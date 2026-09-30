@@ -48,6 +48,7 @@ import {
   prepareBlueprintPublicRelease,
 } from '../../cupboard/blueprint-release';
 import { InstallBlueprintError, servedBlueprintSource } from '../../cupboard/install-blueprint-core';
+import { blueprintListingFacet } from '../../cupboard/identity-listing-surface';
 import { gitCloneShallow } from '../../cupboard/install-io';
 
 export default defineTool({
@@ -144,6 +145,7 @@ export default defineTool({
         blueprintFile: served.blueprintFile,
         listingRef,
         resolveExtends: served.resolveExtends,
+        resolvePackage: served.resolvePackage,
       });
     } catch (error) {
       return Response.json(
@@ -159,6 +161,18 @@ export default defineTool({
       );
     } finally {
       await rm(cloneDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    // The listing facet: hive | harness | identity (P-016), plus an identity's
+    // declared surface, derived from the exact closure the release signs.
+    let facet: ReturnType<typeof blueprintListingFacet>;
+    try {
+      facet = blueprintListingFacet(prepared.source);
+    } catch (error) {
+      return Response.json(
+        { ok: false, error: 'identity_surface_invalid', detail: error instanceof Error ? error.message : String(error) },
+        { status: 422 },
+      );
     }
 
     // Worker caps: title ≤ 200, description ≤ 280.
@@ -178,10 +192,10 @@ export default defineTool({
       title: (typeof body.title === 'string' ? body.title : id).slice(0, 200),
       description: description || undefined,
       // P-018: the blueprint.yaml `kind` drives the Cupboard "Hive Templates" tab — a
-      // kind:'hive' blueprint (generic-hive, …) is a hive template; everything else is a
-      // harness blueprint. Default 'harness' (the schema default) when unset.
+      // kind:'hive' blueprint (generic-hive, …) is a hive template; an identity document
+      // carries the identity facet; everything else is a harness blueprint.
       // pot-rename dual-accept: kind:'pot' maps to the SAME stored cupboard class 'hive'.
-      blueprint_kind: manifest.kind === 'hive' || manifest.kind === 'pot' ? 'hive' : 'harness',
+      ...facet,
       release: prepared.release,
     });
 

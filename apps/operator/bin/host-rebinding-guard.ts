@@ -16,10 +16,16 @@
  *   - PAPERCUSP_ALLOW_REMOTE_ADMIN=1 — the explicit remote opt-in; an off-loopback
  *     bind additionally has to pass assertRemoteAuthReady before it can listen.
  *   - the hosted control-plane and VM-release distribution profiles.
+ *   - requests on the external-ingress listener (WI-10004174). A user's own tunnel sends
+ *     its PUBLIC Host there, so the guard would refuse every MCP request. The exemption is
+ *     safe because that listener holds no local trust (D-015) and serves only the MCP
+ *     resource and its OAuth sign-in (external-ingress-paths.ts); the rebinding threat is
+ *     a browser page reaching LOCAL trust on the loopback listener, which this does not grant.
  * A request with no Host header at all is allowed: every browser sends one, so its
  * absence identifies a non-browser local client, which rebinding cannot produce.
  */
 import type { MiddlewareHandler } from 'hono';
+import { currentExternalIngressListener } from '@papercusp/operator-core/lib/auth/forwarded-request-trust';
 import { isLoopbackHost } from '@papercusp/operator-core/lib/endpoint-route/loopback-guard';
 import { isHostedControlPlaneDistributionProfile } from '@papercusp/operator-core/lib/endpoint-route/hosted-runtime';
 import { isVmReleaseDistribution } from '@papercusp/operator-core/lib/vm-release-runtime-policy';
@@ -43,7 +49,7 @@ export function isHostHeaderAllowed(
 }
 
 export const hostRebindingGuard: MiddlewareHandler = async (c, next) => {
-  if (!isHostHeaderAllowed(c.req.header('host'))) {
+  if (currentExternalIngressListener() === null && !isHostHeaderAllowed(c.req.header('host'))) {
     return c.json(
       {
         error: {

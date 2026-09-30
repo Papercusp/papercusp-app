@@ -272,6 +272,10 @@ async function ensureStarted(): Promise<void> {
       }
       started = true;
       clearRetry();
+      // WI-10004194: the last handler may have left while this start was in
+      // flight; that close saw started=false and did nothing, so close now or
+      // the LISTEN stays open with nobody to wake.
+      if (handlers.size === 0) await maybeCloseListener();
     })().catch((err) => {
       console.error("[coord-inbox-bus] failed to start (will retry):", err);
       started = false;

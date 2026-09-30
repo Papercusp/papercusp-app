@@ -114,3 +114,62 @@ export function pgSuSessionCommandStore(options: { sql?: Sql } = {}): SuSessionC
     },
   };
 }
+
+/** One saved owner turn: the id it was accepted under and its exact text. */
+export interface SuOwnerTurnReceiptRef {
+  turnId: string;
+  content: string;
+}
+
+/** The owner turns saved for one SU session, in acceptance order. A replayed
+ * native transcript uses them to show each restored prompt under the turn id
+ * its command was saved with (WI-10004252). */
+export async function loadSuOwnerTurnReceipts(
+  identity: SuOwnerTurn['target'],
+  options: { sql?: Sql } = {},
+): Promise<SuOwnerTurnReceiptRef[]> {
+  const sql = options.sql ?? getOrgPg().sql;
+  const rows = await sql<{ turn_id: string | null; content: string | null }[]>`
+    SELECT turn->'su_command'->'command'->>'turnId' AS turn_id,
+           turn->'su_command'->'command'->>'content' AS content
+      FROM harness_shared.agent_chats_consolidated c,
+           LATERAL jsonb_array_elements(COALESCE(c.transcript, '[]'::jsonb)) WITH ORDINALITY AS turns(turn, position)
+     WHERE c.workspace_id = ${identity.workspaceId}
+       AND c.id = ${identity.agentChatId}
+       AND turn->>'source' = 'su-session'
+       AND turn->'su_command'->'command'->'target'->>'nativeSessionId' = ${identity.nativeSessionId}
+     ORDER BY turns.position`;
+  return rows.flatMap((row) => row.turn_id && typeof row.content === 'string'
+    ? [{ turnId: row.turn_id, content: row.content }] : []);
+}
+
+const promptKey = (content: string) => content.replace(/\r\n/g, '\n').trim();
+
+/**
+ * Pairs replayed native prompts with saved owner-turn receipts. A prompt takes
+ * the first unused receipt with the same text, in order, so a repeated prompt
+ * ("continue") takes the next receipt rather than the first one again. A turn
+ * already shown live is marked used and is never taken by a replay.
+ */
+export class SuOwnerTurnReceiptMatcher {
+  private receipts: SuOwnerTurnReceiptRef[] = [];
+  private readonly used = new Set<string>();
+
+  load(receipts: readonly SuOwnerTurnReceiptRef[]): void {
+    this.receipts = [...receipts];
+  }
+
+  markUsed(turnId: string): void {
+    this.used.add(turnId);
+  }
+
+  take(content: string): string | null {
+    const key = promptKey(content);
+    for (const receipt of this.receipts) {
+      if (this.used.has(receipt.turnId) || promptKey(receipt.content) !== key) continue;
+      this.used.add(receipt.turnId);
+      return receipt.turnId;
+    }
+    return null;
+  }
+}

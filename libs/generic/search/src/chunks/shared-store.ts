@@ -2,7 +2,8 @@
  * chunks/shared-store — the ChunkStore for ONE shared chunk table holding
  * every surface's chunks, keyed (surface, parent_key text[], chunk_idx).
  *
- * Expected columns (papercusp: harness_shared.text_chunks, migration 1242):
+ * Expected columns (the DDL is sql/text-chunks.reference.sql; papercusp's copy is
+ * harness_shared.text_chunks, migration 1242):
  *   surface text, parent_key text[], chunk_idx int, anchor text, header text,
  *   content text, parent_sha text, chunk_sha text, splitter_version text,
  *   embedding vector, embedding_mode text, embedding_profile text,
@@ -45,15 +46,31 @@ function keyTextArray(surface: ResolvedChunkSurface): string {
   return `ARRAY[${surface.keyColumns.map((k) => `(p.${k.column})::text`).join(', ')}]`;
 }
 
-/** Parent-key equality that keeps the parent's primary-key index usable. */
+/**
+ * Parent-key equality. A typed key casts the chunk side, so the parent's
+ * primary-key index stays usable; an untyped key compares the parent column as
+ * text, the same form the chunk-aware vector leg uses (vector-leg.ts). For a
+ * text or varchar column that cast is a no-op and the index is still used; for
+ * any other column type it is still correct, where a bare `p.col = parent_key[i]`
+ * fails with "operator does not exist: uuid = text" (measured on
+ * harness_shared.operator_turns, 2026-09-30).
+ */
 function keyMatchesChunk(surface: ResolvedChunkSurface, chunkAlias: string): string {
   return surface.keyColumns
     .map((k, i) => {
       const part = `${chunkAlias}.parent_key[${i + 1}]`;
-      return k.type === null ? `p.${k.column} = ${part}` : `p.${k.column} = (${part})::${k.type}`;
+      return k.type === null ? `(p.${k.column})::text = ${part}` : `p.${k.column} = (${part})::${k.type}`;
     })
     .join(' AND ');
 }
+
+/**
+ * SQL form of engine.embeddedChunkText over a shared chunk row: `header\ncontent`,
+ * or content alone when the header is NULL or empty. It must stay byte-identical
+ * to embeddedChunkText, since chunk_sha hashes that text and a re-split reuses a
+ * vector by chunk_sha. A host may wrap it (e.g. left(…, n)) to fit its embedder.
+ */
+export const SHARED_CHUNK_EMBEDDED_TEXT_SQL = `concat_ws(E'\\n', nullif(header, ''), content)`;
 
 /** SQL form of engine.parentShaOf — must stay byte-identical to it. */
 export function parentShaSql(textExpr: string, headerExpr: string): string {
@@ -67,6 +84,14 @@ export function sharedChunkStore(opts: SharedChunkStoreOptions = {}): ChunkStore
   return {
     name: table,
     queryTable: { table, keying: 'shared' },
+    embedTarget: {
+      table,
+      keyColumns: ['surface', 'parent_key', 'chunk_idx'],
+      embeddingColumn: 'embedding',
+      embeddedTextSql: SHARED_CHUNK_EMBEDDED_TEXT_SQL,
+      modeColumn: 'embedding_mode',
+      profileColumn: 'embedding_profile',
+    },
 
     async transaction(sql, fn) {
       return (await sql.begin((tx) => fn(tx as unknown as Sql))) as Awaited<ReturnType<typeof fn>>;

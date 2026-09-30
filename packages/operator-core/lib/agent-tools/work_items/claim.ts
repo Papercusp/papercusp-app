@@ -84,6 +84,7 @@ import {
   type PilotParticipantBindingReceipt,
   type PilotParticipantRole,
 } from '../../pilot-participant-receipts';
+import { canonicalizeAssigneeOwnerId, resolveHolderOwnerId } from '../../work-item-holder-identity';
 
 interface ClaimItem {
   id: string;
@@ -300,6 +301,16 @@ async function claimOne(itRaw: ClaimItem, identity: AgentIdentity, reader: CellR
       hint: 'Refused: this call arrived under scripts/mcp-call.mjs\'s auto-generated fallback identity (mcp-call-<pid>), a one-shot process with no liveness/heartbeat and no fleet cup behind it — claiming here would silently "place" work that nothing executes (EI-8509). Spawn a real cup (fleet:spawn / bee:spawn) and let IT claim, or pass an explicit `assignee` naming the real agent that will do the work.',
     };
   }
+  // EI-23701433507513915: an explicit short-form assignee (`su-851c1a7a`, copied from a coord
+  // glyph handle) is expanded to the unique full ownerId BEFORE it becomes `claimer`, or refused
+  // here with a typed reason naming the fix. Left to the claimWorkItem backstop it came back
+  // null, which this path reported as a phantom claim conflict. A full id, a non-su identity,
+  // and any other value pass through byte-identical, with no lookup.
+  if (it.assignee) {
+    const canonical = await canonicalizeAssigneeOwnerId(it.assignee, { workspaceId: identity.workspaceId ?? null });
+    if (!canonical.ok) return { ok: false, id: it.id, error: canonical.code, hint: canonical.message };
+    if (canonical.expandedFrom !== null) it.assignee = canonical.ownerId;
+  }
   const claimer = it.assignee ?? claimerDefault;
   if (it.pilotRole && claimer !== claimerDefault) {
     return {
@@ -437,8 +448,20 @@ async function claimOne(itRaw: ClaimItem, identity: AgentIdentity, reader: CellR
   let forced:
     | { holder: string; basis: ForceReleaseBasis; reason: string; releaseRequest?: WorkItemReleaseRequest }
     | undefined;
-  const currentHolder = preClaimItem?.assignee?.trim();
-  if (it.force && currentHolder && currentHolder !== identity.ownerId) {
+  // EI-23701433507513915: compare holders by CANONICAL owner id. A short-form holder stored
+  // before assignments were canonicalized (`su-851c1a7a`) is expanded to the unique full id
+  // it prefixes; an ambiguous or unknown prefix stays as stored, so authority never widens.
+  // The CAS below still compares the RAW stored string, which is what `taken_by` holds.
+  const storedHolder = preClaimItem?.assignee?.trim() || undefined;
+  const currentHolder = storedHolder
+    ? await resolveHolderOwnerId(storedHolder, { workspaceId: identity.workspaceId ?? null })
+    : undefined;
+  // The caller's OWN legacy short-form claim: widen the CAS by exactly that stored string
+  // (`fromHolder`) so the self re-claim lands — and rewrites `taken_by` to the full id —
+  // instead of being refused as a conflict and routed to the force path.
+  const legacySelfHolder =
+    storedHolder && storedHolder !== identity.ownerId && currentHolder === identity.ownerId ? storedHolder : undefined;
+  if (it.force && storedHolder && currentHolder && currentHolder !== identity.ownerId) {
     const reason = (it.reason ?? '').trim();
     if (!reason) {
       return {
@@ -468,7 +491,9 @@ async function claimOne(itRaw: ClaimItem, identity: AgentIdentity, reader: CellR
       };
     }
     forced = {
-      holder: currentHolder,
+      // The CAS leg must match `taken_by` byte-for-byte: the RAW stored holder, not its
+      // canonical expansion (EI-23701433507513915).
+      holder: storedHolder,
       basis: verdict.basis as ForceReleaseBasis,
       reason,
       ...(verdict.basis === 'announced-release-request-expired' && releaseRequest ? { releaseRequest } : {}),
@@ -500,7 +525,7 @@ async function claimOne(itRaw: ClaimItem, identity: AgentIdentity, reader: CellR
   // no `assignee` was passed, `claimer` IS `claimerDefault`, so this is a no-op.
   const workItem = await claimWorkItem(it.id, claimer, {
     harness: it.harness,
-    fromHolder: claimerDefault,
+    fromHolder: legacySelfHolder ?? claimerDefault,
     ...(forced ? { expectedAssignee: forced.holder } : {}),
     ...(forceTakeoverAdmission ? { forceTakeoverAdmission } : {}),
     ...(legacyFleetScopeDowngradeAdmission ? { legacyFleetScopeDowngradeAdmission } : {}),

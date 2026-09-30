@@ -28,7 +28,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from '@/lib/router-compat/navigation';
 import { useQueryState, parseAsString, parseAsStringEnum } from 'nuqs';
-import { Search, Globe, RefreshCw, ExternalLink, GitBranch, Users, Clock, ShieldCheck, AlertTriangle, Plug, Boxes, Hexagon, Package, ArrowLeft, Box, Wrench, Sparkles, Brain, Loader2, KeyRound, ChevronRight, LayoutTemplate, AppWindow, Download, MonitorDown, Ruler, ListChecks, Workflow, Goal, Palette } from 'lucide-react';
+import { Search, Globe, RefreshCw, ExternalLink, GitBranch, Users, Clock, ShieldCheck, AlertTriangle, Plug, Boxes, Hexagon, Package, ArrowLeft, Box, Wrench, Sparkles, Brain, Loader2, KeyRound, ChevronRight, LayoutTemplate, AppWindow, Download, MonitorDown, Ruler, ListChecks, Workflow, Goal, Palette, Fingerprint } from 'lucide-react';
 import * as Collapsible from '@radix-ui/react-collapsible';
 import { toast } from 'sonner';
 import type { HarnessListing, ListingKind, HiveBrowseGroup } from '@papercusp/operator-core/lib/cupboard/types';
@@ -37,6 +37,7 @@ import {
   listingActionFor,
   listingKindOf,
   isHiveBlueprintListing,
+  isIdentityBlueprintListing,
   listingRepoSlug,
   listingContributorCount,
   listingTopLanguage,
@@ -932,6 +933,8 @@ export function ListingCard({
   // D-002: a pot blueprint (blueprint_kind='pot') is a POT TEMPLATE — badged
   // distinctly inside the single Blueprints tab (the old separate tab is gone).
   const isPotTemplate = isHiveBlueprintListing(listing);
+  // portable-identity-packages P-016: an identity blueprint is badged too.
+  const isIdentity = isIdentityBlueprintListing(listing);
   const rawAction = listingActionFor(listing);
   const action = suppressViewHive && rawAction === 'view-hive' ? null : rawAction;
   const repoSlug = listingRepoSlug(listing);
@@ -993,7 +996,7 @@ export function ListingCard({
           {listing.title || listing.slug || repoSlug || 'Untitled'}
         </button>
         <span style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-          <KindBadge kind={kind} potTemplate={isPotTemplate} />
+          <KindBadge kind={kind} potTemplate={isPotTemplate} identity={isIdentity} />
           <ClaimStatusBadge
             status={listing.claim_status}
             claimantLogin={listing.claimant_github_login}
@@ -1124,15 +1127,17 @@ export function ListingCard({
 /** Small kind tag on a card. A pot blueprint (`potTemplate`) reads as
  *  "pot template" with a hexagon glyph, distinguishing it inside the single
  *  Blueprints tab (D-002) from an ordinary role blueprint. */
-function KindBadge({ kind, potTemplate }: { kind: ListingKind; potTemplate?: boolean }) {
+function KindBadge({ kind, potTemplate, identity }: { kind: ListingKind; potTemplate?: boolean; identity?: boolean }) {
   const t = useLexicon();
   const tone = CUPBOARD_LISTING_KIND_TONE[kind];
-  const label = potTemplate ? `${t('pot', { lower: true })} template` : kind;
+  const label = potTemplate ? `${t('pot', { lower: true })} template` : identity ? 'identity' : kind;
+  const icon = potTemplate ? <Hexagon size={10} /> : identity ? <Fingerprint size={10} /> : <KindIcon kind={kind} size={10} />;
   return (
     <span
       data-testid="cupboard-kind-badge"
       data-kind={kind}
       data-pot-template={potTemplate ? 'true' : undefined}
+      data-identity={identity ? 'true' : undefined}
       className="pc-badge"
       style={{
         display: 'inline-flex', alignItems: 'center', gap: 3,
@@ -1141,7 +1146,7 @@ function KindBadge({ kind, potTemplate }: { kind: ListingKind; potTemplate?: boo
         color: tone.fg,
       }}
     >
-      {potTemplate ? <Hexagon size={10} /> : <KindIcon kind={kind} size={10} />} {label}
+      {icon} {label}
     </span>
   );
 }

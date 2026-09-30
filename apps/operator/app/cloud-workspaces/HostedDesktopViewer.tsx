@@ -12,6 +12,8 @@ import {
 import { Button } from "@/app/harness/Button";
 import {
   buildHostedDesktopSocketUrl,
+  HOSTED_DESKTOP_CONNECT_ATTEMPTS,
+  HOSTED_DESKTOP_CONNECT_DEADLINE_MS,
   HostedDesktopRelayChannel,
   readHostedDesktopTicket,
   type HostedDesktopViewerMode,
@@ -78,6 +80,7 @@ export function HostedDesktopViewer({
   const readyRejectedRef = useRef(false);
   const controlButtonRef = useRef<HTMLButtonElement | null>(null);
   const [state, setState] = useState<HostedDesktopViewerState>("idle");
+  const [attempt, setAttempt] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [inputAllowed, setInputAllowed] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
@@ -107,9 +110,10 @@ export function HostedDesktopViewer({
     }
   }, []);
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (nextAttempt = 1) => {
     disconnect();
     const epoch = epochRef.current;
+    setAttempt(nextAttempt);
     setError(null);
     setInputAllowed(false);
     readyRejectedRef.current = false;
@@ -236,6 +240,23 @@ export function HostedDesktopViewer({
     void connect();
     return () => disconnect();
   }, [connect, disconnect]);
+
+  // WI-10004214: an attempt that has not reached `connected` by the deadline is
+  // abandoned and retried on a fresh ticket; the last one fails visibly instead of
+  // leaving "Opening your desktop…" up indefinitely.
+  useEffect(() => {
+    if (state !== "ticketing" && state !== "connecting") return;
+    const timer = setTimeout(() => {
+      if (attempt < HOSTED_DESKTOP_CONNECT_ATTEMPTS) {
+        void connect(attempt + 1);
+        return;
+      }
+      disconnect();
+      setError("desktop_connect_timeout");
+      updateState("error");
+    }, HOSTED_DESKTOP_CONNECT_DEADLINE_MS);
+    return () => clearTimeout(timer);
+  }, [attempt, connect, disconnect, state, updateState]);
 
   const changeMode = useCallback(
     (next: HostedDesktopViewerMode) => {
@@ -381,7 +402,9 @@ export function HostedDesktopViewer({
               ? `Desktop stream failed${error ? `: ${error}` : "."}`
               : state === "closed"
                 ? "Connection lost. Your workspace may still be running. Reconnect to resume watching."
-                : "Opening your desktop…"}
+                : attempt > 1
+                  ? `Still opening your desktop… retrying (attempt ${attempt} of ${HOSTED_DESKTOP_CONNECT_ATTEMPTS})`
+                  : "Opening your desktop…"}
           </div>
         ) : null}
       </div>

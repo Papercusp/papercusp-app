@@ -43,9 +43,13 @@ export interface CupboardListingInput {
   /** Denormalized Hive display title (the directory announce stays the content authority). */
   hive_title?: string;
   /** For a `listing_kind: 'blueprint'` publish: the blueprint.yaml `kind` — 'hive' (a hive
-   *  template) | 'harness'. The Cupboard "Hives" tab discriminator (worker migration 009 /
-   *  hive-blueprint-generalization P-018). Omit for non-blueprint kinds. */
-  blueprint_kind?: 'pot' | 'hive' | 'harness';
+   *  template) | 'harness' — or 'identity', the identity facet (worker migration 035 /
+   *  portable-identity-packages P-016). The Cupboard "Hives" tab discriminator (worker
+   *  migration 009 / hive-blueprint-generalization P-018). Omit for non-blueprint kinds. */
+  blueprint_kind?: 'pot' | 'hive' | 'harness' | 'identity';
+  /** An identity listing's declared surface: canonical JSON from `blueprintListingFacet`,
+   *  derived from the signed closure; install refuses a listing whose surface differs. */
+  identity_surface?: string;
   /**
    * Pack model (worker migration 006 / tool-distribution-granularity): the MCP
    * tool names the unit registers when installed. Kinds plugin|pack only — the

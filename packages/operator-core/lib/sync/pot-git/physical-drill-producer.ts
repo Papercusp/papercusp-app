@@ -17,6 +17,8 @@ import {
   quarantineAndObservePhysicalPhaseAAbsence,
   quarantinePhysicalPhaseARepo,
   validatePhysicalPhaseA,
+  validatePhysicalPhaseATowerBefore,
+  type PhysicalPhaseARepoObservation,
   type PhysicalPhaseAInput,
 } from './physical-drill-phase-a';
 
@@ -274,7 +276,7 @@ function writeOutputsAtomically(
   renameSync(evidenceTmp, evidencePath);
 }
 
-async function cli(argv: string[]): Promise<unknown> {
+export async function cli(argv: string[]): Promise<unknown> {
   const [mode, ...args] = argv;
   if (mode === 'identity') {
     const [hostId, cachePath] = args;
@@ -349,9 +351,32 @@ async function cli(argv: string[]): Promise<unknown> {
     }
     const verdict = validatePhysicalPhaseA(readJson(inputPath) as PhysicalPhaseAInput);
     if (!verdict.ok) {
-      throw new Error(`physical-drill-producer: Phase A rejected: ${verdict.errors.join('; ')}`);
+      const message = `physical-drill-producer: Phase A rejected: ${verdict.errors.join('; ')}`;
+      // Only a rejection the hosts can still clear by converging is worth a retry
+      // (exit 3). A frozen-input rejection exits 1 so the scenario's wait stops at once.
+      if (verdict.frozenErrors.length === 0) throw new PhysicalDrillIncompleteEvidenceError(message, verdict);
+      throw new Error(`${message} (frozen input — re-observing the hosts cannot clear it)`);
     }
     return verdict;
+  }
+  if (mode === 'phase-a-precheck') {
+    const [towerBeforePath, towerDeviceKey, vmDeviceKey] = args;
+    if (!towerBeforePath || !towerDeviceKey || !vmDeviceKey) {
+      throw new Error(
+        'usage: physical-drill-producer phase-a-precheck <tower-before.json> <tower-device-key> <vm-device-key>',
+      );
+    }
+    const errors = validatePhysicalPhaseATowerBefore(
+      readJson(towerBeforePath) as PhysicalPhaseARepoObservation,
+      { towerDeviceKey, vmDeviceKey },
+    );
+    if (errors.length > 0) {
+      throw new Error(
+        `physical-drill-producer: PHASE_A_PRECONDITION_FAILED tower-baseline: ${errors.join('; ')} ` +
+          '(the tower must already hold the VM device namespace before phase A quarantines the VM store)',
+      );
+    }
+    return { schemaVersion: 'hive-git-physical-phase-a-precheck/v1', ok: true };
   }
   if (mode === 'phase-b-observe') {
     const [hostId, direction, state, repoPath, sourceDeviceKey, runId, ...rest] = args;
@@ -990,9 +1015,28 @@ export async function runPhysicalDrillCliToExit(
     } else {
       code = 1;
     }
-    await writeFlushed(deps.stderr, `${error instanceof Error ? error.message : String(error)}\n`);
+    const message = error instanceof Error ? error.message : String(error);
+    await writeFlushed(
+      deps.stderr,
+      `${code === 1 ? physicalDrillFailureLine(argv[0], message) : message}\n`,
+    );
   }
   deps.exit(code);
+}
+
+const PHYSICAL_DRILL_REASON_PREFIX = /^physical-drill-[a-z0-9-]+: /;
+
+/**
+ * The one stderr line a failed mode leaves behind. The drill summary
+ * (papercusp-desktop/bin/lib/physical-failure-summary.sh) finds a producer's
+ * cause by the `physical-drill-<module>: ` prefix. Phase modules throw bare
+ * messages such as `physical Phase A git ... failed`, so without this prefix
+ * same-box run 20260930T054405Z summarised a real Phase A failure as "no
+ * prefixed reason line". Prefixing at this single writer covers every mode.
+ */
+export function physicalDrillFailureLine(mode: string | undefined, message: string): string {
+  if (PHYSICAL_DRILL_REASON_PREFIX.test(message)) return message;
+  return `physical-drill-producer: ${mode || '<no mode>'}: ${message}`;
 }
 
 /** Exit code for "the evidence is valid but the host has not converged yet; retry". */

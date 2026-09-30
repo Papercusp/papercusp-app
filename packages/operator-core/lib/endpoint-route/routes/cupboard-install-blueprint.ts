@@ -20,6 +20,7 @@ import { defineTool } from '@papercusp/agent-mcp';
 import { installBlueprintFromCupboard } from '../../cupboard/install-blueprint-io';
 import { classContractConsentSchema, type ClassContractConsent } from '../../cupboard/class-contract-payload';
 import { recipeProviderConsentSchema, type RecipeProviderConsent } from '../../cupboard/capability-grant-resolver';
+import { identityInstallConsentSchema, type IdentityInstallConsent } from '../../cupboard/identity-install-consent';
 
 export default defineTool({
   method: 'POST',
@@ -37,6 +38,7 @@ export default defineTool({
       capabilityProviderSelections?: Record<string, string>;
       classContractConsent?: unknown;
       recipeProviderConsent?: unknown;
+      identityInstallConsent?: unknown;
     };
     try {
       body = await req.json();
@@ -72,6 +74,17 @@ export default defineTool({
       }
       recipeProviderConsent = parsed.data;
     }
+    let identityInstallConsent: IdentityInstallConsent | undefined;
+    if (body.identityInstallConsent !== undefined) {
+      const parsed = identityInstallConsentSchema.safeParse(body.identityInstallConsent);
+      if (!parsed.success) {
+        return Response.json(
+          { ok: false, error: 'invalid_identity_install_consent', detail: parsed.error.issues[0]?.message },
+          { status: 400 },
+        );
+      }
+      identityInstallConsent = parsed.data;
+    }
 
     const outcome = await installBlueprintFromCupboard({
       ...(typeof body.listingId === 'string' ? { listingId: body.listingId } : {}),
@@ -88,6 +101,7 @@ export default defineTool({
         : {}),
       ...(classContractConsent ? { classContractConsent } : {}),
       ...(recipeProviderConsent ? { recipeProviderConsent } : {}),
+      ...(identityInstallConsent ? { identityInstallConsent } : {}),
     });
 
     if (!outcome.ok) {

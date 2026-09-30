@@ -52,7 +52,7 @@ import { realpathSoft, resolveCapabilityBaseDir } from './base-dir';
 import { maskIntegrationKey, readIntegrationKey } from '../../integration-credentials';
 import { RIPGREP_SCOPE_GUIDANCE } from '../../code-intelligence/contracts.ts';
 import { resolveAgentIdentity, type ResolveIdentityCtx } from '../coordination/identity';
-import { resolveBashTaskProvenance } from './bash-task-provenance';
+import { BashProvenanceRefusal, resolveBashTaskProvenance } from './bash-task-provenance';
 import { listLiveTasks } from '../../task-manager/store';
 import { loopLaunchRefusal } from '../../verification-attempts/loop-gate';
 import { operatorHomeHarnessSlug } from '../../harness/operator-home-harness';
@@ -504,6 +504,12 @@ export default defineTool({
       .string()
       .optional()
       .describe('Working dir (absolute, or relative to the project dir). Defaults to the project dir.'),
+    work_item_id: z
+      .string()
+      .optional()
+      .describe(
+        'Held work-item this job is for. Overrides your declared goal for task-ledger attribution and the slow-attempt loop gate.',
+      ),
     integration_env: integrationEnvSchema
       .optional()
       .describe(
@@ -719,7 +725,20 @@ export default defineTool({
       integrationEntries.length > 0 ? ` · integration_env ${JSON.stringify(integrationEnvView)}` : '';
     const processNotice = processTableNotice(command);
 
-    const provenance = await resolveBashTaskProvenance(ctx as unknown as ResolveIdentityCtx, hive ?? null);
+    let provenance: Awaited<ReturnType<typeof resolveBashTaskProvenance>>;
+    try {
+      provenance = await resolveBashTaskProvenance(ctx as unknown as ResolveIdentityCtx, hive ?? null, undefined, {
+        explicitWorkItemId: args.work_item_id ?? null,
+      });
+    } catch (error) {
+      if (!(error instanceof BashProvenanceRefusal)) throw error;
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify({ ok: false, error: error.code, message: error.message }) },
+        ],
+        isError: true,
+      };
+    }
     const frozenRefusal = await frozenLineageRefusal();
     if (frozenRefusal) {
       return {

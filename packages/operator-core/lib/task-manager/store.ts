@@ -786,6 +786,45 @@ export async function markEndedUnobserved(
   return n;
 }
 
+/**
+ * Close rows whose watcher was lost but whose runner-written JOB END marker
+ * survived in the log (WI-10004208). The marker is the payload's own exit,
+ * written by the transient-service runner after it drained output. It is
+ * therefore an OBSERVED terminal verdict, not a guess, and it closes the row
+ * as `exited` / `killed` / `timed_out` with the real exit code instead of
+ * `ended_unobserved`. The verification attempt then records pass/fail instead
+ * of `unknown`.
+ */
+export async function markRecoveredFromJobLog(
+  verdicts: readonly {
+    taskId: string;
+    state: Extract<TaskState, 'exited' | 'killed' | 'timed_out'>;
+    exitCode: number | null;
+    reason: string;
+    terminalProvenance?: TaskTerminalProvenance | null;
+  }[],
+  inject?: Sql,
+): Promise<number> {
+  let n = 0;
+  for (const v of verdicts) {
+    if (
+      await closeTask(
+        v.taskId,
+        {
+          state: v.state,
+          exitCode: v.exitCode,
+          exitReason: v.reason,
+          terminalProvenance: v.terminalProvenance,
+        },
+        inject,
+      )
+    ) {
+      n++;
+    }
+  }
+  return n;
+}
+
 export interface ListTasksFilter {
   workspaceId?: string;
   states?: readonly TaskState[];

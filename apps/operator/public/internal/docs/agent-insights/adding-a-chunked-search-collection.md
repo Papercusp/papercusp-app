@@ -1,0 +1,31 @@
+# Adding a chunked search collection
+URL: /internal/docs/agent-insights/adding-a-chunked-search-collection
+
+Making a collection searchable past the 2,000-char embedding cut is one registry entry (packages/operator-core/lib/search/chunks/registry.ts): sync, embed targets, coverage, retention and search all derive from it. The same works outside Papercusp through @papercusp/search.
+
+# Adding a chunked search collection
+
+A prose embedding reads a bounded window (2,000 characters here), so a question about anything past it cannot find its row. Chunking gives the tail its own vectors. **Adding a collection to chunked search is ONE registry entry**: no migration, no sync code, no embed wiring, no per-collection search code.
+
+## In Papercusp
+
+Add an entry to `CHUNK_SURFACES` in `packages/operator-core/lib/search/chunks/registry.ts` (type `PapercuspChunkSurface`):
+
+* `surface`: the collection name stored in every chunk row.
+* `parent: { table, key }`: the parent table and its primary-key columns; give a non-text key its type (`{ column: 'id', type: 'int' }`) so the parent's key index stays usable.
+* `textSql` / `headerSql` / `eligibleSql` / `versionSql`: SQL over the parent row aliased `p`. Always give `versionSql` (e.g. `p.updated_at`) on a large table: without it every tick hashes every long row.
+* `splitter`, `maxChunks`, `chunkMargin`: from that collection's bench decision (plan generic-rag-chunking-2026-09-29, D-014..D-017). Text past the last chunk is logged and counted, never silently dropped.
+* `parentVector`: the row's existing embedding columns, read by search.
+* `searchSource`: the coverage-gate source the chunks feed, if its search site is one.
+
+Omit `store` and the entry writes into the shared `harness_shared.text_chunks` (migration 1242). Everything else derives from the registry: the sync tick (`search/chunks/tick.ts`), the embed sweep's targets, the prose-width column list, the coverage gate, retention and the backup exclusion (P-005, pinned by `derived-registrations.test.ts`). The search site calls `chunkAwareVectorLeg` with the entry: `'retrieve'` for finding things, `'gist'` for duplicate and novelty checks, which must stay on the parent vector (D-005).
+
+Only a collection that needs its OWN chunk table (like session turns, D-002) implements a `ChunkStore`, and then it also adds a `CHUNK_STORES` registration.
+
+## Outside Papercusp
+
+`@papercusp/search` carries the whole mechanism with no host code (D-010). Its README section "Chunked collections" lists the once-per-host steps: apply `libs/generic/search/sql/text-chunks.reference.sql`, build one `sharedChunkStore`, and run `syncChunkSurfaces`, an embed sweep over `chunkEmbedTargets(registry)` (`embedPendingChunks` is a complete one), and `chunkAwareVectorLeg`.
+
+## The proof
+
+`libs/generic/search/src/chunks/simple-addition.integration.test.ts` (acceptance R-22) is a fixture host that registers a `notes` collection with only an entry and checks end to end that the sync writes the chunks, the derived embed target picks them up, a query matching only text past the cut finds its parent in retrieve mode but not gist mode, editing one section re-embeds only that chunk, and deleting the parent removes its chunks. If a new collection seems to need more than an entry, extend the library so the fixture still needs nothing more, rather than adding per-collection code.

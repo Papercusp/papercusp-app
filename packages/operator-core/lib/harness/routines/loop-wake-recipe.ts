@@ -17,6 +17,7 @@
  */
 import type { Sql } from 'postgres';
 import { getOrgPg } from '@papercusp/db-org';
+import { withIterativeScan, type PgHandle } from '@papercusp/search';
 import { deriveRecipeAuthority } from '../../recipe-authority';
 import {
   proseProfilePredicateSql,
@@ -127,17 +128,23 @@ export async function findTopRecipeForWake(
     const vec = await queryEmbedder.embed(q);
     if (!Array.isArray(vec) || vec.length === 0) return null;
     const qVec = `[${vec.join(',')}]`;
-    const sql = deps.sql ?? getOrgPg().sql;
-    const rows = (await sql`
+    const profile = queryEmbedder.profile;
+    // Iterative HNSW scan (WI-10004138): the active + multi-tool filter keeps a
+    // small share of the table, so the capped scan came back short. Measured
+    // 2026-09-30: 36 of 50 rows over 10 queries without it, 50 with it.
+    const rows = (await withIterativeScan((deps.sql ?? getOrgPg().sql) as unknown as PgHandle, (handle) => {
+      const sql = handle as unknown as Sql;
+      return sql`
       SELECT id, title, script, run_count, 1 - (embedding <=> ${qVec}::vector) AS sim
         FROM harness_shared.code_recipes
        WHERE status = 'active'
          AND embedding IS NOT NULL
-         AND ${proseProfilePredicateSql(sql, queryEmbedder.profile, 'embedding_profile', 'embedding_mode')}
+         AND ${proseProfilePredicateSql(sql, profile, 'embedding_profile', 'embedding_mode')}
          AND COALESCE(array_length(tools_used, 1), 0) >= 2
     ORDER BY embedding <=> ${qVec}::vector
        LIMIT ${CANDIDATE_LIMIT}
-    `) as unknown as Array<{
+    `;
+    })) as unknown as Array<{
       id: string;
       title: string;
       script: string | null;

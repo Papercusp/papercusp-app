@@ -191,7 +191,7 @@ git -C "$LIVE_REPO_DIR" cat-file -e "$DEB_SOURCE_SNAPSHOT_COMMIT^{commit}" 2>/de
 
 DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT="$(
   git -C "$LIVE_REPO_DIR" ls-tree "$DEB_SOURCE_SNAPSHOT_COMMIT" papercusp-desktop 2>/dev/null \
-    | awk '$1 == "160000" && $2 == "commit" { print $3; exit }'
+    | awk '$1 == "160000" && $2 == "commit" && !f { print $3; f = 1 }'
 )"
 [[ "$DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || {
   echo "FATAL: source commit $DEB_SOURCE_SNAPSHOT_COMMIT has no papercusp-desktop gitlink." >&2
@@ -510,14 +510,14 @@ echo "==> sidecar looks real (serve.mjs, $SIDECAR_SQL_COUNT migration file(s), s
 SIDECAR_STAMP="$DESKTOP_DIR/src-tauri/sidecar/.sidecar-build-stamp"
 if [[ -f "$SIDECAR_STAMP" && "${PAPERCUSP_ALLOW_STALE_SIDECAR:-0}" != "1" ]]; then
   if [[ -n "${DEB_SOURCE_SNAPSHOT_COMMIT:-}" ]]; then
-    PINNED_SIDECAR_HEAD="$(sed -n 's/.*"gitHead"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$DESKTOP_DIR/src-tauri/sidecar/build-provenance.json" | head -1)"
+    PINNED_SIDECAR_HEAD="$(sed -n 's/.*"gitHead"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$DESKTOP_DIR/src-tauri/sidecar/build-provenance.json" | sed -n 1p)"
     if [[ "$PINNED_SIDECAR_HEAD" != "$DEB_SOURCE_SNAPSHOT_COMMIT" ]]; then
       echo "FATAL: STALE SIDECAR — pinned source $DEB_SOURCE_SNAPSHOT_COMMIT does not match sidecar provenance $PINNED_SIDECAR_HEAD." >&2
       exit 4
     fi
     echo "==> sidecar source boundary pinned to ${DEB_SOURCE_SNAPSHOT_COMMIT:0:10}; live patch mtimes are not inputs"
   else
-    STAMP_EPOCH="$(sed -n 's/.*"epochSec"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' "$SIDECAR_STAMP" | head -1)"
+    STAMP_EPOCH="$(sed -n 's/.*"epochSec"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' "$SIDECAR_STAMP" | sed -n 1p)"
     if [[ -n "$STAMP_EPOCH" ]]; then
     NEWEST_PATCH=""
     NEWEST_PATCH_EPOCH=0
@@ -683,7 +683,7 @@ done
 CGROOT="${PAPERCUSP_CGROUP_ROOT:-/sys/fs/cgroup}"
 BUILD_CGROUP=""
 if [ "$(stat -fc %T "$CGROOT" 2>/dev/null)" = cgroup2fs ]; then
-  SELF_CG_REL="$(awk -F: '{print $3}' /proc/self/cgroup 2>/dev/null | head -1)"
+  SELF_CG_REL="$(awk -F: '{print $3}' /proc/self/cgroup 2>/dev/null | sed -n 1p)"
   if [ -n "$SELF_CG_REL" ]; then
     CAND="$CGROOT$SELF_CG_REL/papercusp-deb-build-$$-$(date +%s%N 2>/dev/null || echo 0)"
     if mkdir -p "$CAND" 2>/dev/null; then

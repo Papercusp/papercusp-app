@@ -52,6 +52,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
+import { presentOnDisk } from './lib/tracked-files.mjs';
 import { fileURLToPath } from 'node:url';
 
 import { isRepositoryIndexFault, runGuardWithIndexFaultGuard, withGitIndexFaultRetry } from './lib/git-index-fault.mjs';
@@ -284,7 +285,8 @@ function defaultGitLsFiles(root) {
         maxBuffer: 16 * 1024 * 1024,
       }),
     );
-    return out.split('\n').filter(Boolean);
+    // WI-10004176: drop index entries a plain `rm` left behind until git-sync commits it.
+    return presentOnDisk(out.split('\n').filter(Boolean), root);
   } catch (error) {
     if (isRepositoryIndexFault(error)) throw error;
     return [];

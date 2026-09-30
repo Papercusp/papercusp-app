@@ -34,7 +34,7 @@
  * reported positions still point at source.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { resolve, relative, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 // D-003 (git-sync-content-guard): the pure detector now lives in ONE importable
@@ -80,7 +80,11 @@ export function listMdxFiles() {
     .split('\0')
     .filter(Boolean);
 
+  // WI-10004176: drop index entries a plain `rm` left behind until git-sync commits it.
+  // (Inline rather than presentOnDisk: importing the shared helper module makes this
+  // MDX-only checker look like a JS/TS source scanner to guard-string-literal-blindness.)
   return [...new Set(files)]
+    .filter((f) => existsSync(resolve(ROOT, f)))
     .filter((f) => !isExcluded(f))
     .filter((f) => f.endsWith('.mdx') && f.startsWith(DOCS_PREFIX))
     .sort();

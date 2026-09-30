@@ -14,6 +14,7 @@ import { StepKeys } from './StepKeys';
 import { StepLocalModel } from './StepLocalModel';
 import { StepLogins } from './StepLogins';
 import { StepMobilePairing } from './StepMobilePairing';
+import { StepOwnTunnel } from './StepOwnTunnel';
 import { StepOsPermissions } from './StepOsPermissions';
 import { StepPlaceholder } from './StepPlaceholder';
 import { StepTelemetry } from './StepTelemetry';
@@ -364,6 +365,8 @@ function renderStep(id: string) {
       return <StepGit />;
     case 'mobile-pairing':
       return <StepMobilePairing />;
+    case 'own-tunnel':
+      return <StepOwnTunnel />;
     case 'backups':
       return <StepBackups />;
     case 'auto-update':

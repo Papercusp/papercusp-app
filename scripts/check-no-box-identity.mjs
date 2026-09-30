@@ -51,6 +51,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { presentOnDisk } from './lib/tracked-files.mjs';
 import {
   BOX_IDENTITY_FIX_HINT,
   findBoxIdentityPaths,
@@ -73,13 +74,18 @@ import {
  * scripts/check-no-owner-name-tags.mjs. The enumerator seam exists if policy ever
  * changes (`listFilesIncludingUntracked()`); the blocker is D-004, not tooling.
  */
-const files = execFileSync(
-  'git',
-  ['ls-files', '--cached', '--others', '--exclude-standard'],
-  { encoding: 'utf8', maxBuffer: 64 << 20 },
-)
-  .split('\n')
-  .filter((f) => f && !isSkippedPath(f));
+// WI-10004176: drop index entries a plain `rm` left behind until git-sync commits it.
+// Paths are cwd-relative here (no `cwd:` above), so check them against the cwd too.
+const files = presentOnDisk(
+  execFileSync(
+    'git',
+    ['ls-files', '--cached', '--others', '--exclude-standard'],
+    { encoding: 'utf8', maxBuffer: 64 << 20 },
+  )
+    .split('\n')
+    .filter((f) => f && !isSkippedPath(f)),
+  process.cwd(),
+);
 
 const findings = [];
 for (const f of files) {

@@ -23,8 +23,10 @@
  * are the same story: this class specifically disarms the guards we wrote *because we
  * already got burned once*.
  *
- *   node scripts/check-vacuous-negative-assertions.mjs            # gate
+ *   node scripts/check-vacuous-negative-assertions.mjs            # gate (green-checkpoint leg, D-099)
  *   node scripts/check-vacuous-negative-assertions.mjs --report   # + the non-gating bucket
+ *   node scripts/check-vacuous-negative-assertions.mjs --list     # current DRIFTED set, baseline-shaped
+ *   node scripts/check-vacuous-negative-assertions.mjs --update   # shrink the baseline (never grows it)
  *
  * THE RULE
  * A negative assertion on a STATIC literal is vacuous when that literal appears
@@ -39,6 +41,22 @@
  *                       deliberate "this phrasing is gone for good" ratchet, which is
  *                       legitimate and stable (the historical string never changes),
  *                       so it is reported under --report and never gates.
+ *
+ *   COINCIDENT (report) — a long fragment exists, but only OUTSIDE the test's SUBJECT
+ *                       files (resolveSubjectFiles: its relative imports, basename
+ *                       siblings, and repo paths it names). A negative assertion guards
+ *                       its subject's output, so a 12-17 char fragment turning up in
+ *                       unrelated code is coincidence, not a reworded emitter. Measured
+ *                       (WI-10004205): 21 of 31 DRIFTED findings were this shape, and
+ *                       none of the 31 was a real drift.
+ *
+ *   RENAMED  (report) — the fragment IS in the subject, but this same file POSITIVELY
+ *                       asserts a literal containing it. The test pins the NEW wording,
+ *                       so the negative is a deliberate "the old wording must not come
+ *                       back" ratchet, not a guard a rename left behind.
+ *
+ * A test whose subject resolves to NO file is judged against the whole corpus, as
+ * before: an unresolvable subject must not quietly turn the gate off.
  *
  * THE FALSE-POSITIVE DISCRIMINATORS (why this is not noise). A negative assertion is
  * NOT flagged when the string is producible, by any of:
@@ -60,10 +78,10 @@
  * rather than multiplying a full-corpus scan by every assertion.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync, statSync, realpathSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { readFileSync, statSync, realpathSync, writeFileSync } from 'node:fs';
+import { resolve, dirname, posix } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { coverageOf, describeUnscanned } from './lib/tracked-files.mjs';
+import { coverageOf, describeUnscanned, presentOnDisk } from './lib/tracked-files.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -105,7 +123,12 @@ const isExcluded = (p) =>
   /(^|\/)(package-lock\.json|Cargo\.lock)$/.test(p) ||
   p.startsWith('apps/operator/public/internal/docs/') ||
   p.startsWith('.wi3388-cargo-target/') ||
-  p.startsWith('.agent-tmp/');
+  p.startsWith('.agent-tmp/') ||
+  // Tracked compile caches and scratch trees (EI-24493767544777917): byte copies of real
+  // source, or of source that no longer exists, so neither an emitter nor a subject.
+  p.startsWith('.papercusp/') ||
+  /(^|\/)\.tmp[^/]*\//.test(p) ||
+  /(^|\/)\.tsx-tmp\//.test(p);
 
 const MAX_CORPUS_FILE = 2 * 1024 * 1024;
 const PRAGMA = 'vacuous-negative-ok:';
@@ -124,8 +147,10 @@ const ALLOW = new Set([]);
  * it IS in the source — the guard is pinned to that string's OLD wording.
  * ORPHANED reports only: nothing resembling the literal survives, or the literal is not
  * prose (a value pin, a shape guard, fixture-composed output).
+ * COINCIDENT and RENAMED report only: the fragment is outside the test's subject, or the
+ * file positively pins the new wording (see the header).
  *
- * @typedef {'DRIFTED' | 'ORPHANED'} VacuousVerdict
+ * @typedef {'DRIFTED' | 'ORPHANED' | 'COINCIDENT' | 'RENAMED'} VacuousVerdict
  */
 
 /**
@@ -580,14 +605,77 @@ function addDriftQueries(queries, lit) {
   }
 }
 
+const SUBJECT_CODE_EXTS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+const SUBJECT_SIBLING_EXTS = [...SUBJECT_CODE_EXTS, '.sh', '.bash', '.sql', '.py', '.rs', '.service', '.json', '.yml', '.yaml', ''];
+/** @type {Record<string, string[]>} */
+const SUBJECT_TS_FOR_JS = { '.js': ['.ts', '.tsx'], '.mjs': ['.mts'], '.cjs': ['.cts'], '.jsx': ['.tsx'] };
+
+/**
+ * The SUBJECT of a test file: the corpus files its negative assertions are about. A
+ * DRIFTED verdict claims "the emitter this guard watches was reworded", and only the
+ * subject can carry that evidence (WI-10004205). Three sources, all static:
+ *   1. basename siblings: `foo.test.ts` / `foo.integration.test.ts` → `foo.*` in the same
+ *      directory, or one level up from `__tests__/` / `test/` / `tests/`;
+ *   2. every relative specifier in the file (`./x`, `../y.js`): imports, dynamic imports,
+ *      `vi.mock`, `require`, and paths the test reads, resolved the way TS resolves them;
+ *   3. every repo-relative path the test names verbatim (`'scripts/foo.sh'`).
+ * Workspace-package imports (`@papercusp/…`) are deliberately NOT followed. That misses
+ * a subject reached only through a package, whose drift is then reported COINCIDENT
+ * rather than gating; the alternative, following re-exports, re-admits the coincidental
+ * matches this exists to remove.
+ *
+ * @param {string} testPath - Repo-relative POSIX path of the test file.
+ * @param {string} text - The test file's source.
+ * @param {{ has(path: string): boolean }} corpus - Repo-relative paths eligible as corpus.
+ * @returns {string[]} Subject paths, a subset of `corpus`, sorted.
+ */
+export function resolveSubjectFiles(testPath, text, corpus) {
+  /** @type {Set<string>} */
+  const out = new Set();
+  const dir = posix.dirname(testPath);
+  /** @param {string} p */
+  const add = (p) => {
+    const n = posix.normalize(p);
+    if (corpus.has(n)) out.add(n);
+  };
+  /** @param {string} p */
+  const addModule = (p) => {
+    const ext = posix.extname(p);
+    if (ext && corpus.has(posix.normalize(p))) return add(p);
+    for (const e of (ext && SUBJECT_TS_FOR_JS[ext]) || []) add(p.slice(0, -ext.length) + e);
+    for (const e of SUBJECT_CODE_EXTS) {
+      add(p + e);
+      add(posix.join(p, `index${e}`));
+    }
+  };
+
+  const base = posix.basename(testPath).replace(/(\.(unit|integration|e2e|live))?\.(test|spec)\.[cm]?[jt]sx?$/, '');
+  const dirs = [dir];
+  if (/(^|\/)(__tests__|tests?)$/.test(dir)) dirs.push(posix.dirname(dir));
+  for (const d of dirs) for (const e of SUBJECT_SIBLING_EXTS) add(posix.join(d, base + e));
+
+  for (const m of text.matchAll(/['"`](\.{1,2}\/[^'"`\s$]+)['"`]/g)) addModule(posix.join(dir, m[1]));
+
+  // Not `./x` — those are test-relative and handled above; resolved from the root they
+  // would name the wrong file.
+  for (const m of text.matchAll(/['"`]([A-Za-z0-9_@-][A-Za-z0-9_@.-]*(?:\/[A-Za-z0-9_@.-]+)+)['"`]/g)) {
+    add(m[1]);
+    if (!posix.extname(m[1])) addModule(m[1]);
+  }
+  return [...out].sort();
+}
+
 /**
  * Judge one test file's negative assertions. `includes` answers "does the non-test
  * corpus contain this string" — injected so the unit tests can drive a synthetic corpus.
+ * `subjectIncludes` answers the same over the test's SUBJECT files only
+ * (resolveSubjectFiles). Omit it when the subject is unknown: drift is then judged
+ * against the whole corpus, exactly as before the locality rule.
  *
- * @param {{ file: string; text: string; includes: IncludesFn }} args
+ * @param {{ file: string; text: string; includes: IncludesFn; subjectIncludes?: IncludesFn }} args
  * @returns {{ considered: number; findings: VacuousFinding[] }}
  */
-export function judgeFile({ file, text, includes }) {
+export function judgeFile({ file, text, includes, subjectIncludes }) {
   const lines = text.split('\n');
   const negatives = extractNegativeLiterals(text);
   if (negatives.length === 0) return { considered: 0, findings: [] };
@@ -618,14 +706,22 @@ export function judgeFile({ file, text, includes }) {
 
     const drift = driftFragment(lit, includes);
     if (drift && residueIsComposed(drift.residue, haystack)) continue; // runtime-composed
-    findings.push({
-      file,
-      line: c.line,
-      kind: c.kind,
-      lit,
-      verdict: drift && proseShaped(lit) ? 'DRIFTED' : 'ORPHANED',
-      fragment: drift?.fragment ?? null,
-    });
+    /** @type {VacuousVerdict} */
+    let verdict = 'ORPHANED';
+    let fragment = drift?.fragment ?? null;
+    if (drift && proseShaped(lit)) {
+      // Locality: only the subject can prove ITS emitter was reworded.
+      const local = subjectIncludes ? driftFragment(lit, subjectIncludes) : drift;
+      if (!local) {
+        verdict = 'COINCIDENT';
+      } else {
+        fragment = local.fragment;
+        const pinned = local.fragment.trim();
+        // The same file positively asserts the new wording: a rename ratchet, not a dead guard.
+        verdict = pinned.length >= MIN_FRAGMENT && positives.some((p) => p.includes(pinned)) ? 'RENAMED' : 'DRIFTED';
+      }
+    }
+    findings.push({ file, line: c.line, kind: c.kind, lit, verdict, fragment });
   }
   return { considered, findings };
 }
@@ -639,10 +735,12 @@ export function judgeFile({ file, text, includes }) {
  * because `bin/git-hooks/pre-push` has no file extension and was outside the corpus).
  */
 function trackedFiles() {
-  return execFileSync('git', ['ls-files', '--recurse-submodules'], { cwd: ROOT, maxBuffer: 1 << 28 })
+  const files = execFileSync('git', ['ls-files', '--recurse-submodules'], { cwd: ROOT, maxBuffer: 1 << 28 })
     .toString()
     .split('\n')
     .filter(Boolean);
+  // WI-10004176: drop index entries a plain `rm` left behind until git-sync commits it.
+  return presentOnDisk(files, ROOT);
 }
 
 /**
@@ -664,8 +762,138 @@ function trackedFiles() {
 const MIN_EXPECTED_CORPUS = 2000;
 const MIN_EXPECTED_TESTS = 500;
 
+/**
+ * SHRINK-ONLY BASELINE (WI-10004205, D-097/D-099). This lint is a green-checkpoint leg,
+ * so a DRIFTED finding already in the tree when it was wired must not red-pin `main`,
+ * while a NEW one must. The baseline lists the tolerated findings by `file + kind + lit`
+ * (never by line number, which moves on every unrelated edit above the assertion).
+ *
+ * Shrink-only has two halves, and both are mechanical:
+ *   - `--update` rewrites the file to baseline ∩ current findings. It removes entries
+ *     whose assertion was fixed and NEVER adds one, so it cannot launder new drift.
+ *   - `BASELINE_HIGH_WATERMARK` caps the file's size. Growing the baseline by hand then
+ *     needs this constant raised in the same diff, where review can see it.
+ * `--list` prints the current DRIFTED set in baseline form without writing anything:
+ * the measuring run a re-seed starts from.
+ *
+ * Wired at 0 findings (after WI-10004204's pragmas), so today it is a hard zero with a
+ * ratchet ready for the day a finding must be tolerated deliberately.
+ */
+const BASELINE_FILE = 'scripts/vacuous-negative-baseline.json';
+export const BASELINE_HIGH_WATERMARK = 0;
+
+/**
+ * One tolerated DRIFTED finding. Keyed without the line number on purpose.
+ *
+ * @typedef {object} BaselineEntry
+ * @property {string} file
+ * @property {string} kind
+ * @property {string} lit
+ */
+
+/**
+ * @param {{ file: string, kind: string, lit: string }} f
+ * @returns {string}
+ */
+export function baselineKey(f) {
+  return `${f.file}\u0000${f.kind}\u0000${f.lit}`;
+}
+
+/**
+ * Split the DRIFTED findings against the baseline. Pure, so the gate decision is
+ * unit-testable without building the ~110M-char corpus.
+ *
+ * `fresh` findings gate. `baselined` ones are tolerated. `stale` entries match no
+ * current finding (the assertion was fixed or deleted) and never gate: a red for an
+ * improvement would freeze the queue on good news; `--update` removes them.
+ * `overWatermark` is true when the baseline holds more entries than the cap allows.
+ *
+ * @param {{ drifted: VacuousFinding[], baseline: BaselineEntry[], watermark?: number }} args
+ * @returns {{ fresh: VacuousFinding[], baselined: VacuousFinding[], stale: BaselineEntry[], overWatermark: boolean }}
+ */
+export function partitionAgainstBaseline({ drifted, baseline, watermark = BASELINE_HIGH_WATERMARK }) {
+  const allowed = new Set(baseline.map(baselineKey));
+  const seen = new Set(drifted.map(baselineKey));
+  const fresh = [];
+  const baselined = [];
+  for (const f of drifted) (allowed.has(baselineKey(f)) ? baselined : fresh).push(f);
+  const stale = baseline.filter((e) => !seen.has(baselineKey(e)));
+  return { fresh, baselined, stale, overWatermark: baseline.length > watermark };
+}
+
+/**
+ * The process exit code for a partition: 1 when any finding is new or the baseline is
+ * over its cap, else 0. Stale entries never affect it. `main` returns exactly this.
+ *
+ * @param {{ fresh: readonly unknown[], overWatermark: boolean }} partition
+ * @returns {0 | 1}
+ */
+export function gateExitCode({ fresh, overWatermark }) {
+  return overWatermark || fresh.length > 0 ? 1 : 0;
+}
+
+/**
+ * Parse the baseline file's text. An ABSENT file is an empty baseline (the strictest
+ * reading: every finding gates). A present but malformed file is an error, never an
+ * empty baseline, because silently tolerating nothing would hide the corruption and
+ * silently tolerating everything would hide the findings.
+ *
+ * @param {string | null} text - File contents, or null when the file does not exist.
+ * @returns {{ ok: true, entries: BaselineEntry[] } | { ok: false, error: string }}
+ */
+export function parseBaseline(text) {
+  if (text === null) return { ok: true, entries: [] };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, error: `not valid JSON (${e instanceof Error ? e.message : String(e)})` };
+  }
+  const entries = parsed?.entries;
+  if (!Array.isArray(entries)) return { ok: false, error: 'missing an "entries" array' };
+  for (const [i, e] of entries.entries()) {
+    if (typeof e?.file !== 'string' || typeof e?.kind !== 'string' || typeof e?.lit !== 'string') {
+      return { ok: false, error: `entries[${i}] needs string file, kind and lit` };
+    }
+  }
+  return { ok: true, entries };
+}
+
+/** @param {BaselineEntry[]} entries */
+function renderBaseline(entries) {
+  const sorted = [...entries].sort((a, b) => baselineKey(a).localeCompare(baselineKey(b)));
+  return (
+    JSON.stringify(
+      {
+        _comment:
+          'Shrink-only baseline for scripts/check-vacuous-negative-assertions.mjs (WI-10004205, D-099). ' +
+          'Entries are tolerated DRIFTED findings keyed by file + kind + lit. `--update` only removes ' +
+          'entries; growing this file also requires raising BASELINE_HIGH_WATERMARK in the script.',
+        entries: sorted.map(({ file, kind, lit }) => ({ file, kind, lit })),
+      },
+      null,
+      2,
+    ) + '\n'
+  );
+}
+
 function main(argv) {
   const report = argv.includes('--report');
+  const listMode = argv.includes('--list');
+  const update = argv.includes('--update');
+  const baselinePath = resolve(ROOT, BASELINE_FILE);
+  let baselineText = null;
+  try {
+    baselineText = readFileSync(baselinePath, 'utf8');
+  } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'ENOENT') throw e;
+  }
+  const baselineRead = parseBaseline(baselineText);
+  if (!baselineRead.ok) {
+    // Checked BEFORE the expensive scan: a corrupt baseline is a verdict on its own.
+    console.error(`✗ vacuous-negative-assertions: ${BASELINE_FILE} is unreadable: ${baselineRead.error}.`);
+    return 1;
+  }
   const list = trackedFiles();
   const corpusFiles = list.filter(
     (p) => !TEST_RE.test(p) && !BINARY_RE.test(p) && !PROSE_RE.test(p) && !isExcluded(p),
@@ -684,10 +912,16 @@ function main(argv) {
   }
 
   const parts = [];
+  // Path → text, for the per-test SUBJECT corpus (resolveSubjectFiles). Holds the same
+  // string references `parts` does, so it costs a map, not a second copy of the corpus.
+  /** @type {Map<string, string>} */
+  const corpusTextOf = new Map();
   for (const f of corpusFiles) {
     try {
       if (statSync(resolve(ROOT, f)).size > MAX_CORPUS_FILE) continue;
-      parts.push(readFileSync(resolve(ROOT, f), 'utf8'));
+      const t = readFileSync(resolve(ROOT, f), 'utf8');
+      parts.push(t);
+      corpusTextOf.set(f, t);
     } catch {
       /* unreadable / gone since ls-files — skip */
     }
@@ -746,7 +980,10 @@ function main(argv) {
     const text = testTexts.get(f);
     if (text === undefined) continue;
     if (!text.includes('.not.to')) continue;
-    const r = judgeFile({ file: f, text, includes });
+    const subjects = resolveSubjectFiles(f, text, corpusTextOf);
+    const subjectText = subjects.map((s) => corpusTextOf.get(s) ?? '').join('\n \n');
+    const subjectIncludes = subjects.length > 0 ? (/** @type {string} */ s) => subjectText.includes(s) : undefined;
+    const r = judgeFile({ file: f, text, includes, subjectIncludes });
     considered += r.considered;
     for (const finding of r.findings) (finding.verdict === 'DRIFTED' ? drifted : orphaned).push(finding);
   }
@@ -787,12 +1024,14 @@ function main(argv) {
         `${considered} static-literal negative assertion(s) judged.\n`,
     );
     console.log(
-      `ORPHANED (non-gating — the literal is absent, but it is not reworded PROSE, so it is\n` +
-        `most likely a deliberate value/shape guard or a "this phrasing is gone for good"\n` +
-        `ratchet. A "near:" line means a long fragment IS in the source — worth a look): ${orphaned.length}\n`,
+      `NON-GATING (${orphaned.length}). ORPHANED: the literal is absent but is not reworded PROSE,\n` +
+        `so most likely a deliberate value/shape guard or a "gone for good" ratchet. [COINCIDENT]:\n` +
+        `the fragment exists only outside the test's subject files. [RENAMED]: the same file\n` +
+        `positively pins the new wording. A "near:" line means a long fragment IS in the source:\n`,
     );
     for (const f of orphaned) {
-      console.log(`    ${f.file}:${f.line}  ${f.kind}  ${JSON.stringify(f.lit)}`);
+      const tag = f.verdict === 'ORPHANED' ? '' : `[${f.verdict}]  `;
+      console.log(`    ${f.file}:${f.line}  ${tag}${f.kind}  ${JSON.stringify(f.lit)}`);
       if (f.fragment) console.log(`        near: ${JSON.stringify(f.fragment)}`);
     }
     console.log('');
@@ -802,10 +1041,41 @@ function main(argv) {
   const cov = coverageOf(list, ROOT);
   const coverageNote = describeUnscanned(cov, ROOT);
 
-  if (drifted.length === 0) {
+  if (listMode) {
+    // The measuring run: the full current DRIFTED set, baselined or not, in the file's
+    // own shape. It writes nothing, so it cannot widen the baseline by itself.
+    process.stdout.write(renderBaseline(drifted));
+    return 0;
+  }
+
+  const partition = partitionAgainstBaseline({ drifted, baseline: baselineRead.entries });
+  const { fresh, baselined, stale, overWatermark } = partition;
+  if (update && stale.length > 0) {
+    const kept = baselineRead.entries.filter((e) => !stale.some((s) => baselineKey(s) === baselineKey(e)));
+    writeFileSync(baselinePath, renderBaseline(kept));
+    console.log(`baseline shrunk: removed ${stale.length} fixed entr${stale.length === 1 ? 'y' : 'ies'}, ${kept.length} remain.`);
+  } else if (stale.length > 0) {
+    console.log(
+      `⚠ ${stale.length} baseline entr${stale.length === 1 ? 'y matches' : 'ies match'} no current finding ` +
+        `(fixed or deleted). Non-gating; shrink the baseline with --update:`,
+    );
+    for (const e of stale) console.log(`    ${e.file}  ${e.kind}  ${JSON.stringify(e.lit)}`);
+  }
+  if (overWatermark) {
+    console.error(
+      `✗ vacuous-negative-assertions: ${BASELINE_FILE} holds ${baselineRead.entries.length} entr` +
+        `${baselineRead.entries.length === 1 ? 'y' : 'ies'}, above BASELINE_HIGH_WATERMARK=${BASELINE_HIGH_WATERMARK}.\n` +
+        '  The baseline is shrink-only. Fix the new drift instead, or raise the watermark in the\n' +
+        '  script in the same diff so review sees the baseline grow.',
+    );
+    return 1;
+  }
+
+  if (gateExitCode(partition) === 0) {
     console.log(
       `✓ vacuous negative assertions: none of ${considered} static-literal negative assertion(s) ` +
-        `pins a reworded string (${orphaned.length} orphaned, non-gating). Corpus: ${corpusFiles.length} file(s) ` +
+        `pins a reworded string (${orphaned.length} non-gating: orphaned/coincident/renamed` +
+        `${baselined.length ? `; ${baselined.length} DRIFTED tolerated by the baseline` : ''}). Corpus: ${corpusFiles.length} file(s) ` +
         `across the superproject + ${cov.scanned.length}/${cov.declared.length} submodule(s).` +
         coverageNote,
     );
@@ -819,13 +1089,14 @@ function main(argv) {
       "  source. The string it guards still exists; the guard is pinned to that string's OLD\n" +
       '  wording, so it passes unconditionally no matter what the code does.\n',
   );
-  for (const f of drifted) {
+  for (const f of fresh) {
     console.error(`    ${f.file}:${f.line}  ${f.kind}`);
     console.error(`      pins:      ${JSON.stringify(f.lit)}`);
     console.error(`      source has: ${JSON.stringify(f.fragment)}\n`);
   }
   console.error(
-    `  ${drifted.length} finding(s). Re-point each assertion at the CURRENT wording, or delete it\n` +
+    `  ${fresh.length} new finding(s)${baselined.length ? ` (${baselined.length} more tolerated by ${BASELINE_FILE})` : ''}. ` +
+      `Re-point each assertion at the CURRENT wording, or delete it\n` +
       `  if the guard is obsolete. If the absence is deliberate, annotate the line with\n` +
       `  "// ${PRAGMA} <reason>". See EI-18765867705399052.`,
   );

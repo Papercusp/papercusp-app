@@ -2800,22 +2800,34 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     // Background reads may clear the global status error. Keep the actual
     // refusal with the unsent turn so the owner can act on it before retrying.
     // Without details it is ONE plain sentence: cause and next step.
-    let turn_error: Vec<String> = if details {
-        app.su_pending_turn
-            .as_ref()
-            .filter(|_| !app.chat_streaming)
-            .and_then(|turn| turn.error.clone())
-            .or(app.su_connection_error.clone())
-    } else {
-        app.chat_failure_sentence()
-    }
-    .map(|error| {
-        wrap_text(&error, area.width.saturating_sub(2).max(1) as usize)
+    //
+    // A start the operator refused (WI-10004164) leads with that sentence in
+    // BOTH views: its reason names the owner's next step (an account or model
+    // to choose), so the details view adds the raw code beneath it instead of
+    // replacing the next step with `SU-session: <code>: …`.
+    let turn_error: Vec<String> = {
+        let raw = if details {
+            app.su_pending_turn
+                .as_ref()
+                .filter(|_| !app.chat_streaming)
+                .and_then(|turn| turn.error.clone())
+                .or(app.su_connection_error.clone())
+        } else {
+            None
+        };
+        let sentence = if !details || app.su_launch_refusal.is_some() {
+            app.chat_failure_sentence()
+        } else {
+            None
+        };
+        let wrap_width = area.width.saturating_sub(2).max(1) as usize;
+        sentence
             .into_iter()
+            .chain(raw)
+            .flat_map(|error| wrap_text(&error, wrap_width))
             .take(6)
             .collect()
-    })
-    .unwrap_or_default();
+    };
     // Inline card (sentinel-tui-shared-backend-and-cards Phase 2a): when the
     // operator brain has an open `chat:ask_choice` card, reserve a bottom strip
     // for it (between the transcript and the composer) and render it there. The
@@ -3796,13 +3808,16 @@ fn draw_card(f: &mut Frame, app: &App, area: Rect) {
     }
     let inner_w = area.width.saturating_sub(2).max(1) as usize;
     let lines = card_lines(app, inner_w);
+    // Say what the card needs from the person, not which Papercusp component
+    // raised it: "Operator" is internal product jargon to someone who launched
+    // `pui` to chat (WI-10004211, pui-chat-first-ux-2026-09-28 R-03).
     let title = if remaining > 0 {
         format!(
-            " {} Operator asks · {remaining} more ",
+            " {} Needs your answer · {remaining} more ",
             crate::glyph::nav::EXPANDED
         )
     } else {
-        format!(" {} Operator asks ", crate::glyph::nav::EXPANDED)
+        format!(" {} Needs your answer ", crate::glyph::nav::EXPANDED)
     };
     // Clear under the strip so the transcript doesn't bleed through.
     f.render_widget(Clear, area);
@@ -5147,7 +5162,7 @@ fn draw_session_setup(f: &mut Frame, app: &App) {
             Line::from(format!("b Engine: {}", setup.backend.label())),
             Line::from(format!(
                 "a Account: {}",
-                setup.account.as_deref().unwrap_or("default")
+                crate::session_config::account_label(setup.account.as_deref(), setup.backend)
             )),
             Line::from(format!(
                 "m Model: {}",
@@ -7710,6 +7725,36 @@ mod tests {
         assert!(text.contains("Enter retries"), "{text}");
     }
 
+    /// WI-10004164: the workbench's details view shows raw errors, but a
+    /// start the operator refused still leads with the plain sentence that
+    /// names the owner's next step; the raw code stays beneath it.
+    #[test]
+    fn workbench_refused_start_leads_with_the_plain_sentence() {
+        let mut app = App::new();
+        app.tab = crate::app::Tab::Operator;
+        app.chat_composing = true;
+        app.chat_input = "keep this draft".into();
+        app.update(crate::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        )));
+        app.update(crate::event::Event::SuSessionRefused {
+            code: "attached_engine_start_failed".into(),
+            message: "OMP default account cannot use gateway model 'papercusp-gateway/x'; choose auto or a named gateway account.".into(),
+        });
+        app.last_error = None;
+        assert!(app.chat_details_visible());
+        let text = render(&app, 160, 30);
+        assert!(text.contains("keep this draft"), "{text}");
+        let sentence = text
+            .find("could not start: OMP default account cannot use gateway model")
+            .unwrap_or_else(|| panic!("no plain sentence:\n{text}"));
+        let raw = text
+            .find("attached_engine_start_failed")
+            .unwrap_or_else(|| panic!("no raw code in details:\n{text}"));
+        assert!(sentence < raw, "{text}");
+    }
+
     #[test]
     fn agent_ctx_panes_render_brief_mail_work() {
         use crate::app::AgentCtxMode;
@@ -10106,7 +10151,14 @@ mod tests {
         assert!(text.contains("Approve the deploy?"), "card prompt renders");
         assert!(text.contains("1. Approve"), "option 1 renders numbered");
         assert!(text.contains("2. Reject"), "option 2 renders numbered");
-        assert!(text.contains("Operator asks"), "card block title renders");
+        assert!(
+            text.contains("Needs your answer"),
+            "card block title renders"
+        );
+        assert!(
+            !text.contains("Operator asks"),
+            "card title names no internal component (WI-10004211)"
+        );
         assert!(
             text.contains("answer above") || text.contains("pick"),
             "composer steers the user to the card"

@@ -40,6 +40,7 @@
  * a failure here is a NEW un-reported fallback, never a baseline addition.
  */
 import { readFileSync, realpathSync } from 'node:fs';
+import { presentOnDisk } from './lib/tracked-files.mjs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
@@ -131,10 +132,11 @@ export function scanTree() {
 
   // The ENUMERATION is the collapse detector and must stay whole-tree: it is what proves
   // the guard is looking at a repository at all. It costs nothing — no file is read.
-  const enumerated = execFileSync('git', ['ls-files', '*.ts'], { cwd: ROOT, encoding: 'utf8' })
-    .split('\n')
-    .filter(Boolean)
-    .filter(eligible);
+  // WI-10004176: drop index entries a peer's plain `rm` left until git-sync commits it.
+  const enumerated = presentOnDisk(
+    execFileSync('git', ['ls-files', '*.ts'], { cwd: ROOT, encoding: 'utf8' }).split('\n').filter(Boolean),
+    ROOT,
+  ).filter(eligible);
 
   // Reading all ~5.4k of those cost ~13s, which is too expensive to attach to every
   // changed .ts path — and it was pure waste: a handful of files mention a sidecar

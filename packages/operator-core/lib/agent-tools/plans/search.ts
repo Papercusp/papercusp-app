@@ -178,6 +178,8 @@ interface Hit {
    *  response under the token limit (a high-hit plan can match dozens of
    *  items/decisions). 0 → omitted. */
   matches_omitted?: number;
+  /** generic-rag-chunking P-009: the plan section a past-the-cut chunk match fell in. */
+  matchedSection?: string;
 }
 
 // Bound the per-plan snippet count: matches are pushed in scope order
@@ -435,6 +437,7 @@ export default defineTool({
     // wanted, resolvePlansEmbedder returns a REJECTING embedder on every
     // degraded path, so a dead embedder reports `blocked` (D-023) instead of
     // being indistinguishable from `semantic:false`.
+    const matchedSections = new Map<string, string>();
     const semanticOn = args.semantic ?? !process.env.VITEST;
     const { embedder, embeddingMode } = semanticOn
       ? await resolvePlansEmbedder()
@@ -472,6 +475,8 @@ export default defineTool({
               embeddingMode,
               { ...opts, includeArchived },
               (h: PlanSemanticHit) => {
+                // generic-rag-chunking P-009: the section a chunk match fell in.
+                if (h.matchedSection) matchedSections.set(h.slug, h.matchedSection);
                 // A plan the lexical leg never scored still needs a row to
                 // return; the title match mirrors what the old fusion
                 // synthesized for a semantic-only hit.
@@ -504,7 +509,9 @@ export default defineTool({
 
     let semanticHitCount = 0;
     const merged: Array<Hit & { semantic?: true; similarity?: number }> = results.map((r) => {
-      const base: Hit = hydration.get(r.source_id) ?? { plan: r.source_id, score: 0, matches: [] };
+      const hydrated: Hit = hydration.get(r.source_id) ?? { plan: r.source_id, score: 0, matches: [] };
+      const section = matchedSections.get(r.source_id);
+      const base: Hit = section ? { ...hydrated, matchedSection: section } : hydrated;
       const raw = r.rankerScores?.embeddings;
       const similarity = raw === undefined ? undefined : Math.round(raw * 1000) / 1000;
       // Only mark semantic:true (the "this wasn't a lexical match" signal

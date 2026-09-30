@@ -127,8 +127,8 @@ export function StepMobilePairing() {
 
       <p className="pc-step__hint">
         Manage paired devices later in{' '}
-        <RouteLink href="/settings/mobile" style={{ color: 'var(--accent)' }}>
-          Settings → Mobile access
+        <RouteLink href="/settings/remote-access" style={{ color: 'var(--accent)' }}>
+          Settings → Remote access
         </RouteLink>
         . Pairing is fully optional; everything works without the mobile app.
       </p>

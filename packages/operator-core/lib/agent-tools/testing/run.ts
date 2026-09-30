@@ -132,6 +132,7 @@ import {
 import type { ResourceDemand } from '../../resource-governor/admission';
 import { resolveAgentIdentity, type ResolveIdentityCtx } from '../coordination/identity';
 import { resolveBashTaskProvenance } from '../capability/bash-task-provenance';
+import { loopLaunchRefusal } from '../../verification-attempts/loop-gate';
 import {
   prepareTestEvidence,
   finishTestEvidence,
@@ -1564,7 +1565,12 @@ async function recoverCompletedRunAfterBudget(opts: {
   if (reportTexts.length > 0) {
     const failureDetails = await readFailureDetails(join(opts.dir, TEST_FAILURE_DETAILS_FILENAME), opts.root);
     run = mergeDistilledRuns(
-      reportTexts.map((text) => distillVitestRun(text, opts.root, { maxFailures: opts.maxFailures, failureDetails })),
+      withNodeTestGroupRuns(
+        reportTexts.map((text) => distillVitestRun(text, opts.root, { maxFailures: opts.maxFailures, failureDetails })),
+        opts.output,
+        opts.files,
+        opts.maxFailures === undefined ? {} : { maxFailures: opts.maxFailures },
+      ),
       { maxFailures: opts.maxFailures },
     );
   } else {
@@ -2338,6 +2344,21 @@ export function parseRouterTestResult(
     return null;
   }
 
+  return distillNodeTestSummary(output, files, executed, status === 'failed', opts);
+}
+
+/**
+ * Distill Node's numeric test summary (`ℹ tests N` / `ℹ pass N` / `ℹ fail N`)
+ * from one router output segment. Returns null when no non-zero summary is
+ * present — a missing summary is never evidence that tests ran.
+ */
+function distillNodeTestSummary(
+  output: string,
+  files: readonly string[],
+  executed: number,
+  routerReportedFailure: boolean,
+  opts: { maxFailures?: number } = {},
+): DistilledTestRun | null {
   const summaryValue = (label: string): number | null => {
     const re = new RegExp(`^\\s*(?:ℹ|#)?\\s*${label}\\s+(\\d+)\\s*$`, 'gm');
     let value: number | null = null;
@@ -2354,7 +2375,7 @@ export function parseRouterTestResult(
   let durationMs: number | null = null;
   for (const match of output.matchAll(durationMatch)) durationMs = Math.max(0, Math.round(Number(match[1])));
 
-  const failed = Math.max(reportedFailed, status === 'failed' ? 1 : 0);
+  const failed = Math.max(reportedFailed, routerReportedFailure ? 1 : 0);
   const maxFailures = Math.max(1, Math.floor(opts.maxFailures ?? 20));
   const failureFile = files.length === 1 ? files[0]! : '(node:test failure)';
   const failureNames = [...output.matchAll(/^\s*not ok(?:\s+\d+)?\s+-\s+([^\r\n]+)$/gm)].map((m) => m[1]!.trim());
@@ -2383,6 +2404,92 @@ export function parseRouterTestResult(
     durationMs,
     byFile,
   };
+}
+
+/** Map a router `requested <path>` line back to the caller's exact `files[]` entry. */
+function matchRequestedFile(requested: string, files: string[]): string | null {
+  const norm = requested.replace(/\\/g, '/').replace(/^\.\//, '');
+  const exact = files.find((f) => f.replace(/\\/g, '/').replace(/^\.\//, '') === norm);
+  if (exact) return exact;
+  const suffix = files.filter((f) => {
+    const nf = f.replace(/\\/g, '/').replace(/^\.\//, '');
+    return nf.endsWith(`/${norm}`) || norm.endsWith(`/${nf}`);
+  });
+  return suffix.length === 1 ? suffix[0]! : null;
+}
+
+/**
+ * WI-10004243: a MIXED batch (Vitest files + registered node:test files) writes
+ * Vitest JSON reports for the Vitest groups only, so the node:test files used to
+ * vanish from `byFile` — and scorecards:emit then refused the criterion as
+ * "never reported on". The router prints each node:test group as
+ * `ROUTE cwd=<dir> runner=node:test` + `  requested <file>` lines followed by
+ * Node's own numeric summary; distill each group from ITS segment only.
+ *
+ * Attribution is exact only for a single-file group (Node prints one aggregate
+ * summary per `node --test` process). A multi-file group is returned as an
+ * unattributed run (counts, no byFile entries) so totals stay honest and the
+ * caller can see which requested files still lack a per-file verdict.
+ */
+export function parseNodeTestGroupRuns(
+  output: string,
+  files: string[],
+  opts: { maxFailures?: number } = {},
+): DistilledTestRun[] {
+  const lines = output.split(/\r?\n/);
+  const runs: DistilledTestRun[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const route = /^ROUTE cwd=(\S+) runner=node:test\s*$/.exec(lines[i]!);
+    if (!route) continue;
+    const cwdLabel = route[1]!;
+    const requested: string[] = [];
+    let j = i + 1;
+    for (; j < lines.length; j++) {
+      const m = /^\s+requested\s+(\S.*?)\s*$/.exec(lines[j]!);
+      if (!m) break;
+      requested.push(m[1]!);
+    }
+    let end = j;
+    while (end < lines.length && !/^(?:ROUTE cwd=|TEST_FILE_RESULT\b)/.test(lines[end]!)) end++;
+    if (requested.length === 0) continue;
+    const mapped = requested.map((r) => matchRequestedFile(r, files));
+    const escapedCwd = cwdLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const groupFailed = new RegExp(
+      `^TEST_FILE_GROUP_RESULT cwd=${escapedCwd} runner=node:test\\b[^\\r\\n]*status=failed`,
+      'm',
+    ).test(output);
+    const attributable = mapped.length === 1 && mapped[0] !== null;
+    const run = distillNodeTestSummary(
+      lines.slice(j, end).join('\n'),
+      attributable ? [mapped[0]!] : mapped.filter((f): f is string => f !== null),
+      requested.length,
+      groupFailed,
+      opts,
+    );
+    if (!run) continue;
+    runs.push(attributable ? run : { ...run, byFile: {} });
+    i = end - 1;
+  }
+  return runs;
+}
+
+/**
+ * Fold node:test group runs into a Vitest-reported batch for any requested file
+ * the Vitest reports did not cover. Files already present in a Vitest report are
+ * never double-counted.
+ */
+function withNodeTestGroupRuns(
+  vitestRuns: DistilledTestRun[],
+  output: string,
+  files: string[],
+  opts: { maxFailures?: number } = {},
+): DistilledTestRun[] {
+  const covered = new Set(vitestRuns.flatMap((r) => Object.keys(r.byFile)));
+  const nodeRuns = parseNodeTestGroupRuns(output, files, opts).filter((r) => {
+    const keys = Object.keys(r.byFile);
+    return keys.length === 0 ? true : keys.every((k) => !covered.has(k));
+  });
+  return nodeRuns.length === 0 ? vitestRuns : [...vitestRuns, ...nodeRuns];
 }
 
 /**
@@ -2979,8 +3086,11 @@ export async function runTestFilesCore(opts: {
       // The sidecar is optional and fail-soft; JSON reports remain authoritative.
     }
 
-    const distilledRuns = reportTexts.map((text) =>
-      distillVitestRun(text, root, { maxFailures: opts.maxFailures, failureDetails }),
+    const distilledRuns = withNodeTestGroupRuns(
+      reportTexts.map((text) => distillVitestRun(text, root, { maxFailures: opts.maxFailures, failureDetails })),
+      outcome.output,
+      pathResolution.files,
+      opts.maxFailures !== undefined ? { maxFailures: opts.maxFailures } : {},
     );
     const emptyReport = emptyDistilledRunRefusal({
       runs: distilledRuns,
@@ -3274,6 +3384,26 @@ export default defineTool({
           }
         : null;
     if (evidenceRequest && !evidenceScope) return { data: { ok: false, error: 'evidence_requires_concrete_scope' } };
+    // expensive-verification-loops P-001: a run that outlives the foreground clamp
+    // continues detached, and that detached run is the expensive attempt the loop
+    // detector counts per work-item. An evidence request names its item explicitly;
+    // otherwise use the caller's unambiguous held claim — the same rule capability:bash
+    // applies, so one agent's runs link identically through either door.
+    const attemptWorkItemId =
+      evidenceRequest?.workItemId ??
+      (await resolveBashTaskProvenance(ctx as unknown as ResolveIdentityCtx, harnessSlug ?? null)).workItemId ??
+      undefined;
+    // P-002 (WI-10004175): the loop gate capability:bash and release:cut apply. Its budget is
+    // the REQUESTED one, not the foreground clamp, because the detached run keeps going past
+    // the clamp; a run asked for <= SLOW_ATTEMPT_MIN_MS stays free for an audit's quick checks.
+    // Checked before evidence preparation so a refusal registers no pending rows.
+    const loopRefusal = await loopLaunchRefusal({
+      workspaceId: ctx.workspaceId && ctx.workspaceId !== '*' ? ctx.workspaceId : null,
+      workItemId: attemptWorkItemId,
+      background: false,
+      timeoutMs: requestedTimeoutMs ?? DEFAULT_TIMEOUT_MS,
+    });
+    if (loopRefusal) return { data: { ...loopRefusal, runId, root: rootSelection.root } };
     let prepared: Awaited<ReturnType<typeof prepareTestEvidence>> | undefined;
     if (evidenceRequest) {
       const selected = normalizeTestFilePaths(files, rootSelection.root);
@@ -3288,15 +3418,6 @@ export default defineTool({
         return { data: { ok: false, error: 'evidence_preparation_failed', message: String(error) } };
       }
     }
-    // expensive-verification-loops P-001: a run that outlives the foreground clamp
-    // continues detached, and that detached run is the expensive attempt the loop
-    // detector counts per work-item. An evidence request names its item explicitly;
-    // otherwise use the caller's unambiguous held claim — the same rule capability:bash
-    // applies, so one agent's runs link identically through either door.
-    const attemptWorkItemId =
-      evidenceRequest?.workItemId ??
-      (await resolveBashTaskProvenance(ctx as unknown as ResolveIdentityCtx, harnessSlug ?? null)).workItemId ??
-      undefined;
     const result = await runTestFilesCore({
       files,
       runId,

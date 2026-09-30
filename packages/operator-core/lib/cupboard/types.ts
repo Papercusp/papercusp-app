@@ -314,6 +314,12 @@ export function isHiveBlueprintListing(l: HarnessListing): boolean {
   return listingKindOf(l) === 'blueprint' && (l.blueprint_kind === 'pot' || l.blueprint_kind === 'hive');
 }
 
+/** A blueprint listing with the identity facet — a wearable identity (P-016); its
+ *  `identity_surface` is the declared surface a shopper previews before install. */
+export function isIdentityBlueprintListing(l: HarnessListing): boolean {
+  return listingKindOf(l) === 'blueprint' && l.blueprint_kind === 'identity';
+}
+
 /** Pre-publication review (worker migration 008 / knowledge-packs D-007):
  *  pending/rejected listings are publicly invisible server-side; this badge
  *  helper is for the PUBLISHER's own views (their pending rows + reasons). */
@@ -511,9 +517,13 @@ export interface HarnessListing {
   /** Within-project discriminator (blueprint stream / plugin/pack slug). */
   listing_ref?: string | null;
   /** For a `listing_kind: 'blueprint'` row: the blueprint.yaml `kind` — 'hive' (a hive
-   *  template) | 'harness'. Absent/null for non-blueprint listings + pre-009 rows
-   *  (Cupboard migration 009 / hive-blueprint-generalization P-018). Drives the Hives tab. */
-  blueprint_kind?: 'pot' | 'hive' | 'harness' | null;
+   *  template) | 'harness' — or 'identity', the identity facet (Cupboard migration 035 /
+   *  portable-identity-packages P-016). Absent/null for non-blueprint listings + pre-009
+   *  rows (Cupboard migration 009 / hive-blueprint-generalization P-018). Drives the Hives tab. */
+  blueprint_kind?: 'pot' | 'hive' | 'harness' | 'identity' | null;
+  /** An identity listing's declared surface (canonical JSON, identity-listing-surface.ts):
+   *  derived from the signed closure at publish, recomputed and compared at install. */
+  identity_surface?: string | null;
 
   // ── App-distribution fields (Cupboard worker migration 014 /
   // cupboard-app-distribution-2026-07-14 P-001 [owner 2026-07-14]). Present

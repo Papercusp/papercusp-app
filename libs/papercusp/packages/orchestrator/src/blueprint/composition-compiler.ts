@@ -1053,7 +1053,9 @@ function contributionInputKey(input: ResolvedAgentInput): string {
 }
 
 function contributionKey(declaration: BlueprintContribution): string {
-  return declaration.verb === undefined
+  // A setting or prompt-file provider's verb names its first-party class's
+  // contract (D-039); its produced value still binds by ref alone.
+  return declaration.verb === undefined || declaration.inputKind !== 'capability-provider'
     ? `${declaration.inputKind}:${declaration.ref}`
     : `${declaration.inputKind}:${declaration.ref}#${declaration.verb}`;
 }

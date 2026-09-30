@@ -139,6 +139,10 @@ export type PlanAcceptanceGateCode =
   | 'spec_clause_unproven'
   | 'design_evidence_unsatisfied'
   | 'design_evidence_unavailable'
+  // WI-10004178 / p2p-public-release-endgame D-095 — this node is a federated RECEIVER
+  // of the plan's acceptance rubric, so its revision counter is not the one the
+  // authoring node's cards were graded against. Ship and grade from the authoring node.
+  | 'acceptance_authored_on_other_node'
   /** Never accompanies a refusal (the census degrades to report-only), carried for the union's honesty. */
   | 'spec_coverage_unavailable';
 
@@ -194,6 +198,8 @@ export interface PlanAcceptanceGateVerdict {
   requirementDroppedTargets?: DroppedTarget[];
   /** Why the gate refused (satisfied:false). */
   code?: PlanAcceptanceGateCode;
+  /** On `acceptance_authored_on_other_node`: the node that must ship and grade this plan. */
+  authoringNode?: AcceptanceAuthoringNode;
   /** Preserve the SAME lifecycle observation that refused; do not re-read to explain it. */
   acceptanceBarLifecycle?: Omit<AcceptanceBarLifecycleVerdict, 'nonCodeItemProofs'>;
   /**
@@ -501,6 +507,167 @@ function locateEphemeralDeliverableReferences(
 }
 
 /**
+ * WI-10004178 / p2p-public-release-endgame-2026-09-01 D-095 — in v1, grading and
+ * shipping a federated plan are acts of the node that AUTHORED its acceptance rubric.
+ *
+ * The rubric row federates, but its `version` is a machine-local counter: a receiver's
+ * copy lands at 0 and every remote apply bumps it. Cards graded on the authoring node
+ * name the authoring node's counter, and `plan_revisions` does not federate, so on a
+ * receiver the rubric-family checks compare two unrelated counters and answer with a
+ * plausible-looking `acceptance_ungraded` (which would then recruit a grader HERE) or a
+ * revision mismatch. Neither is a verdict this node can compute (D-089's principle), so
+ * the gate says so instead, and names the node that can.
+ *
+ * Receiver evidence is BOTH of:
+ * - the subject plan's machine-local `acceptance_bar_verified_revision` is set. Only the
+ *   federated-receiver seed writes it (acceptance-bar-receiver-seed.ts); every
+ *   author-side writer (seed, amendment, rubric write) clears it; it never federates.
+ * - the governing acceptance rubric row is `origin='remote'`: its current content was
+ *   written by another node. A local content write resets origin to 'local'
+ *   (stamp_local_federated_write), and `version` is in that trigger's mask, so the
+ *   receiver seed's own counter bump does not.
+ * Neither is enough alone. The authoring node can hold a remote-origin rubric (a peer's
+ * supersede federating back; measured live 2026-09-30, several shipped plans here), and
+ * the receiver seed can run on the authoring node after a peer's plan write federates
+ * back. The conjunction is what only a receiver holds.
+ */
+export interface AcceptanceAuthoringNode {
+  /** The acceptance rubric whose revision counter belongs to the authoring node. */
+  rubricId: string;
+  /** The device pubkey the federated rows carried for their author, when they carried one. */
+  pubkey: string | null;
+  /** Renderable name of the authoring node. Never invented: see `labelSource`. */
+  label: string;
+  /**
+   * `pot-member`: the pubkey resolved to a verified pot member's handle.
+   * `pubkey`: a pubkey was carried but binds to no member; the label is its short form.
+   * `unresolved`: the federation op carried no author key, so this node cannot name it.
+   */
+  labelSource: 'pot-member' | 'pubkey' | 'unresolved';
+  /** The agent that proposed the rubric on the authoring node — a locating hint, not a node. */
+  proposedBy: string | null;
+  /** This node's machine-local BAR verification revision: the receiver evidence. */
+  verifiedRevision: number;
+}
+
+export interface ReceiverHeldAcceptanceInput {
+  planSlug: string;
+  /** harness_plans.acceptance_bar_verified_revision of the subject plan on THIS node. */
+  verifiedRevision: number | null;
+  /** The single governing acceptance rubric row on this node, or null if not exactly one. */
+  rubric: {
+    rubricId: string;
+    origin: string | null;
+    authorPubkey: string | null;
+    proposedBy: string | null;
+  } | null;
+  /** Fallback author key: the subject plan row's owner_author_pubkey. */
+  planOwnerPubkey?: string | null;
+  /** The pot-member handle `pubkey` resolved to, when it resolved to a verified member. */
+  memberHandle?: string | null;
+}
+
+function shortAuthoringPubkey(pubkey: string): string {
+  return pubkey.length > 12 ? `${pubkey.slice(0, 12)}…` : pubkey;
+}
+
+/** PURE: the receiver-node refusal, or null when this node may evaluate the gate. */
+export function receiverHeldAcceptanceRefusal(
+  input: ReceiverHeldAcceptanceInput,
+): PlanAcceptanceGateVerdictWithoutBuildProvenance | null {
+  if (input.verifiedRevision == null || !input.rubric || input.rubric.origin !== 'remote') return null;
+  const pubkey = input.rubric.authorPubkey || input.planOwnerPubkey || null;
+  const labelSource: AcceptanceAuthoringNode['labelSource'] = !pubkey
+    ? 'unresolved'
+    : input.memberHandle ? 'pot-member' : 'pubkey';
+  const label = labelSource === 'pot-member'
+    ? `${input.memberHandle} (device ${shortAuthoringPubkey(pubkey!)})`
+    : labelSource === 'pubkey'
+      ? `device ${shortAuthoringPubkey(pubkey!)}`
+      : 'the node that authored it (its federated rows carry no author key, so this node cannot name it)';
+  const authoringNode: AcceptanceAuthoringNode = {
+    rubricId: input.rubric.rubricId,
+    pubkey,
+    label,
+    labelSource,
+    proposedBy: input.rubric.proposedBy,
+    verifiedRevision: input.verifiedRevision,
+  };
+  const proposer = input.rubric.proposedBy ? `, proposed there by ${input.rubric.proposedBy}` : '';
+  return {
+    satisfied: false,
+    code: 'acceptance_authored_on_other_node',
+    authoringNode,
+    message:
+      `Ship from the authoring node ${label}. Plan '${input.planSlug}' and its acceptance rubric ` +
+      `'${input.rubric.rubricId}' were authored on another node${proposer}; this node holds a federated ` +
+      `copy (BAR verified at local revision ${input.verifiedRevision}). In v1, grading and shipping a ` +
+      `federated plan are authoring-node acts (p2p-public-release-endgame-2026-09-01 D-095): rubric ` +
+      `revisions are node-local counters, so this node cannot tell whether the authoring node's cards ` +
+      `grade the current revision. Run plans:set-plan-status and any acceptance grading on the ` +
+      `authoring node. Do NOT recruit a grader or author a rubric here — both would mint a competing ` +
+      `verdict. Not waivable by force.`,
+  };
+}
+
+/**
+ * Read the receiver evidence for `planSlug` and resolve the authoring node's name.
+ * Only called once `acceptance_bar_verified_revision` is set, so the authoring node
+ * never pays for it. Best-effort: an unreadable rubric leaves the ordinary checks in charge.
+ */
+async function readReceiverHeldAcceptanceRefusal(input: {
+  planSlug: string;
+  harnessSlug: string | null;
+  verifiedRevision: number;
+  planOwnerPubkey: string | null;
+}): Promise<PlanAcceptanceGateVerdictWithoutBuildProvenance | null> {
+  let rubrics: Array<{ plan_slug: string; origin: string | null; author_pubkey: string | null; proposed_by: string | null }>;
+  try {
+    const { sql } = getOrgPg();
+    // Same discovery predicate as the receiver seed, so both agree on which rubric governs.
+    rubrics = await sql<typeof rubrics>`
+      SELECT plan_slug, origin, author_pubkey, template_data->>'proposedBy' AS proposed_by
+        FROM harness_shared.harness_plans
+       WHERE workspace_id = ${activeWorkspaceId()}
+         AND template = 'rubric'
+         AND template_slug IS NULL
+         AND archived = false
+         AND status IN ('active', 'ready')
+         AND template_data->>'kind' = 'acceptance'
+         AND template_data->>'subjectPlan' = ${input.planSlug}
+         AND (${input.harnessSlug}::text IS NULL
+           OR template_data->>'subjectHarnessSlug' = ${input.harnessSlug}
+           OR template_data->>'subjectHarnessSlug' IS NULL)
+       LIMIT 2`;
+  } catch {
+    return null;
+  }
+  const rubric = rubrics.length === 1 ? rubrics[0]! : null;
+  const base: ReceiverHeldAcceptanceInput = {
+    planSlug: input.planSlug,
+    verifiedRevision: input.verifiedRevision,
+    rubric: rubric
+      ? { rubricId: rubric.plan_slug, origin: rubric.origin, authorPubkey: rubric.author_pubkey, proposedBy: rubric.proposed_by }
+      : null,
+    planOwnerPubkey: input.planOwnerPubkey,
+  };
+  if (!receiverHeldAcceptanceRefusal(base)) return null;
+  const pubkey = rubric?.author_pubkey || input.planOwnerPubkey;
+  let memberHandle: string | null = null;
+  if (pubkey) {
+    try {
+      const { resolvePlanAuthorIdentities, planAuthorKey } = await import('./identity/resolve-plan-author-identity');
+      const resolved = (await resolvePlanAuthorIdentities(activeWorkspaceId(), [{ kind: 'pubkey', value: pubkey }]))
+        .get(planAuthorKey('pubkey', pubkey));
+      if (resolved?.verified) memberHandle = resolved.handle;
+    } catch {
+      // Best-effort naming: the refusal still stands with the device key.
+    }
+  }
+  return receiverHeldAcceptanceRefusal({ ...base, memberHandle });
+}
+
+/**
  * Evaluate the acceptance gate for a plan about to be marked shipped/complete.
  * Never throws — an infrastructure failure inside a check degrades toward the
  * feature's default posture for that check (the flag read fails toward ON;
@@ -553,9 +720,12 @@ async function evaluatePlanAcceptanceGateWithoutBuildProvenance(
         content: string | null;
         status: string | null;
         acceptance_bar_epoch: number | string | null;
+        acceptance_bar_verified_revision?: number | string | null;
+        owner_author_pubkey?: string | null;
       }[]
     >`
-        SELECT plan_slug, harness_slug, template, template_slug, content, status, acceptance_bar_epoch
+        SELECT plan_slug, harness_slug, template, template_slug, content, status, acceptance_bar_epoch,
+               acceptance_bar_verified_revision, owner_author_pubkey
         FROM harness_shared.harness_plans
        WHERE workspace_id = ${activeWorkspaceId()}
          AND plan_slug = ${planSlug}
@@ -619,6 +789,18 @@ async function evaluatePlanAcceptanceGateWithoutBuildProvenance(
     // a post-epoch BAR-only, divergent, unreadable, or wrong-plane contract cannot
     // be mistaken for an ordinary rubric/acceptance verdict.
     if (rubricGate) {
+      // WI-10004178 / endgame D-095: a federated RECEIVER cannot compute this verdict,
+      // so it must not show one — and it must not show a grader gap, which would recruit
+      // a grader here. Checked before every rubric-family read for exactly that reason.
+      if (row?.acceptance_bar_verified_revision != null) {
+        const receiverRefusal = await readReceiverHeldAcceptanceRefusal({
+          planSlug,
+          harnessSlug: planHarnessSlug,
+          verifiedRevision: Number(row.acceptance_bar_verified_revision),
+          planOwnerPubkey: row.owner_author_pubkey ?? null,
+        });
+        if (receiverRefusal) return receiverRefusal;
+      }
       // A historical plan may predate the adoption marker and still contain
       // promises. Its as-built rubric must not silently replace those promises
       // with a checklist of tested seams. Require explicit contract adoption at

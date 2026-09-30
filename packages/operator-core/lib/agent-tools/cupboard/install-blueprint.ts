@@ -15,6 +15,7 @@ import { defineTool, entityRef } from '@papercusp/agent-mcp';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { classContractConsentSchema } from '../../cupboard/class-contract-payload';
 import { recipeProviderConsentSchema } from '../../cupboard/capability-grant-resolver';
+import { identityInstallConsentSchema } from '../../cupboard/identity-install-consent';
 
 const text = (payload: Record<string, unknown>) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
@@ -63,6 +64,8 @@ export default defineTool({
       .describe('Administrator decision on the consentSubject from a class_contract_consent_required refusal, plus decision.'),
     recipeProviderConsent: recipeProviderConsentSchema.optional()
       .describe('Administrator decision on the consentSubject from a capability_recipe_provider_consent_required refusal, plus decision.'),
+    identityInstallConsent: identityInstallConsentSchema.optional()
+      .describe('The consentSubject from an identity_install_consent_required refusal, echoed verbatim.'),
     workspace: z.string().max(120).optional(),
   }),
   async handler(args, ctx) {
@@ -111,6 +114,7 @@ export default defineTool({
         : {}),
       ...(args.classContractConsent ? { classContractConsent: args.classContractConsent } : {}),
       ...(args.recipeProviderConsent ? { recipeProviderConsent: args.recipeProviderConsent } : {}),
+      ...(args.identityInstallConsent ? { identityInstallConsent: args.identityInstallConsent } : {}),
     });
 
     if (!outcome.ok) {

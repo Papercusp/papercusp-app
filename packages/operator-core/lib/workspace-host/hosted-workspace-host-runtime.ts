@@ -35,14 +35,9 @@ import {
   hiveDesktopSessionId,
   leasedDesktopBySessionId,
   leasedHiveDesktops,
+  reapDeadHiveDesktops,
 } from '../agent-tools/computer/desktop-lease';
-import {
-  desktopAuditAction,
-  desktopAuditSubject,
-  recordDesktopAudit,
-  type DesktopAuditMode,
-  type DesktopAuditPhase,
-} from '../desktop/desktop-audit';
+import { hostedDesktopAuditRow, recordDesktopAudit } from '../desktop/desktop-audit';
 import type { HostedConnectorBinding } from '../endpoint-route/hosted-workspace-connector';
 import { configureAgentSpawnTransform } from '@papercusp/papercusp-shared/agent';
 import { installHostedCustomerAgentIdentity } from './hosted-agent-identity';
@@ -103,55 +98,12 @@ export interface HostedWorkspaceHostRuntime {
 }
 
 /**
- * Map one adapter audit event onto the SHARED desktop-viewer namespace.
- *
- * The adapter names its events in its own vocabulary (`desktop_takeover_started`,
- * `desktop_watch_started`, `desktop_denied`, …) because it must not know about the
- * local lane. Translating here — rather than renaming them there — is what lets a
- * single `frame-vnc.takeover-started` filter find hosted takeovers alongside frame
- * and local ones, which is the property `desktop-audit.ts` exists to hold.
- *
- * Non-desktop adapter events (PTY attach, file operations) keep the adapter's own
- * action verbatim under a `hosted-relay.` prefix: they are a different population
- * and folding them into the desktop namespace would pollute the very filter this
- * mapping protects.
+ * The default audit sink: the workspace audit_log, same table the local lane writes.
+ * This is the HOST's database; the control plane records its own copy of the desktop
+ * events from the relay (WI-10004167).
  */
-export function hostedAuditRow(event: HostedHostAuditEvent): {
-  action: string;
-  actor: string;
-  subject: string;
-  details: Record<string, unknown>;
-} {
-  const desktop: Record<string, [DesktopAuditMode, DesktopAuditPhase]> = {
-    desktop_watch_started: ['watch', 'started'],
-    desktop_takeover_started: ['takeover', 'started'],
-  };
-  const mapped = desktop[event.action];
-  const subjectRef = event.channelId ?? event.hostedSessionId ?? 'unknown';
-  const details: Record<string, unknown> = {
-    target: 'hosted',
-    organizationId: event.organizationId,
-    customerWorkspaceId: event.customerWorkspaceId,
-    hostId: event.hostId,
-    generation: event.generation,
-    ...(event.userId ? { userId: event.userId } : {}),
-    ...(event.hostedSessionId ? { hostedSessionId: event.hostedSessionId } : {}),
-    ...(event.channelId ? { channelId: event.channelId } : {}),
-    ...(event.detail ? { detail: event.detail } : {}),
-  };
-  return {
-    action: mapped ? desktopAuditAction(mapped[0], mapped[1]) : `hosted-relay.${event.action}`,
-    // The browser principal, not the host: an auditor asking "who took this over"
-    // wants the human. The host identity is still on the row, in `details.hostId`.
-    actor: event.userId ?? `host:${event.hostId}`,
-    subject: desktopAuditSubject('hosted', event.hostId, subjectRef),
-    details,
-  };
-}
-
-/** The default audit sink: the workspace audit_log, same table the local lane writes. */
 export function defaultHostedAudit(event: HostedHostAuditEvent): void {
-  recordDesktopAudit(hostedAuditRow(event), {
+  recordDesktopAudit(hostedDesktopAuditRow(event), {
     idPrefix: 'hosted-vnc',
     onError: (error) => console.warn('[hosted-workspace-host] audit write failed:', error),
   });
@@ -197,10 +149,13 @@ export function createDefaultDesktopBackend(
     // desktops die with that operator's socket (D-363), so every row it holds no
     // lease for was left by a previous incarnation of it (WI-10002797).
     reconcile: async () => {
+      // A lease whose desktop died is not live, whatever the map still holds (WI-10004206):
+      // release it first, which closes its row, so the roster stops offering it.
+      const dead = await reapDeadHiveDesktops();
       const liveIds = leasedHiveDesktops()
         .map(hiveDesktopSessionId)
         .filter((id): id is string => Boolean(id));
-      return (await reconcileLocalDesktopSessions({ workspaceId: scope(), liveIds, soleOwner: true })).reaped;
+      return dead.length + (await reconcileLocalDesktopSessions({ workspaceId: scope(), liveIds, soleOwner: true })).reaped;
     },
     ...overrides,
   });

@@ -131,7 +131,9 @@ export async function learningLoopHealthSweep(): Promise<LearningLoopHealthEscal
           severity: loop.alwaysOn ? 'major' : 'minor',
           body:
             `${reason}\n\nlastFiredAt=${loop.lastFiredAt ?? 'never'}, daysSinceFire=${loop.daysSinceFire ?? 'n/a'}, ` +
-            `activitySource=${loop.activitySource ?? 'none'}. This classification (computeLearningLoopHealth) already ` +
+            `activitySource=${loop.activitySource ?? 'none'}` +
+            (loop.activityDetail ? `, activityDetail: ${loop.activityDetail}` : '') +
+            `. This classification (computeLearningLoopHealth) already ` +
             `existed — the gap was that nothing periodically ran it and acted on a bad verdict ` +
             `(EI-19281872822982156); \`improvements:learning_loops\` is the same read, pull-only until now.`,
           // Omit scope: a workspace-singleton concern, not tied to one harness — auto-homes to

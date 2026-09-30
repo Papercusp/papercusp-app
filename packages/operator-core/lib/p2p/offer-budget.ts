@@ -21,7 +21,7 @@
  * current time, the reservation ids — is PASSED IN by the caller, so the whole
  * budget contract stays a property-testable set of pure functions. The two IO
  * edges live elsewhere: the loud wind-down RECEIPT is emitted by
- * ./offer-budget-receipts (P-004 emitP2pReceipt), and the durable spend LEDGER
+ * ./foreign-supervision windDownForeignSession (P-004 emitP2pReceipt), and the durable spend LEDGER
  * across offers is P-205's metering table — this module owns the in-flight
  * reservation arithmetic + the clamp/liveness/expiry DECISIONS, nothing durable.
  *
@@ -415,7 +415,7 @@ export function recordAndCheckPublisherRate(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wind-down decision (pure) — feeds the receipt bridge (./offer-budget-receipts)
+// Wind-down decision (pure) — its receipt is emitted by ./foreign-supervision windDownForeignSession
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type WindDownCause =

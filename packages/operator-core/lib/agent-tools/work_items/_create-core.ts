@@ -32,6 +32,7 @@ import type { DedupCandidateStamp } from './dedup-candidates-stamp';
 import { resolvePotScope, POT_REQUIRED_DETAIL } from '../_pot-scope';
 import { resolveConcreteHarnessSlug } from '../_harness-scope';
 import { getOrgPg } from '@papercusp/db-org';
+import { canonicalizeAssigneeOwnerId } from '../../work-item-holder-identity';
 // The goal-provenance stamp is SHARED with improvements:capture (WI-2140701 (b)):
 // every door that mints a work-item row stamps goal_id the same way.
 import { stampGoalProvenance } from '../../goals/provenance-stamp';
@@ -580,6 +581,18 @@ export async function createOneWorkItem(
       (typeof args.workspace === 'string' && args.workspace.trim()) ? args.workspace.trim()
         : (ctx.workspaceId && ctx.workspaceId !== '*') ? ctx.workspaceId
           : undefined;
+    // EI-23701433507513915: the backstop for EVERY createOneWorkItem caller, not only the
+    // work_items:create handler (which canonicalizes first and downgrades there). A short-form
+    // su id (`su-851c1a7a`) persisted as taken_by makes every exact holder check refuse the
+    // real holder. Expand a unique prefix HERE, before any read of assign_to, so the
+    // pending-repair UPDATE, the explicit-assignment bypass, the audit echo and the INSERT all
+    // see the full id. An unresolvable or ambiguous prefix is refused rather than stored. A
+    // full id, 'self', or any non-su identity passes through untouched with no lookup.
+    if (args.assign_to) {
+      const canonical = await canonicalizeAssigneeOwnerId(args.assign_to, { workspaceId: workspaceId ?? null });
+      if (!canonical.ok) return { ok: false, error: canonical.code, message: canonical.message };
+      if (canonical.expandedFrom !== null) args = { ...args, assign_to: canonical.ownerId };
+    }
     // WI-39604: a conditionKey routes this create through the WI-39594 condition
     // upsert. Adoption is checked FIRST — it cannot create a row, so the dedup
     // screens below have nothing to screen, and a recurring detector's steady-state

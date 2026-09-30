@@ -4,6 +4,7 @@ import type { Readable, Writable } from 'node:stream';
 import { FrameDecoder, FrameType, encodeJsonFrame } from '@papercusp/ipc-framing';
 import { z } from 'zod';
 import type { ProvisionOptions, SandboxDesktop } from '../agent-tools/computer/desktop-provisioner';
+import { DesktopXServerExitedError, describeXServerExit } from '../agent-tools/computer/desktop-provisioner-core';
 import { kasmvncWebsocketPort } from './x-server-backend';
 
 export const WORKSPACE_DESKTOP_SOCKET = '/run/papercusp-desktop/session.sock';
@@ -60,13 +61,18 @@ export function parseWorkspaceDesktop(value: unknown) {
   return result;
 }
 
-/** One socket-activated service instance owns one desktop and releases it on EOF/error. */
+/**
+ * One socket-activated service instance owns one desktop and releases it on EOF/error,
+ * or when its X server exits: the lease is only as alive as this socket (WI-10004206).
+ */
 export async function serveWorkspaceDesktop(
   input: Readable,
   output: Writable,
   provision: (options: z.infer<typeof workspaceDesktopOptions>) => Promise<SandboxDesktop>,
+  log: (line: string) => void = (line) => console.warn(`[desktop-session] ${line}`),
 ): Promise<void> {
   let desktop: SandboxDesktop | undefined;
+  let ending = false;
   const decoder = new FrameDecoder();
   try {
     for await (const chunk of input) {
@@ -79,16 +85,28 @@ export async function serveWorkspaceDesktop(
         const request = workspaceDesktopRequest.parse(JSON.parse(frame.payload.toString('utf8')));
         if (request.action === 'release') return;
         if (desktop) throw new Error('desktop already provisioned');
-        desktop = await provision(request.options);
+        const served: SandboxDesktop = desktop = await provision(request.options);
         if (input.destroyed || output.destroyed) return;
-        output.write(encodeJsonFrame(FrameType.EVENT_JSON, serializeWorkspaceDesktop(desktop)));
+        output.write(encodeJsonFrame(FrameType.EVENT_JSON, serializeWorkspaceDesktop(served)));
+        // A worker that outlives its X server holds the socket open, and the operator then
+        // offers a `ready` desktop that nothing serves. End the session instead: the socket
+        // closes, the lease reads dead, and the next start provisions a fresh desktop.
+        void served.xServerExited?.then((exit) => {
+          if (ending) return;
+          log(`${describeXServerExit(served.display, exit)}\nending the desktop session`);
+          input.destroy(new Error('desktop X server exited'));
+        });
       }
     }
     if (decoder.bufferedBytes) throw new Error('incomplete desktop request');
-  } catch {
+  } catch (error) {
     // Never reflect arbitrary requests, app argv or credentials into the response/log.
+    // The X server's own exit is the exception: it names none of them, and without it
+    // the journal cannot say why a desktop never came up.
+    if (error instanceof DesktopXServerExitedError) log(describeXServerExit(error.display, error.exit));
     if (!output.destroyed) output.write(encodeJsonFrame(FrameType.ERROR, { error: 'desktop_session_failed' }));
   } finally {
+    ending = true;
     try { await desktop?.release(); }
     finally { output.end(); }
   }

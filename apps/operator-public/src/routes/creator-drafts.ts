@@ -174,6 +174,13 @@ function validateManifest(raw: unknown): { ok: true; manifest: DraftManifest } |
   if (typeof a.content_type !== 'string' || !CONTENT_TYPE_RE.test(a.content_type)) {
     return { ok: false, field: 'artifact.content_type', reason: 'mime_type_required' };
   }
+  // An identity listing's declared surface (migration 035) is derived from its
+  // signed release closure at direct publish. A draft uploads an artifact with
+  // no signed closure, so it cannot publish one: the install gate would refuse
+  // the listing as surface-missing anyway.
+  if (value.blueprint_kind === 'identity') {
+    return { ok: false, field: 'blueprint_kind', reason: 'identity_requires_direct_publish' };
+  }
   return {
     ok: true,
     manifest: {

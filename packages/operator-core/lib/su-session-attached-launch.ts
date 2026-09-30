@@ -219,7 +219,11 @@ export async function launchAttachedSuSession(request: Request, input: AttachedS
       if (previous.backend !== input.agent || previous.harnessSlug !== input.harness_slug) throw new Error('The conversation is already bound to a different engine or project');
       const host = getRegisteredSuSessionHost({ workspaceId, harnessSlug: input.harness_slug, agentChatId: input.agent_chat_id });
       const snapshot = host?.snapshot();
-      const initializing = state.engines.has(key) && snapshot?.descriptor.lifecycle === 'starting';
+      // A resumed engine restores its transcript in 'resuming' before it is
+      // ready; a second attach meanwhile (the startup adoption and a /resume
+      // pick) joins it rather than waiting on it to exit (WI-10004162).
+      const initializing = state.engines.has(key)
+        && (snapshot?.descriptor.lifecycle === 'starting' || snapshot?.descriptor.lifecycle === 'resuming');
       if (!snapshot || snapshot.terminal || (!initializing && (!snapshot.executorAttached || !snapshot.streamReady))) {
         // A dead engine's exit bookkeeping can still be running when the
         // owner's recovery send arrives; wait for it rather than refuse.

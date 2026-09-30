@@ -1,0 +1,32 @@
+# Driving the hive-git physical drill — reading a failure, re-running one phase, and when to stop re-running
+URL: /internal/docs/agent-insights/hive-git-physical-drill-driver-runbook
+
+Runbook for driving papercusp-desktop/bin/hive-git-drill.sh's physical scenario: the per-run evidence dir, the phase-naming summary and HARNESS_RESULT line, the attempt fingerprint the loop gate compares, --only-phase/--from-phase partial re-runs (diagnostic, never release evidence), and the driver rule — after two drill failures with different causes, stop and audit the harness before the next run.
+
+This runbook covers how an agent **drives** the hive-git physical drill: how to launch it, how to read a failure, and when to stop re-running it. How to operate hive-git itself (mode flips, authority, sigrefs, the post-GO canary) is in [the hive-git P2P ops runbook](/internal/docs/agent-insights/hive-git-p2p-ops-runbook-2026-07-09).
+
+## Why this exists
+
+The P-505 physical drill took 32 runs and about 22 hours. From run 17 to run 31, every failure printed the same summary line, but the real causes were five different harness defects: a single remote read where the check needed to wait for convergence, an ssh producer that never exited, a missing below-steer trust hold, a canary baseline nobody checked up front, and evidence that each run deleted from the one before. Each re-run cost 18 to 26 minutes and taught nothing the last one had not. Plan `physical-drill-iteration-speed-2026-09-29` exists to make that loop cheap to break. The rule below is the part that depends on the person driving the drill.
+
+## The driver rule
+
+After two drill failures with different causes, stop re-running the drill. Before the next run, audit the harness for each failure's defect class: opaque failure output, evidence overwritten between runs, no way to re-run one phase, a known precondition nobody checks up front, a single remote read where the check should wait for convergence. Fix each class everywhere it occurs, not only the one instance, and turn each lesson into an automatic preflight check. Three failures with the same cause mean the fix did not work, so diagnose instead of re-running. The platform backstops this rule. A drill launched through `capability:bash { run_in_background: true }` under your work item is recorded as a slow attempt. Once the loop trips, your next slow attempt is refused until an audit note naming every distinct failure fingerprint is posted on the work item. The note must start with `[attempt-audit]`.
+
+## Reading a failure
+
+* **The summary line names the phase.** A failing physical run prints `physical E/G adapter failed (exit N) in phase X (fn): reason`. The same phase reaches the `HARNESS_RESULT … first_failure=physical/<step>/<reason>` line written by the verification-harness contract (`libs/generic/verification-harness/bin/vh.sh`), with the drill phase as the step. The attempt ledger fingerprints the failure from that `first_failure` field, so two runs that fail in different drill phases count as distinct failures and two runs of the same failure count as repeats.
+* **The gate cannot separate two causes inside one phase. You can.** The drill's reason code is `adapter-exit-<rc>`, so two different defects that both surface in, say, Phase D share one fingerprint. The gate then waits for three of them instead of two. Compare the adapter stderr of the two runs. If the causes differ, apply the driver rule yourself; don't wait for the gate.
+* **Evidence is kept per run.** Each physical run writes its adapter output to its own directory under `$HIVE_GIT_PHYSICAL_RUNS_DIR` (default `~/.papercusp-drill-physical-runs/<run-id>/`). The newest 30 runs are kept. The failure line names the directory, so compare two runs' output side by side and don't assume the next run will reproduce the last one.
+* **Guard-rail facts are pre-run checks.** The `guard-rail:p505-*` and `guard-rail:physical-drill-*` workspace facts record rig-state lessons from earlier runs. Read them (`facts:list { scope: 'workspace' }`) before a physical run. Where a fact carries an executable `recheck.exec` probe, the harness preflight runs it and refuses the run while it fails.
+
+## Re-running one phase
+
+A fix to one phase is verified by re-running only that phase, not the whole drill. `bin/hive-git-drill.sh --only-phase D` (or `--only-phase D,E`) runs just those physical-scenario phases. `--from-phase D` runs D through H. Either one runs against the rig state the previous run left behind (the join, the pot repo, the VM install), so it takes minutes instead of 18 to 26. It needs `HIVE_GIT_PHYSICAL_PROBE_CMD`, the same as a full physical run. It skips the local single-box legs, and the `HARNESS_RESULT` line records them as `skipped not-selected`. The selection is checked before anything starts, so a bad phase letter fails in a second, not after staging. A partial run is diagnostic only. The probe exits before it signs anything, so a partial run can never become release evidence, and the drill refuses a partial run under `REQUIRE_ZERO_SKIPS=1`. Once the phase passes, prove the fix with one full run. Selecting every phase is refused because that is the full run: drop the flag instead. To see what a selection would run without touching the rig, use `HIVE_GIT_PHYSICAL_PHASES=D bin/vm-rig/hive-git-physical-scenario.sh --phase-plan`.
+
+## Related
+
+* Loop gate: `packages/operator-core/lib/verification-attempts/loop-gate.ts`. Attempt ledger: `attempt-ledger.ts` in the same directory.
+* Rule judge: `packages/operator-core/lib/doc-claims/driver-audit-rule.ts`. It pins this paragraph and the same rule in the base agent persona.
+* The drill: `papercusp-desktop/bin/hive-git-drill.sh`. The physical producer: `packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts`.
+* Phase selection: `papercusp-desktop/bin/lib/physical-phase-select.sh`, one parser that the drill, the probe and the scenario all share. Its guard: `packages/operator-core/lib/hive-git-drill-phase-select.test.ts`.

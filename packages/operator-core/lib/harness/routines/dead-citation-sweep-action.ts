@@ -5,6 +5,7 @@
  * nothing here to clock or budget beyond the SQL query itself.
  */
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path, { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,7 +43,13 @@ async function listRepoFiles(): Promise<string[]> {
     ['ls-files', '--', '*.md', '*.mdx', '*.json', '*.ts', '*.tsx', '*.mjs', '*.js', '*.sh'],
     { cwd: repoRoot(), maxBuffer: 64 * 1024 * 1024 },
   );
-  return stdout.split('\n').filter(Boolean);
+  const root = repoRoot();
+  // WI-10004176: on the shared tree a plain `rm` stays in the index until git-sync commits it;
+  // reading such an entry throws ENOENT, so drop entries with nothing on disk.
+  return stdout
+    .split('\n')
+    .filter(Boolean)
+    .filter((f) => existsSync(path.join(root, f)));
 }
 
 async function readRepoFile(relPath: string): Promise<string> {

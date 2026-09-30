@@ -36,6 +36,20 @@ function fpDeltaIcon(delta: number | null | undefined) {
   );
 }
 
+/**
+ * WI-10004133: the newest monitor fire when it did NOT move the trend — it failed, or the
+ * flag was off — and it is newer than the latest recorded run. That is the one case where
+ * the FP@5 chip is silently stale; null otherwise (no attempt recorded, or the latest fire
+ * recorded a row).
+ */
+function unrecordedAttempt(precision: MemoryHealth['precision']) {
+  const a = precision?.lastAttempt ?? null;
+  if (!a || a.outcome === 'recorded') return null;
+  const latestAt = precision?.latest?.ranAt;
+  if (latestAt && Date.parse(a.attemptedAt) <= Date.parse(latestAt)) return null;
+  return a;
+}
+
 export default function MemoryHealthCard({ memory }: { memory: MemoryHealth | null }) {
   if (!memory) {
     return (
@@ -52,6 +66,7 @@ export default function MemoryHealthCard({ memory }: { memory: MemoryHealth | nu
   // Some zero-hits are healthy (off-topic turns). A majority of recalls
   // returning nothing, on real volume, is the degradation signal.
   const zeroHitWorrying = memory.recalls7d >= 10 && memory.zeroHitRate7d >= 0.5;
+  const stalledAttempt = unrecordedAttempt(memory.precision);
 
   return (
     <div className="pc-learning__flow" aria-label="Memory health">
@@ -142,6 +157,25 @@ export default function MemoryHealthCard({ memory }: { memory: MemoryHealth | nu
           {memory.precision.latest.jevGate ? (
             <em data-testid="memory-precision-jev-gate"> · Jev-gated · {memory.precision.latest.jevGate.model}</em>
           ) : null}
+        </span>
+      ) : null}
+      {stalledAttempt ? (
+        <span
+          className="pc-learning__flowchip"
+          data-testid="memory-precision-last-attempt"
+          style={stalledAttempt.outcome === 'failed' ? { borderColor: 'rgba(248, 113, 113, 0.5)', color: '#f87171' } : undefined}
+          title={
+            `The newest memory-precision monitor fire (${stalledAttempt.attemptedAt}) recorded no bench row, so the ` +
+            `FP@5 figure is older than it looks. ` +
+            (stalledAttempt.outcome === 'failed'
+              ? `It failed at the ${stalledAttempt.stage ?? 'unknown'} step: ${stalledAttempt.error ?? '(no error text)'}`
+              : `The MEMORY_PRECISION_BENCH flag was off, so nothing ran by design.`)
+          }
+        >
+          <AlertTriangle size={11} aria-hidden />
+          {stalledAttempt.outcome === 'failed'
+            ? <>precision bench <strong>failed</strong> at {stalledAttempt.stage ?? '?'}</>
+            : <>precision bench <strong>skipped</strong> (flag off)</>}
         </span>
       ) : null}
       {memory.fragmentHits7d > 0 ? (

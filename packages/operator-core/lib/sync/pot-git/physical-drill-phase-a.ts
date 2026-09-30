@@ -178,6 +178,14 @@ export type PhysicalPhaseAInput = {
 export type PhysicalPhaseAVerdict = {
   ok: boolean;
   errors: string[];
+  /**
+   * The subset of `errors` raised by inputs fixed BEFORE the scenario's convergence wait:
+   * the identities, the tower baseline, the quarantine, the absence read and the bootstrap.
+   * Re-observing the hosts cannot clear one, so the wait must stop on it instead of
+   * retrying (same-box run 20260930T085016Z-2629813 retried a frozen tower-baseline
+   * rejection for the full 20 minutes).
+   */
+  frozenErrors: string[];
   result: null | {
     schemaVersion: typeof PHASE_A_RESULT_SCHEMA;
     phase: 'A';
@@ -486,19 +494,48 @@ function validateNamespaceWitnesses(
   }
 }
 
+/**
+ * Phase A's precondition on the tower baseline: before the scenario touches the VM, the
+ * tower's store already holds BOTH device namespaces — the VM joined and announced at
+ * least once, which is the physical canary's steady state. It is a property of a snapshot
+ * taken before any mutation, so the scenario checks it (`phase-a-precheck`) before the
+ * quarantine and fails in seconds; {@link validatePhysicalPhaseA} re-checks the same
+ * snapshot as a frozen input.
+ */
+export function validatePhysicalPhaseATowerBefore(
+  towerBefore: PhysicalPhaseARepoObservation,
+  identities: PhysicalPhaseAInput['identities'],
+): string[] {
+  const errors: string[] = [];
+  let towerNamespace = '';
+  let vmNamespace = '';
+  try {
+    towerNamespace = deviceNamespaceKey(identities.towerDeviceKey);
+    vmNamespace = deviceNamespaceKey(identities.vmDeviceKey);
+    if (towerNamespace === vmNamespace) errors.push('tower and vm identities must be distinct');
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : String(error));
+    return errors;
+  }
+  validatePresent(towerBefore, 'tower', towerNamespace, vmNamespace, errors);
+  return [...new Set(errors)];
+}
+
 export function validatePhysicalPhaseA(input: PhysicalPhaseAInput): PhysicalPhaseAVerdict {
   const errors: string[] = [];
-  if (input.schemaVersion !== PHASE_A_INPUT_SCHEMA) errors.push(`schemaVersion must be ${PHASE_A_INPUT_SCHEMA}`);
-  if (!RUN_ID.test(input.runId)) errors.push('runId is invalid');
+  // Inputs fixed before the convergence wait; see PhysicalPhaseAVerdict.frozenErrors.
+  const frozen: string[] = [];
+  if (input.schemaVersion !== PHASE_A_INPUT_SCHEMA) frozen.push(`schemaVersion must be ${PHASE_A_INPUT_SCHEMA}`);
+  if (!RUN_ID.test(input.runId)) frozen.push('runId is invalid');
 
   let towerNamespace = '';
   let vmNamespace = '';
   try {
     towerNamespace = deviceNamespaceKey(input.identities.towerDeviceKey);
     vmNamespace = deviceNamespaceKey(input.identities.vmDeviceKey);
-    if (towerNamespace === vmNamespace) errors.push('tower and vm identities must be distinct');
+    if (towerNamespace === vmNamespace) frozen.push('tower and vm identities must be distinct');
   } catch (error) {
-    errors.push(error instanceof Error ? error.message : String(error));
+    frozen.push(error instanceof Error ? error.message : String(error));
   }
 
   const startedAt = time(input.window.startedAt, 'window.startedAt', errors);
@@ -531,7 +568,7 @@ export function validatePhysicalPhaseA(input: PhysicalPhaseAInput): PhysicalPhas
     dirname(input.quarantine.quarantinePath) !== dirname(input.quarantine.sourcePath) ||
     !input.quarantine.quarantinePath.startsWith(`${input.quarantine.sourcePath}.p505-phase-a-`)
   ) {
-    errors.push('VM store absence must come from the scenario atomic-quarantine operation');
+    frozen.push('VM store absence must come from the scenario atomic-quarantine operation');
   }
   if (
     input.bootstrap.tool !== 'git-sync:run' ||
@@ -539,10 +576,10 @@ export function validatePhysicalPhaseA(input: PhysicalPhaseAInput): PhysicalPhas
     input.bootstrap.targetHost !== 'vm' ||
     input.bootstrap.fired !== true
   ) {
-    errors.push('VM bootstrap must be the fixed canonical git-sync:run invocation');
+    frozen.push('VM bootstrap must be the fixed canonical git-sync:run invocation');
   }
 
-  validatePresent(input.observations.towerBefore, 'tower', towerNamespace, vmNamespace, errors);
+  validatePresent(input.observations.towerBefore, 'tower', towerNamespace, vmNamespace, frozen);
   const absent = input.observations.vmAbsent;
   if (
     absent.schemaVersion !== PHASE_A_REPO_SCHEMA ||
@@ -553,10 +590,10 @@ export function validatePhysicalPhaseA(input: PhysicalPhaseAInput): PhysicalPhas
     absent.objectDatabasePath !== null ||
     absent.refs.length !== 0
   ) {
-    errors.push('VM store must be physically observed absent after quarantine');
+    frozen.push('VM store must be physically observed absent after quarantine');
   }
   if (absent.ownNamespace !== vmNamespace || absent.peerNamespace !== towerNamespace) {
-    errors.push('VM absence observation must derive namespaces from preflighted identities');
+    frozen.push('VM absence observation must derive namespaces from preflighted identities');
   }
   validatePresent(input.observations.towerAfter, 'tower', towerNamespace, vmNamespace, errors);
   validatePresent(input.observations.vmAfter, 'vm', vmNamespace, towerNamespace, errors);
@@ -589,10 +626,12 @@ export function validatePhysicalPhaseA(input: PhysicalPhaseAInput): PhysicalPhas
     errors.push('tower and vm observations must come from distinct physical repo directories');
   }
 
-  const uniqueErrors = [...new Set(errors)];
+  const frozenErrors = [...new Set(frozen)];
+  const uniqueErrors = [...new Set([...frozen, ...errors])];
   return {
     ok: uniqueErrors.length === 0,
     errors: uniqueErrors,
+    frozenErrors,
     result:
       uniqueErrors.length > 0
         ? null

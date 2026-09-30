@@ -838,12 +838,18 @@ The tool call is also cheaper: a structured result, no subprocess, nothing to
 re-parse. When a row's caveat applies (a `tail -f` follow, a non-operator database,
 a `\du`), the bash form is the right answer — the gate will not fight you on those.
 
-⚠ **No papercusp tools AT ALL? READ THE REFUSAL — two classes, two different doors.**
+⚠ **No papercusp tools AT ALL? READ THE REFUSAL — three classes, three different doors.**
 
 - **TRANSPORT** — no tools listed; the handshake never completed (`:9071` starves
   new handshakes under load). Pass your OWN `--client`, or writes land under an
   anonymous `mcp-call-*` (EI-8509):
   `node scripts/mcp-call.mjs <server:verb> --json-file <args.json> --client <your-su-id> --port 3170`
+- **DISCONNECTED** — tools worked, then every call says `MCP server papercusp-su is not
+  connected` (`WaitForMcpServers` / `/mcp`: `Failed to connect`). After an operator
+  restart the client stops re-dialing, so this NEVER heals on its own, and it does NOT
+  need a human `/mcp` (EI-24657708696146012). Flush your checkpoints through
+  `mcp-call.mjs` as above, then respawn YOURSELF; the relaunched CLI reconnects:
+  `node scripts/mcp-call.mjs session:request-compaction '{"reason":"papercusp-su MCP disconnected"}' --client <your-su-id> --port 3070`
 - **IDENTITY** — tools ARE listed, but every call refuses `Identity capability
   (unresolved): stale-artifact`. ⛔ **`mcp-call.mjs` CANNOT open this one** — it is a
   server-side kernel preflight, so every client, port and transport gets the same

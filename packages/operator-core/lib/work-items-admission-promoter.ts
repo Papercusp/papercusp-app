@@ -2315,7 +2315,20 @@ export async function readWorkItemAdmissionQueueHealth(opts: {
            ) AS review_oldest_age_ms
       FROM harness_shared.work_items wi
      WHERE wi.workspace_id = ${opts.workspaceId}
-       AND (${harnessSlug}::text IS NULL OR wi.harness_slug = ${harnessSlug})`;
+       AND (${harnessSlug}::text IS NULL OR wi.harness_slug = ${harnessSlug})
+       -- The ADMISSION-PIPELINE population, decided on plain columns BEFORE any
+       -- payload path is read (WI-10003692). Every FILTER above can only count a
+       -- row that entered admission: pending/unreviewed read the admission column,
+       -- the latency percentiles need admitted_at, and every payload.admissionReview
+       -- writer in this file sets or requires admission IN ('unreviewed','admitted')
+       -- together with admitted_at (the fail-open sweep, both promote paths, the
+       -- re-review UPDATE gated on admission = 'unreviewed', and the merge restore
+       -- that puts both back from the same prior). Without this predicate every
+       -- row in the harness (~226k live, ~62% agent observations) had its
+       -- TOASTed payload detoasted by ~10 separate #>> reads, which measured
+       -- ~4s on an idle box and made this the slowest leg of the 10s-deadline
+       -- workItemAdmission.runs sync read.
+       AND (wi.admission IS NOT NULL OR wi.admitted_at IS NOT NULL)`;
   const row = rows[0];
   const numberOrNull = (value: number | string | null | undefined): number | null =>
     value == null ? null : Number(value);

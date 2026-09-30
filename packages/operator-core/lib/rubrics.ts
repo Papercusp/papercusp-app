@@ -4714,6 +4714,7 @@ async function amendAcceptanceBarRubric(
                acceptance_bar_rubric_slug = ${input.rubricId},
                acceptance_bar_rubric_revision = ${nextRubricRevision},
                acceptance_bar_seeded_at = now(), acceptance_bar_seeded_by = ${actorId},
+               acceptance_bar_verified_revision = NULL, -- WI-10004146: rubric pin governs
                updated_at = now(), origin = 'local'
          WHERE workspace_id = ${subjectScope.workspaceId}
            AND harness_slug = ${subjectScope.harnessSlug}

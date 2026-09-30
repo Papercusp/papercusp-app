@@ -9,6 +9,7 @@ import { planKnowledgePackageResources, releasePackageInstallation } from './pac
 import { planRecipePackageResource } from './package-recipe-resources';
 import { planKnowledgeDocResources } from './package-doc-resources';
 import { resolveWearerPackageDocKeys } from './package-memory-visibility';
+import { replaceIdentityRuleSubscriptions } from '../agent-identities/identity-rule-subscriptions';
 
 /** Package kinds whose rows the installation journal owns. Rubrics are
  * immutable seeds and stay outside it. */
@@ -210,6 +211,9 @@ export async function applySessionPackageResources(tx: TransactionSql, input: {
   }
   // A legacy launch record carries no artifact, so it says nothing about packages.
   if (!artifact) return { superseded: [] };
+  // P-018 / D-029 §4: the wearer's async-rule subscriptions follow the applied
+  // artifact in this same transaction (none worn here cancels them all).
+  await replaceIdentityRuleSubscriptions(tx, { ownerId: input.ownerId, workspaceId: input.workspaceId, artifact });
   const expected = journaledPackages(artifact)
     ? (await expectedPackageResources(artifact, input.workspaceId)).get(input.workspaceId) : undefined;
   // The applied identity wears no journaled package here: detach the prior ones.

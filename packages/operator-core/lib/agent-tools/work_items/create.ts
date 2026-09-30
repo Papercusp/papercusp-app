@@ -53,6 +53,7 @@ import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
 import { resolveGoalContext } from '../../modes/goal-context';
 import { gateWorkScope } from '../../work-scope-policy';
+import { canonicalizeAssigneeOwnerId } from '../../work-item-holder-identity';
 
 /**
  * Inline typed-link spec (WI-3956) — one edge written from the NEW work-item to a
@@ -474,6 +475,36 @@ export default defineTool({
         // when the ownership does not. Applies to `fleet_winding_down` too: a paused
         // fleet's member must not acquire NEW work, but recording a finding is not
         // acquiring work.
+        // EI-23701433507513915: canonicalize the assignee BEFORE the scope/fleet admission reads
+        // it. A short-form id (`su-851c1a7a`) was persisted verbatim as `taken_by` — every exact
+        // holder check then refused the real holder — and the fleet admission resolved no
+        // membership for it. Unresolved/ambiguous ⇒ the item is still filed, UNASSIGNED, with
+        // the reason on the ok:true result (mirrors fleetScopeDowngrade below).
+        let assigneeResolutionDowngrade: Record<string, never> | { assigneeResolutionDowngrade: string } = {};
+        if (spec.assign_to) {
+          const canonical = await canonicalizeAssigneeOwnerId(spec.assign_to, {
+            workspaceId: ident.workspaceId ?? null,
+          });
+          if (canonical.ok) {
+            spec.assign_to = canonical.ownerId;
+          } else {
+            spec.payload = {
+              ...(typeof spec.payload === 'object' && spec.payload !== null ? spec.payload : {}),
+              assigneeResolutionDowngrade: {
+                requestedAssignee: canonical.input,
+                reportedBy: ident.ownerId,
+                code: canonical.code,
+                candidates: canonical.candidates,
+                at: new Date().toISOString(),
+              },
+            };
+            // Same reason as the fleet-scope downgrade: the caller explicitly meant to assign,
+            // so keep the unassigned filing out of the duplicate-screening pending dead end.
+            spec.admissionBypass = 'bypass:explicit-assignment';
+            spec.assign_to = undefined;
+            assigneeResolutionDowngrade = { assigneeResolutionDowngrade: `FILED UNASSIGNED — ${canonical.message}` };
+          }
+        }
         let workScopeDowngrade: Record<string, never> | { workScopeDowngrade: string } = {};
         let fleetScopeDowngrade: Record<string, never> | { fleetScopeDowngrade: string } = {};
         if (spec.assign_to) {
@@ -729,6 +760,7 @@ export default defineTool({
           ...planItemBlockerNudge,
           // EI-18784357226895330: filed, but the requested self-assignment was refused
           // by the fleet lane — the caller must see this on an ok:true result.
+          ...assigneeResolutionDowngrade,
           ...workScopeDowngrade,
           ...fleetScopeDowngrade,
           // work-queue-admission-and-bulk-dedup-2026-08-24 P-002 (item d): the P-008

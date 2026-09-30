@@ -145,7 +145,14 @@ export async function synchronizeAcceptanceBarSubjectRevision(
        AND template_data->>'subjectPlan' = ${args.planSlug}
        AND template_data->>'barSetHash' = ${subject.acceptance_bar_set_hash}
     RETURNING plan_slug`;
-  return rows.length === 1;
+  if (rows.length !== 1) return false;
+  // WI-10004146: the rubric pin now names this local revision, so it governs again.
+  await sql`
+    UPDATE harness_shared.harness_plans
+       SET acceptance_bar_verified_revision = NULL
+     WHERE workspace_id = ${args.workspaceId} AND harness_slug = ${args.harnessSlug}
+       AND plan_slug = ${args.planSlug} AND acceptance_bar_verified_revision IS NOT NULL`;
+  return true;
 }
 
 /** A reviewer posts this JSON through an authenticated Threadable verb (for
@@ -715,7 +722,9 @@ export async function synchronizeAcceptanceBarRevision(
     UPDATE harness_shared.harness_plans
        SET acceptance_bar_rubric_slug = ${args.rubricSlug},
            acceptance_bar_rubric_revision = ${args.rubricRevision},
-           acceptance_bar_set_hash = ${data.barSetHash!}
+           acceptance_bar_set_hash = ${data.barSetHash!},
+           -- WI-10004146: a local re-pin makes the rubric pin authoritative again.
+           acceptance_bar_verified_revision = NULL
      WHERE workspace_id = ${args.workspaceId} AND harness_slug = ${args.harnessSlug}
        AND plan_slug = ${subjectPlan}`;
   return revisions;

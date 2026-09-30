@@ -270,7 +270,7 @@ unset _vm_release_build_sha _vm_release_desktop_version
 # caller's node when it satisfies the pin; otherwise use a matching common
 # NVM/Homebrew/mise install and prepend ITS bin directory to PATH so `npm` uses
 # the same runtime. If none exists, fail fast with the actual vs required major.
-PAPERCUSP_REQUIRED_NODE_MAJOR="$(sed -nE 's/^[[:space:]]*v?([0-9]+).*$/\1/p' "$REPO_ROOT/.nvmrc" 2>/dev/null | head -1)"
+PAPERCUSP_REQUIRED_NODE_MAJOR="$(sed -nE 's/^[[:space:]]*v?([0-9]+).*$/\1/p' "$REPO_ROOT/.nvmrc" 2>/dev/null | sed -n 1p)"
 # P-411 R1 (check-assert-integrity): this used to coerce an empty read to 25.
 # An empty read means EITHER "the pin is unreadable/missing" OR "the parse
 # failed" — it never means "the pin is 25". Coercing made an UNMEASURED probe
@@ -422,6 +422,58 @@ if [[ "$TARGET_OS" != "$_host_os" || "$TARGET_ARCH" != "$_host_arch" ]]; then
   CROSS_BUILD=1
   echo "→ WI-5651 CROSS-baking sidecar for ${TARGET_OS}-${TARGET_ARCH} on a ${_host_os}-${_host_arch} host"
 fi
+
+# HOST-TOOL PREFLIGHT (EI-24668318952454860 follow-up, WI-10003960 R-15): several
+# hard host-tool requirements used to be checked only at their point of use,
+# thousands of lines in, so a fresh build host paid a full multi-minute run per
+# missing tool and discovered them one at a time (a fresh-clone Linux build died
+# on `kopia not found` only after the whole sidecar had been assembled). Decide
+# every host tool that is knowable from the target alone HERE, before the first
+# toolchain or dependency operation, and report ALL missing ones in one failure.
+# The point-of-use checks stay as the authoritative guards; this only moves the
+# discovery forward. Keep the conditions in lock-step with those call sites.
+_missing_host_tools=()
+# kopia: the bundled snapshot subsystem (packages/backup/src/workspace-backup.ts).
+# Local builds copy the host binary; darwin cross-builds read the host version to
+# fetch the matching release. Only vm-release consumes its own pinned build.
+if [[ "${DISTRIBUTION_PROFILE:-}" != "vm-release" ]] \
+   && ! command -v kopia >/dev/null 2>&1; then
+  _missing_host_tools+=("kopia (snapshot subsystem — https://kopia.io/docs/installation/, apt/brew install kopia)")
+fi
+# ALSA dev headers: the chat-dock step natively `cargo build`s apps/tui, whose
+# `pui-audio` bin pulls cpal → alsa-sys, and alsa-sys's build script needs
+# `alsa.pc` via pkg-config on Linux. A fresh Ubuntu host without libasound2-dev
+# died on it (exit 101) ~8 minutes in (WI-10003960 R-15 build5).
+if [[ "$CROSS_BUILD" != "1" && "$TARGET_OS" == "linux" ]]; then
+  if ! command -v pkg-config >/dev/null 2>&1; then
+    _missing_host_tools+=("pkg-config (native Rust builds — apt install pkg-config)")
+  elif ! pkg-config --exists alsa 2>/dev/null; then
+    _missing_host_tools+=("ALSA development headers, alsa.pc (chat-dock pui audio — apt install libasound2-dev / dnf install alsa-lib-devel)")
+  fi
+fi
+# Embedding models: the sidecar's fail-closed models guard (WI-5638 / D-178) needs the
+# two contract-pinned transformers models, which `npm ci` never downloads. A host tree
+# carries them only because live use filled the package's `.cache`; a fresh clone
+# (WI-10003960 R-15 build6) died on the guard ~8 minutes in. Refuse here instead, and
+# name the one command that produces them.
+_tf_pkg="$REPO_ROOT/node_modules/@huggingface/transformers"
+if [[ -z "${PAPERCUSP_TRANSFORMERS_MODEL_CACHE:-}" ]] \
+   && ! papercusp_transformers_models_present "$_tf_pkg/.cache" \
+   && ! papercusp_transformers_models_present "$_tf_pkg/models"; then
+  _missing_host_tools+=("embedding models (harrier-oss + embeddinggemma, ~3.4GB) — run: bin/lib/transformers-models.sh fetch ~/.cache/papercusp-models && export PAPERCUSP_TRANSFORMERS_MODEL_CACHE=~/.cache/papercusp-models")
+fi
+unset _tf_pkg
+if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
+  for _t in file curl python3 rcodesign; do
+    command -v "$_t" >/dev/null 2>&1 || _missing_host_tools+=("$_t (darwin cross-build vendoring/signing)")
+  done
+fi
+if (( ${#_missing_host_tools[@]} > 0 )); then
+  echo "ERROR: build host is missing required tool(s) — install them, then re-run:" >&2
+  for _t in "${_missing_host_tools[@]}"; do echo "  - $_t" >&2; done
+  exit 1
+fi
+unset _missing_host_tools _t
 
 # WI-2644 / EI-18751304112302229: the packaged sidecar's serve.mjs runs
 # standalone (no `npm run` context), so process.env.npm_package_version is
@@ -909,9 +961,9 @@ build_runtime_workspace_outputs_after_install
 
 echo "→ verifying workspace deps resolved"
 echo "  apps/operator/node_modules/@restart/ contents:"
-ls -la "$WEB_DIR/node_modules/@restart" 2>&1 | head -10 || echo "(no @restart subdir)"
+ls -la "$WEB_DIR/node_modules/@restart" 2>&1 | sed -n 1,10p || echo "(no @restart subdir)"
 echo "  apps/operator/node_modules/@papercusp/ contents:"
-ls -la "$WEB_DIR/node_modules/@papercusp" 2>&1 | head -10 || echo "(no @papercusp subdir)"
+ls -la "$WEB_DIR/node_modules/@papercusp" 2>&1 | sed -n 1,10p || echo "(no @papercusp subdir)"
 # FAIL-FAST GUARD (2026-07-25, WI-5769): the two `ls` checks above are purely
 # informational — neither fails the build, so the exact "npm said up to date
 # but a declared dep never got extracted to node_modules" bug this whole
@@ -1462,7 +1514,7 @@ fetch_cross_npm_pkg() {
   if ! ( cd "$tmp" && npm pack "$spec" --silent >/dev/null 2>&1 ); then
     echo "ERROR: npm pack '$spec' failed (cross-fetch of a per-platform pkg)"; rm -rf "$tmp"; return 1
   fi
-  local tgz; tgz="$(ls "$tmp"/*.tgz 2>/dev/null | head -1)"
+  local tgz; tgz="$(ls "$tmp"/*.tgz 2>/dev/null | sed -n 1p)"
   [[ -f "$tgz" ]] || { echo "ERROR: npm pack '$spec' produced no tarball"; rm -rf "$tmp"; return 1; }
   mkdir -p "$dest"
   if ! tar -xzf "$tgz" -C "$dest" --strip-components=1; then
@@ -1672,7 +1724,7 @@ load_sidecar_tree_excludes() {
   # GNU tar REQUIRED: bsdtar's --exclude anchoring dialect differs subtly, which
   # would be a silent-content bug rather than a loud one (same reason
   # stage-source-tree.sh asserts this).
-  if ! tar --version 2>/dev/null | head -1 | grep -qi 'gnu tar'; then
+  if ! tar --version 2>/dev/null | sed -n 1p | grep -ci 'gnu tar' >/dev/null; then
     echo "ERROR: GNU tar required for filtered sidecar tree copies (macOS: brew install gnu-tar)" >&2
     exit 1
   fi
@@ -1747,7 +1799,7 @@ PY
     echo "ERROR: could not read VM_RELEASE_ASSET_ALLOWLIST / VM_RELEASE_CUPBOARD_CONTENT_ROOTS from $HERE/audit-release-bundle.py — refusing to guess whether '$root' is still test-exempt (D-178)" >&2
     exit 1
   fi
-  if ! printf '%s\n' "$known" | grep -qxF "${root%/}"; then
+  if ! printf '%s\n' "$known" | grep -cxF "${root%/}" >/dev/null; then
     echo "ERROR: '$root' is in NEITHER the auditor's VM_RELEASE_ASSET_ALLOWLIST nor its VM_RELEASE_CUPBOARD_CONTENT_ROOTS, so the test-files rule now judges its members — drop keep_product_tests for this tree (D-178)" >&2
     exit 1
   fi
@@ -2881,7 +2933,7 @@ for _wh_entrypoint in papercusp-remote-initializer papercusp-deliver-material; d
   fi
   # Assert the shebang survived the bundle: the host spawns this file by path, so without a
   # shebang it is an ordinary data file with the executable bit set and exec() fails ENOEXEC.
-  if ! head -c 2 "$_wh_bin" | grep -q '#!'; then
+  if ! head -c 2 "$_wh_bin" | grep -c '#!' >/dev/null; then
     echo "ERROR: $_wh_bin has no '#!' line — exec() on the host would fail ENOEXEC" >&2
     exit 1
   fi
@@ -2941,7 +2993,7 @@ echo "→ installing embedded-postgres-server runtime deps into the bundle (~60-
 # accepts. (Proven on linux, WI-5651.)
 if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
   _epg_root="$EMBEDDED_PG_DST/node_modules/@embedded-postgres"
-  _epg_host="$(ls "$_epg_root" 2>/dev/null | head -1)"
+  _epg_host="$(ls "$_epg_root" 2>/dev/null | sed -n 1p)"
   [[ -n "$_epg_host" ]] || { echo "ERROR: no @embedded-postgres/<host> pkg after npm install — cannot derive the cross version"; exit 1; }
   _epg_ver="$(node -e "console.log(require('$_epg_root/$_epg_host/package.json').version)" 2>/dev/null)"
   [[ -n "$_epg_ver" ]] || { echo "ERROR: could not read installed @embedded-postgres/$_epg_host version"; exit 1; }
@@ -2994,7 +3046,7 @@ NODE
   echo "  ✓ replaced npm PostgreSQL payload with pinned PostgreSQL $PAPERCUSP_VM_POSTGRES_VERSION + OpenSSL $PAPERCUSP_VM_OPENSSL_VERSION"
 fi
 # Sanity check: must have at least one @embedded-postgres/<platform> binary pkg
-if ! ls "$EMBEDDED_PG_DST/node_modules/@embedded-postgres" 2>/dev/null | grep -q .; then
+if ! ls "$EMBEDDED_PG_DST/node_modules/@embedded-postgres" 2>/dev/null | grep -c . >/dev/null; then
   echo "ERROR: bundled embedded-postgres missing platform binary — node_modules install didn't include @embedded-postgres/*"
   exit 1
 fi
@@ -3070,7 +3122,7 @@ if [[ -n "$_pg_otool" ]]; then
       # Versioned counterpart: libzstd.1.dylib → libzstd.1.<ver>.dylib. compgen -G
       # so a ref with NO bundled counterpart (e.g. libcurl.4.dylib — OAuth-only,
       # never dlopen'd) yields an EMPTY list and is SKIPPED. The prior
-      # `ls "…${_ref%.dylib}."*.dylib | head -1` aborted the ENTIRE sidecar build on
+      # `ls "…${_ref%.dylib}."*.dylib | sed -n 1p` aborted the ENTIRE sidecar build on
       # such a ref: an unmatched glob makes `ls` exit 2, and under this script's
       # `set -euo pipefail` the failing command-substitution assignment tripped
       # errexit (exit 2, no error text) — invisible when the block is run
@@ -3157,7 +3209,7 @@ print(pick[1])
 fetch_brew_keg() {
   local formula="$1" ver="$2" arch="$3" repo="$4" outdir="$5"
   local tmp; tmp="$(_fetch_brew_bottle_raw "$formula" "$ver" "$arch" "$repo")" || return 1
-  local keg; keg="$(find "$tmp" -maxdepth 4 -type d \( -name bin -o -name lib \) 2>/dev/null | head -1)"
+  local keg; keg="$(find "$tmp" -maxdepth 4 -type d \( -name bin -o -name lib \) 2>/dev/null | sed -n 1p)"
   [[ -n "$keg" ]] || { echo "bottle($formula): could not locate keg root (no bin/ or lib/)" >&2; rm -rf "$tmp"; return 1; }
   keg="$(dirname "$keg")"
   rm -rf "$outdir"; mkdir -p "$outdir"
@@ -3220,10 +3272,10 @@ fetch_pgvector_darwin_bottle() {
   # target the share/ path EXPLICITLY, or a bare `-name extension` picks include/
   # (it sorts first) and the copy fails. NB: set -e is DISABLED inside this fn (it
   # is called via `||`), so every failure is checked by hand and returns non-zero.
-  local dylib; dylib="$(find "$tmp" -type f -path '*/lib/postgresql@18/vector.dylib' | head -1)"
-  [[ -z "$dylib" ]] && dylib="$(find "$tmp" -type f -name vector.dylib | head -1)"
-  local extdir; extdir="$(find "$tmp" -type d -path '*/share/postgresql@18/extension' | head -1)"
-  [[ -z "$extdir" ]] && extdir="$(dirname "$(find "$tmp" -type f -path '*/share/*' -name vector.control | head -1)")"
+  local dylib; dylib="$(find "$tmp" -type f -path '*/lib/postgresql@18/vector.dylib' | sed -n 1p)"
+  [[ -z "$dylib" ]] && dylib="$(find "$tmp" -type f -name vector.dylib | sed -n 1p)"
+  local extdir; extdir="$(find "$tmp" -type d -path '*/share/postgresql@18/extension' | sed -n 1p)"
+  [[ -z "$extdir" ]] && extdir="$(dirname "$(find "$tmp" -type f -path '*/share/*' -name vector.control | sed -n 1p)")"
   [[ -f "$dylib" ]] || { echo "pgvector bottle: lib/postgresql@18/vector.dylib not found in bottle" >&2; rm -rf "$tmp"; return 1; }
   [[ -n "$extdir" && -f "$extdir/vector.control" ]] || { echo "pgvector bottle: share/postgresql@18/extension/vector.control not found in bottle" >&2; rm -rf "$tmp"; return 1; }
   local out; out="$(mktemp -d)"; mkdir -p "$out/extension"
@@ -3401,7 +3453,7 @@ if [[ "$_cross_darwin" == "1" ]]; then
   _epg_pkg_json="$(cd "$EMBEDDED_PG_BIN_DIR/../.." 2>/dev/null && pwd)/package.json"
   EMBEDDED_PG_MAJOR="$(node -e "console.log(String(require('$_epg_pkg_json').version).split('.')[0])" 2>/dev/null)"
 else
-  EMBEDDED_PG_MAJOR="$("$EMBEDDED_PG_BIN_DIR/postgres" --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
+  EMBEDDED_PG_MAJOR="$("$EMBEDDED_PG_BIN_DIR/postgres" --version 2>/dev/null | grep -oE '[0-9]+' | sed -n 1p)"
 fi
 if [[ -z "$EMBEDDED_PG_MAJOR" ]]; then
   echo "ERROR: could not determine embedded postgres major version from $EMBEDDED_PG_BIN_DIR/postgres"
@@ -3420,7 +3472,7 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   }
   cp "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/bin/kopia" "$SIDECAR_DIR/bin/kopia"
   chmod 755 "$SIDECAR_DIR/bin/kopia"
-  "$SIDECAR_DIR/bin/kopia" --version | grep -Fq "${PAPERCUSP_VM_KOPIA_VERSION}-papercusp.1" || {
+  "$SIDECAR_DIR/bin/kopia" --version | grep -Fc "${PAPERCUSP_VM_KOPIA_VERSION}-papercusp.1" >/dev/null || {
     echo "ERROR: vm-release copied Kopia does not match the pinned patched build" >&2
     exit 1
   }
@@ -3451,8 +3503,8 @@ if [[ "$_cross_darwin" == "1" ]]; then
   _cross_rl_keg="$(fetch_brew_keg readline "$_brew_rl_ver" "$TARGET_ARCH" "homebrew/core/readline" "$(mktemp -d)/rlkeg")" \
     || { echo "ERROR: readline darwin bottle fetch failed (see above)"; exit 1; }
   mkdir -p "$SIDECAR_DIR/bin/.pg-lib"
-  _rl_src="$(find "$_cross_rl_keg/lib" -maxdepth 1 -name 'libreadline.8.dylib' | head -1)"
-  [[ -n "$_rl_src" ]] || _rl_src="$(find "$_cross_rl_keg/lib" -maxdepth 1 -name 'libreadline.8*.dylib' ! -type l | head -1)"
+  _rl_src="$(find "$_cross_rl_keg/lib" -maxdepth 1 -name 'libreadline.8.dylib' | sed -n 1p)"
+  [[ -n "$_rl_src" ]] || _rl_src="$(find "$_cross_rl_keg/lib" -maxdepth 1 -name 'libreadline.8*.dylib' ! -type l | sed -n 1p)"
   [[ -n "$_rl_src" ]] || { echo "ERROR: libreadline.8.dylib not found in the readline bottle"; exit 1; }
   cp -L "$_rl_src" "$SIDECAR_DIR/bin/.pg-lib/libreadline.8.dylib"
   chmod 755 "$SIDECAR_DIR/bin/.pg-lib/libreadline.8.dylib"
@@ -3544,7 +3596,7 @@ _cross_darwin_vendor_pg_tool() {
       tgt="$base"                                              # exact (libpq.5, libintl.8, libcrypto.3)
     else
       stem="${base%.dylib}"
-      m="$(ls "$nlibdir/$stem".*.dylib 2>/dev/null | head -1)" # compat→versioned (libzstd.1→libzstd.1.5.7)
+      m="$(ls "$nlibdir/$stem".*.dylib 2>/dev/null | sed -n 1p)" # compat→versioned (libzstd.1→libzstd.1.5.7)
       [[ -n "$m" ]] && tgt="$(basename "$m")"
     fi
     if [[ -n "$tgt" ]]; then
@@ -3721,7 +3773,10 @@ if [[ "$_pg_build_os" == "Linux" && -d "$SIDECAR_DIR/bin/.pg-real" ]]; then
   _ldconfig="$(resolve_ldconfig)" || exit 1
   echo "  using ldconfig: $_ldconfig"
   for _lib in libreadline.so.8 libtinfo.so.6; do
-    _libpath="$("$_ldconfig" -p 2>/dev/null | awk -v l="$_lib" '$1==l {print $NF; exit}')"
+    # No early `exit` in awk: under `set -o pipefail` an early-exiting consumer
+    # SIGPIPEs `ldconfig -p` (~100KB of output) and the whole build dies with a
+    # silent exit 141, depending on a scheduling race (fresh-clone build4, WI-10003960).
+    _libpath="$("$_ldconfig" -p 2>/dev/null | awk -v l="$_lib" '$1==l && !f {print $NF; f=1}')"
     if [[ -n "$_libpath" && -e "$_libpath" ]]; then
       cp -L "$_libpath" "$SIDECAR_DIR/bin/.pg-real/lib/$_lib"
     else
@@ -3760,7 +3815,7 @@ for tool in pg_dump psql pg_dumpall pg_restore; do
       _res="${_ref/@executable_path/$SIDECAR_DIR/bin}"
       [[ -e "$_res" ]] || { echo "ERROR: cross-vendored $tool references a missing bundled lib: $_ref"; exit 1; }
     done < <(llvm-otool-18 -L "$_final" 2>/dev/null | awk 'NR>1{print $1}' | grep -E '^@executable_path' || true)
-    if ! rcodesign print-signature-info "$_final" 2>/dev/null | grep -q 'CodeDirectory'; then
+    if ! rcodesign print-signature-info "$_final" 2>/dev/null | grep -c 'CodeDirectory' >/dev/null; then
       echo "ERROR: cross-vendored $tool is not ad-hoc signed (dyld would SIGKILL it on load)"
       exit 1
     fi
@@ -3804,7 +3859,7 @@ if [[ "$_cross_darwin" == "1" ]]; then
   # copied linux kopia would be an ELF the mac can't exec → silently dump-less
   # snapshots, and the host `--version` probe below CAN'T catch it (it runs the
   # ELF on linux, where it passes). Just fetch, copy, ad-hoc sign.
-  _kopia_ver="$(kopia --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  _kopia_ver="$(kopia --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sed -n 1p)"
   [[ -n "$_kopia_ver" ]] || { echo "ERROR: could not determine build-host kopia version to match the darwin download"; exit 1; }
   case "$TARGET_ARCH" in x64) _kopia_arch=x64 ;; arm64) _kopia_arch=arm64 ;; *) echo "ERROR: unsupported kopia target arch $TARGET_ARCH"; exit 1 ;; esac
   _kopia_url="https://github.com/kopia/kopia/releases/download/v${_kopia_ver}/kopia-${_kopia_ver}-macOS-${_kopia_arch}.tar.gz"
@@ -3812,7 +3867,7 @@ if [[ "$_cross_darwin" == "1" ]]; then
   _kopia_tmp="$(mktemp -d)"
   curl -fsSL "$_kopia_url" -o "$_kopia_tmp/kopia.tgz" || { echo "ERROR: darwin kopia download failed: $_kopia_url"; rm -rf "$_kopia_tmp"; exit 1; }
   tar -xzf "$_kopia_tmp/kopia.tgz" -C "$_kopia_tmp" || { echo "ERROR: darwin kopia extract failed"; rm -rf "$_kopia_tmp"; exit 1; }
-  _kopia_bin="$(find "$_kopia_tmp" -type f -name kopia | head -1)"
+  _kopia_bin="$(find "$_kopia_tmp" -type f -name kopia | sed -n 1p)"
   [[ -n "$_kopia_bin" ]] || { echo "ERROR: kopia binary not found in the darwin tarball"; rm -rf "$_kopia_tmp"; exit 1; }
   cp -L "$_kopia_bin" "$SIDECAR_DIR/bin/kopia"
   chmod 755 "$SIDECAR_DIR/bin/kopia"
@@ -3821,7 +3876,7 @@ if [[ "$_cross_darwin" == "1" ]]; then
   echo "  kopia: cross-fetched darwin ${_kopia_ver} (${_kopia_arch}), ad-hoc signed"
   echo "kopia: cross-fetch (darwin ${_kopia_ver} ${_kopia_arch} github release)" >> "$SOURCE_NOTE_FILE"
 elif [[ -x "$SIDECAR_DIR/bin/kopia" ]] && "$SIDECAR_DIR/bin/kopia" --version >/dev/null 2>&1; then
-  echo "  kopia: already bundled ($("$SIDECAR_DIR/bin/kopia" --version 2>/dev/null | head -1))"
+  echo "  kopia: already bundled ($("$SIDECAR_DIR/bin/kopia" --version 2>/dev/null | sed -n 1p))"
 else
   _kopia_src="$(command -v kopia 2>/dev/null || true)"
   if [[ -z "$_kopia_src" ]]; then
@@ -3840,7 +3895,7 @@ else
     echo "ERROR: bundled kopia fails --version probe as installed"
     exit 1
   fi
-  echo "  kopia: copy ($_kopia_src) → $("$SIDECAR_DIR/bin/kopia" --version 2>/dev/null | head -1)"
+  echo "  kopia: copy ($_kopia_src) → $("$SIDECAR_DIR/bin/kopia" --version 2>/dev/null | sed -n 1p)"
   papercusp_append_pg_tool_source_note \
     "$SOURCE_NOTE_FILE" "kopia" "copy (from system PATH)" "$_kopia_src"
 fi
@@ -3895,7 +3950,7 @@ for pkg in $SIDECAR_DIR/node_modules/@lydell/node-pty-*/; do
   # host has no source for a foreign platform anyway. If they're already present,
   # keep them (the native path still backfills the host's own package, whose
   # prebuilds Next's tracer strips — that's why the host-source copy exists).
-  if find "$pkg/prebuilds" -name '*.node' 2>/dev/null | grep -q .; then
+  if find "$pkg/prebuilds" -name '*.node' 2>/dev/null | grep -c . >/dev/null; then
     echo "  ✓ $pkg_name: prebuilds already present ($(find "$pkg/prebuilds" -name '*.node' | wc -l) .node file(s)) — cross-fetched pkg"
     continue
   fi
@@ -4167,7 +4222,7 @@ if [[ -n "${node_archive:-}" ]]; then
         *.tar.xz) tar -xJf "$node_tarball" -C "$tmp_node_dir" --strip-components=1 ;;
         *.tar.gz) tar -xzf "$node_tarball" -C "$tmp_node_dir" --strip-components=1 ;;
         *.zip)    unzip -q "$node_tarball" -d "$tmp_node_dir" && \
-                   inner=$(find "$tmp_node_dir" -maxdepth 1 -mindepth 1 -type d | head -1) && \
+                   inner=$(find "$tmp_node_dir" -maxdepth 1 -mindepth 1 -type d | sed -n 1p) && \
                    mv "$inner"/* "$tmp_node_dir/" 2>/dev/null || true ;;
       esac
       if [[ -f "$tmp_node_dir/bin/node" ]]; then
@@ -4226,7 +4281,7 @@ if [[ -n "$gh_archive" ]]; then
     gh_dst="$OMP_DIR/gh"
     cp "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/bin/gh" "$gh_dst"
     chmod 755 "$gh_dst"
-    "$gh_dst" --version | head -1 | grep -Fq "gh version ${PAPERCUSP_VM_GH_VERSION}-papercusp.1" || {
+    "$gh_dst" --version | sed -n 1p | grep -Fc "gh version ${PAPERCUSP_VM_GH_VERSION}-papercusp.1" >/dev/null || {
       echo "ERROR: vm-release copied GitHub CLI does not match the pinned patched build" >&2
       exit 1
     }
@@ -4246,7 +4301,7 @@ if [[ -n "$gh_archive" ]]; then
         *.zip)    unzip -q "$gh_tarball" -d "$gh_tmp" ;;
       esac
       # Find the gh binary regardless of inner dir naming quirks
-      gh_src=$(find "$gh_tmp" -name "gh" -o -name "gh.exe" 2>/dev/null | head -1)
+      gh_src=$(find "$gh_tmp" -name "gh" -o -name "gh.exe" 2>/dev/null | sed -n 1p)
       if [[ -n "$gh_src" && -f "$gh_src" ]]; then
         gh_dst="$OMP_DIR/$(basename "$gh_src")"
         cp "$gh_src" "$gh_dst"
@@ -4304,7 +4359,7 @@ align_better_sqlite3_native() {
   fi
 
   local bsq_node
-  bsq_node="$(find "$bsq_dir" -type f -name '*.node' 2>/dev/null | head -1)"
+  bsq_node="$(find "$bsq_dir" -type f -name '*.node' 2>/dev/null | sed -n 1p)"
   [[ -n "$bsq_node" ]] || {
     echo "ERROR: better-sqlite3: no *.node present after target-ABI alignment" >&2
     return 1
@@ -4406,7 +4461,7 @@ if [[ "$_cross_darwin" == "1" ]]; then
     echo "  → cross: fetching $_gd_formula ${_gd_ver} darwin-${TARGET_ARCH} bottle (git dep)"
     _gd_keg="$(fetch_brew_keg "$_gd_formula" "$_gd_ver" "$TARGET_ARCH" "homebrew/core/$_gd_formula" "$(mktemp -d)/${_gd_formula}keg")" \
       || { echo "ERROR: $_gd_formula darwin bottle fetch failed (see above)"; exit 1; }
-    _gd_src="$(find "$_gd_keg/lib" -maxdepth 1 -name "$_gd_expect_base" ! -type l | head -1)"
+    _gd_src="$(find "$_gd_keg/lib" -maxdepth 1 -name "$_gd_expect_base" ! -type l | sed -n 1p)"
     [[ -n "$_gd_src" && -f "$_gd_src" ]] || { echo "ERROR: $_gd_expect_base not found in the $_gd_formula bottle ($_gd_keg/lib)"; exit 1; }
     cp -L "$_gd_src" "$SIDECAR_DIR/bin/.git-lib/$_gd_expect_base"
     chmod 755 "$SIDECAR_DIR/bin/.git-lib/$_gd_expect_base"
@@ -4438,7 +4493,7 @@ if [[ "$_cross_darwin" == "1" ]]; then
 
   _git_vendor_count=0
   while IFS= read -r -d '' _gv_file; do
-    if file -b "$_gv_file" 2>/dev/null | grep -q '^Mach-O'; then
+    if file -b "$_gv_file" 2>/dev/null | grep -c '^Mach-O' >/dev/null; then
       _cross_darwin_vendor_pg_tool "$_gv_file" "$SIDECAR_DIR/bin/.git-lib" || exit 1
       _git_vendor_count=$((_git_vendor_count + 1))
     fi
@@ -4784,7 +4839,7 @@ esac
 # when the bundled zellij matches THIS host — so never trust it for a cross build
 # (a stale host-platform zellij would masquerade as up-to-date and ride into the
 # wrong-OS bundle). Force a fresh fetch when cross-baking.
-if [[ "$CROSS_BUILD" == "0" && -x "$SIDECAR_DIR/bin/zellij" ]] && "$SIDECAR_DIR/bin/zellij" --version 2>/dev/null | grep -q "$ZJ_VER"; then
+if [[ "$CROSS_BUILD" == "0" && -x "$SIDECAR_DIR/bin/zellij" ]] && "$SIDECAR_DIR/bin/zellij" --version 2>/dev/null | grep -c "$ZJ_VER" >/dev/null; then
   echo "    ✓ zellij ${ZJ_VER} already present — skipping download"
 else
   curl -fsSL "https://github.com/zellij-org/zellij/releases/download/v${ZJ_VER}/zellij-${ZJ_TRIPLE}.tar.gz" | tar -xz -C "$SIDECAR_DIR/bin"

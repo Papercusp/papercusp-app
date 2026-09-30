@@ -862,6 +862,11 @@ export const TABLE_TO_QUERY_NAMES: Readonly<Record<string, readonly QueryNameTar
   // table but was not listed, so a device joining or leaving never pushed to it. Low-churn table,
   // so the added fan-out is negligible. Found by the resolver→table coverage guard.
   'harness_shared.pot_members': ['dev.assignableMembers', 'p2p.devices'],
+  // external-app-access P-010 (D-025): Settings → Remote access lists every phone, app key and
+  // service key and shows the workspace switch. Migration 1264 attaches the shared change-notify
+  // trigger to both tables, so every writer (not only the screen's routes) refreshes an open page.
+  'harness_shared.connected_apps': ['remoteAccess.overview'],
+  'harness_shared.connected_app_access_settings': ['remoteAccess.overview'],
   // P-510: the host-local foreign-work registry drives the Settings page's
   // lifecycle view. Migration 985 attaches the shared change-notify trigger;
   // full-bust is appropriate because the query is one low-volume workspace fold.

@@ -661,7 +661,7 @@ for role in $ROLES; do
   if [[ -z "$_imports" ]]; then
     fail "crt-static guard: could not read imports of $EXE (need llvm-readobj, objdump or strings) — refusing to ship an unverified Windows binary"
   fi
-  if printf '%s' "$_imports" | grep -qE 'vcruntime140|msvcp140|api-ms-win-crt'; then
+  if printf '%s' "$_imports" | grep -cE 'vcruntime140|msvcp140|api-ms-win-crt' >/dev/null; then
     fail "crt-static guard FAILED: $EXE still imports the VC++ runtime (vcruntime140/msvcp140/api-ms-win-crt).
 This binary will install fine and then FAIL AT FIRST LAUNCH on any clean Windows
 that lacks the redistributable — the exact WI-39372 defect. Most likely cause: a

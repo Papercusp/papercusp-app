@@ -26,8 +26,9 @@
 
 import type { Sql } from 'postgres';
 import { getOrgPg, withWorkspace } from '@papercusp/db-org';
+import { networkOf, type AppKeyUseOutcome } from './network';
 import { listAllProjectedTools } from '@papercusp/agent-mcp';
-import { appKeyHashMatches, mintAppKey, parseAppKey } from './key';
+import { appKeyHashMatches, mintAppKey, parseAccessToken, parseAppKey } from './key';
 import {
   appScopeToolOf,
   validateAppKeyScopes,
@@ -87,9 +88,47 @@ export interface AppKeyRow {
   rotated_at: Date | null;
   /** While set and in the future, the key's previous secret still authenticates (R-11). */
   previous_token_valid_until: Date | null;
+  /**
+   * Set when the service key is an OAuth client-credentials client (P-016, migration 1261): how it
+   * authenticates at the token endpoint. Such a key is refused as a bearer ('token_endpoint_only');
+   * the app exchanges it for short-lived access tokens instead. Null = an ordinary bearer key.
+   */
+  client_auth: ClientAuthMethod | null;
 }
 
-export type AppKeyRefusal = 'malformed' | 'unknown' | 'mismatch' | 'rotated' | 'revoked' | 'paused' | 'expired';
+export type ClientAuthMethod = 'client_secret' | 'private_key_jwt';
+
+export type AppKeyRefusal =
+  | 'malformed'
+  | 'unknown'
+  | 'mismatch'
+  | 'rotated'
+  | 'revoked'
+  | 'paused'
+  | 'expired'
+  /** A client-credentials secret presented as a bearer: it is only valid at the token endpoint. */
+  | 'token_endpoint_only'
+  /**
+   * The key's workspace has Remote access switched off (P-010, D-025): the instant kill switch.
+   * Every app key, service key and access token of that workspace is refused until it is back on.
+   */
+  | 'remote_access_off';
+
+/**
+ * The workspace's Remote access switch, read in the same query as the key (D-025). Required on
+ * every row a verdict is computed from, so a loader that forgets to read it does not compile — and
+ * a row where it is not literally `true` is refused, so a missing value fails closed.
+ */
+export interface RemoteAccessState {
+  remote_access_enabled: boolean;
+}
+
+/** The access token a bearer presented (P-016). Its principal is still the parent key. */
+export interface AccessTokenGrant {
+  id: string;
+  scopes: AppKeyScopes;
+  expires_at: Date;
+}
 
 export type AppKeyVerdict =
   | {
@@ -97,6 +136,8 @@ export type AppKeyVerdict =
       app: AppKeyRow;
       /** True when the key presented is the previous secret, inside its rotation overlap window. */
       viaPreviousKey: boolean;
+      /** Present when the bearer was a client-credentials access token rather than the key itself. */
+      accessToken?: AccessTokenGrant;
     }
   | { ok: false; reason: AppKeyRefusal };
 
@@ -159,7 +200,14 @@ const KEY_KINDS_SQL = `kind IN ('app', 'service')`;
 const APP_COLUMNS = `id, user_email, workspace_id, kind, label, scopes, limits,
   paired_at, expires_at, paused_at, revoked_at, last_seen, last_ip,
   spend_cap_cents::float8 AS spend_cap_cents, spend_cap_window_sec,
-  rotated_at, previous_token_valid_until`;
+  rotated_at, previous_token_valid_until, client_auth`;
+
+/**
+ * The Remote access switch of the key's workspace (migration 1263, D-025), as a column of a query
+ * over `harness_shared.connected_apps` (unaliased). No settings row = on.
+ */
+const REMOTE_ACCESS_COLUMN = `COALESCE((SELECT s.enabled FROM harness_shared.connected_app_access_settings s
+   WHERE s.workspace_id = harness_shared.connected_apps.workspace_id), true) AS remote_access_enabled`;
 
 /** The scope fields a caller may ask for, before normalization. */
 export type AppKeyScopeRequest = Pick<CreateAppKeyOptions, 'capabilities' | 'tools' | 'harnesses' | 'knownTools'>;
@@ -286,6 +334,22 @@ export async function revokeAppKey(workspaceId: string, id: string): Promise<boo
   return rows.length > 0;
 }
 
+/**
+ * Replace a live key's scopes (the Remote access screen's "edit scope", P-010). `scopes` must come
+ * from `resolveAppKeyScopes`, so an edit can never grant what creation would refuse. Takes effect
+ * on the key's next call: the dispatch seat reads the row per call (`loadAppScopeRow`), and access
+ * tokens are evaluated against their parent's scopes too. Returns null when no live key has that id.
+ */
+export async function setAppKeyScopes(workspaceId: string, id: string, scopes: AppKeyScopes): Promise<AppKeyRow | null> {
+  const rows = await withWorkspace(workspaceId, async (tx) => tx<AppKeyRow[]>`
+    UPDATE harness_shared.connected_apps
+       SET scopes = ${JSON.stringify(scopes)}::jsonb
+     WHERE id = ${id} AND ${tx.unsafe(KEY_KINDS_SQL)} AND revoked_at IS NULL
+    RETURNING ${tx.unsafe(APP_COLUMNS)}
+  `);
+  return rows[0] ?? null;
+}
+
 export interface RotatedAppKey extends CreatedAppKey {
   /** The instant the previous key stops authenticating (== rotation time for a zero overlap). */
   previousKeyValidUntil: Date;
@@ -323,11 +387,12 @@ export async function rotateAppKey(
   return { app, key: minted.key, previousKeyValidUntil: validUntil };
 }
 
-/** A stored key row as verification reads it: the public row plus both digests. */
-export type StoredAppKeyRow = AppKeyRow & {
-  token_hash: string | null;
-  previous_token_hash?: string | null;
-};
+/** A stored key row as verification reads it: the public row, both digests and the workspace switch. */
+export type StoredAppKeyRow = AppKeyRow &
+  RemoteAccessState & {
+    token_hash: string | null;
+    previous_token_hash?: string | null;
+  };
 
 /**
  * The verdict for a presented key against its stored row — pure, so every rule is testable
@@ -338,42 +403,213 @@ export type StoredAppKeyRow = AppKeyRow & {
  *      other secret is `mismatch`. These come first, so only a holder of a real secret for this id
  *      ever learns the key's state.
  *   2. Revocation outranks pause outranks expiry in the reported reason.
+ *   3. Then the workspace's Remote access switch (P-010, D-025): switched off, every key of the
+ *      workspace is `remote_access_off`. It ranks below the key's own state, so a key revoked on
+ *      the screen still reports `revoked` (R-40) whatever the switch says.
  *
  * Nothing here reads who created the key: a service key belongs to the workspace, so a change in
  * its creator's organization membership cannot refuse it (D-007, R-10).
+ *
+ *   4. A client-credentials key (client_auth set, P-016) is refused as a bearer
+ *      (`token_endpoint_only`); only the token endpoint verifies it, with `at: 'token-endpoint'`.
  */
-export function appKeyVerdictOf(row: StoredAppKeyRow | null | undefined, key: string, now: Date): AppKeyVerdict {
+export function appKeyVerdictOf(
+  row: StoredAppKeyRow | null | undefined,
+  key: string,
+  now: Date,
+  opts: { at?: 'bearer' | 'token-endpoint' } = {},
+): AppKeyVerdict {
   if (!parseAppKey(key)) return { ok: false, reason: 'malformed' };
   if (!row) return { ok: false, reason: 'unknown' };
-  const { token_hash: tokenHash, previous_token_hash: previousHash, ...app } = row;
+  const {
+    token_hash: tokenHash,
+    previous_token_hash: previousHash,
+    remote_access_enabled: remoteAccessEnabled,
+    ...app
+  } = row;
   let viaPreviousKey = false;
   if (!appKeyHashMatches(key, tokenHash)) {
     if (!appKeyHashMatches(key, previousHash)) return { ok: false, reason: 'mismatch' };
     if (!previousKeyStillValid(app.previous_token_valid_until, now)) return { ok: false, reason: 'rotated' };
     viaPreviousKey = true;
   }
-  if (app.revoked_at) return { ok: false, reason: 'revoked' };
-  if (app.paused_at) return { ok: false, reason: 'paused' };
-  if (app.expires_at && app.expires_at.getTime() <= now.getTime()) return { ok: false, reason: 'expired' };
+  const state = parentStateRefusal(app, remoteAccessEnabled, now);
+  if (state) return { ok: false, reason: state };
+  if (app.client_auth && opts.at !== 'token-endpoint') return { ok: false, reason: 'token_endpoint_only' };
   return { ok: true, app, viaPreviousKey };
 }
 
 /**
- * Verify a presented key: read its row by primary key and apply `appKeyVerdictOf`. Refuses a
- * malformed key, an unknown id, a secret that does not hash to a live digest, and a key that is
- * revoked, paused, or past its expiry.
+ * Revocation outranks pause outranks expiry outranks the workspace switch, for a key and for every
+ * token it issued. The switch refuses unless it is literally `true`, so a missing value fails closed.
+ */
+function parentStateRefusal(
+  app: AppKeyRow,
+  remoteAccessEnabled: boolean,
+  now: Date,
+): 'revoked' | 'paused' | 'expired' | 'remote_access_off' | null {
+  if (app.revoked_at) return 'revoked';
+  if (app.paused_at) return 'paused';
+  if (app.expires_at && app.expires_at.getTime() <= now.getTime()) return 'expired';
+  if (remoteAccessEnabled !== true) return 'remote_access_off';
+  return null;
+}
+
+/** An access-token row as verification reads it. */
+export interface StoredAccessTokenRow {
+  id: string;
+  token_hash: string;
+  app_id: string;
+  scopes: AppKeyScopes;
+  expires_at: Date;
+}
+
+/**
+ * The verdict for a presented access token (P-016) — pure. The token's own digest and expiry come
+ * first; then the PARENT key's state, so revoking, pausing or expiring the client refuses every
+ * token it issued on the next call. The parent must still be a client-credentials key: switching a
+ * key out of that mode ends its tokens too. The verdict names the parent as the app.
+ */
+export function accessTokenVerdictOf(
+  token: StoredAccessTokenRow | null | undefined,
+  parentRow: (AppKeyRow & RemoteAccessState) | null | undefined,
+  presented: string,
+  now: Date,
+): AppKeyVerdict {
+  const parsed = parseAccessToken(presented);
+  if (!parsed) return { ok: false, reason: 'malformed' };
+  if (!token || token.id !== parsed.id) return { ok: false, reason: 'unknown' };
+  if (!appKeyHashMatches(presented, token.token_hash)) return { ok: false, reason: 'mismatch' };
+  if (token.expires_at.getTime() <= now.getTime()) return { ok: false, reason: 'expired' };
+  if (!parentRow) return { ok: false, reason: 'revoked' };
+  const { remote_access_enabled: remoteAccessEnabled, ...parent } = parentRow;
+  if (parent.id !== token.app_id || parent.kind !== 'service' || !parent.client_auth) {
+    return { ok: false, reason: 'revoked' };
+  }
+  const state = parentStateRefusal(parent, remoteAccessEnabled, now);
+  if (state) return { ok: false, reason: state };
+  return {
+    ok: true,
+    app: parent,
+    viaPreviousKey: false,
+    accessToken: { id: token.id, scopes: token.scopes, expires_at: token.expires_at },
+  };
+}
+
+/**
+ * Verify a presented bearer: an app or service key (`pcapp_`, by `appKeyVerdictOf`) or a
+ * client-credentials access token (`pcat_`, by `accessTokenVerdictOf`). Refuses a malformed
+ * bearer, an unknown id, a secret that does not hash to a live digest, a key or token that is
+ * revoked, paused or past its expiry, and a client-credentials key presented as a bearer.
  */
 export async function verifyAppKey(key: string, now: Date = new Date()): Promise<AppKeyVerdict> {
+  const { sql } = getOrgPg();
+  const token = parseAccessToken(key);
+  if (token) {
+    const tokens = await sql<StoredAccessTokenRow[]>`
+      SELECT id, token_hash, app_id, scopes, expires_at
+        FROM harness_shared.connected_app_access_tokens
+       WHERE id = ${token.id}
+       LIMIT 1
+    `;
+    const row = tokens[0];
+    const parents = row
+      ? await sql<(AppKeyRow & RemoteAccessState)[]>`
+          SELECT ${sql.unsafe(APP_COLUMNS)}, ${sql.unsafe(REMOTE_ACCESS_COLUMN)}
+            FROM harness_shared.connected_apps
+           WHERE id = ${row.app_id} AND ${sql.unsafe(KEY_KINDS_SQL)} LIMIT 1`
+      : [];
+    return accessTokenVerdictOf(row, parents[0], key, now);
+  }
   const parsed = parseAppKey(key);
   if (!parsed) return { ok: false, reason: 'malformed' };
-  const { sql } = getOrgPg();
   const rows = await sql<StoredAppKeyRow[]>`
-    SELECT ${sql.unsafe(APP_COLUMNS)}, token_hash, previous_token_hash
+    SELECT ${sql.unsafe(APP_COLUMNS)}, token_hash, previous_token_hash, ${sql.unsafe(REMOTE_ACCESS_COLUMN)}
       FROM harness_shared.connected_apps
      WHERE id = ${parsed.id} AND ${sql.unsafe(KEY_KINDS_SQL)}
      LIMIT 1
   `;
   return appKeyVerdictOf(rows[0], key, now);
+}
+
+/**
+ * The key row the token endpoint authenticates a client against (P-016): the stored row with both
+ * digests and the registered public JWK. Admin connection, like `verifyAppKey`. Null when no key
+ * has that id.
+ */
+export async function loadClientKeyRow(
+  id: string,
+): Promise<(StoredAppKeyRow & { client_jwk: Record<string, unknown> | null }) | null> {
+  const { sql } = getOrgPg();
+  const rows = await sql<(StoredAppKeyRow & { client_jwk: Record<string, unknown> | null })[]>`
+    SELECT ${sql.unsafe(APP_COLUMNS)}, token_hash, previous_token_hash, client_jwk,
+           ${sql.unsafe(REMOTE_ACCESS_COLUMN)}
+      FROM harness_shared.connected_apps
+     WHERE id = ${id} AND ${sql.unsafe(KEY_KINDS_SQL)}
+     LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
+/**
+ * The scope row the dispatch seat evaluates for an ACCESS TOKEN (P-016): the parent's state and
+ * workspace with the token's own (possibly narrowed) scopes and the earlier of the two expiries.
+ * The seat evaluates this AND the parent row, so a scope removed from the parent after issue
+ * applies to live tokens too. Null when the token is gone or no longer belongs to that key.
+ */
+export async function loadAccessTokenScopeRow(tokenId: string, appId: string): Promise<AppScopeRow | null> {
+  const { sql } = getOrgPg();
+  const rows = await sql<(AppScopeRow & { token_expires_at: Date })[]>`
+    SELECT a.id, a.workspace_id, t.scopes, a.revoked_at, a.paused_at, a.expires_at, t.expires_at AS token_expires_at
+      FROM harness_shared.connected_app_access_tokens t
+      JOIN harness_shared.connected_apps a ON a.id = t.app_id
+     WHERE t.id = ${tokenId} AND t.app_id = ${appId}
+       AND a.kind = 'service' AND a.client_auth IS NOT NULL
+     LIMIT 1
+  `;
+  const row = rows[0];
+  if (!row) return null;
+  const { token_expires_at: tokenExpiresAt, ...scopeRow } = row;
+  const parentExpiry = scopeRow.expires_at ? new Date(scopeRow.expires_at).getTime() : Infinity;
+  return { ...scopeRow, expires_at: new Date(Math.min(parentExpiry, new Date(tokenExpiresAt).getTime())) };
+}
+
+/** Thrown by `setClientCredentialsMode` for a mode no row may hold. */
+export class ClientCredentialsModeError extends Error {
+  constructor(readonly code: 'not_service_key' | 'invalid_jwk') {
+    super(code === 'not_service_key' ? 'only a service key can be a client-credentials client' : 'client_jwk must be a public JWK');
+    this.name = 'ClientCredentialsModeError';
+  }
+}
+
+/**
+ * Switch a live service key into client-credentials mode (`client_secret` or `private_key_jwt` with
+ * a public JWK), or back to an ordinary bearer key (`null`). Leaving the mode, or changing it, ends
+ * every access token the key issued. Returns null when no live key has that id; throws
+ * `ClientCredentialsModeError` for an app key or a JWK that is not a validated public key.
+ */
+export async function setClientCredentialsMode(
+  workspaceId: string,
+  id: string,
+  mode: { auth: ClientAuthMethod; jwk?: Record<string, unknown> | null } | null,
+): Promise<AppKeyRow | null> {
+  const jwk = mode?.auth === 'private_key_jwt' ? mode.jwk ?? null : null;
+  if (mode?.auth === 'private_key_jwt' && !jwk) throw new ClientCredentialsModeError('invalid_jwk');
+  return withWorkspace(workspaceId, async (tx) => {
+    const current = await tx<{ kind: AppKeyKind }[]>`
+      SELECT kind FROM harness_shared.connected_apps
+       WHERE id = ${id} AND ${tx.unsafe(KEY_KINDS_SQL)} AND revoked_at IS NULL`;
+    if (!current[0]) return null;
+    if (mode && current[0].kind !== 'service') throw new ClientCredentialsModeError('not_service_key');
+    const rows = await tx<AppKeyRow[]>`
+      UPDATE harness_shared.connected_apps
+         SET client_auth = ${mode?.auth ?? null},
+             client_jwk  = ${jwk ? JSON.stringify(jwk) : null}::jsonb
+       WHERE id = ${id} AND ${tx.unsafe(KEY_KINDS_SQL)} AND revoked_at IS NULL
+      RETURNING ${tx.unsafe(APP_COLUMNS)}`;
+    await tx`DELETE FROM harness_shared.connected_app_access_tokens WHERE app_id = ${id}`;
+    return rows[0] ?? null;
+  });
 }
 
 /**
@@ -393,19 +629,47 @@ export async function loadAppScopeRow(id: string): Promise<AppScopeRow | null> {
   return rows[0] ?? null;
 }
 
+/** The fields an alert about a key shows (P-011): its label, kind and workspace. */
+export async function loadAlertedAppRow(id: string): Promise<{ id: string; workspace_id: string; kind: string; label: string | null } | null> {
+  const { sql } = getOrgPg();
+  const rows = await sql<Array<{ id: string; workspace_id: string; kind: string; label: string | null }>>`
+    SELECT id, workspace_id, kind, label FROM harness_shared.connected_apps
+     WHERE id = ${id} AND ${sql.unsafe(KEY_KINDS_SQL)}
+     LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
 /**
  * Record that a key was just used. At most one write a minute per key (or on an
  * address change), so a busy app does not turn every request into an UPDATE.
  * Best-effort: callers must not fail a request because this did.
+ *
+ * Reports what the use found (P-011, D-028): the key's FIRST use ever (`first_used_at` is set by
+ * the one write that finds it null), and a network the key was never used from before (a new row
+ * in `connected_app_networks`). The row lock on the key serializes concurrent first calls, so only
+ * one of them reports `firstUse`. The address is caller-reported: alerts only, never authorization.
  */
-export async function recordAppKeyUse(id: string, ip: string | null): Promise<void> {
+export async function recordAppKeyUse(id: string, ip: string | null): Promise<AppKeyUseOutcome> {
   const { sql } = getOrgPg();
-  await sql`
-    UPDATE harness_shared.connected_apps
-       SET last_seen = now(), last_ip = COALESCE(${ip}, last_ip)
-     WHERE id = ${id} AND ${sql.unsafe(KEY_KINDS_SQL)}
-       AND (last_seen IS NULL
-            OR last_seen < now() - interval '60 seconds'
-            OR (${ip}::text IS NOT NULL AND last_ip IS DISTINCT FROM ${ip}))
+  const network = networkOf(ip);
+  const rows = await sql<Array<{ first_use: boolean | null; new_network: string | null }>>`
+    WITH used AS (
+      UPDATE harness_shared.connected_apps
+         SET last_seen = now(), last_ip = COALESCE(${ip}, last_ip),
+             first_used_at = COALESCE(first_used_at, now())
+       WHERE id = ${id} AND ${sql.unsafe(KEY_KINDS_SQL)}
+         AND (last_seen IS NULL
+              OR last_seen < now() - interval '60 seconds'
+              OR (${ip}::text IS NOT NULL AND last_ip IS DISTINCT FROM ${ip}))
+      RETURNING workspace_id, first_used_at = now() AS first_use
+    ), seen AS (
+      INSERT INTO harness_shared.connected_app_networks (app_id, workspace_id, network)
+      SELECT ${id}, workspace_id, ${network}::text FROM used WHERE ${network}::text IS NOT NULL
+      ON CONFLICT (app_id, network) DO NOTHING
+      RETURNING network
+    )
+    SELECT (SELECT first_use FROM used) AS first_use, (SELECT network FROM seen) AS new_network
   `;
+  return { firstUse: rows[0]?.first_use === true, newNetwork: rows[0]?.new_network ?? null };
 }

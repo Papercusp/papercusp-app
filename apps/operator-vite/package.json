@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "vite",
     "dev:nohmr": "bin/vite-watch-singleton",
-    "//prebuild": "WI-7088 + cdn-egress-fixes-2026-08-02 P-001: publicDir is apps/operator/public, and the vditor + monaco runtime mirrors there are gitignored/generated. postinstall normally populates them, but a deploy that skips node_modules would leave them absent — so re-assert here. Both are idempotent + version-stamped, so this is a no-op once current.",
-    "prebuild": "bash ../operator/scripts/setup-vditor-runtime.sh && bash ../operator/scripts/setup-monaco-runtime.sh && bash ../operator/scripts/setup-excalidraw-runtime.sh && bash ../operator/scripts/setup-porcupine-runtime.sh",
+    "//prebuild": "WI-7088 + cdn-egress-fixes-2026-08-02 P-001: publicDir is apps/operator/public, and the vditor + monaco runtime mirrors there are gitignored/generated. postinstall normally populates them, but a deploy that skips node_modules would leave them absent — so re-assert here. Both are idempotent + version-stamped, so this is a no-op once current. The wake + VAD ONNX runtimes (public/wake-runtime, public/vad-runtime) are asserted here too: the workspace-host sidecar build installs with --ignore-scripts from a source-only checkout, so apps/operator's postinstall never runs there and verify-sidecar-bundle's WI-10004073 layout check refused the r62 cut.",
+    "prebuild": "bash ../operator/scripts/setup-wake-runtime.sh && bash ../operator/scripts/setup-vad-runtime.sh && bash ../operator/scripts/setup-vditor-runtime.sh && bash ../operator/scripts/setup-monaco-runtime.sh && bash ../operator/scripts/setup-excalidraw-runtime.sh && bash ../operator/scripts/setup-porcupine-runtime.sh",
     "build": "bin/vite-build-singleflight",
     "preview": "vite preview",
     "test": "vitest run",

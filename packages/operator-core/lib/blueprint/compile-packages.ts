@@ -24,7 +24,7 @@ import {
   type ResolvedPackageInput,
 } from '@papercusp/orchestrator/blueprint';
 import { resolveLocalRecipe } from '../cupboard/recipe-store';
-import { operatorResolveExtends } from './installed-blueprints';
+import { INSTALLED_BLUEPRINTS_DIR, operatorResolveExtends } from './installed-blueprints';
 import { blueprintRegistrySets } from './registry-sets.js';
 import { resolveLocalRubric } from '../cupboard/rubric-store';
 import { resolveLocalRule } from '../cupboard/rule-store';
@@ -40,6 +40,7 @@ import {
   parseCapabilityClassRef,
   type ProviderBindingRow,
 } from '../capability-class-registry-store';
+import { IDENTITY_GRANT_PROVIDER_KINDS } from '../agent-identities/grant-provider-kinds';
 import {
   resolveIdentityClassProvider,
   type IdentityClassProviderResolution,
@@ -114,34 +115,44 @@ export function capabilityProviderInput(
   };
 }
 
-/** Use the existing resolution precedence and snapshot the directory actually selected. */
-export const resolveLocalBlueprintPackage: BlueprintPackageResolver = async (request) => {
+/** Where a blueprint repo vendors its bundled packages (D-037): `<dir>/packages/<kind>/<ref>/`. */
+export const VENDORED_PACKAGES_DIR = 'packages';
+
+/** Snapshot one package through the local stores' own readers. `vendoredDir`
+ * narrows every reader to that one directory instead of the host roots. */
+async function resolveStoredBlueprintPackage(
+  request: PackageRequest, vendoredDir?: string,
+): Promise<ResolvedPackageInput | null> {
+  const only = (kind: string) => vendoredDir ? [{ dir: join(vendoredDir, kind), layer: 'user' as const }] : undefined;
   if (request.kind === 'recipe') {
-    const asset = resolveLocalRecipe(request.ref);
+    const asset = resolveLocalRecipe(request.ref, only('recipe'));
     if (!asset) return null;
     const { dir, layer: _layer, source: _source, ...value } = asset;
     return snapshotPackageDirectory({ packageKind: 'recipe', ref: request.ref, revision: asset.version, dir, value });
   }
   if (request.kind === 'rubric') {
-    const asset = resolveLocalRubric(request.ref);
+    const asset = resolveLocalRubric(request.ref, only('rubric'));
     if (!asset) return null;
     const { dir, layer: _layer, source: _source, ...value } = asset;
     return snapshotPackageDirectory({ packageKind: 'rubric', ref: request.ref, revision: asset.version, dir, value });
   }
   if (request.kind === 'rule') {
-    const asset = resolveLocalRule(request.ref);
+    const asset = resolveLocalRule(request.ref, only('rule'));
     if (!asset) return null;
     const { dir, layer: _layer, ...value } = asset;
     return snapshotPackageDirectory({ packageKind: 'rule', ref: request.ref, revision: asset.version, dir, value });
   }
   if (request.kind === 'event') {
+    // Events are host registrations, never vendored content.
+    if (vendoredDir) return null;
     const asset = resolveInstalledEvent(request.ref);
     if (!asset) return null;
     const { dir, source: _source, ...value } = asset;
     return snapshotPackageDirectory({ packageKind: 'event', ref: request.ref, revision: asset.version, dir, value });
   }
   if (request.kind === 'knowledge-pack') {
-    const asset = await loadKnowledgePack(request.ref);
+    const asset = await loadKnowledgePack(request.ref,
+      vendoredDir ? { roots: [{ dir: join(vendoredDir, 'knowledge-pack'), source: 'installed' }] } : {});
     if (!asset) return null;
     if (!asset.directory || asset.warnings.length) {
       throw new CompositionCompilerError('package-read-failed', asset.warnings.join('; ') || 'resolved directory missing', request.ref);
@@ -152,7 +163,33 @@ export const resolveLocalBlueprintPackage: BlueprintPackageResolver = async (req
     });
   }
   throw new CompositionCompilerError('package-missing', 'no installed content resolver for package kind ' + request.kind, request.ref);
+}
+
+const satisfies = (pin: ResolvedPackageInput | null, request: PackageRequest) =>
+  pin !== null && (!request.version || pin.revision === request.version);
+
+/** Use the existing resolution precedence and snapshot the directory actually
+ * selected. When the host stores hold no package of the requested ref/version,
+ * the active installed releases' retained closures are the next tier (D-037):
+ * a bundled package resolves from the release that shipped it. */
+export const resolveLocalBlueprintPackage: BlueprintPackageResolver = async (request) => {
+  const local = await resolveStoredBlueprintPackage(request);
+  if (satisfies(local, request)) return local;
+  const { resolveInstalledReleasePackage } = await import('../cupboard/blueprint-release');
+  return (await resolveInstalledReleasePackage(INSTALLED_BLUEPRINTS_DIR(), request)) ?? local;
 };
+
+/** Resolve a repo's vendored packages first, then `host` (D-037) — the package
+ * half of the clone-first seam publish and install share. */
+export function vendoredBlueprintPackageResolver(
+  blueprintDir: string, host: BlueprintPackageResolver = resolveLocalBlueprintPackage,
+): BlueprintPackageResolver {
+  const vendoredDir = join(blueprintDir, VENDORED_PACKAGES_DIR);
+  return async (request) => {
+    const vendored = await resolveStoredBlueprintPackage(request, vendoredDir);
+    return satisfies(vendored, request) ? vendored : host(request);
+  };
+}
 
 /** Resolve the exact transitive graph once per compile; conflicting demands never overwrite. */
 export async function resolveBlueprintPackageInputs(
@@ -313,6 +350,7 @@ export async function compileBlueprintWithPackages(
         potSlug,
         classId: parsed.id,
         classVersion: parsed.version,
+        providerKinds: IDENTITY_GRANT_PROVIDER_KINDS,
       });
     });
   const capabilityProviders: ResolvedCapabilityProviderInput[] = [];

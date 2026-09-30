@@ -72,6 +72,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { presentOnDisk } from './lib/tracked-files.mjs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
@@ -87,9 +88,8 @@ function git(args) {
 
 /** Tracked .ts/.tsx source files, excluding tests/dist/node_modules/generated output. */
 function defaultCandidateFiles() {
-  return git(['ls-files', '--', '*.ts', '*.tsx'])
-    .split('\n')
-    .filter(Boolean)
+  // WI-10004176: presentOnDisk drops index entries a peer's plain `rm` left until git-sync commits it.
+  return presentOnDisk(git(['ls-files', '--', '*.ts', '*.tsx']).split('\n').filter(Boolean))
     .filter((f) => !/\.(test|spec|integration\.test)\.tsx?$/.test(f))
     .filter((f) => !/(^|\/)(dist|build|node_modules|\.papercusp|__tests__|__mocks__)\//.test(f))
     .filter((f) => !f.startsWith('papercup-release/') && !f.startsWith('papercup-checkpoint/'));
@@ -878,6 +878,19 @@ const LIVE_LOCK_IMPORTER_NO_HEAD_FALLBACK =
   'intentional (adjudicated 2026-09-28, WI-10003582): the live-lock importer pass must not relax on HEAD resolvability — ' +
   'a live-locked dependency may be changing its exports, so resolving its old copy at HEAD does not satisfy the importer.';
 
+/**
+ * WI-10004167 — `DesktopAuditDeps.workspaceId` selects WHICH workspace's audit_log a
+ * desktop-viewer row lands in. Omitting it is the production default, not a skipped concern:
+ * desktop-audit.ts:163-165 falls back to `activeWorkspaceId()`, the process's own workspace.
+ * The local lane (frame-vnc.ts) and the hosted host (hosted-workspace-host-runtime.ts) SHOULD
+ * write to their own database. Only the control-plane relay (apps/operator/bin/hosted-handler.ts)
+ * writes a second copy into the binding's control-plane workspace, because the customer-acceptance
+ * receipt reads that database (WI-10004167). The asymmetry is the design.
+ */
+const AUDIT_ROW_OWN_WORKSPACE_DEFAULT =
+  'intentional (adjudicated 2026-09-30, WI-10004167): omitting workspaceId writes to the process\'s own workspace ' +
+  '(desktop-audit.ts:163-165 `activeWorkspaceId()`); only the control-plane relay copy targets another workspace.';
+
 const FAIL_BASELINE = new Map([
   // Historical seed from the measured `--list` run after the WI-1745363 attribution fix:
   // 28 findings / 22 distinct rows over 7,150 files (was 44 / 33 under shape-based
@@ -938,6 +951,11 @@ const FAIL_BASELINE = new Map([
   ['RunGitSyncOpts|packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.ts|loadRoster', PHASE_I_FENCE_FIXTURE],
   ['RunGitSyncOpts|packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.ts|refreshLiveLockHoldings', PHASE_I_FENCE_FIXTURE],
   ['DesktopAuditDeps|packages/operator-core/lib/workspace-host/hosted-workspace-host-runtime.ts|now', OVERRIDE_WITH_REAL_DEFAULT],
+  // 2026-09-30 — WI-10004167 added the control-plane relay copy (hosted-handler.ts), which
+  // injects workspaceId and takes the Date.now default for `now` (desktop-audit.ts `deps.now ?? Date.now`).
+  ['DesktopAuditDeps|apps/operator/bin/hosted-handler.ts|now', OVERRIDE_WITH_REAL_DEFAULT],
+  ['DesktopAuditDeps|packages/operator-core/lib/deployment/frame-vnc.ts|workspaceId', AUDIT_ROW_OWN_WORKSPACE_DEFAULT],
+  ['DesktopAuditDeps|packages/operator-core/lib/workspace-host/hosted-workspace-host-runtime.ts|workspaceId', AUDIT_ROW_OWN_WORKSPACE_DEFAULT],
   ['ExclusiveWaitParams|packages/operator-core/lib/agent-tools/locks/acquire_resource.ts|hostLocalOwnerPid', WAIT_MODE_SPECIFIC_SEAM],
   ['GuardSpec|apps/operator/lib/release/deploy-deps.ts|onTick', WAIT_MODE_SPECIFIC_SEAM],
   ['GuardSpec|packages/operator-core/lib/agent-tools/db/migrate.ts|hostLocalOwnerPid,onStaleHolderReclaimed', WAIT_MODE_SPECIFIC_SEAM],

@@ -24,6 +24,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import type postgres from 'postgres';
 import { z } from 'zod';
+import { FIRST_PARTY_CLASS_NAMESPACE } from '@papercusp/orchestrator/blueprint';
 import { canonicalJson } from '../authority/authority-rpc-envelope';
 import { isCompilableSchema } from '../datatype-payload-validation';
 import {
@@ -460,6 +461,16 @@ export async function importCupboardClassContracts(
           ref: entry.ref,
           detail: `behavioralSuiteRef ${contract.behavioralSuiteRef} names no <packageKind>:<ref> pinned in the release closure`,
         });
+      }
+      // First-party classes are code, not registry rows (D-039), so their
+      // namespace is held even where this workspace has no row for it.
+      if (ns === FIRST_PARTY_CLASS_NAMESPACE) {
+        refusals.push({
+          code: 'platform-shadow',
+          ref: entry.ref,
+          detail: `namespace "${ns}" is reserved for the platform's first-party classes`,
+        });
+        continue;
       }
       const platformRows = await tx<{ id: string; version: string }[]>`
         SELECT id, version FROM harness_shared.capability_class_registry

@@ -50,9 +50,12 @@ import { loadCorpusFixture } from './corpus';
 import { loadGoldSetFixture } from './gold-set';
 import { BENCH_SCOPE, makeBackendCtx } from './run-bench';
 import {
+  recordMemoryPrecisionAttempt,
   recordMemoryPrecisionRun,
   readMemoryPrecision,
   PRECISION_BENCH_WORKER_TIMEOUT_MS,
+  type MemoryPrecisionAttemptInput,
+  type MemoryPrecisionAttemptStage,
   type MemoryPrecisionMetrics,
 } from './precision-read';
 import { evaluateRecallDrop, BASELINE_HISTORY_WINDOW, type PriorRun, type RecallDropEvaluation } from './precision-alert';
@@ -101,12 +104,18 @@ export interface MemoryPrecisionBenchDeps {
   history?: (workspaceId: string) => Promise<PriorRun[]>;
   /** Override the recall-drop escalation (file on alert / resolve on recovery). Tests capture without PG. */
   escalateRecall?: (workspaceId: string, backend: string, rowId: number, evaluation: RecallDropEvaluation) => Promise<void>;
+  /**
+   * Override the per-fire outcome write (WI-10004133). Every fire records one attempt,
+   * so a fire that writes no bench row still leaves its reason behind. Tests capture
+   * without PG.
+   */
+  recordAttempt?: (workspaceId: string, attempt: MemoryPrecisionAttemptInput) => Promise<void>;
   log?: (m: string) => void;
 }
 
 export type MemoryPrecisionOutcome =
   | { ran: false; skipReason: 'flag-off' }
-  | { ran: false; skipReason: 'failed'; error: string }
+  | { ran: false; skipReason: 'failed'; stage: MemoryPrecisionAttemptStage; error: string }
   | { ran: true; metrics: MemoryPrecisionMetrics; rowId: number };
 
 function fmt(v: number | null): string {
@@ -461,7 +470,27 @@ export async function runMemoryPrecisionMonitor(
 ): Promise<MemoryPrecisionOutcome> {
   const log = deps.log ?? ((m: string) => console.log(`[memory-precision-bench] ${m}`));
   const flag = deps.flag ?? ((slug: string) => getFlag(FLAGS.MEMORY_PRECISION_BENCH, `routine:${slug}`));
-  if (!(await flag(input.installSlug))) return { ran: false, skipReason: 'flag-off' };
+  // WI-10004133: every exit records its outcome durably. Best-effort — an attempt-write
+  // failure is logged and never changes the outcome or throws into the routine tick.
+  // The attempt ledger follows the record seam: a caller that injects the bench-row write
+  // (a test or a dry harness) never writes attempts to the real database by default.
+  const injectedAttempt = deps.recordAttempt ?? (deps.record ? async () => {} : undefined);
+  const recordAttempt = async (attempt: MemoryPrecisionAttemptInput): Promise<void> => {
+    try {
+      if (injectedAttempt) {
+        await injectedAttempt(input.workspaceId, attempt);
+      } else {
+        const { getOrgPg } = await import('@papercusp/db-org');
+        await recordMemoryPrecisionAttempt(getOrgPg().sql, input.workspaceId, attempt);
+      }
+    } catch (e) {
+      log(`attempt record failed (non-fatal, outcome ${attempt.outcome}): ${e instanceof Error ? e.message : e}`);
+    }
+  };
+  if (!(await flag(input.installSlug))) {
+    await recordAttempt({ outcome: 'flag-off' });
+    return { ran: false, skipReason: 'flag-off' };
+  }
 
   // P-008: measure what the injector does. Only an EFFECTIVE On (mode on AND a
   // key stored) gates the push path; Off and Log only inject the floor's set.
@@ -482,7 +511,8 @@ export async function runMemoryPrecisionMonitor(
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     log(`bench failed (non-fatal): ${error}`);
-    return { ran: false, skipReason: 'failed', error };
+    await recordAttempt({ outcome: 'failed', stage: 'bench', error, jevGate });
+    return { ran: false, skipReason: 'failed', stage: 'bench', error };
   }
 
   // EI-10047: read the rolling baseline BEFORE this run's own row exists, so
@@ -517,8 +547,10 @@ export async function runMemoryPrecisionMonitor(
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     log(`record failed (non-fatal): ${error}`);
-    return { ran: false, skipReason: 'failed', error };
+    await recordAttempt({ outcome: 'failed', stage: 'record', error, jevGate });
+    return { ran: false, skipReason: 'failed', stage: 'record', error };
   }
+  await recordAttempt({ outcome: 'recorded', rowId, jevGate });
 
   try {
     if (deps.invalidate) deps.invalidate();

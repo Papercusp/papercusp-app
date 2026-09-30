@@ -50,7 +50,7 @@ tsconfig.declarations.json vitest.config.ts
 eslint.config.mjs knip.json bunfig.toml .gitignore
 CLAUDE.md AGENTS.md BORROWABLE.md
 node_modules apps libs packages
-tools scripts templates patches design design-tokens rubrics docs bin"
+tools scripts templates patches design design-tokens rubrics goal-packages docs bin"
 
 source_tree_selection() {
   local here="$1" mono="$2" mode="${3:-installer}"

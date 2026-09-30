@@ -25,7 +25,13 @@
 import { promises as fs, existsSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { BlueprintSourceDocumentSchema, blueprintPackageInputs, resolveBlueprintSource, type ResolveExtendsPath } from '@papercusp/orchestrator/blueprint';
+import {
+  BlueprintSourceDocumentSchema,
+  blueprintPackageInputs,
+  resolveBlueprintSource,
+  type BlueprintSourceDocument,
+  type ResolveExtendsPath,
+} from '@papercusp/orchestrator/blueprint';
 import {
   resolveAndValidateBlueprint,
   validateBlueprintDependencies,
@@ -34,13 +40,19 @@ import {
 } from '@papercusp/blueprint-distribution';
 import { blueprintRegistrySets } from '../blueprint/registry-sets';
 import { registerHarnessOpProxies } from '../harness-ops/proxy';
-import { resolveBlueprintPackageInputs, type BlueprintPackageResolver } from '../blueprint/compile-packages';
+import {
+  resolveBlueprintPackageInputs,
+  vendoredBlueprintPackageResolver,
+  type BlueprintPackageResolver,
+} from '../blueprint/compile-packages';
 import { resolveSeedPackKey } from '../knowledge-packs/seed-pack-key';
 import {
   BlueprintLifecycleError,
   buildBlueprintReleaseArchive,
   commitBlueprintRelease,
   verifyListedBlueprintRelease,
+  type BlueprintJournalReport,
+  type BlueprintLifecycleJournal,
   type BlueprintActivationLayer,
   type BlueprintActivationPreflight,
   type BlueprintReleaseDiff,
@@ -72,6 +84,21 @@ import type {
 } from './capability-provider-package-closure';
 import type { IdentityGrantFailure } from '../capability-envelope/blueprint-envelopes';
 import type { CupboardReleaseManifest } from './listing-manifest';
+import type { InstallProviderBinding } from './blueprint-install-journal';
+import {
+  identityConsentSubjects,
+  identityInstallConsentRefusal,
+  identityInstallConsentSubject,
+  identityPermissionLines,
+  resolvedProviderBindings,
+  type IdentityConsentSubjects,
+  type IdentityInstallConsent,
+} from './identity-install-consent';
+import {
+  checkListedIdentityFacet,
+  type IdentityListingSurface,
+  type ListedBlueprintFacet,
+} from './identity-listing-surface';
 
 export interface InstallBlueprintCoreInput {
   /** The blueprint repo's GitHub URL (https://github.com/owner/repo[.git]). */
@@ -90,6 +117,9 @@ export interface InstallBlueprintCoreInput {
     /** The whole signed release manifest, verbatim from the listing. A present
      *  signature is verified before any bytes land; absent installs unsigned. */
     manifest?: CupboardReleaseManifest | null;
+    /** The row's facet (P-016). Present on every listing-resolved install: an
+     *  identity must be listed with the surface its verified closure derives. */
+    listing?: ListedBlueprintFacet;
   };
   /** Trusted Cupboard moderation receipt for this exact listed artifact. Direct
    * GitHub URL installs cannot supply one through the public install door. */
@@ -98,6 +128,10 @@ export interface InstallBlueprintCoreInput {
    * (P-021), bound to the exact artifact hash and {ref, contractHash} set that
    * a `class_contract_consent_required` refusal returned. */
   classContractConsent?: ClassContractConsent;
+  /** Administrator consent to everything beyond package-private content (P-014,
+   * D-034), echoing the `consentSubject` an `identity_install_consent_required`
+   * refusal returned. Content-only releases need none. */
+  identityInstallConsent?: IdentityInstallConsent;
   capabilityContext?: {
     workspaceId: string;
     potSlug: string;
@@ -137,6 +171,24 @@ export interface InstallBlueprintCoreResult {
   capabilityProviderInstalls: CapabilityProviderPackageInstallResult | null;
   /** Consent-bound class-contract import; null when the release carries none. */
   classContracts: ImportClassContractsResult | null;
+  /** What the install needed consent for (contentOnly when nothing). */
+  consent: IdentityConsentSubjects;
+  /** An identity's declared surface, derived from the verified closure (P-016); null otherwise. */
+  identitySurface: IdentityListingSurface | null;
+  /** The pot install journal's outcome (P-014); null outside a pot. */
+  bindingJournal: BlueprintJournalReport | null;
+}
+
+/** Every pot binding the identity runs through, with its execution kind. */
+function journaledProviderBindings(resolution: CapabilityGrantResolutionVerdict | null): InstallProviderBinding[] {
+  if (!resolution) return [];
+  return [
+    ...resolution.requirements.flatMap((item) => item.binding ? [{ classRef: item.classRef,
+      providerPackage: item.binding.providerPackage, providerVersion: item.binding.providerVersion,
+      providerKind: item.binding.providerKind }] : []),
+    ...resolution.selected.map(({ classRef, providerPackage, providerVersion, providerKind }) =>
+      ({ classRef, providerPackage, providerVersion, providerKind })),
+  ];
 }
 
 export interface InstallBlueprintCoreDeps {
@@ -173,9 +225,13 @@ export interface InstallBlueprintCoreDeps {
   installCapabilityProviderPackages?: (
     review: CapabilityProviderPackageClosureReview,
   ) => Promise<CapabilityProviderPackageInstallResult>;
-  commitCapabilitySelections?: (
-    selections: readonly CapabilityProviderSelection[],
-  ) => Promise<{ rollback: () => Promise<void> }>;
+  /** P-014 / D-034: the destination pot's install journal for this release's
+   * provider bindings — the ones it reuses and the ones it writes. The release
+   * lifecycle drives it under its lock; the file-tier switch is activation. */
+  blueprintInstallJournal?: (input: {
+    blueprintId: string;
+    bindings: readonly InstallProviderBinding[];
+  }) => BlueprintLifecycleJournal;
   /** Consent-bound writer into the destination capability-class registry
    * (`importCupboardClassContracts`, scoped to the install's workspace). */
   importClassContracts?: (
@@ -301,12 +357,16 @@ export function servedBlueprintSource(
   cloneDir: string,
   listingRef: string | undefined,
   host: ResolveExtendsPath,
-): { bpDir: string; blueprintFile: string; resolveExtends: ResolveExtendsPath } {
+  hostPackage?: BlueprintPackageResolver,
+): { bpDir: string; blueprintFile: string; resolveExtends: ResolveExtendsPath; resolvePackage: BlueprintPackageResolver } {
   const bpDir = locateBlueprintDir(cloneDir, listingRef);
   return {
     bpDir,
     blueprintFile: join(bpDir, 'blueprint.yaml'),
     resolveExtends: cloneFirstResolveExtends(cloneDir, bpDir, host),
+    // D-037: bundled packages the repo vendors travel with it, so a clean
+    // destination installs them from the clone rather than its own stores.
+    resolvePackage: vendoredBlueprintPackageResolver(bpDir, hostPackage),
   };
 }
 
@@ -322,7 +382,8 @@ export async function installBlueprintFromCupboardCore(
   const cloneDir = join(deps.tmpDir(), `cupboard-blueprint-${Date.now()}-${Math.floor(performance.now())}`);
   try {
     await deps.cloneRepo(url, cloneDir);
-    const { bpDir, resolveExtends } = servedBlueprintSource(cloneDir, input.listingRef, deps.resolveExtends);
+    const { bpDir, resolveExtends, resolvePackage } = servedBlueprintSource(
+      cloneDir, input.listingRef, deps.resolveExtends, deps.resolvePackage);
 
     let raw: Record<string, unknown>;
     try {
@@ -362,6 +423,7 @@ export async function installBlueprintFromCupboardCore(
       blueprints: [],
     };
     let declaredCapabilityGrants: CapabilityGrantSet = {};
+    let declaredContributions: BlueprintSourceDocument['contributions'];
     if (!abstract) {
       // P-002: register a PROXY CoordOp per harness-provided op this blueprint
       // declares (`ops:` manifest), BEFORE the resolve+validate snapshots the op
@@ -413,13 +475,14 @@ export async function installBlueprintFromCupboardCore(
         optional: resolved.grants?.optional ?? [],
         suggestedProviders: resolved.grants?.suggestedProviders ?? {},
       };
+      declaredContributions = resolved.contributions;
       const bundles = resolved.bundles ?? [];
       const requests: Array<{ kind: string; ref: string; version?: string }> = [...bundles];
       const knowledge = resolveSeedPackKey(resolved).packId;
       if (knowledge && !requests.some((request) => request.kind === 'knowledge-pack' && request.ref === knowledge)) {
         requests.push({ kind: 'knowledge-pack', ref: knowledge });
       }
-      const packages = await resolveBlueprintPackageInputs(requests, deps.resolvePackage);
+      const packages = await resolveBlueprintPackageInputs(requests, resolvePackage);
       closure = { bundles: requests, inputs: [...packages, ...blueprintPackageInputs(source, packages)] };
     } catch (error) {
       throw new InstallBlueprintError(`blueprint "${id}" package resolution failed: ${error instanceof Error ? error.message : String(error)}`, 422);
@@ -465,35 +528,66 @@ export async function installBlueprintFromCupboardCore(
       ? raw.version
       : depCheck.pins.find((pin) => pin.packageKind === 'blueprint' && pin.ref === id)?.revision ?? 'unversioned';
 
-    // P-021 / D-015: third-party class contracts ride in the signed closure.
-    // They enter the destination registry only after the listed release has
-    // verified (hash pin + publisher signature) and only with administrator
-    // consent bound to this exact artifact and contract set — before grant
-    // resolution, so a grant on a novel class resolves against the registry.
+    // The listed release verifies (hash pin + a PRESENT publisher signature)
+    // before anything is written: class contracts, bindings or bytes.
     let classContracts: ClassContractPayloadEntry[] = [];
+    let releaseArchive: ReturnType<typeof buildBlueprintReleaseArchive>;
+    let verifiedPublisherLogin: string | null;
     try {
       classContracts = await readClassContractSources(bpDir);
+      releaseArchive = buildBlueprintReleaseArchive(depCheck.pins, id, classContracts);
+      ({ verifiedPublisherLogin } = verifyListedBlueprintRelease({
+        id, version, archive: releaseArchive, expectedRelease: input.expectedRelease,
+      }));
     } catch (error) {
       if (error instanceof ClassContractImportError) throw classContractInstallError(error);
+      if (error instanceof BlueprintLifecycleError) throw new InstallBlueprintError(error.message, error.status);
       throw error;
     }
+    const artifactContentHash = releaseArchive.package.rootHash;
+
+    // D-034 trust path: a signed manifest that lists permissions must list
+    // exactly what the closure carries. An empty legacy list is tolerated —
+    // consent below is computed from the closure, so omission hides nothing.
+    const listedPermissions = input.expectedRelease?.manifest?.signature
+      ? [...input.expectedRelease.manifest.permissions].sort() : [];
+    const carriedPermissions = identityPermissionLines(identityConsentSubjects({
+      grants: declaredCapabilityGrants, providerBindings: [], contributions: declaredContributions,
+      inputs: releaseArchive.pins,
+    }));
+    if (listedPermissions.length > 0 && listedPermissions.join('\n') !== carriedPermissions.join('\n')) {
+      throw new InstallBlueprintError(
+        `blueprint "${id}" signed release lists permissions that differ from what its closure carries`,
+        422,
+        'identity_permissions_mismatch',
+        { listed: listedPermissions, carried: carriedPermissions },
+      );
+    }
+
+    // P-016: the storefront previews an identity from its listed surface, so a
+    // listed identity must describe exactly what this verified closure carries.
+    const { surface: identitySurface, mismatch: identityFacetMismatch } = checkListedIdentityFacet(
+      input.expectedRelease?.listing,
+      { id, version, raw, grants: declaredCapabilityGrants, contributions: declaredContributions, archive: releaseArchive },
+    );
+    if (identityFacetMismatch) {
+      throw new InstallBlueprintError(
+        `blueprint "${id}" is listed with a declared identity surface that differs from its closure ` +
+          `(${identityFacetMismatch.reason})`,
+        422,
+        'identity_surface_mismatch',
+        identityFacetMismatch,
+      );
+    }
+
+    // P-021 / D-015: third-party class contracts ride in the signed closure.
+    // They enter the destination registry only after the listed release has
+    // verified and only with administrator consent bound to this exact
+    // artifact and contract set — before grant resolution, so a grant on a
+    // novel class resolves against the registry.
     let classContractImport: ImportClassContractsResult | null = null;
     if (classContracts.length > 0) {
-      let verifiedPublisherLogin: string | null;
-      let artifactContentHash: string;
-      let closurePins: Array<{ packageKind: string; ref: string }>;
-      try {
-        const archive = buildBlueprintReleaseArchive(depCheck.pins, id, classContracts);
-        ({ verifiedPublisherLogin } = verifyListedBlueprintRelease({
-          id, version, archive, expectedRelease: input.expectedRelease,
-        }));
-        artifactContentHash = archive.package.rootHash;
-        closurePins = archive.pins.map((pin) => ({ packageKind: pin.packageKind, ref: pin.ref }));
-      } catch (error) {
-        if (error instanceof ClassContractImportError) throw classContractInstallError(error);
-        if (error instanceof BlueprintLifecycleError) throw new InstallBlueprintError(error.message, error.status);
-        throw error;
-      }
+      const closurePins = releaseArchive.pins.map((pin) => ({ packageKind: pin.packageKind, ref: pin.ref }));
       const consentSubject = classContractConsentSubject(artifactContentHash, classContracts);
       const review = { consentSubject, contracts: classContracts };
       if (!verifiedPublisherLogin) {
@@ -611,7 +705,26 @@ export async function installBlueprintFromCupboardCore(
           );
         }
       }
+    }
 
+    // D-034: one consent to everything beyond package-private content, bound to
+    // this artifact, before any provider package, binding or byte is written.
+    const consent = identityConsentSubjects({
+      grants: declaredCapabilityGrants,
+      providerBindings: resolvedProviderBindings(capabilityGrantResolution),
+      contributions: declaredContributions,
+      inputs: releaseArchive.pins,
+    });
+    if (!consent.contentOnly) {
+      const consentSubject = identityInstallConsentSubject(artifactContentHash, consent);
+      const refusal = identityInstallConsentRefusal(input.identityInstallConsent, consentSubject);
+      if (refusal) {
+        throw new InstallBlueprintError(`blueprint "${id}": ${refusal.detail}`, 409,
+          'identity_install_consent_' + refusal.code, { consentSubject, subjects: consent, identitySurface });
+      }
+    }
+
+    if (capabilityGrantResolution && input.capabilityContext) {
       if (capabilityGrantResolution.selected.length > 0) {
         if (!deps.reviewCapabilityProviderPackages) {
           throw new InstallBlueprintError(
@@ -671,29 +784,18 @@ export async function installBlueprintFromCupboardCore(
       }
     }
 
-    let rollbackCapabilitySelections: (() => Promise<void>) | null = null;
-    if ((capabilityGrantResolution?.selected.length ?? 0) > 0) {
-      if (!deps.commitCapabilitySelections) {
-        throw new InstallBlueprintError(
-          'capability provider choices resolved but this install path cannot persist pot bindings',
-          500,
-          'capability_binding_writer_unavailable',
-          capabilityGrantResolution,
-        );
-      }
-      try {
-        rollbackCapabilitySelections = (
-          await deps.commitCapabilitySelections(capabilityGrantResolution!.selected)
-        ).rollback;
-      } catch (error) {
-        throw new InstallBlueprintError(
-          'capability provider binding failed before blueprint install: ' +
-            (error instanceof Error ? error.message : String(error)),
-          409,
-          'capability_provider_binding_failed',
-          capabilityGrantResolution,
-        );
-      }
+    // Every install into a pot is journaled, even one with no bindings: an
+    // update that no longer needs a binding fences the prior install's.
+    let journal: BlueprintLifecycleJournal | undefined;
+    if (input.capabilityContext && deps.blueprintInstallJournal) {
+      journal = deps.blueprintInstallJournal({ blueprintId: id, bindings: journaledProviderBindings(capabilityGrantResolution) });
+    } else if ((capabilityGrantResolution?.selected.length ?? 0) > 0) {
+      throw new InstallBlueprintError(
+        'capability provider choices resolved but this install path cannot persist pot bindings',
+        500,
+        'capability_binding_writer_unavailable',
+        capabilityGrantResolution,
+      );
     }
 
     let lifecycle: Awaited<ReturnType<typeof commitBlueprintRelease>>;
@@ -713,27 +815,12 @@ export async function installBlueprintFromCupboardCore(
           policyRef: modePolicyRef,
           approvedArtifactContentHash: input.modeApproval!.approvedArtifactContentHash,
         } : undefined,
+        ...(journal ? { journal } : {}),
       });
     } catch (error) {
-      let rollbackFailure: unknown;
-      if (rollbackCapabilitySelections) {
-        try {
-          await rollbackCapabilitySelections();
-        } catch (rollbackError) {
-          rollbackFailure = rollbackError;
-        }
-      }
-      if (rollbackFailure) {
-        throw new InstallBlueprintError(
-          'blueprint release failed and capability binding rollback also failed: ' +
-            (rollbackFailure instanceof Error ? rollbackFailure.message : String(rollbackFailure)),
-          500,
-          'capability_binding_rollback_failed',
-          { releaseError: error, capabilityGrants: capabilityGrantResolution },
-        );
-      }
       if (error instanceof BlueprintLifecycleError) {
-        throw new InstallBlueprintError(error.message, error.status);
+        throw new InstallBlueprintError(error.message, error.status, error.code,
+          error.code ? { capabilityGrants: capabilityGrantResolution } : undefined);
       }
       throw error;
     }
@@ -760,6 +847,9 @@ export async function installBlueprintFromCupboardCore(
       capabilityProviderReview,
       capabilityProviderInstalls,
       classContracts: classContractImport,
+      consent,
+      identitySurface,
+      bindingJournal: lifecycle.journal ?? null,
     };
   } finally {
     await fs.rm(cloneDir, { recursive: true, force: true }).catch(() => {});

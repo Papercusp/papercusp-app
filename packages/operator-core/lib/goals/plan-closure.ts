@@ -97,6 +97,9 @@ export const GATE_CODE_CLOSURE_LEG: Record<
   spec_coverage_unavailable: { leg: 'verificationReadBack', rating: 'unknown' },
 
   // --- leg 3: an INDEPENDENT evaluator regraded the current subject ---------
+  // WI-10004178 / endgame D-095: a federated receiver cannot tell whether the authoring
+  // node's cards grade the current revision — a failed measurement, not a finding.
+  acceptance_authored_on_other_node: { leg: 'independentRegrade', rating: 'unknown' },
   acceptance_ungraded: { leg: 'independentRegrade', rating: 'fail' },
   self_graded_only: { leg: 'independentRegrade', rating: 'fail' },
   acceptance_rubric_missing: { leg: 'independentRegrade', rating: 'fail' },

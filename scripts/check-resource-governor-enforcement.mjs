@@ -1505,6 +1505,15 @@ export const P016_REVIEWED_DISPOSITIONS = Object.freeze([
       "P-016 reviewed bypass disposition for packages/operator-core/lib/release/repair-head-admission.ts (frozen-candidate-stays-frozen-through-all-fixes-2026-09-03 P-001, the ONE door a fix enters the frozen lineage through): every start is a short synchronous spawnSync('git', …) plumbing call awaited to completion — rev-parse, ls-tree, read-tree/update-index/write-tree against a throwaway temp index, diff-tree (the allowlist proof), and commit-tree — followed by one update-ref. It runs once per explicit `release:repair-queue { op:'admit' }` call under the caller's own admission, holds nothing resident, and creates no independent queue; a resident Governor lease here would gate the gate's own repair path behind the resource it is trying to un-wedge.",
   },
   {
+    // WI-10004151 part 2: the admission-time dependency prediction the repair-queue admit door
+    // consults before it lands a lockfile change on the frozen lineage.
+    path: "packages/operator-core/lib/release/dependency-admission-prediction.ts",
+    code: "resource-start-outside-admission",
+    disposition: "bypass",
+    reason:
+      "P-016 reviewed bypass disposition for packages/operator-core/lib/release/dependency-admission-prediction.ts (WI-10004151): its only start is one execFile('bash', [dependency-generation.sh, '--predict-ref', <ref>]) per explicit `release:repair-queue { op:'admit' }` call, made inside that admit and awaited to completion. The --predict-ref mode is read-only against the generation store and the live trees: it fingerprints the ref's dependency inputs, checks for an existing selector or a live-tree match, and otherwise stages ONLY the ref's lockfiles into a scratch root (removed before it returns) for the dependency-lock-equivalence.mjs comparison. It never installs, never copies node_modules, never publishes, and takes no generation lock. The call is bounded by DEPENDENCY_PREDICTION_TIMEOUT_MS (30s, measured 12.6s at load ~90) plus a 4 MiB maxBuffer, after which the prediction degrades to verdict 'unknown' rather than waiting. It holds nothing resident and creates no independent queue. It is the same shape as the repair-head-admission.ts bypass it sits beside: a resident Governor lease here would gate the frozen lineage's own repair door behind the capacity the gate is trying to recover.",
+  },
+  {
     path: "scripts/check-integration-teardown-nullsafe.mjs",
     code: "resource-start-outside-admission",
     disposition: "bypass",

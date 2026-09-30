@@ -19,6 +19,11 @@ import {
   type HostedWorkspaceAttachRequest,
 } from "@papercusp/operator-core/lib/endpoint-route/hosted-workspace-session";
 import {
+  hostedDesktopAuditRow,
+  isHostedDesktopAuditAction,
+  recordDesktopAudit,
+} from "@papercusp/operator-core/lib/desktop/desktop-audit";
+import {
   AppRelayRateLimiter,
   DEFAULT_APP_RELAY_LIMITS,
   InMemoryHostedAppRelayUsageStore,
@@ -28,6 +33,15 @@ import {
   type HostedAppRelayDependencies,
   type HostedAppRelayUsageStore,
 } from "@papercusp/operator-core/lib/workspace-host/hosted-app-relay";
+import {
+  InMemoryPortalOAuthStore,
+  PostgresPortalOAuthStore,
+  handleHostedMcpOAuth,
+  isPortalMcpOAuthPath,
+  type PortalMcpOAuthDependencies,
+  type PortalOAuthStore,
+} from "@papercusp/operator-core/lib/connected-apps/portal-mcp-oauth";
+import { createHostedPrincipalResolver } from "@papercusp/operator-core/lib/auth/hosted-principal-resolver";
 
 /** Local server-rendered namespaces that must never become SPA-looking 200s. */
 export const HOSTED_FORBIDDEN_HOST_PATH_PREFIXES = [
@@ -77,6 +91,16 @@ export interface HostedHandlerOptions {
    */
   appRelayUsage?: HostedAppRelayUsageStore;
   appRelayLimits?: AppRelayLimits;
+  /**
+   * The portal's MCP OAuth clients and requests (P-325, migration 1260). Production passes the
+   * Postgres store; the in-memory default is for tests and hosts without one.
+   */
+  mcpOAuthStore?: PortalOAuthStore;
+  /**
+   * The control-plane workspace the principal resolver stamps (see hosted-principal-resolver.ts).
+   * Without it the consent page cannot resolve a signed-in account, so it always asks to sign in.
+   */
+  controlPlaneWorkspaceId?: string;
 }
 
 export function createHostedHandler(
@@ -90,6 +114,22 @@ export function createHostedHandler(
   // every relay socket and reports what it sees; `heartbeat_at` is what the CLI's
   // `reachable` and terminal gate read, so a dead link stops reading as connected.
   const sessionBroker = new HostedWorkspaceSessionBroker({
+    // WI-10004167: the control plane's own copy of hosted desktop viewer starts, in
+    // the binding's control-plane workspace. The host writes these to its own
+    // database, which the customer-acceptance receipt cannot read. Only desktop
+    // starts are persisted: the broker also reports every relayed terminal frame.
+    onAudit: (event) => {
+      if (!isHostedDesktopAuditAction(event.action)) return;
+      recordDesktopAudit(hostedDesktopAuditRow(event), {
+        idPrefix: "hosted-relay-vnc",
+        workspaceId: () => event.controlPlaneWorkspaceId,
+        onError: (error) =>
+          console.warn(
+            `[hosted-relay] could not record ${event.action} for ${event.customerWorkspaceId} channel ${event.channelId ?? "?"}:`,
+            error instanceof Error ? error.message : error,
+          ),
+      });
+    },
     onConnectorLiveness: (binding, alive) => {
       if (!gateway) return;
       void gateway.recordLiveness(binding, alive, (error) => {
@@ -114,6 +154,32 @@ export function createHostedHandler(
     rate: new AppRelayRateLimiter(appRelayLimits.requestsPerMinute),
     limits: appRelayLimits,
   };
+
+  // P-325 (D-021): the portal is each hosted workspace's MCP authorization server. An MCP
+  // client handed `<portal>/api/workspaces/<id>/mcp` follows the relay's 401 to this metadata,
+  // registers, sends the person to the consent page (the plane's own signed-in session decides
+  // who may approve), and trades the code for a key the MACHINE mints over the connector.
+  // Matched by the module's own path test, ahead of the relay and the `/api/*` catch-all.
+  const controlPlaneWorkspaceId = options.controlPlaneWorkspaceId?.trim();
+  const resolveHostedPrincipal = controlPlaneWorkspaceId
+    ? createHostedPrincipalResolver({
+        controlPlaneWorkspaceId,
+        sessionCookieCodec: plane.components.sessionCookieCodec,
+        sessionStore: plane.components.sessionStore,
+        membershipAuthority: plane.components.membershipAuthority,
+      })
+    : null;
+  const mcpOAuth: PortalMcpOAuthDependencies = {
+    store: options.mcpOAuthStore ?? new InMemoryPortalOAuthStore(),
+    port: sessionBroker,
+    resolvePrincipal: async (headers) =>
+      resolveHostedPrincipal ? resolveHostedPrincipal(headers) : { ok: false, reason: "principal_resolver_unconfigured" },
+  };
+  app.use("*", async (context, next) => {
+    if (!isPortalMcpOAuthPath(new URL(context.req.url).pathname)) return next();
+    return (await handleHostedMcpOAuth(context.req.raw, mcpOAuth)) ?? new Response("Not found", { status: 404 });
+  });
+
   app.all("/api/workspaces/:workspaceId/agent-tools/*", (context) => handleHostedAppRelay(context.req.raw, appRelay));
   app.all("/api/workspaces/:workspaceId/mcp", (context) => handleHostedAppRelay(context.req.raw, appRelay));
 
@@ -184,8 +250,12 @@ export async function createHostedHandlerFromEnvironment(
     controlPlaneWorkspaceId: configuration.controlPlaneWorkspaceId,
   });
   // The monthly relay bandwidth cap (D-006) must survive a restart, so production
-  // counts it in Postgres, as the hosted service role (migrations 1254 + 1255).
+  // counts it in Postgres, as the hosted service role (migrations 1254 + 1255). So do
+  // the portal's MCP OAuth clients and pending grants (migration 1260, P-325).
+  const runService = dependencies.runService ?? withHostedServiceContext;
   return createHostedHandler(plane, spa, {
-    appRelayUsage: new PostgresHostedAppRelayUsageStore(dependencies.runService ?? withHostedServiceContext),
+    appRelayUsage: new PostgresHostedAppRelayUsageStore(runService),
+    mcpOAuthStore: new PostgresPortalOAuthStore(runService),
+    controlPlaneWorkspaceId: configuration.controlPlaneWorkspaceId,
   });
 }

@@ -364,6 +364,11 @@ async function startDbosOnce(): Promise<void> {
     // wrapper (autonomous launch-blueprint fires survive a host crash + re-run
     // once) BEFORE launch, alongside the feature-pipeline + coord-program workflows.
     await import('./durable-spawn');
+    // portable-identity-packages P-018 (D-029 §5): worn async identity rules run as
+    // their own durable workflow + queue — never the in-process reaction path, and
+    // not gated on PAPERCUSP_DBOS_REACTIONS (set on no unit). Request workers reach
+    // it through a DBOSClient enqueue (events/identity-reaction.ts).
+    await import('./identity-reaction-workflow');
   }
   if (dbosProvisionActive()) {
     // dbos-flows P-001/P-002 (default-on; disable with PAPERCUSP_DBOS_PROVISION=0):

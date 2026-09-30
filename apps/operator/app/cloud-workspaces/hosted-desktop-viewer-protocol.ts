@@ -7,6 +7,17 @@ import {
 
 export type HostedDesktopViewerMode = "watch" | "takeover";
 
+/**
+ * How long one viewer attempt may take to reach `connected` before it is abandoned
+ * and retried on a fresh ticket (WI-10004214). Without it a dial that never settled
+ * left the stage on "Opening your desktop…" forever, with no error and Reconnect
+ * disabled — the owner's first Take control on owner-test, 2026-09-30.
+ */
+export const HOSTED_DESKTOP_CONNECT_DEADLINE_MS = 15_000;
+
+/** Attempts per connect (initial + automatic retries) before the viewer shows an error. */
+export const HOSTED_DESKTOP_CONNECT_ATTEMPTS = 3;
+
 export interface HostedDesktopReadyEvent {
   action: "watch" | "takeover";
   inputAllowed: boolean;

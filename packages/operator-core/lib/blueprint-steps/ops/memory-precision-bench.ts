@@ -28,6 +28,8 @@ const args = z.object({});
 const result = z.object({
   ran: z.boolean(),
   skipReason: z.enum(['flag-off', 'failed']).optional(),
+  /** `failed` only: which step threw (WI-10004133). */
+  stage: z.enum(['bench', 'record']).optional(),
   error: z.string().optional(),
   rowId: z.number().int().optional(),
   fpAt5: z.number().nullable().optional(),
@@ -69,6 +71,7 @@ export const memoryPrecisionBenchOp: CoordOp<z.infer<typeof args>, z.infer<typeo
     return {
       ran: false,
       skipReason: outcome.skipReason,
+      stage: 'stage' in outcome ? outcome.stage : undefined,
       error: 'error' in outcome ? outcome.error : undefined,
     };
   },

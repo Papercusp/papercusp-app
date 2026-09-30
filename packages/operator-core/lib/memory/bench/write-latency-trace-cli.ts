@@ -26,7 +26,7 @@ import { getMemoryBackend } from '../backend';
 import { anchorMetadata } from '../anchors';
 import { detectPossibleSecrets } from '../secret-detect';
 import { conflictCheckEnabled, checkConflicts } from '../conflict-check';
-import { createAnthropicJudge, conflictJudgeAvailable } from '../anthropic-judge';
+import { resolveConflictJudge } from '../conflict-judge';
 import { neighbourSearchQuery } from '../../agent-tools/memory/remember';
 import { expandRefsForEmbed } from '../ref-expand';
 import { journalPendingWrite, markJournalCommitted } from '../write-journal';
@@ -120,8 +120,14 @@ async function traceOnce(i: number): Promise<{ stages: Stage[]; total: number }>
   let neighbors: Array<{ id: string; text: string; score?: number }> = [];
   const dedupWanted = process.env.PAPERCUSP_MEMORY_DEDUP === 'on';
   const conflictWanted = conflictCheckEnabled();
-  const judgeAvailable = conflictJudgeAvailable();
+  // Same resolution the handler uses (jev-decision-model-integration P-009 /
+  // D-016): a stored Jev key first, then ANTHROPIC_API_KEY, else no judge.
+  const resolution = conflictWanted ? await resolveConflictJudge() : null;
+  const judgeAvailable = resolution?.available === true;
   const conflictUsable = conflictWanted && judgeAvailable;
+  const judgeStage = resolution?.available
+    ? `checkConflicts (${resolution.backend} judge)`
+    : 'checkConflicts (no judge)';
   if (dedupWanted || conflictUsable) {
     neighbors = await timed('backend.search() (dedup/conflict neighbours)', stages,
       // P-008: length-capped query, exactly as the handler passes it.
@@ -131,20 +137,25 @@ async function traceOnce(i: number): Promise<{ stages: Stage[]; total: number }>
     // CPU cost so it is attributed rather than hidden inside the search stage.
     await timed('lexicalSimilarity scan (sync)', stages,
       () => neighbors.map((n) => lexicalSimilarity(content, n.text)));
-    await timed('checkConflicts (Anthropic Haiku judge)', stages,
-      () => checkConflicts({
-        newText: content,
-        neighbors: neighbors.map((n) => ({ id: n.id, text: n.text, ...(n.score !== undefined ? { score: n.score } : {}) })),
-        judge: createAnthropicJudge(),
-      }),
-      (v) => `${v.conflicts.length} conflicts; ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY ? 'set' : 'ABSENT (judge is a no-op)'}`);
+    if (resolution?.available) {
+      const judge = resolution.judge;
+      await timed(judgeStage, stages,
+        () => checkConflicts({
+          newText: content,
+          neighbors: neighbors.map((n) => ({ id: n.id, text: n.text, ...(n.score !== undefined ? { score: n.score } : {}) })),
+          judge,
+        }),
+        (v) => `${v.conflicts.length} conflicts`);
+    } else {
+      stages.push({ name: judgeStage, ms: 0, note: 'n/a — dedup-only run, conflict-check off or no judge' });
+    }
   } else {
     const why = conflictWanted && !judgeAvailable
-      ? 'SKIPPED (P-007: conflict-check ON but no usable judge — nothing can consume it)'
+      ? `SKIPPED (P-007: conflict-check ON but no usable judge — ${resolution && !resolution.available ? resolution.reason : 'nothing can consume it'})`
       : 'SKIPPED (dedup off and conflict-check off)';
     stages.push({ name: 'backend.search() (dedup/conflict neighbours)', ms: 0, note: why });
     stages.push({ name: 'lexicalSimilarity scan (sync)', ms: 0, note: 'n/a — no neighbours' });
-    stages.push({ name: 'checkConflicts (Anthropic Haiku judge)', ms: 0, note: 'n/a — no neighbours' });
+    stages.push({ name: judgeStage, ms: 0, note: 'n/a — no neighbours' });
   }
 
   const embedText = await timed('expandRefsForEmbed (ref → title lookups)', stages,
@@ -199,7 +210,7 @@ async function main(): Promise<void> {
   console.log(`env: PAPERCUSP_EMBED_SIDECAR_URL=${process.env.PAPERCUSP_EMBED_SIDECAR_URL ?? '(unset)'}`);
   console.log(`env: PAPERCUSP_MEMORY_CONFLICT_CHECK=${process.env.PAPERCUSP_MEMORY_CONFLICT_CHECK ?? '(unset → ON)'}`);
   console.log(`env: PAPERCUSP_MEMORY_DEDUP=${process.env.PAPERCUSP_MEMORY_DEDUP ?? '(unset → off)'}`);
-  console.log(`env: ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY ? 'set' : '(unset → conflict judge is a no-op)'}`);
+  console.log(`env: ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY ? 'set' : '(unset)'} (a stored Jev key takes precedence as the conflict judge)`);
   console.log(`runs: ${RUNS}${KEEP ? ' (--keep: rows retained)' : ' (rows cleaned up)'}\n`);
 
   const all: Array<{ stages: Stage[]; total: number }> = [];

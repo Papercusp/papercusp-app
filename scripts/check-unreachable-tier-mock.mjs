@@ -68,7 +68,7 @@
  * raw text at the same offsets, because the mask is length-preserving.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripCommentsAndStrings } from './lib/strip-comments-and-strings.mjs';
@@ -396,7 +396,9 @@ function gitFiles(...globs) {
     execFileSync('git', ['ls-files', ...globs], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }),
   )
     .split('\n')
-    .filter(Boolean);
+    .filter(Boolean)
+    // WI-10004176: drop index entries a peer's plain `rm` left behind until git-sync commits it.
+    .filter((f) => existsSync(join(ROOT, f)));
 }
 
 const isTest = (f) => /\.(?:test|spec)\.tsx?$/.test(f);

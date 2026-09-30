@@ -595,6 +595,14 @@ export interface UnifiedToolContext {
    */
   isPowerUser?: boolean;
   /**
+   * A stable party the run-windowed quota accumulates on, for a caller that
+   * mints a fresh `runId` per dispatch yet must be charged as one party — the
+   * same problem `isPowerUser` solves for the per-request MCP run. When set,
+   * the quota window is `subject:<quotaSubject>` with the `perRun` ceiling;
+   * `runId` still groups telemetry per dispatch.
+   */
+  quotaSubject?: string;
+  /**
    * Active caller profile. Governs which tools appear in `tools/list`
    * and which `tools/call` invocations are accepted.
    *

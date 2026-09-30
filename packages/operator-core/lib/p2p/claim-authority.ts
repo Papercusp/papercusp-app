@@ -66,10 +66,10 @@ export interface AxisAvailability {
    */
   allotmentRemaining: number;
   /**
-   * PHYSICS. Real-time capacity RIGHT NOW, read live from the inference gateway by
-   * `live-headroom.ts` (WI-3590): remote = this host's policy cap derated by the binding rate
-   * window's utilization (the gateway reports rate room, not dollars — see that module's doc);
-   * local = free foreign slots on the local-backend pool. M12 still holds: host-interactive work
+   * PHYSICS. Real-time capacity RIGHT NOW, supplied by the caller: remote = this host's policy
+   * cap derated by the binding rate window's utilization (the gateway reports rate room, not
+   * dollars); local = free foreign slots on the local-backend pool. (Its former producer,
+   * live-headroom.ts, was deleted with the dead kind:work offer-executor seam — D-092.) M12 still holds: host-interactive work
    * always preempts a local slot, so this is an offerable count, not a reservation. Any unknown
    * (gateway down, paused, hard-rejected, no serviceable accounts, no utilization data) resolves
    * to 0 — PHYSICS can only ever lower what POLICY allowed.

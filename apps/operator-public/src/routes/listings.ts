@@ -123,6 +123,7 @@ interface PublishBody {
   release_manifest_digest?: unknown; // expected: string — listingManifestDigest()
   release_signature?: unknown;       // expected: string
   release_manifest?: unknown;        // expected: string — canonical JSON of the signed CupboardReleaseManifest
+  identity_surface?: unknown;        // expected: string — canonical JSON IdentityListingSurface; blueprint_kind 'identity' only
 }
 
 /** provides_tools caps (migration 006): bounded so a listing can't smuggle a payload. */
@@ -283,12 +284,22 @@ function registerListingEndpoints(
       }
       paid = paidRaw === '1' || paidRaw === 'true';
     }
+    // Blueprint facet (migrations 009/035): ?blueprint_kind=identity lists identities.
+    const blueprintKindRaw = url.searchParams.get('blueprint_kind');
+    let blueprint_kind: string | undefined;
+    if (blueprintKindRaw != null && blueprintKindRaw !== '' && blueprintKindRaw !== 'all') {
+      if (blueprintKindRaw !== 'hive' && blueprintKindRaw !== 'harness' && blueprintKindRaw !== 'identity') {
+        return c.json({ error: 'invalid_field', field: 'blueprint_kind' }, 400);
+      }
+      blueprint_kind = blueprintKindRaw;
+    }
     const filters = {
       limit,
       cursor,
       search,
       claim_status,
       kind,
+      blueprint_kind,
       project_ref,
       visibility,
       tenant_ref: url.searchParams.get('tenant') ?? undefined,
@@ -939,6 +950,33 @@ function registerListingEndpoints(
         return badCatalog('release_manifest', 'json_object');
       }
     }
+    // An identity listing's declared surface (migration 035 / portable-identity-
+    // packages P-016): what the storefront previews before install. The publisher
+    // derives it from the closure it signs and the installer recomputes it from the
+    // verified clone, so — like release_manifest — it is bounded and well-formed
+    // here and checked semantically by the side that must not be fooled. Required
+    // on, and exclusive to, the identity facet: a preview that is absent would
+    // describe less than what installs.
+    const isIdentityListing = kind === 'blueprint' && body.blueprint_kind === 'identity';
+    const identitySurface = optionalStr(body.identity_surface, 16000);
+    if (identitySurface === false) return badCatalog('identity_surface', 'non_empty_string_max_16000');
+    if (identitySurface != null && !isIdentityListing) {
+      return badCatalog('identity_surface', 'blueprint_identity_only');
+    }
+    if (isIdentityListing && identitySurface == null) {
+      return badCatalog('identity_surface', 'required_with_identity_blueprint_kind');
+    }
+    if (identitySurface != null) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(identitySurface);
+      } catch {
+        return badCatalog('identity_surface', 'json_object');
+      }
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        return badCatalog('identity_surface', 'json_object');
+      }
+    }
     let releaseContentHash: string | null = null;
     if (body.release_content_hash != null) {
       if (typeof body.release_content_hash !== 'string' || !CONTENT_HASH_RE.test(body.release_content_hash)) {
@@ -988,12 +1026,15 @@ function registerListingEndpoints(
       hive_pubkey: (body.hive_pubkey as string | undefined) ?? null,
       hive_title: (body.hive_title as string | undefined) ?? null,
       // P-018: the blueprint.yaml `kind` for a blueprint listing (the Hives-tab
-      // discriminator). Only meaningful for kind='blueprint'; lenient — an absent/bad
-      // value ⇒ null (treated as a harness-blueprint), never blocks a publish.
+      // discriminator), or the identity facet (P-016). Only meaningful for
+      // kind='blueprint'; lenient — an absent/bad value ⇒ null (treated as a
+      // harness-blueprint), never blocks a publish.
       blueprint_kind:
-        kind === 'blueprint' && (body.blueprint_kind === 'hive' || body.blueprint_kind === 'harness')
+        kind === 'blueprint' &&
+        (body.blueprint_kind === 'hive' || body.blueprint_kind === 'harness' || body.blueprint_kind === 'identity')
           ? body.blueprint_kind
           : null,
+      identity_surface: identitySurface,
       // App distribution (migration 014). App-only — null on every other kind
       // (the validation above rejects an app field on a non-app publish).
       delivery_type: deliveryType,

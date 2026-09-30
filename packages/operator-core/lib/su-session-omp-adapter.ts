@@ -41,6 +41,7 @@ import { createOmpTimelineParser, type TimelineLineParser } from './session-time
 import { gatewayServedAccountForOwner } from './compaction-usage';
 import {
   SuSessionHost,
+  nativeRecordKey,
   registerSuSessionHost,
   type SuSessionCommandContext,
   type SuSessionCommandOutcome,
@@ -455,13 +456,17 @@ export class OmpSuSessionAdapter {
     this.host.emit({ type: 'transcript', phase: 'completed', turnId: input.turnId, role: input.role, channel: input.channel, ...(input.content ? { content: input.content } : {}) } as SuSessionEventInput<'omp'>);
   }
 
-  ingestNativeLine(line: string, { preserveLifecycle = false }: { preserveLifecycle?: boolean } = {}): void {
+  ingestNativeLine(line: string, { preserveLifecycle = false, replay = false }: { preserveLifecycle?: boolean; replay?: boolean } = {}): void {
     let record: Record<string, unknown>;
     try { record = JSON.parse(line) as Record<string, unknown>; }
     catch {
+      if (!this.host.claimNativeRecord(nativeRecordKey(line, {})) && replay) return;
       this.host.emit({ type: 'error', scope: 'transport', code: 'omp_record_malformed', message: 'OMP transcript emitted a malformed JSONL record', recoverable: true } as SuSessionEventInput<'omp'>);
       return;
     }
+    // A replayed transcript only adds records this host has not shown yet (see
+    // SuSessionHost.claimNativeRecord, WI-10004162).
+    if (!this.host.claimNativeRecord(nativeRecordKey(line, record)) && replay) return;
     const recordId = firstString(record.id, record.entryId, record.messageId);
     const messageRecord = asRecord(record.message);
     const messageToolId = firstString(messageRecord?.toolCallId, messageRecord?.tool_call_id);
@@ -550,7 +555,7 @@ export class OmpSuSessionAdapter {
 
   async consumeTranscriptSnapshot({ preserveLifecycle = false }: { preserveLifecycle?: boolean } = {}): Promise<void> {
     if (!this.runtimeValue.transcriptPath) throw new Error('OMP runtime has no resolved transcript path');
-    for await (const line of readOmpTranscriptSnapshotLines(this.runtimeValue.transcriptPath)) this.ingestNativeLine(line, { preserveLifecycle });
+    for await (const line of readOmpTranscriptSnapshotLines(this.runtimeValue.transcriptPath)) this.ingestNativeLine(line, { preserveLifecycle, replay: true });
   }
 
   replaceRuntime(runtime: OmpSuRuntimeBinding, reason = 'OMP runtime replaced'): void {

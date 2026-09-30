@@ -1,0 +1,559 @@
+{
+ "capturedFrom": "pre-migration binder (function-path producerRef), 2026-09-30, test run 20240706",
+ "scenarios": [
+  {
+   "name": "turn-start:su",
+   "identityId": "su",
+   "sink": "turn-start",
+   "outputs": [
+    {
+     "contributionId": "turn-start-orientation",
+     "value": "ORIENTATION held: WI-1"
+    },
+    {
+     "contributionId": "current-mode-state",
+     "value": [
+      {
+       "axisKey": "autonomy",
+       "mode": "auto",
+       "reason": "owner asked",
+       "setBy": "su-1",
+       "setBySelf": true
+      }
+     ]
+    },
+    {
+     "contributionId": "current-assignment",
+     "value": {
+      "ownerId": "su-1",
+      "intent": "carry P-005",
+      "currentPlanSlug": "plan-a"
+     }
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "turn-start-orientation",
+     "legacyProducerRef": "turn-start-orientation:buildTurnStartOrientationBlock",
+     "status": "bound",
+     "outputRevision": "6b64b04d5dbecb75e0a03827c03fd2082d4d573345086b23760efb327f15c631"
+    },
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "bound",
+     "outputRevision": "562a6f5c6cf33826e5d698b5886f228780d1b7489b0f1a704f125376a909b42f"
+    },
+    {
+     "contributionId": "current-assignment",
+     "legacyProducerRef": "coord:presence",
+     "status": "bound",
+     "outputRevision": "015ed64b06131f4de96790673758f6f671e37cfa13527bff8d88a8b2a94542b1"
+    }
+   ]
+  },
+  {
+   "name": "orient:su",
+   "identityId": "su",
+   "sink": "on-demand",
+   "outputs": [
+    {
+     "contributionId": "coord-orientation",
+     "value": {
+      "ok": true,
+      "self": {
+       "ownerId": "su-1"
+      },
+      "claims": []
+     }
+    },
+    {
+     "contributionId": "current-mode-state",
+     "value": [
+      {
+       "axisKey": "autonomy",
+       "mode": "auto",
+       "reason": "owner asked",
+       "setBy": "su-1",
+       "setBySelf": true
+      }
+     ]
+    },
+    {
+     "contributionId": "current-assignment",
+     "value": {
+      "ownerId": "su-1",
+      "intent": null,
+      "currentPlanSlug": null
+     }
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "coord-orientation",
+     "legacyProducerRef": "agent-tools/coordination/tools/orient:composeOrient",
+     "status": "bound",
+     "outputRevision": "7f2fb049eac9f05d4ed071103469377c854921fe1f3ef498b8d40f4eaef80bf0"
+    },
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "bound",
+     "outputRevision": "562a6f5c6cf33826e5d698b5886f228780d1b7489b0f1a704f125376a909b42f"
+    },
+    {
+     "contributionId": "current-assignment",
+     "legacyProducerRef": "coord:presence",
+     "status": "bound",
+     "outputRevision": "f6ca09f97b1c671c9bcfe3b55fc962949225c7813dceabdb44a5d6325eb0f22f"
+    }
+   ]
+  },
+  {
+   "name": "turn-start:goal",
+   "identityId": "su.mode-goal",
+   "sink": "turn-start",
+   "outputs": [
+    {
+     "contributionId": "current-mode-state",
+     "value": [
+      {
+       "axisKey": "autonomy",
+       "mode": "auto",
+       "reason": "owner asked",
+       "setBy": "su-1",
+       "setBySelf": true
+      },
+      {
+       "axisKey": "goal",
+       "mode": "goal",
+       "reason": "goal g-1",
+       "setBy": "su-1",
+       "setBySelf": true
+      }
+     ]
+    },
+    {
+     "contributionId": "goal-kickoff",
+     "omission": {
+      "reason": "not-requested"
+     }
+    },
+    {
+     "contributionId": "goal-portfolio",
+     "omission": {
+      "reason": "not-requested"
+     }
+    },
+    {
+     "contributionId": "goal-obligations",
+     "value": "OBLIGATION place plan for g-1"
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "bound",
+     "outputRevision": "21cbdcf9fca4a091cc3c2cac97243ead96f11ba6d7d2c437a256197d1054073b"
+    },
+    {
+     "contributionId": "goal-kickoff",
+     "legacyProducerRef": "agent-tools/goals/start:buildGoalKickoffBrief",
+     "status": "omitted:not-requested",
+     "outputRevision": null
+    },
+    {
+     "contributionId": "goal-portfolio",
+     "legacyProducerRef": "goal-launch-settings:renderGoalPortfolioBrief",
+     "status": "omitted:not-requested",
+     "outputRevision": null
+    },
+    {
+     "contributionId": "goal-obligations",
+     "legacyProducerRef": "agent-obligation-reader:projectAgentTurnStartObligationBrief",
+     "status": "bound",
+     "outputRevision": "71a8b2d6eb3e453d24fd71200f8eda5cf6580b82bd97649fafb6d7242456c879"
+    }
+   ]
+  },
+  {
+   "name": "turn-start:goal-trimmed",
+   "identityId": "su.mode-goal",
+   "sink": "turn-start",
+   "outputs": [
+    {
+     "contributionId": "current-mode-state",
+     "value": [
+      {
+       "axisKey": "autonomy",
+       "mode": "auto",
+       "reason": "owner asked",
+       "setBy": "su-1",
+       "setBySelf": true
+      },
+      {
+       "axisKey": "goal",
+       "mode": "goal",
+       "reason": "goal g-1",
+       "setBy": "su-1",
+       "setBySelf": true
+      }
+     ]
+    },
+    {
+     "contributionId": "goal-kickoff",
+     "omission": {
+      "reason": "not-requested"
+     }
+    },
+    {
+     "contributionId": "goal-portfolio",
+     "omission": {
+      "reason": "not-requested"
+     }
+    },
+    {
+     "contributionId": "goal-obligations",
+     "omission": {
+      "reason": "unavailable",
+      "errorRef": "turn-start:obligation-budget-trimmed"
+     }
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "bound",
+     "outputRevision": "21cbdcf9fca4a091cc3c2cac97243ead96f11ba6d7d2c437a256197d1054073b"
+    },
+    {
+     "contributionId": "goal-kickoff",
+     "legacyProducerRef": "agent-tools/goals/start:buildGoalKickoffBrief",
+     "status": "omitted:not-requested",
+     "outputRevision": null
+    },
+    {
+     "contributionId": "goal-portfolio",
+     "legacyProducerRef": "goal-launch-settings:renderGoalPortfolioBrief",
+     "status": "omitted:not-requested",
+     "outputRevision": null
+    },
+    {
+     "contributionId": "goal-obligations",
+     "legacyProducerRef": "agent-obligation-reader:projectAgentTurnStartObligationBrief",
+     "status": "omitted:unavailable",
+     "outputRevision": null
+    }
+   ]
+  },
+  {
+   "name": "goals-start:launch",
+   "identityId": "su.mode-goal",
+   "sink": "launch",
+   "outputs": [
+    {
+     "contributionId": "current-mode-state",
+     "value": [
+      {
+       "axisKey": "autonomy",
+       "mode": "auto",
+       "reason": "owner asked",
+       "setBy": "su-1",
+       "setBySelf": true
+      },
+      {
+       "axisKey": "goal",
+       "mode": "goal",
+       "reason": "goal g-1",
+       "setBy": "su-1",
+       "setBySelf": true
+      }
+     ]
+    },
+    {
+     "contributionId": "goal-kickoff",
+     "value": "KICKOFF goal g-1"
+    },
+    {
+     "contributionId": "goal-portfolio",
+     "value": "PORTFOLIO pots: a, b"
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "bound",
+     "outputRevision": "21cbdcf9fca4a091cc3c2cac97243ead96f11ba6d7d2c437a256197d1054073b"
+    },
+    {
+     "contributionId": "goal-kickoff",
+     "legacyProducerRef": "agent-tools/goals/start:buildGoalKickoffBrief",
+     "status": "bound",
+     "outputRevision": "02fe58c0c798b2ca9f4274a00e5cc7ecb57883ba965f0349a0378dafdc58711e"
+    },
+    {
+     "contributionId": "goal-portfolio",
+     "legacyProducerRef": "goal-launch-settings:renderGoalPortfolioBrief",
+     "status": "bound",
+     "outputRevision": "672e138ae74bfefd8d269ad016c86db7d76fb34f3f4f31cd820f742be0d2b793"
+    }
+   ]
+  },
+  {
+   "name": "goals-start:baseline-arm",
+   "identityId": "su.mode-goal",
+   "sink": "launch",
+   "outputs": [
+    {
+     "contributionId": "current-mode-state",
+     "omission": {
+      "reason": "not-requested"
+     }
+    },
+    {
+     "contributionId": "goal-kickoff",
+     "omission": {
+      "reason": "experiment-arm"
+     }
+    },
+    {
+     "contributionId": "goal-portfolio",
+     "omission": {
+      "reason": "experiment-arm"
+     }
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "omitted:not-requested",
+     "outputRevision": null
+    },
+    {
+     "contributionId": "goal-kickoff",
+     "legacyProducerRef": "agent-tools/goals/start:buildGoalKickoffBrief",
+     "status": "omitted:experiment-arm",
+     "outputRevision": null
+    },
+    {
+     "contributionId": "goal-portfolio",
+     "legacyProducerRef": "goal-launch-settings:renderGoalPortfolioBrief",
+     "status": "omitted:experiment-arm",
+     "outputRevision": null
+    }
+   ]
+  },
+  {
+   "name": "leader-brief:value",
+   "identityId": "su.fleet-leader",
+   "sink": "on-demand",
+   "outputs": [
+    {
+     "contributionId": "fleet-leader-brief",
+     "value": {
+      "ok": true,
+      "summary": {
+       "fleet": "f-1"
+      },
+      "members": []
+     }
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "fleet-leader-brief",
+     "legacyProducerRef": "agent-tools/fleet/leader-brief:buildLeaderBrief",
+     "status": "bound",
+     "outputRevision": "7b11eea96dc1cb7f15a5c929d95dd28d0ae6a6e7ddac72e488eec12d84b41b61"
+    }
+   ]
+  },
+  {
+   "name": "leader-brief:ineligible",
+   "identityId": "su.fleet-leader",
+   "sink": "on-demand",
+   "outputs": [
+    {
+     "contributionId": "fleet-leader-brief",
+     "omission": {
+      "reason": "ineligible"
+     }
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "fleet-leader-brief",
+     "legacyProducerRef": "agent-tools/fleet/leader-brief:buildLeaderBrief",
+     "status": "omitted:ineligible",
+     "outputRevision": null
+    }
+   ]
+  },
+  {
+   "name": "mode:audit",
+   "identityId": "su.mode-audit",
+   "sink": "turn-start",
+   "outputs": [
+    {
+     "contributionId": "current-mode-state",
+     "value": [
+      {
+       "axisKey": "autonomy",
+       "mode": "auto",
+       "reason": "owner asked",
+       "setBy": "su-1",
+       "setBySelf": true
+      }
+     ]
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "bound",
+     "outputRevision": "562a6f5c6cf33826e5d698b5886f228780d1b7489b0f1a704f125376a909b42f"
+    }
+   ]
+  },
+  {
+   "name": "mode:auto",
+   "identityId": "su.mode-auto",
+   "sink": "turn-start",
+   "outputs": [
+    {
+     "contributionId": "current-mode-state",
+     "value": [
+      {
+       "axisKey": "autonomy",
+       "mode": "auto",
+       "reason": "owner asked",
+       "setBy": "su-1",
+       "setBySelf": true
+      }
+     ]
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "bound",
+     "outputRevision": "562a6f5c6cf33826e5d698b5886f228780d1b7489b0f1a704f125376a909b42f"
+    }
+   ]
+  },
+  {
+   "name": "mode:drain",
+   "identityId": "su.mode-drain",
+   "sink": "turn-start",
+   "outputs": [
+    {
+     "contributionId": "current-mode-state",
+     "value": [
+      {
+       "axisKey": "autonomy",
+       "mode": "auto",
+       "reason": "owner asked",
+       "setBy": "su-1",
+       "setBySelf": true
+      }
+     ]
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "bound",
+     "outputRevision": "562a6f5c6cf33826e5d698b5886f228780d1b7489b0f1a704f125376a909b42f"
+    }
+   ]
+  },
+  {
+   "name": "mode:grade",
+   "identityId": "su.mode-grade",
+   "sink": "turn-start",
+   "outputs": [
+    {
+     "contributionId": "current-mode-state",
+     "value": [
+      {
+       "axisKey": "autonomy",
+       "mode": "auto",
+       "reason": "owner asked",
+       "setBy": "su-1",
+       "setBySelf": true
+      }
+     ]
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "bound",
+     "outputRevision": "562a6f5c6cf33826e5d698b5886f228780d1b7489b0f1a704f125376a909b42f"
+    }
+   ]
+  },
+  {
+   "name": "mode:ideate",
+   "identityId": "su.mode-ideate",
+   "sink": "turn-start",
+   "outputs": [
+    {
+     "contributionId": "current-mode-state",
+     "value": [
+      {
+       "axisKey": "autonomy",
+       "mode": "auto",
+       "reason": "owner asked",
+       "setBy": "su-1",
+       "setBySelf": true
+      }
+     ]
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "bound",
+     "outputRevision": "562a6f5c6cf33826e5d698b5886f228780d1b7489b0f1a704f125376a909b42f"
+    }
+   ]
+  },
+  {
+   "name": "mode:test",
+   "identityId": "su.mode-test",
+   "sink": "turn-start",
+   "outputs": [
+    {
+     "contributionId": "current-mode-state",
+     "value": [
+      {
+       "axisKey": "autonomy",
+       "mode": "auto",
+       "reason": "owner asked",
+       "setBy": "su-1",
+       "setBySelf": true
+      }
+     ]
+    }
+   ],
+   "expected": [
+    {
+     "contributionId": "current-mode-state",
+     "legacyProducerRef": "modes/store:agent_modes",
+     "status": "bound",
+     "outputRevision": "562a6f5c6cf33826e5d698b5886f228780d1b7489b0f1a704f125376a909b42f"
+    }
+   ]
+  }
+ ]
+}

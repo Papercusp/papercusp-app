@@ -15,7 +15,6 @@ import { defineTool, AGENT_ROLES } from '@papercusp/agent-mcp';
 import {
   BASH_TEST_MEMORY_MAX_BYTES,
   BASH_TEST_TASKS_MAX,
-  JOB_LOG_END_MARKER_PREFIX,
   JOB_LOG_DIED_MARKER_PREFIX,
   detectBufferingLastStage,
   detectSelfOutputRedirect,
@@ -28,6 +27,7 @@ import {
   type BashStatus,
   type BashJob,
 } from './bash-jobs';
+import { parseJobLogEndMarker } from '../../task-manager/job-log-terminal';
 import { backgroundTypecheckVerdict } from './background-typecheck-verdict';
 import { capturedExitMismatch } from './captured-exit-verdict';
 import { coresBetween, readCgroupCpuSample, MIN_SAMPLE_GAP_MS } from './cgroup-cpu';
@@ -726,34 +726,10 @@ export interface StrandedJobLogInspection {
   filterError?: string;
 }
 
-// The marker is written only after the child reaches a terminal state and the
-// spill stream is flushed. It is therefore the durable completion evidence for
-// a job whose in-memory BashJob entry was lost, even when the task ledger has not
-// observed the close yet. A confined service runner can write a raw verdict first
-// so reader loss never strands the log; when the operator survives, it appends a
-// later normalized verdict after diagnostics. The LAST matching marker is
-// authoritative. Anchor at the start of a line so ordinary command output
-// containing the marker prefix cannot become a false terminal verdict.
-const JOB_LOG_END_MARKER_RE = new RegExp(
-  '^' +
-    JOB_LOG_END_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
-    ': status=(completed|failed|killed|timed_out) exit=(null|-?\\d+) at [^\\n]*(?:\\n|$)',
-  'gm',
-);
-
-/** Parse the durable terminal marker from a stranded job log tail. */
-export function parseJobLogEndMarker(log: string): { status: RecoveredJobStatus; exitCode: number | null } | null {
-  JOB_LOG_END_MARKER_RE.lastIndex = 0;
-  let match: RegExpExecArray | null = null;
-  let latest: RegExpExecArray | null = null;
-  while ((match = JOB_LOG_END_MARKER_RE.exec(log)) !== null) latest = match;
-  JOB_LOG_END_MARKER_RE.lastIndex = 0;
-  if (!latest) return null;
-  return {
-    status: latest[1] as RecoveredJobStatus,
-    exitCode: latest[2] === 'null' ? null : Number(latest[2]),
-  };
-}
+// The durable JOB END marker (the completion evidence for a job whose in-memory
+// BashJob entry was lost) is parsed by ONE shared parser in task-manager, which
+// the ledger reconciler also uses to recover the exit of a job whose watcher
+// died with its operator host (WI-10004208).
 
 const JOB_LOG_DIED_MARKER_RE = new RegExp(
   '^' +

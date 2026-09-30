@@ -49,8 +49,9 @@ interface BlueprintListing {
   description: string;
   /** Within-project blueprint discriminator (the blueprint id / subdir). */
   listing_ref?: string | null;
-  /** 'hive' = a hive template (instantiable as a hive home) | 'harness'. */
-  blueprint_kind?: 'hive' | 'harness' | null;
+  /** 'hive' = a hive template (instantiable as a hive home) | 'harness' | 'identity'
+   *  (a wearable identity, P-016 — never a hive home). */
+  blueprint_kind?: 'hive' | 'harness' | 'identity' | null;
 }
 
 type SearchPhase = 'idle' | 'searching' | 'results' | 'empty' | 'error';
@@ -183,8 +184,9 @@ export function CupboardBlueprintForm({ onBack, onCreated, hiveLabel }: Cupboard
           const raw = Array.isArray(data.listings) ? data.listings : [];
           // Hive-instantiable only: keep 'hive' templates + unknown (pre-009
           // worker rows that don't carry blueprint_kind); drop known 'harness'
-          // blueprints — they can't be a hive home (createHiveHarness rejects them).
-          const hives = raw.filter((l) => l.blueprint_kind !== 'harness');
+          // blueprints and identities — they can't be a hive home (createHiveHarness
+          // rejects them).
+          const hives = raw.filter((l) => l.blueprint_kind !== 'harness' && l.blueprint_kind !== 'identity');
           setResults(hives);
           setPhase(hives.length ? 'results' : 'empty');
         } catch (err) {

@@ -1,0 +1,9 @@
+{
+  "kind": "goal",
+  "id": "work-on-everything",
+  "title": "Work on everything",
+  "description": "First-party standing stewardship goal: keeps the whole workspace moving. Its agent triages the unowned frontier, places and arbitrates work through the claim layer, drives the Blender idea loop (grade, triage, promote/iterate/deprecate), and reports on a steady cadence — creating, placing, arbitrating, and killing work, never implementing it. Installing lands an inactive stub with no agent and no spend; starting it is a separate deliberate act.",
+  "version": "1.1.0",
+  "source": "first-party",
+  "requires_rubrics": [{ "rubricRef": "goal-mode-e2e" }]
+}

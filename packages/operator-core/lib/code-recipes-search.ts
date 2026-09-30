@@ -29,7 +29,7 @@
 import type postgres from 'postgres';
 import type { EmbedderMode } from '@papercusp/memory';
 import './search/configure-search-defaults';
-import { runHybridSearch, type SearchSource, type SearchSourceParams, type Listing } from '@papercusp/search';
+import { runHybridSearch, withIterativeScan, type SearchSource, type SearchSourceParams, type Listing } from '@papercusp/search';
 import {
   buildRecipeAuthorityRecommendation,
   type RecipeAuthorityContext,
@@ -107,7 +107,10 @@ export const codeRecipesSource: SearchSource = {
     const selection = embeddingProfile
       ? resolveProseProfileIdSelection(embeddingProfile.profileId, embeddingProfile.legacyMode)
       : null;
-    const rows = (await sql`
+    // Iterative HNSW scan (WI-10004138): 'active' is ~29% of the table, so the
+    // capped scan's ~40 candidates filter down to ~12. Measured 2026-09-30 at the
+    // caller's LIMIT 60: 267 of 600 rows returned without it, 600 with it.
+    const rows = (await withIterativeScan(sql, (sql) => sql`
       SELECT id, title, description, run_count, tools_used,
              1 - (embedding <=> ${qVec}::vector) AS sim
         FROM harness_shared.code_recipes
@@ -116,7 +119,7 @@ export const codeRecipesSource: SearchSource = {
          AND ${proseProfilePredicateSql(sql as postgres.Sql, selection, 'embedding_profile', 'embedding_mode')}
     ORDER BY embedding <=> ${qVec}::vector
        LIMIT ${limit}
-    `) as unknown as Array<{
+    `)) as unknown as Array<{
       id: string;
       title: string;
       description: string;

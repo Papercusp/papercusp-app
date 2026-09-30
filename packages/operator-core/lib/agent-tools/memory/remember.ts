@@ -28,11 +28,8 @@ import { anchorMetadata } from '../../memory/anchors';
 import { expandRefsForEmbed } from '../../memory/ref-expand';
 import { getWorkItem } from '../../work-items';
 import { checkConflicts, conflictCheckEnabled } from '../../memory/conflict-check';
-import {
-  createAnthropicJudge,
-  conflictJudgeAvailable,
-  warnConflictJudgeUnavailableOnce,
-} from '../../memory/anthropic-judge';
+import { warnConflictJudgeUnavailableOnce } from '../../memory/anthropic-judge';
+import { resolveConflictJudge } from '../../memory/conflict-judge';
 import { persistAnchorsSql } from '../../memory/persist-anchors';
 import { journalPendingWrite, markJournalCommitted } from '../../memory/write-journal';
 import { isMemoryPaused, MEMORY_PAUSED_REFUSAL } from '../../memory/memory-pause';
@@ -477,11 +474,14 @@ export default defineTool({
     // Measured before/after in plan memory-write-latency-2026-07-26 (D-001/D-002).
     const dedupWanted = !args.force && dedupEnabled();
     const conflictWanted = !args.force && conflictCheckEnabled();
-    const judgeAvailable = conflictJudgeAvailable();
+    // P-009 (D-016): Jev when a Jev key is stored, else Anthropic, else NO judge,
+    // reported as such rather than as a no-op that looks like "nothing found".
+    const conflictJudge = conflictWanted ? await resolveConflictJudge() : null;
     // Configured ON but inert — say so ONCE. That silence is what let a default-ON
     // contradiction guard sit dead in this operator (EI-18746586784230719).
-    if (conflictWanted && !judgeAvailable) warnConflictJudgeUnavailableOnce();
-    const conflictUsable = conflictWanted && judgeAvailable;
+    if (conflictJudge && !conflictJudge.available) warnConflictJudgeUnavailableOnce();
+    const usableJudge = conflictJudge?.available ? conflictJudge.judge : null;
+    const conflictUsable = usableJudge !== null;
 
     if (dedupWanted || conflictUsable) {
       try {
@@ -552,11 +552,11 @@ export default defineTool({
         // `conflictUsable` (not just `conflictCheckEnabled()`) — with no real
         // judge this call could only ever return an empty report, and we no
         // longer even have neighbours to hand it in that case.
-        if (conflictUsable && neighbors.length > 0) {
+        if (usableJudge && neighbors.length > 0) {
           const conflict = await checkConflicts({
             newText: args.content,
             neighbors: neighbors.map((n) => ({ id: n.id, text: n.text, score: n.score })),
-            judge: createAnthropicJudge(),
+            judge: usableJudge,
           });
           // `supersede:<id>` is an explicit resolution of THAT conflict, not a
           // blanket force-through: any other contradiction still refuses.

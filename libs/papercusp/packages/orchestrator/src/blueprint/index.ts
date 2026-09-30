@@ -13,6 +13,9 @@ export * from './schema.js';
 // Declared injection points (portable-identity-packages P-010): the sink/trigger/
 // budget vocabulary a provider contribution declares and its compile validation.
 export * from './injection-points.js';
+// First-party context classes (portable-identity-packages P-005, D-039): the
+// platform producers builtin identities name by class@major.
+export * from './first-party-classes.js';
 // Schema-driven per-harness config read/write/validate keyed by a blueprint's declared
 // `params` (psu-isolation-and-blueprint-aware-harness-ui-2026-06-09 P-007).
 export {

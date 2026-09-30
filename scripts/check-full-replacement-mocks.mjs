@@ -33,6 +33,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { presentOnDisk } from './lib/tracked-files.mjs';
 import { join, dirname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -1014,7 +1015,8 @@ function gitTestFiles() {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
   });
-  return out.split('\n').filter(Boolean);
+  // WI-10004176: drop index entries a peer's plain `rm` left until git-sync commits it.
+  return presentOnDisk(out.split('\n').filter(Boolean), ROOT);
 }
 
 function main() {

@@ -13,7 +13,7 @@
  * files exist to be judged", which is the half every pinned guard was missing.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -99,6 +99,8 @@ export function trackedTextFiles(options: TrackedTextFileOptions): string[] {
     .filter((path) => extensions.some((ext) => path.endsWith(ext)))
     .filter((path) => (options.includeTests ? true : !isTestFile(path)))
     .filter((path) => !isNonAuthored(path))
+    // WI-10004176: a plain `rm` stays in the index until git-sync commits it — drop those.
+    .filter((path) => existsSync(join(options.root, path)))
     .sort();
 
   if (files.length === 0) {

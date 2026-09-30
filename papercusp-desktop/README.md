@@ -20,8 +20,8 @@ Agents run through the CLIs you already use (for example the `claude` CLI); set 
 
 | Platform | Install |
 |---|---|
-| **Ubuntu / Debian** | `sudo apt install build-essential curl wget file pkg-config libssl-dev libxdo-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf` |
-| **Fedora / RHEL** | `sudo dnf install webkit2gtk4.1-devel openssl-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel` |
+| **Ubuntu / Debian** | `sudo apt install build-essential curl wget file pkg-config libssl-dev libxdo-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev patchelf` |
+| **Fedora / RHEL** | `sudo dnf install webkit2gtk4.1-devel openssl-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel alsa-lib-devel` |
 | **macOS** | Xcode Command Line Tools (`xcode-select --install`) |
 | **Windows** | WebView2 (preinstalled on Windows 11) + Visual Studio Build Tools |
 
@@ -82,7 +82,25 @@ VERIFY_TAURI_ISOLATED_DB=1 scripts/verify-tauri-headless.sh --boot-only
 Installers are built locally, not by a hosted CI service. `bin/build-linux-local.sh` builds the
 Linux `.deb` and AppImage (`bin/build-mac-cross.sh` and `bin/build-windows-cross.sh` cover the other
 platforms). `bin/build-desktop-sidecar.sh` assembles the sidecar the installers carry: the operator
-host, the UI bundle, the embedded Postgres with pgvector, Node, and the runnable source tree. A
+host, the UI bundle, the embedded Postgres with pgvector, Node, and the runnable source tree.
+Installer builds additionally need **kopia** on the build host — the sidecar vendors it for the
+snapshot/backup subsystem. It is not in the Ubuntu/Debian archive: install it from kopia's apt
+repository or release page (<https://kopia.io/docs/installation/>), or `brew install kopia` on
+macOS. They also need the two bundled embedding models (harrier-oss and embeddinggemma, about
+3.4GB), which `npm ci` does not download. Fetch the exact revisions pinned in
+`src-tauri/distribution-contract.json` (each file is sha256-verified) and point the build at them:
+
+```bash
+bin/lib/transformers-models.sh fetch ~/.cache/papercusp-models
+export PAPERCUSP_TRANSFORMERS_MODEL_CACHE=~/.cache/papercusp-models
+```
+
+The installer license scan (`bin/audit-release-bundle.py --scan-artifact --licenses`, which runs
+`scripts/check-licenses.mjs --installer-tree`) also needs **syft** on `PATH`
+(<https://github.com/anchore/syft#installation>); without it the scan reports
+`LICENSE_GATE_RESULT status=undetermined` rather than a verdict.
+
+The sidecar build checks its host tools and models up front and names every missing one. A
 release cut also needs a signing key (`bin/setup-signing-key.sh`) and the release-identity inputs
 the build's audit checks against; `SHIPPING.md` and `RELEASE-RUNBOOK.md` describe the full flow.
 Bundle configuration lives in `src-tauri/tauri.conf.json`.

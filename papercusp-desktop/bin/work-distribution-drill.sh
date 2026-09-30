@@ -336,7 +336,7 @@ if table_present p2p_metering_spend && table_present p2p_metering_contribution; 
     [ "${spend_rows:-0}" != "0" ] && ok "METERING writer live: $spend_rows spend row(s) recorded" \
       || skipp "METERING — DETECTED: writer ships but no spend rows flowed this run"
   else
-    skipp "METERING — DETECTED: recordSpendDurable is absent from the shipped bundle — the ledger has NO production writer (tables exist and are read by host-availability, but nothing writes them)"
+    skipp "METERING — DETECTED: recordSpendDurable is absent from the shipped bundle — the ledger has NO production writer (the tables exist, but nothing in production writes or reads them)"
   fi
 else
   skipp "METERING — DETECTED: substrate missing from this instance (spend=$(table_present p2p_metering_spend && echo yes || echo no), contribution=$(table_present p2p_metering_contribution && echo yes || echo no))"

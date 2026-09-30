@@ -39,8 +39,23 @@ const DEFAULT_H = 768;
 const BASE_DISPLAY = 110; // well clear of :0 (host) and the frame pool default (:99)
 
 export interface SandboxDesktop {
-  /** External workers can disappear independently of the process holding the lease. */
+  /**
+   * False once the desktop is gone: its X server exited (a desktop this process
+   * provisioned) or its worker's socket closed (a worker-served one). Sampled at call
+   * time, never cached.
+   */
   isAlive?: () => boolean;
+  /**
+   * WI-10004206 — settles once, when the X server at the root of this desktop exits,
+   * whether a release killed it or it died on its own. Absent for a desktop served by
+   * another process, where the socket is the only liveness signal.
+   *
+   * THE FAILURE THIS CLOSES. The X server was spawned with `stdio: 'ignore'` and nothing
+   * watched it, so when it died the worker kept its socket open and the lease kept
+   * offering a `ready` desktop whose every dial failed `desktop_dial_failed`, with no
+   * trace of why in any journal (measured on owner-test 2026-09-30).
+   */
+  xServerExited?: Promise<DesktopXServerExit>;
   /** X display string, e.g. ":110". Set this as PAPERCUSP_COMPUTER_DISPLAY for the agent. */
   display: string;
   number: number;
@@ -149,6 +164,77 @@ export interface SandboxDesktop {
 
 /** Bounded stderr retained per app — enough for a launch failure, never a log sink. */
 export const APP_STDERR_TAIL_BYTES = 4096;
+
+/** Bounded X server stderr. Xkasmvnc logs every client connect, so this is a tail, never a sink. */
+export const X_SERVER_STDERR_TAIL_BYTES = 8192;
+
+/** WI-10004206 — how a desktop's X server ended, as seen by the process that spawned it. */
+export interface DesktopXServerExit {
+  code: number | null;
+  signal: string | null;
+  /** Last {@link X_SERVER_STDERR_TAIL_BYTES} bytes of the X server's own stderr. */
+  stderrTail: string;
+}
+
+/** Thrown when the X server exits before its display accepts connections. */
+export class DesktopXServerExitedError extends Error {
+  constructor(readonly display: string, readonly exit: DesktopXServerExit) {
+    super(`desktop-provisioner — X server for ${display} exited before accepting connections (code=${exit.code ?? '-'} signal=${exit.signal ?? '-'})`);
+    this.name = 'DesktopXServerExitedError';
+  }
+}
+
+/** One journal line for an X server exit: the reason, then its last words. */
+export function describeXServerExit(display: string, exit: DesktopXServerExit): string {
+  const tail = exit.stderrTail.trim();
+  return `X server for ${display} exited code=${exit.code ?? '-'} signal=${exit.signal ?? '-'}` +
+    (tail ? `; stderr tail:\n${tail}` : '; it wrote nothing to stderr');
+}
+
+/**
+ * Watch the X server at the root of a desktop: drain and tail its stderr, and settle
+ * `exited` when it goes. Liveness reads the child, never a cached boolean.
+ */
+export function watchXServer(child: ChildProcess): {
+  isAlive: () => boolean;
+  exited: Promise<DesktopXServerExit>;
+  exit: () => DesktopXServerExit | null;
+} {
+  let stderrTail = '';
+  let exit: DesktopXServerExit | null = null;
+  child.stderr?.setEncoding('utf8');
+  child.stderr?.on('data', (chunk: string) => {
+    stderrTail = (stderrTail + chunk).slice(-X_SERVER_STDERR_TAIL_BYTES);
+  });
+  // A failed diagnostic pipe must not take the desktop with it.
+  child.stderr?.on('error', () => {});
+  const exited = new Promise<DesktopXServerExit>((resolve) => {
+    const settle = (code: number | null, signal: string | null): void => {
+      exit ??= { code, signal, stderrTail };
+      resolve(exit);
+    };
+    child.once('exit', (code, signal) => {
+      // 'close' follows once stderr has drained, so waiting for it keeps the server's
+      // last words. Bounded, because a descendant that inherited the pipe can hold it open.
+      const timer = setTimeout(() => settle(code, signal), 1000);
+      timer.unref?.();
+      child.once('close', () => { clearTimeout(timer); settle(code, signal); });
+    });
+    // A spawn that never started emits 'error' and no 'exit'.
+    child.once('error', (error) => {
+      if (child.pid !== undefined) return;
+      stderrTail = `${stderrTail}${error.message}`.slice(-X_SERVER_STDERR_TAIL_BYTES);
+      settle(null, null);
+    });
+  });
+  return {
+    isAlive: () => exit === null && child.exitCode === null && child.signalCode === null,
+    exited,
+    exit: () => exit ?? (child.exitCode === null && child.signalCode === null
+      ? null
+      : { code: child.exitCode, signal: child.signalCode, stderrTail }),
+  };
+}
 
 /** Live bookkeeping behind {@link SandboxDesktop.appDiagnostics}. */
 interface AppRecord {
@@ -466,12 +552,20 @@ function displayReady(display: string): boolean {
   }
 }
 
-async function waitForDisplay(display: string, timeoutMs: number): Promise<void> {
+async function waitForDisplay(
+  display: string,
+  timeoutMs: number,
+  xServer: Pick<ReturnType<typeof watchXServer>, 'exit'>,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   // Time is read inside the loop; the helper is only reached on the live path.
-   
+
   while (Date.now() < deadline) {
     if (displayReady(display)) return;
+    // A server that already exited will never accept a connection; say so now, with
+    // its stderr, instead of timing out on a display nothing is serving.
+    const exit = xServer.exit();
+    if (exit) throw new DesktopXServerExitedError(display, exit);
     await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error(`desktop-provisioner — X display ${display} did not come up within ${timeoutMs}ms`);
@@ -636,7 +730,10 @@ export async function provisionSandboxDesktop(opts: ProvisionOptions, runtime: D
         argv: [],
         ...(opts.harnessSlug ? { harnessSlug: opts.harnessSlug } : {}),
       },
-      { spawnOptions: { stdio: 'ignore' } },
+      // WI-10004206 — stderr is piped and tailed (drained by `watchXServer`, so a chatty
+      // server never blocks on a full pipe). It was `'ignore'`, which threw away the only
+      // record of why a desktop's X server died.
+      { spawnOptions: { stdio: ['ignore', 'ignore', 'pipe'] } },
     );
     taskId = xvfbTask.taskId;
     // Replace the provisional closure metadata once the Xvfb root exists. The
@@ -649,7 +746,8 @@ export async function provisionSandboxDesktop(opts: ProvisionOptions, runtime: D
       ledgered: xvfbTask.row.detail.unledgered !== true,
     };
     procs.push(xvfbTask.child);
-    await waitForDisplay(display, opts.readyTimeoutMs ?? 8000);
+    const xWatch = watchXServer(xvfbTask.child);
+    await waitForDisplay(display, opts.readyTimeoutMs ?? 8000, xWatch);
 
     // ISOLATION: the WM + apps run with a host-stripped env bound to the sandbox
     // display only — never the operator's inherited DISPLAY=:0 / gdm XAUTHORITY.
@@ -822,6 +920,8 @@ export async function provisionSandboxDesktop(opts: ProvisionOptions, runtime: D
         ? { capture: { width: opts.captureWidth, height: opts.captureHeight } }
         : {}),
       appDiagnostics: () => snapshotAppDiagnostics(appRecords),
+      isAlive: xWatch.isAlive,
+      xServerExited: xWatch.exited,
       release,
     };
   } catch (e) {

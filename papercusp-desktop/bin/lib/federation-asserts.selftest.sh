@@ -367,6 +367,46 @@ else
   bad "fed_acquire_port_lock could not acquire :$LOCK_PORT"
 fi
 
+# 5b) fed_pick_free_port RESERVES what it returns (WI-10004241). On 2026-09-30 two rigs picked
+#     :18532 within seconds; the sidecar binds ~100 s after the pick and the loser died on
+#     EADDRINUSE. A reservation held by another LIVE launcher must be skipped; a dead launcher's
+#     or an expired reservation must be reclaimed; a second pick by one launcher gets a new port.
+RES_DIR="$WORK/port-reservations"
+mkdir -p "$RES_DIR"   # the fixture writes reservations itself; never depend on the subject creating it
+RES_PORT="$((SIDE_PORT + 40))"
+res_a="$(FED_PORT_RESERVE_DIR="$RES_DIR" fed_pick_free_port "$RES_PORT")"
+# A concurrent launcher: a live process other than this shell holds res_a's reservation.
+sleep 300 & res_holder=$!
+printf '%s %s\n' "$res_holder" "$(date +%s)" > "$RES_DIR/$res_a"
+res_b="$(bash -c 'source "$1"; FED_PORT_RESERVE_DIR="$3" fed_pick_free_port "$2"' _ "$DIR/federation-asserts.sh" "$res_a" "$RES_DIR")"
+if [ "${res_b:-0}" -gt "${res_a:-0}" ] 2>/dev/null; then
+  ok "fed_pick_free_port skips :$res_a reserved by live launcher $res_holder → :$res_b"
+else
+  bad "fed_pick_free_port returned '$res_b' although :$res_a is reserved by live launcher $res_holder (the pick→bind race of WI-10004241)"
+fi
+kill "$res_holder" 2>/dev/null; wait "$res_holder" 2>/dev/null
+# res_b's reservation names the bash -c child, which has exited, and res_a's holder is dead now.
+res_c="$(FED_PORT_RESERVE_DIR="$RES_DIR" fed_pick_free_port "$res_a")"
+if [ "$res_c" = "$res_a" ]; then
+  ok "fed_pick_free_port reclaims :$res_a once its launcher is dead"
+else
+  bad "fed_pick_free_port returned '$res_c' for :$res_a whose reserving launcher is dead (a stale reservation must not strand a port)"
+fi
+res_d="$(FED_PORT_RESERVE_DIR="$RES_DIR" fed_pick_free_port "$res_a")"
+if [ "${res_d:-0}" -gt "$res_a" ] 2>/dev/null; then
+  ok "a second pick by the same launcher gets a new port (:$res_d, not :$res_a)"
+else
+  bad "a second pick by the same launcher returned '$res_d' (expected a port above its own reserved :$res_a)"
+fi
+res_e_port="$((RES_PORT + 15))"
+printf '%s %s\n' "$$" 1 > "$RES_DIR/$res_e_port"   # a live launcher, but reserved at epoch 1
+res_e="$(FED_PORT_RESERVE_DIR="$RES_DIR" FED_PORT_RESERVE_TTL_SEC=900 fed_pick_free_port "$res_e_port")"
+if [ "$res_e" = "$res_e_port" ]; then
+  ok "fed_pick_free_port reclaims an expired reservation on :$res_e_port"
+else
+  bad "fed_pick_free_port returned '$res_e' for :$res_e_port whose reservation expired"
+fi
+
 # 6) fed_local_launch_sidecar rejects same/empty hono+pg ports (the 2026-07-03
 #    P-002 class: argless fed_pick_free_port x4 handed 18000 to everything and
 #    every instance EADDRINUSE'd at boot — the guard must fail LOUDLY instead)

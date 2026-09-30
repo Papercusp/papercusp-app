@@ -33,7 +33,7 @@
  * deliberately not initialized — a legitimate skip, but still a stated one.
  */
 import { execSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { lstatSync, readdirSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 
 import { isRepositoryIndexFault, withGitIndexFaultRetry } from './git-index-fault.mjs';
@@ -250,8 +250,30 @@ export function listTrackedFiles(cwd = ROOT) {
   // `-z` is load-bearing, not a style choice: without it git C-quotes any path
   // needing it and every one of the 37 guards on this helper receives an
   // unresolvable literal instead of the real filename. See `gitLinesNul`.
-  const files = gitLinesNul('ls-files -z --recurse-submodules', cwd);
+  const files = presentOnDisk(gitLinesNul('ls-files -z --recurse-submodules', cwd), cwd);
   return { files, ...coverageOf(files, cwd) };
+}
+
+/**
+ * Drop index entries whose path has NO directory entry on disk (WI-10004173).
+ *
+ * On the shared tree an agent deletes a tracked file with plain `rm`, and the
+ * git-sync sweep commits the deletion minutes later. Until then the index still
+ * lists the path, so every whole-tree guard that enumerates this set and then
+ * reads each entry threw ENOENT for every agent running it in that window
+ * (three guards went red at once after one 11-file deletion). A path with no
+ * entry has no content to scan, and the deletion reaches the index on the next
+ * sweep, so omitting it is the honest enumeration of what is actually there.
+ *
+ * `lstat`, not `existsSync`: existsSync follows symlinks and would also drop a
+ * tracked symlink whose target is missing. That entry is really on disk, and a
+ * guard that audits symlinks must keep seeing it.
+ *
+ * Exported for guards that must keep their own `git ls-files` invocation (a
+ * pathspec, or superproject-only scope) but read what they enumerate.
+ */
+export function presentOnDisk(files, cwd = ROOT) {
+  return files.filter((file) => lstatSync(join(cwd, file), { throwIfNoEntry: false }) !== undefined);
 }
 
 /**
@@ -322,7 +344,9 @@ export function listFilesIncludingUntracked(cwd = ROOT) {
     // the filesystem fallback above.
     for (const rel of submodule.files) files.push(`${path}/${rel}`);
   }
-  return { files, ...coverageOf(files, cwd) };
+  // `--cached` carries the same index lag as listTrackedFiles (WI-10004173).
+  const present = presentOnDisk(files, cwd);
+  return { files: present, ...coverageOf(present, cwd) };
 }
 
 /**

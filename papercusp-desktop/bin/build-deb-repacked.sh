@@ -112,7 +112,7 @@ SUPERPROJECT="$(git -C "$ROOT" rev-parse --show-superproject-working-tree 2>/dev
 [[ -n "$SUPERPROJECT" ]] || SUPERPROJECT="$ROOT"
 export PAPERCUSP_BUILD_SHA="${PAPERCUSP_BUILD_SHA:-$(git -C "$SUPERPROJECT" rev-parse HEAD 2>/dev/null || true)}"
 BUILD_TREE_DIRTY=false
-if [[ -n "$(git -C "$SUPERPROJECT" status --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null | head -c1)" ]]; then
+if [[ -n "$(git -C "$SUPERPROJECT" status --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null)" ]]; then
   BUILD_TREE_DIRTY=true
 fi
 

@@ -57,6 +57,7 @@ import {
   listingActionFor,
   listingKindOf,
   isHiveBlueprintListing,
+  isIdentityBlueprintListing,
   listingRepoSlug,
   listingContributorCount,
   listingTopLanguage,
@@ -64,6 +65,7 @@ import {
   LISTING_ACTION_LABEL,
 } from '@papercusp/operator-core/lib/cupboard/types';
 import { COLORS, FONTS, RADIUS, SIZES } from '../cupboard-theme';
+import IdentitySurface from './IdentitySurface';
 import { CupboardErrorState, cupboardHttpError } from '../CupboardErrorState';
 import KnowledgePackInstall from './KnowledgePackInstall';
 import BundleAppInstall from './BundleAppInstall';
@@ -521,6 +523,7 @@ export default function CupboardDetailPage() {
   const kind = listingKindOf(listing);
   // D-002: a pot blueprint reads as "pot template" on its detail page too.
   const isPotTemplate = isHiveBlueprintListing(listing);
+  const isIdentity = isIdentityBlueprintListing(listing);
   const repoSlug = listingRepoSlug(listing);
   const contributors = listingContributorCount(listing);
   const language = listingTopLanguage(listing);
@@ -612,8 +615,9 @@ export default function CupboardDetailPage() {
               display: 'inline-flex', alignItems: 'center', gap: 4,
               background: COLORS.surfaceRaised, border: `1px solid ${COLORS.border}`,
               color: COLORS.textMuted,
-            }} data-testid="cupboard-detail-kind" data-kind={kind} data-pot-template={isPotTemplate ? 'true' : undefined}>
-              <ActionIcon action={action} size={12} /> {isPotTemplate ? `${t('pot', { lower: true })} template` : kind}
+            }} data-testid="cupboard-detail-kind" data-kind={kind} data-pot-template={isPotTemplate ? 'true' : undefined}
+              data-identity={isIdentity ? 'true' : undefined}>
+              <ActionIcon action={action} size={12} /> {isPotTemplate ? `${t('pot', { lower: true })} template` : isIdentity ? 'identity' : kind}
             </span>
             <ClaimStatusBadge
               status={listing.claim_status}
@@ -847,6 +851,11 @@ export default function CupboardDetailPage() {
         {kind === 'theme' && (
           <ThemeInstall listing={listing} />
         )}
+
+        {/* identity blueprint (portable-identity-packages P-016): the declared
+            surface — what wearing it injects, hooks, bundles and asks consent
+            for — read BEFORE install. */}
+        {isIdentity && <IdentitySurface value={listing.identity_surface} />}
 
         {kind === 'blueprint' && capabilityFlow && (
           <BlueprintCapabilityReview

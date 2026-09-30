@@ -5223,6 +5223,43 @@ export function applyOmpOperatorOrigin(mcpJsonText, operatorUrl) {
   }
 }
 
+/** Replace the bearer on every papercusp SUPERUSER `/api/mcp` server (`?superuser=1`) in an OMP
+ *  mcp.json with `bearer`, the token the target operator actually validates.
+ *
+ *  WHY (WI-10003604): the user-level template bakes the bearer it was minted with and normally
+ *  points at the :9071 proxy, which re-injects the CURRENT superuser token on every request.
+ *  applyOmpOperatorOrigin re-points that origin — for the in-process PUI engine, straight at the
+ *  operator — so the proxy's refresh no longer runs and the stale template bearer reaches an
+ *  operator validating `$PAPERCUSP_HOME/superuser-token`. Result: `superuser_invalid_bearer` on
+ *  every tools/list, OMP starts with only its native tools, and the SU turn fails
+ *  `omp_connection_failed`. The credential must follow the origin. Any case variant of the
+ *  Authorization header is replaced so the server never receives two. An empty bearer, a
+ *  non-superuser server, or unparseable input is left unchanged. Pure; exported for tests. */
+export function applyOmpOperatorBearer(mcpJsonText, bearer) {
+  const token = typeof bearer === "string" ? bearer.trim() : "";
+  if (!token) return mcpJsonText;
+  try {
+    const obj = JSON.parse(mcpJsonText);
+    const servers = obj?.mcpServers;
+    if (servers && typeof servers === "object") {
+      for (const key of Object.keys(servers)) {
+        const srv = servers[key];
+        if (!srv || typeof srv.url !== "string" || !/\/api\/mcp(\?|$)/.test(srv.url)) continue;
+        if (new URL(srv.url).searchParams.get("superuser") !== "1") continue;
+        const headers = srv.headers && typeof srv.headers === "object" ? srv.headers : {};
+        for (const h of Object.keys(headers)) {
+          if (h.toLowerCase() === "authorization") delete headers[h];
+        }
+        headers.Authorization = `Bearer ${token}`;
+        srv.headers = headers;
+      }
+    }
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return mcpJsonText;
+  }
+}
+
 /**
  * Probe an OMP session's operator MCP endpoint without requiring auth or a
  * valid MCP request. Any HTTP response proves that a listener is serving the
@@ -5491,6 +5528,11 @@ export function writeOmpSessionConfigDir(
     // site passes it, and the omp-seed-wire-budget guard measures the pair.
     toolsCompact = null,
     operatorUrl = OPERATOR_URL,
+    // The superuser bearer the operator at operatorUrl validates. When set, it replaces the
+    // template's baked bearer on every superuser papercusp server (applyOmpOperatorBearer):
+    // re-pointing the origin without the credential strands the session on a stale token
+    // (WI-10003604). Null keeps the template bearer (legacy callers, open dev operators).
+    operatorBearer = null,
     model = null,
     // Authoritative gateway registry bytes from bootstrap account routing.
     // When present they replace (not merge with) the user's global registry so
@@ -5777,6 +5819,7 @@ export function writeOmpSessionConfigDir(
         if (toolsAllowlist && toolsAllowlist.length)
           mcpText = filterTrimmedOmpMcpServers(mcpText);
         mcpText = applyOmpOperatorOrigin(mcpText, operatorUrl);
+        mcpText = applyOmpOperatorBearer(mcpText, operatorBearer);
         if (toolsAllowlist && toolsAllowlist.length)
           mcpText = applyOmpToolsAllowlist(
             mcpText,
@@ -16139,6 +16182,8 @@ async function launchFreshSu(selections, args, { brain = false } = {}) {
         model: effectiveModel,
         modelsYml: res.envelopeEnv?.PAPERCUSP_OMP_MODELS_YML || null,
         clientId: res.envelopeEnv?.PAPERCUSP_SID || null,
+        // The live superuser token, not the template's minted copy (WI-10003604).
+        operatorBearer: readToken() || null,
         env: { ...process.env, ...res.envelopeEnv },
         nativeMcp: true,
         mcpEnv: res.envelopeEnv || null,

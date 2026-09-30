@@ -15,9 +15,12 @@
  *      refused every other shape (schema superRefine → `validateInjectionPoint`).
  *   3. WHO PRODUCES IT. A due contribution is a context capability (D-013):
  *      `class@major` + `verb`. The pot's exact conformed provider is resolved
- *      (`resolveIdentityClassProvider` — it refuses recipe and operation
- *      providers, which P-013 and P-018 own), its verb binding is dispatched as a
- *      READ-ONLY tool under the sink's abort signal (`dispatchReadOnlyTool`), and
+ *      (`resolveIdentityClassProvider` — it refuses operation providers and a
+ *      recipe provider without inspected evidence). A tool binding is dispatched
+ *      as a READ-ONLY tool under the sink's abort signal (`dispatchReadOnlyTool`);
+ *      a recipe binding runs through the P-013 recipe runtime as the wearer,
+ *      resolved again before every call (`resolvePackageSinkRecipeWearer`, D-031);
+ *      and
  *      the output is validated against the contract's schema and provenance-
  *      enveloped (`validateIdentityProviderOutput`) before the evaluator may
  *      count or render it.
@@ -50,8 +53,15 @@ import {
 import { parseBlueprintSource } from '../agent-tools/blueprint/_resolve';
 import { operatorResolveExtends } from '../blueprint/installed-blueprints';
 import { dispatchReadOnlyTool } from '../events/await/predicate-watch';
+import {
+  readIdentityReactionCeiling,
+  type IdentityReactionCeiling,
+} from '../capability-envelope/identity-grants-port';
 import { resolveIdentityClassProvider } from './class-provider';
 import { validateIdentityProviderOutput } from './provider-output';
+import { runIdentityRecipeProvider, type IdentityRecipeRuntimeDeps } from './recipe-provider-runtime';
+import type { IdentityTemplateWearer } from './state-template-reader';
+import { IDENTITY_WEARER_ROLE, buildWearerToolContext, identityCeilingRefusal } from './wearer-authority';
 import { getIdentitySource, localDirs } from './source';
 import {
   DEFAULT_SINK_HOST_LIMITS,
@@ -92,6 +102,8 @@ export interface ProduceContextInput {
   readonly identityId: string;
   readonly contribution: DueContextContribution;
   readonly signal: AbortSignal;
+  /** Epoch ms: the sink invocation's deadline. A recipe script gets the time left to it. */
+  readonly deadlineAt: number;
 }
 
 export interface TurnStartPackageSinkDeps {
@@ -172,7 +184,7 @@ export async function evaluateTurnStartPackageSink(input: {
             if (!potSlug) throw new Error('the wearer has no pot scope to resolve a provider in');
             return deps.produceContext({
               workspaceId: input.workspaceId, potSlug, ownerId: input.ownerId,
-              identityId, contribution, signal: call.signal,
+              identityId, contribution, signal: call.signal, deadlineAt: call.deadlineAt,
             });
           },
         });
@@ -256,31 +268,87 @@ export function packageSinkReceipt(sink: TurnStartPackageSink): Record<string, u
   };
 }
 
-/** Production wiring: the control anchor, the identity source catalog, the class registry and the read-only dispatcher. */
-export function defaultTurnStartPackageSinkDeps(): TurnStartPackageSinkDeps {
+/**
+ * P-018 (D-020, D-031): the wearer a turn-start recipe provider runs as,
+ * resolved immediately before each call and never cached. The anchor is read
+ * again, so a wearer that has since stopped wearing the identity, or has no
+ * harness scope, is refused before any dispatch. The principal is the wearer;
+ * its capabilities are the recipe's inspected requirements that the live
+ * pot/role ceiling and the never-auto floor admit. A requirement they refuse is
+ * absent, so re-inspection refuses the call as `capability-denied`. The
+ * dispatcher's identity grant kernel then judges the wearer's own grants on
+ * every call the recipe makes.
+ */
+export async function resolvePackageSinkRecipeWearer(input: {
+  ownerId: string;
+  workspaceId: string;
+  identityId: string;
+  requiredCapabilities: readonly string[];
+  signal: AbortSignal;
+}, deps: {
+  readWearer: TurnStartPackageSinkDeps['readWearer'];
+  readCeiling: NonNullable<PackageSinkHost['readCeiling']>;
+}): Promise<IdentityTemplateWearer> {
+  const wearer = await deps.readWearer(input.ownerId, input.workspaceId);
+  if (!wearer || !wearer.stack.some((ref) => stackRefIdentity(ref) === input.identityId)) {
+    throw new Error('capability-class:recipe-wearer-detached');
+  }
+  if (!wearer.potSlug) throw new Error('capability-class:recipe-wearer-unscoped');
+  const ceiling = await deps.readCeiling({
+    workspaceId: input.workspaceId, harnessSlug: wearer.potSlug, role: IDENTITY_WEARER_ROLE,
+  });
+  const capabilities = input.requiredCapabilities.filter((cap) => identityCeilingRefusal(cap, ceiling) === null);
   return {
-    readWearer: async (ownerId, workspaceId) => {
-      const rows = await getOrgPg().sql<{ control_state: unknown; control_generation: string | number | null }[]>`
-        SELECT control_state, control_generation
-          FROM harness_shared.session_briefs
-         WHERE owner_id = ${ownerId} AND workspace_id = ${workspaceId}
-         LIMIT 1`;
-      const state = rows[0]?.control_state as {
-        stack?: unknown; scope?: { harness?: unknown };
-        activation?: { applied?: { specificationRevision?: unknown; stateRevision?: unknown } | null } | null;
-      } | null | undefined;
-      if (!state || !Array.isArray(state.stack)) return null;
-      const applied = state.activation?.applied;
-      const attachmentRevision = typeof applied?.specificationRevision === 'string' &&
-        typeof applied.stateRevision === 'string'
-        ? `${applied.specificationRevision}:${applied.stateRevision}`
-        : `generation:${String(rows[0]!.control_generation ?? '')}`;
-      return {
-        stack: state.stack.filter((ref): ref is string => typeof ref === 'string'),
-        attachmentRevision,
-        potSlug: typeof state.scope?.harness === 'string' && state.scope.harness ? state.scope.harness : null,
-      };
-    },
+    ownerId: input.ownerId,
+    capabilityCeiling: new Set(capabilities),
+    context: buildWearerToolContext({
+      workspaceId: input.workspaceId, ownerId: input.ownerId, role: IDENTITY_WEARER_ROLE,
+      harnessSlug: wearer.potSlug, capabilities, spawnId: PACKAGE_SINK_SPAWN_ID, signal: input.signal,
+    }),
+  };
+}
+
+/** The provider path's host seams. Production passes none: the P-013 runtime's
+ * own defaults, the live pot/role ceiling read and a real dispatch. */
+export interface PackageSinkHost {
+  readonly runtime?: IdentityRecipeRuntimeDeps;
+  readonly readCeiling?: (input: { workspaceId: string; harnessSlug: string; role: string }) =>
+    Promise<Pick<IdentityReactionCeiling, 'ceilings' | 'protectedAdditions'>>;
+  /**
+   * P-015 (D-033): the author preview's substitute for the provider's RAW
+   * output. When set, nothing is dispatched and no recipe runs; the value goes
+   * through the same resolution, contract validation and provenance envelope
+   * as that provider kind's real output.
+   */
+  readonly readProviderValue?: (input: { call: ProduceContextInput; providerKind: 'tool' | 'recipe' }) => Promise<unknown>;
+}
+
+/** Production wiring: the control anchor, the identity source catalog, the class registry and the read-only dispatcher. */
+export function defaultTurnStartPackageSinkDeps(host: PackageSinkHost = {}): TurnStartPackageSinkDeps {
+  const readWearer: TurnStartPackageSinkDeps['readWearer'] = async (ownerId, workspaceId) => {
+    const rows = await getOrgPg().sql<{ control_state: unknown; control_generation: string | number | null }[]>`
+      SELECT control_state, control_generation
+        FROM harness_shared.session_briefs
+       WHERE owner_id = ${ownerId} AND workspace_id = ${workspaceId}
+       LIMIT 1`;
+    const state = rows[0]?.control_state as {
+      stack?: unknown; scope?: { harness?: unknown };
+      activation?: { applied?: { specificationRevision?: unknown; stateRevision?: unknown } | null } | null;
+    } | null | undefined;
+    if (!state || !Array.isArray(state.stack)) return null;
+    const applied = state.activation?.applied;
+    const attachmentRevision = typeof applied?.specificationRevision === 'string' &&
+      typeof applied.stateRevision === 'string'
+      ? `${applied.specificationRevision}:${applied.stateRevision}`
+      : `generation:${String(rows[0]!.control_generation ?? '')}`;
+    return {
+      stack: state.stack.filter((ref): ref is string => typeof ref === 'string'),
+      attachmentRevision,
+      potSlug: typeof state.scope?.harness === 'string' && state.scope.harness ? state.scope.harness : null,
+    };
+  };
+  return {
+    readWearer,
     readDueContributions: async (identityId) => {
       const identity = await getIdentitySource(identityId);
       // A layer the catalog cannot resolve declares nothing this sink can run.
@@ -303,28 +371,58 @@ export function defaultTurnStartPackageSinkDeps(): TurnStartPackageSinkDeps {
         classRef: call.contribution.ref, verb: call.contribution.verb,
       });
       if (!resolved.ok) throw new Error(`capability-class:${resolved.code}`);
-      // A recipe binding names a saved recipe, not a tool. Its runtime
-      // (recipe-provider-runtime.ts) needs the real wearer resolver, which P-018
-      // owns (D-008, D-020); until then it omits visibly instead of dispatching.
-      if (resolved.provider.providerKind !== 'tool') throw new Error('capability-class:recipe-wearer-unavailable');
+      /** The contract check and provenance envelope a provider kind's real output gets. */
+      const envelope = (value: unknown, outputSchema: typeof resolved.contract.outputSchema): string => {
+        const checked = validateIdentityProviderOutput({
+          json: typeof value === 'string' ? value : JSON.stringify(value ?? null),
+          outputSchema,
+          provenance: {
+            author: resolved.provider.providerPackage, identityRef: call.identityId,
+            providerRef: `${resolved.provider.providerPackage}@${resolved.provider.providerVersion}`,
+            classRef: resolved.classRef,
+          },
+          maxBytes: PACKAGE_CONTEXT_OUTPUT_MAX_BYTES,
+        });
+        if (checked.status === 'omitted') throw new Error(`capability-output:${checked.reason}`);
+        return checked.text;
+      };
+      if (resolved.provider.providerKind === 'recipe') {
+        // A recipe binding names a saved recipe, not a tool: the P-013 runtime
+        // re-inspects it against its recorded pin and runs it as the wearer
+        // (D-020, D-031). Its declared needs are what that inspection recorded.
+        const inspections = resolved.provider.recipeInspections;
+        const evidence = inspections && Object.hasOwn(inspections, resolved.verb) ? inspections[resolved.verb] : undefined;
+        if (host.readProviderValue) {
+          // The runtime's own availability check, then its output contract.
+          if (!evidence?.ok || evidence.recipe.id !== resolved.provider.verbBindings[resolved.verb]) {
+            throw new Error('capability-class:recipe-recipe-unavailable');
+          }
+          return envelope(await host.readProviderValue({ call, providerKind: 'recipe' }), evidence.outputSchema);
+        }
+        const declaredNeeds = evidence?.ok ? evidence.requiredCapabilities : [];
+        const run = await runIdentityRecipeProvider({
+          resolution: resolved, identityRef: call.identityId, signal: call.signal,
+          deadlineAt: call.deadlineAt, maxBytes: PACKAGE_CONTEXT_OUTPUT_MAX_BYTES, declaredNeeds,
+          resolveWearer: () => resolvePackageSinkRecipeWearer({
+            ownerId: call.ownerId, workspaceId: call.workspaceId, identityId: call.identityId,
+            requiredCapabilities: declaredNeeds, signal: call.signal,
+          }, { readWearer, readCeiling: host.readCeiling ?? readIdentityReactionCeiling }),
+        }, host.runtime);
+        if (run.status === 'value') return run.text;
+        throw new Error(run.status === 'refused' ? `capability-class:recipe-${run.code}` : `capability-output:${run.reason}`);
+      }
+      if (resolved.provider.providerKind !== 'tool') {
+        throw new Error(`capability-class:${resolved.provider.providerKind}-unavailable`);
+      }
       const tool = resolved.provider.verbBindings[resolved.verb];
       if (typeof tool !== 'string' || !tool.trim()) throw new Error('capability-class:verb-unbound');
-      const value = await dispatchReadOnlyTool(tool.trim(), {}, {
-        workspaceId: call.workspaceId, harnessSlug: call.potSlug, role: 'su',
-        onBehalfOf: call.ownerId, spawnId: PACKAGE_SINK_SPAWN_ID, signal: call.signal,
-      });
-      const providerRef = `${resolved.provider.providerPackage}@${resolved.provider.providerVersion}`;
-      const checked = validateIdentityProviderOutput({
-        json: typeof value === 'string' ? value : JSON.stringify(value ?? null),
-        outputSchema: resolved.contract.outputSchema,
-        provenance: {
-          author: resolved.provider.providerPackage, identityRef: call.identityId,
-          providerRef, classRef: resolved.classRef,
-        },
-        maxBytes: PACKAGE_CONTEXT_OUTPUT_MAX_BYTES,
-      });
-      if (checked.status === 'omitted') throw new Error(`capability-output:${checked.reason}`);
-      return checked.text;
+      const value = host.readProviderValue
+        ? await host.readProviderValue({ call, providerKind: 'tool' })
+        : await dispatchReadOnlyTool(tool.trim(), {}, {
+          workspaceId: call.workspaceId, harnessSlug: call.potSlug, role: 'su',
+          onBehalfOf: call.ownerId, spawnId: PACKAGE_SINK_SPAWN_ID, signal: call.signal,
+        });
+      return envelope(value, resolved.contract.outputSchema);
     },
     // Loaded on call: sync-hook-rules imports this module for its own defaults.
     readRuleRequests: async (call) => (await import('./sync-hook-rules')).turnStartSyncRuleRequests(call),

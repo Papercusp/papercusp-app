@@ -12,8 +12,15 @@
  * Landing the dir IS the install. A rule does nothing until a blueprint bundle
  * pins it and a wearer applies that artifact; compile then binds a sync context
  * rule's provider and refuses an operation or asynchronous one.
+ *
+ * An ASYNC rule also has to agree with the installing workspace's catalogs
+ * (P-018, D-027 §1): its `on` must be an active catalogued event key and its
+ * class verb must declare a capability. The caller supplies that check, and it
+ * is a required argument so no install path can land an async rule unchecked.
  */
-import { readRuleDir, RULE_MANIFEST, userRulesDir, type LocalRule } from './rule-store';
+import {
+  readRuleDir, RULE_MANIFEST, userRulesDir, type LocalAsyncRule, type LocalRule,
+} from './rule-store';
 import {
   installSelfDescribingFromCupboard,
   type InstallSelfDescribingDeps,
@@ -40,18 +47,22 @@ export interface InstallRuleCoreResult {
   pin: VerifiedContentPin | null;
 }
 
-const RULE_KIND_SPEC: SelfDescribingKindSpec<LocalRule> = {
-  label: 'rule',
-  manifestFile: RULE_MANIFEST,
-  readDir: (dir, ref) => readRuleDir(dir, ref, 'user'),
-  userDir: userRulesDir,
-};
+/** Returns a refusal message for an async rule the workspace cannot run, or null. */
+export type AsyncRuleInstallChecker = (rule: LocalAsyncRule) => Promise<string | null>;
 
 export async function installRuleFromCupboardCore(
   input: InstallSelfDescribingInput,
   deps: InstallSelfDescribingDeps,
+  checkAsyncRule: AsyncRuleInstallChecker,
 ): Promise<InstallRuleCoreResult> {
-  const r = await installSelfDescribingFromCupboard(input, RULE_KIND_SPEC, deps);
+  const spec: SelfDescribingKindSpec<LocalRule> = {
+    label: 'rule',
+    manifestFile: RULE_MANIFEST,
+    readDir: (dir, ref) => readRuleDir(dir, ref, 'user'),
+    validate: async (rule) => rule.delivery === 'async' ? checkAsyncRule(rule) : null,
+    userDir: userRulesDir,
+  };
+  const r = await installSelfDescribingFromCupboard(input, spec, deps);
   return {
     ok: true,
     ref: r.ref,

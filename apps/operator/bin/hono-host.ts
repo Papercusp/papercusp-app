@@ -38,6 +38,11 @@ import { BOOT_INTEGRITY_EXIT_CODE } from '@papercusp/operator-core/lib/boot-inte
 import { runBootstrap, waitForBootMigrationGate } from './host-bootstrap';
 import { externalIngressHandler, handler } from './host-handler';
 import { externalIngressPort } from '@papercusp/operator-core/lib/auth/forwarded-request-trust';
+import { configureIngressListener } from '@papercusp/operator-core/lib/own-tunnel/runtime';
+import {
+  markOwnTunnelListenerSeamConfigured,
+  startOwnTunnelReconciler,
+} from '@papercusp/operator-core/lib/own-tunnel/service';
 import { workspacePinWarning } from '@papercusp/operator-core/lib/workspace-pin-guard';
 import { requestOnlyHost } from '@papercusp/operator-core/lib/background-workers';
 import { scheduleTranscriptSearchWarmup } from '@papercusp/operator-core/lib/transcript-search-warmup';
@@ -469,6 +474,37 @@ function startRequestServers(): void {
         console.log(`[hono-host] external-ingress listener on ${hostname}:${ingressPort} (no local trust)`);
       },
     });
+  } else if (ingressPort === null) {
+    // external-app-access P-009: with no static port, the install's own tunnel
+    // (lib/own-tunnel/service.ts) opens and closes the listener at runtime through this
+    // seam — no restart. Loopback only: the tunnel's connector dials 127.0.0.1. Same
+    // externalIngressHandler, so tunnel traffic can never reach local trust.
+    let dynamic: { server: import('node:http').Server; port: number } | null = null;
+    configureIngressListener({
+      currentPort: () => dynamic?.port ?? null,
+      open: (listenPort) =>
+        new Promise<void>((resolve, reject) => {
+          const srv = createAdaptorServer({ fetch: externalIngressHandler }) as unknown as import('node:http').Server;
+          srv.once('error', reject);
+          srv.listen({ port: listenPort, host: '127.0.0.1', ...(cluster.isWorker ? { reusePort: true } : {}) }, () => {
+            srv.off('error', reject);
+            dynamic = { server: srv, port: listenPort };
+            console.log(`[hono-host] own-tunnel external-ingress listener on 127.0.0.1:${listenPort} (no local trust)`);
+            resolve();
+          });
+        }),
+      close: () =>
+        new Promise<void>((resolve) => {
+          const current = dynamic;
+          dynamic = null;
+          if (!current) return resolve();
+          current.server.close(() => resolve());
+          // The kill switch is instant: drop open keep-alive connections too.
+          current.server.closeAllConnections();
+          console.log(`[hono-host] own-tunnel external-ingress listener on 127.0.0.1:${current.port} closed`);
+        }),
+    });
+    markOwnTunnelListenerSeamConfigured();
   }
 
   // B2 (infra-fail-fast-build-integrity P-006) — the "safe half": explicit inbound
@@ -819,6 +855,8 @@ const clusterHandle = sidecarMode ? null : startCluster({
     // never federating (su-72ce40f2's diagnosis, WI-5441, post 53143).
     void waitForBootMigrationGate().then(() => {
       startRequestServers();
+      // external-app-access P-009: open this process's own-tunnel listener now (idempotent).
+      startOwnTunnelReconciler();
       // Heartbeat the primary so the cluster-lag-watchdog can detect a SYNCHRONOUS wedge
       // (which freezes the worker-side lag-self-restart too) by heartbeat ABSENCE
       // (EI-1598/1608). DEFAULT-OFF; only meaningful in a forked worker (process.send).
@@ -939,6 +977,11 @@ if (clusterHandle && clusterHandle.role === 'primary' && clusterWorkers > 1) {
   // the same way; a request-only primary under the dedicated-bg-host topology stays
   // silent here too.
   const bootedHandlesPgPublisher = startBootedHandlesPgPublisher({});
+  // external-app-access P-009: the primary is the process that may own the own-tunnel
+  // connector (cloudflared); request workers arm the same reconciler for their listener.
+  // Idempotent, never throws, and it re-reads the row every few seconds, so a first pass
+  // that runs before boot migrations have applied simply converges on a later tick.
+  startOwnTunnelReconciler();
   // WI-6594: relay each worker's P-009 stamp declarations to every other worker.
   // The primary is the hub because only it holds a handle to every worker; it also
   // applies each patch locally, since it runs the background machinery whose own

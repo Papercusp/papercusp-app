@@ -168,7 +168,7 @@ release_artifacts_guarded_delete \
   || exit 1
 
 # 2. Locate the AppDir tauri produced (GUI bundle).
-APPDIR="$(ls -d "$APPIMG_DIR"/*.AppDir 2>/dev/null | grep -vi server | head -1)"
+APPDIR="$(ls -d "$APPIMG_DIR"/*.AppDir 2>/dev/null | grep -vi server | sed -n 1p)"
 [ -n "$APPDIR" ] && [ -d "$APPDIR" ] || { echo "FATAL: no AppDir under $APPIMG_DIR — tauri didn't get far enough" >&2; exit 1; }
 echo "==> finishing AppDir: $APPDIR"
 
@@ -180,7 +180,7 @@ echo "==> finishing AppDir: $APPDIR"
 #     bundled bootstrap SPA while making a stale staged serve.mjs, node runtime, model,
 #     rootfs or seed impossible to ship. The finished-artifact audit remains the
 #     fail-closed backstop.
-APPDIR_SIDECAR="$(ls -d "$APPDIR"/usr/lib/*/sidecar 2>/dev/null | head -1)"
+APPDIR_SIDECAR="$(ls -d "$APPDIR"/usr/lib/*/sidecar 2>/dev/null | sed -n 1p)"
 if [ -z "$APPDIR_SIDECAR" ] || [ ! -d "$APPDIR_SIDECAR" ]; then
   echo "FATAL: no bundled GUI resource root under $APPDIR/usr/lib/*/sidecar — tauri bundle incomplete" >&2; exit 1
 fi
@@ -197,7 +197,7 @@ while IFS= read -r -d '' _stale_sidecar; do
   release_artifacts_guarded_delete "$_stale_sidecar" || exit 1
 done < <(find "$APPDIR_SIDECAR" -mindepth 1 -maxdepth 1 ! -name spa -print0)
 release_artifacts_guarded_delete "$LIBDIR/resources" "$LIBDIR/seed" || exit 1
-if find "$APPDIR_SIDECAR" -mindepth 1 -maxdepth 1 ! -name spa -print -quit | grep -q .; then
+if find "$APPDIR_SIDECAR" -mindepth 1 -maxdepth 1 ! -name spa -print -quit | grep -c . >/dev/null; then
   echo "FATAL: GUI AppDir contains a non-allowlisted sidecar member" >&2; exit 1
 fi
 echo "   GUI resources now contain only sidecar/spa ($(du -sh "$APPDIR_SPA" 2>/dev/null | cut -f1))"
@@ -242,7 +242,7 @@ Categories=Development;
 Terminal=false
 DESK
 # linuxdeploy validates icon resolution, so hand it a real 256x256 from the AppDir.
-_ldicon="$(find "$APPDIR/usr/share/icons" -path '*256x256*' -name '*.png' 2>/dev/null | head -1)"
+_ldicon="$(find "$APPDIR/usr/share/icons" -path '*256x256*' -name '*.png' 2>/dev/null | sed -n 1p)"
 [ -n "$_ldicon" ] || _ldicon="$(find "$APPDIR/usr/share/icons" -name '*.png' 2>/dev/null | sort -V | tail -1)"
 cp "$_ldicon" "$DEPLOY_STAGE/usr/share/icons/hicolor/256x256/apps/papercusp-libdeploy.png"
 (
@@ -499,7 +499,7 @@ copy_gstreamer_plugin_closure() {
         fi
       done
       if [ -z "$_gst_host" ] && [ -n "$_gst_ldconfig" ]; then
-        _gst_host="$("$_gst_ldconfig" -p 2>/dev/null | awk -v need="$_gst_need" '$1 == need { print $NF; exit }' || true)"
+        _gst_host="$("$_gst_ldconfig" -p 2>/dev/null | awk -v need="$_gst_need" '$1 == need && !f { print $NF; f = 1 }' || true)"
       fi
       if [ -z "$_gst_host" ] || [ ! -e "$_gst_host" ]; then
         echo "FATAL: GStreamer plugin $(basename "$_gst_real") needs $_gst_need, but no host or AppDir copy resolves it" >&2
@@ -661,7 +661,7 @@ ln -sfn ../../usr/lib/x86_64-linux-gnu/webkit2gtk-4.1 "$APPDIR/lib/x86_64-linux-
 #     already has system WebKit can launch it". Never package that again.
 _missing=""
 for _need in libwebkit2gtk-4.1.so.0 libjavascriptcoregtk-4.1.so.0 libgtk-3.so.0 libsoup-3.0.so.0 libgio-2.0.so.0 libglib-2.0.so.0; do
-  find "$APPDIR/usr/lib" -maxdepth 2 -name "$_need" | grep -q . || _missing="$_missing $_need"
+  find "$APPDIR/usr/lib" -maxdepth 2 -name "$_need" | grep -c . >/dev/null || _missing="$_missing $_need"
 done
 [ -x "$APPDIR/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess" ] || _missing="$_missing <cwd-relative WebKitNetworkProcess>"
 # Assert EVERY soname the 2c-i copy loop was asked to bundle actually landed, not one
@@ -685,7 +685,7 @@ done
 # That is exactly the failure this whole guard exists to prevent, so assert the
 # absolute path is GONE from the shipped library rather than trusting the patch ran.
 if [ -f "$APPDIR/usr/lib/libwebkit2gtk-4.1.so.0" ]; then
-  if strings -a "$APPDIR/usr/lib/libwebkit2gtk-4.1.so.0" | grep -q '^/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1'; then
+  if strings -a "$APPDIR/usr/lib/libwebkit2gtk-4.1.so.0" | grep -c '^/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1' >/dev/null; then
     _missing="$_missing <libwebkit2gtk still carries an ABSOLUTE PKGLIBEXECDIR — helper spawn will fail on a host without system WebKitGTK>"
   fi
 fi
@@ -699,7 +699,7 @@ echo "   self-containment OK: $(find "$APPDIR/usr/lib" -maxdepth 2 -name '*.so*'
 # 3. appimagetool requires the desktop file's Icon=<name> to exist as <name>.png at
 #    the AppDir ROOT. linuxdeploy names the root icon after the productName, but the
 #    .desktop uses the binary/icon name — so copy the largest bundled icon into place.
-ICON_NAME="$(grep -h -oP '^Icon=\K.*' "$APPDIR"/*.desktop 2>/dev/null | head -1)"
+ICON_NAME="$(grep -h -oP '^Icon=\K.*' "$APPDIR"/*.desktop 2>/dev/null | sed -n 1p)"
 if [ -n "$ICON_NAME" ] && [ ! -f "$APPDIR/$ICON_NAME.png" ]; then
   ICON_SRC="$(find "$APPDIR/usr/share/icons" -name "$ICON_NAME.png" 2>/dev/null | sort -V | tail -1)"
   if [ -n "$ICON_SRC" ]; then cp "$ICON_SRC" "$APPDIR/$ICON_NAME.png"; echo "   root icon: $ICON_NAME.png (from $ICON_SRC)"; fi
@@ -729,7 +729,7 @@ export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/sha
 # linuxdeploy plugin hooks (gtk plugin: GSETTINGS_SCHEMA_DIR, GTK_PATH, immodules, …)
 for _hook in "$HERE"/apprun-hooks/*.sh; do [ -r "$_hook" ] && . "$_hook"; done
 # gdk-pixbuf image loaders
-_pbcache="$(ls "$HERE"/usr/lib/*/gdk-pixbuf-*/*/loaders.cache "$HERE"/usr/lib/gdk-pixbuf-*/*/loaders.cache 2>/dev/null | head -1)"
+_pbcache="$(ls "$HERE"/usr/lib/*/gdk-pixbuf-*/*/loaders.cache "$HERE"/usr/lib/gdk-pixbuf-*/*/loaders.cache 2>/dev/null | sed -n 1p)"
 [ -n "$_pbcache" ] && export GDK_PIXBUF_MODULE_FILE="$_pbcache"
 # gio modules (tls etc.)
 for _gio in "$HERE/usr/lib/x86_64-linux-gnu/gio/modules" "$HERE/usr/lib/gio/modules"; do
@@ -849,7 +849,7 @@ fi
 
 # 4. Locate appimagetool (tauri downloads the linuxdeploy appimage plugin, which
 #    embeds it) and package the AppDir. No ELF scan → no crash.
-PLUGIN="$(ls "$HOME/.cache/tauri/"*plugin-appimage*.AppImage 2>/dev/null | head -1)"
+PLUGIN="$(ls "$HOME/.cache/tauri/"*plugin-appimage*.AppImage 2>/dev/null | sed -n 1p)"
 [ -n "$PLUGIN" ] || { echo "FATAL: linuxdeploy-plugin-appimage not found in ~/.cache/tauri (did the tauri step run?)" >&2; exit 1; }
 
 # APPIMAGE_EXTRACT_AND_RUN makes the type-2 runtime unpack the plugin under

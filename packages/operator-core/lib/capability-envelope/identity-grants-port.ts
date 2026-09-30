@@ -125,6 +125,26 @@ export function appliedIdentityArtifact(
 }
 
 /**
+ * The applied artifact, admitting the one case `resolveIdentityArtifact` below
+ * also admits: a control-only activation advanced the applied STATE revision
+ * without re-rendering, so no receipt carries it, while the record's current
+ * specification IS the applied one (EI-23431478594488191). Readers of worn
+ * content (rule pins) need the artifact itself, which that verdict omits for an
+ * ungoverned identity, so they share this instead of re-deriving the fallback.
+ */
+export function appliedOrCurrentIdentityArtifact(
+  raw: unknown,
+  revision: KernelExecutionRevision | null | undefined,
+): ResolvedAgentSpecification | null {
+  const artifact = appliedIdentityArtifact(raw, revision);
+  if (artifact || !revision) return artifact;
+  const record = object(raw);
+  if (!record?.specificationArtifact || record.specificationRevision !== revision.specificationRevision) return null;
+  const current = replayAgentSpecification(record.specificationArtifact);
+  return current.specificationRevision === revision.specificationRevision ? current : null;
+}
+
+/**
  * The verdict `checkIdentityGrantKernel` reaches about a launch record, as a
  * value instead of a control-flow side effect.
  *
@@ -305,10 +325,10 @@ export function launchRecordAdmitsApplied(
   return resolveIdentityArtifact(record, revision).kind !== 'stale-artifact';
 }
 
-/** Reads existing stores; missing or failed policy reads must reach the caller. */
-export const readIdentityGrantPolicy: PolicyReader = async (input) => {
-  const registry = await readOperatorState<HarnessRegistry>('harness_registry', input.workspaceId, { fresh: true });
-  const harness = registry?.projects.find((entry) => entry.slug === input.harnessSlug);
+/** The administrator-selected pot of a harness and the worker roles ITS OWN layer declares. */
+async function readAdministratorPotRoles(workspaceId: string, harnessSlug: string) {
+  const registry = await readOperatorState<HarnessRegistry>('harness_registry', workspaceId, { fresh: true });
+  const harness = registry?.projects.find((entry) => entry.slug === harnessSlug);
   if (!harness || !registry) throw new Error('identity harness is not registered');
   const potSlug = potSlugsForHarnesses(registry.projects, [harness.slug])[0] ?? harness.slug;
   const pot = registry.projects.find((entry) => entry.slug === potSlug);
@@ -322,17 +342,27 @@ export const readIdentityGrantPolicy: PolicyReader = async (input) => {
   // A remote identity can contribute worker-role configuration too. Its
   // inherited value cannot count as independent administrator authorization.
   const ownSource = BlueprintSourceDocumentSchema.parse(layerSourceDocument(ownLayer));
-  const roles = ownSource.fleet?.workerRoles ?? [];
+  return { potSlug, roles: ownSource.fleet?.workerRoles ?? [] };
+}
+
+/** The runtime role-envelope overrides, only while that flag is on. */
+async function readEnvelopeOverrides(workspaceId: string): Promise<CapabilityEnvelopeOverrides> {
+  const overridesEnabled = await getFlag(FLAGS.CAPABILITY_ENVELOPE_OVERRIDES, systemDistinctId());
+  return overridesEnabled
+    ? await readOperatorState<CapabilityEnvelopeOverrides>('operator_capability_envelopes', workspaceId, { fresh: true }) ?? {}
+    : {};
+}
+
+/** Reads existing stores; missing or failed policy reads must reach the caller. */
+export const readIdentityGrantPolicy: PolicyReader = async (input) => {
+  const { potSlug, roles } = await readAdministratorPotRoles(input.workspaceId, input.harnessSlug);
   // A library install may omit a role only for an unambiguous single-role pot.
   // The installed package never supplies the administrator role selection.
   const role = input.role ?? (roles.length === 1 ? roles[0].id : null);
   if (!role) throw new Error('identity grant target role is ambiguous');
   const potRole = roles.find((entry) => entry.id === role);
   if (potRole?.capabilities === undefined) throw new Error('administrator pot has no explicit role capability ceiling');
-  const overridesEnabled = await getFlag(FLAGS.CAPABILITY_ENVELOPE_OVERRIDES, systemDistinctId());
-  const overrides = overridesEnabled
-    ? await readOperatorState<CapabilityEnvelopeOverrides>('operator_capability_envelopes', input.workspaceId, { fresh: true }) ?? {}
-    : {};
+  const overrides = await readEnvelopeOverrides(input.workspaceId);
   const ceilings: RoleEnvelope[] = [overrides.roleEnvelopes?.[role] ?? ROLE_ENVELOPES[role] ?? {}];
   ceilings.push({ allowCapabilities: potRole.capabilities });
   const bindings: PotCapabilityProviderBindingRow[] = [];
@@ -356,6 +386,35 @@ export const readIdentityGrantPolicy: PolicyReader = async (input) => {
   })).digest('hex');
   return { policyRevision, potSlug, bindings, ceilings, tools, protectedAdditions };
 };
+
+/** The pot/role ceiling an identity reaction's capability is narrowed to (P-018, D-027 §4). */
+export interface IdentityReactionCeiling {
+  potSlug: string;
+  ceilings: readonly RoleEnvelope[];
+  protectedAdditions: readonly string[];
+}
+
+/**
+ * The same sources as {@link readIdentityGrantPolicy}: the role envelope (with its
+ * runtime override) and the administrator pot's explicit role ceiling. One
+ * difference: a pot that declares no ceiling for the role adds none here instead
+ * of throwing. The dispatch that follows still runs the kernel, which refuses a
+ * governed wearer in that pot, and an ungoverned wearer keeps its structural
+ * envelope. Throws when a source cannot be read, so the durable step retries
+ * rather than authorizing on a partial read.
+ */
+export async function readIdentityReactionCeiling(input: {
+  workspaceId: string;
+  harnessSlug: string;
+  role: string;
+}): Promise<IdentityReactionCeiling> {
+  const { potSlug, roles } = await readAdministratorPotRoles(input.workspaceId, input.harnessSlug);
+  const overrides = await readEnvelopeOverrides(input.workspaceId);
+  const ceilings: RoleEnvelope[] = [overrides.roleEnvelopes?.[input.role] ?? ROLE_ENVELOPES[input.role] ?? {}];
+  const potRole = roles.find((entry) => entry.id === input.role);
+  if (potRole?.capabilities !== undefined) ceilings.push({ allowCapabilities: potRole.capabilities });
+  return { potSlug, ceilings, protectedAdditions: overrides.protectedAdditions ?? [] };
+}
 
 /** Validate resolved choices BEFORE installing packages or writing pot bindings. */
 export async function validateIdentityInstallGrants(

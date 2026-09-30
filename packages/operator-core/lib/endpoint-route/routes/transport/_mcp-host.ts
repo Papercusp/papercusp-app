@@ -823,6 +823,26 @@ export function crossHiveSelfSweepHint(toolName: string, slug: string, scopeHive
 }
 
 /**
+ * EI-24646272383071079: the "how to create it inside your hive" hint for a refused
+ * `harness:create { slug }`, or '' for any other tool/arg.
+ *
+ * `harness:create`'s `slug` names a harness that does not exist yet, so a hive-confined
+ * session reaches this refusal only when it omitted `pot` (with `pot`, the clamp checks
+ * `pot` instead — see collectHarnessSlugArgs). The bare refusal claims the slug "names a
+ * harness outside this session's hive", which reads as a naming conflict; the actionable
+ * fact is that the new harness would be hive-less.
+ */
+export function crossHiveCreateHint(toolName: string, arg: string, scopeHive: string): string {
+  if (toolName !== 'harness:create' || arg !== 'slug') return '';
+  return (
+    ` harness:create names a NEW harness; without \`pot\` it would be created outside every hive, ` +
+    `so this session could not operate on it afterwards. To create it inside this hive, pass ` +
+    `pot:"${scopeHive}" (the new harness joins "${scopeHive}"). A harness outside this hive needs an ` +
+    'unscoped (owner) session.'
+  );
+}
+
+/**
  * EI-20206112532711097: docs-surface tools, whose `harness:'all'` refusal must name
  * `harness:'engineering'`.
  *
@@ -1406,7 +1426,7 @@ async function applyScopedSuperuserTransportClamp(
               content: [
                 {
                   type: 'text' as const,
-                  text: `harness_forbidden: ${arg} "${slug}" names a harness outside this session's hive "${scopeHive}". A cross-hive call made this way could not later be claimed, commented on, or closed by this session.${crossHiveSelfSweepHint(toolName, slug, scopeHive)}`,
+                  text: `harness_forbidden: ${arg} "${slug}" names a harness outside this session's hive "${scopeHive}". A cross-hive call made this way could not later be claimed, commented on, or closed by this session.${crossHiveSelfSweepHint(toolName, slug, scopeHive)}${crossHiveCreateHint(toolName, arg, scopeHive)}`,
                 },
               ],
             },
@@ -3686,7 +3706,7 @@ export function registerMcpHost(server: McpServer): void {
                   content: [
                     {
                       type: 'text' as const,
-                      text: `harness_forbidden: ${arg} "${slug}" names a harness outside this session's hive "${scopeHive}". A cross-hive call made this way could not later be claimed, commented on, or closed by this session.${crossHiveSelfSweepHint(toolName, slug, scopeHive)}`,
+                      text: `harness_forbidden: ${arg} "${slug}" names a harness outside this session's hive "${scopeHive}". A cross-hive call made this way could not later be claimed, commented on, or closed by this session.${crossHiveSelfSweepHint(toolName, slug, scopeHive)}${crossHiveCreateHint(toolName, arg, scopeHive)}`,
                     },
                   ],
                 };

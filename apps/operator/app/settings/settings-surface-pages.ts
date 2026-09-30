@@ -35,7 +35,9 @@ export const SETTINGS_SURFACE_PAGES = {
   'deploy-accounts': lazy(() => import('./deploy-accounts/page')),
   'expert-routing': lazy(() => import('./expert-routing/page')),
   identities: lazy(() => import('./identities/page')),
-  mobile: lazy(() => import('./mobile/page')),
+  // /settings/mobile is replaced by Remote access (external-app-access P-010); its route redirects
+  // there, and the in-panel surface renders the same page for the old sub-path.
+  mobile: lazy(() => import('./remote-access/page')),
   omp: lazy(() => import('./omp/page')),
   operator: lazy(() => import('./operator/page')),
   p2p: lazy(() => import('./p2p/page')),
@@ -47,6 +49,7 @@ export const SETTINGS_SURFACE_PAGES = {
   'pot-customization': lazy(() => import('./pot-customization/page')),
   profile: lazy(() => import('./profile/page')),
   'prompt-studio': lazy(() => import('./prompt-studio/page')),
+  'remote-access': lazy(() => import('./remote-access/page')),
   // The one sub-page with no `page.tsx`: its route mounts the client
   // component directly, behind `requireFlag(FLAGS.CLOUDFLARE_PUBLISH)`. The
   // surface applies the same gate through the layout's own route→flag map.

@@ -115,6 +115,7 @@ import { isLiveCodeAt, stripCommentsAndStrings } from './lib/strip-comments-and-
 import { execSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { presentOnDisk } from './lib/tracked-files.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 
@@ -821,13 +822,17 @@ export function baselineExpired(today = new Date().toISOString().slice(0, 10)) {
 
 /** Scan the tracked tree. Returns offenders + the visibility counters. */
 export function findOffenders() {
-  const tracked = execSync(`git ls-files ${SCAN_DIRS.join(' ')}`, {
-    cwd: ROOT,
-    encoding: 'utf8',
-    maxBuffer: 256 * 1024 * 1024,
-  })
-    .split('\n')
-    .filter(Boolean);
+  // WI-10004176: drop index entries a plain `rm` left behind until git-sync commits it.
+  const tracked = presentOnDisk(
+    execSync(`git ls-files ${SCAN_DIRS.join(' ')}`, {
+      cwd: ROOT,
+      encoding: 'utf8',
+      maxBuffer: 256 * 1024 * 1024,
+    })
+      .split('\n')
+      .filter(Boolean),
+    ROOT,
+  );
 
   const offenders = [];
   const exemptions = [];

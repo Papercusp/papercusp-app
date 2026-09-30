@@ -196,5 +196,8 @@ export function approvalCardText(toolName: string, input: unknown,
   const fullPath = path && !display.title.includes(`(${path})`) ? [path] : [];
   const lines = [options.title || `Allow ${display.title}?`, ...fullPath, ...display.body,
     options.description, options.decisionReason].filter((line): line is string => Boolean(line && line.trim()));
-  return { prompt: lines.join('\n'), details: `Raw arguments (${name}):\n${JSON.stringify(record(input), null, 2)}` };
+  // Claude's permission-request description is usually the tool input's own
+  // description (a Bash call's), which the body already shows: say it once.
+  const shown = lines.filter((line, index) => lines.findIndex((other) => other.trim() === line.trim()) === index);
+  return { prompt: shown.join('\n'), details: `Raw arguments (${name}):\n${JSON.stringify(record(input), null, 2)}` };
 }

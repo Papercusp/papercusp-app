@@ -1078,8 +1078,9 @@ export interface CheckpointDeps {
    *  the checkpoint tree after it is pointed at `ref`, so the graph walk reads the lineage's own
    *  package graph. Returns the related test files and the lint/check legs the run attaches
    *  (both re-runnable at the same `ref` via `runTestsAtRef` / `runGateAtRef`), or null when the
-   *  selector widened or a task cannot be narrowed — the caller then runs the FULL gate at `ref`.
-   *  Optional: absent ⇒ that same full-run fall-through. Never reads the integration tip. */
+   *  selector output is malformed/unroutable. A failure to RUN (tree setup, missing dependency
+   *  generation, non-zero selector exit) rejects with an error naming its cause, which the
+   *  caller carries into the queue's hold (WI-10004151). Never reads the integration tip. */
   affectedTestsAtRef?(
     ref: string,
     paths: string[],
@@ -5028,6 +5029,10 @@ export const NON_TEST_GATE_SCRIPTS: Record<string, string[]> = {
   // — but nothing measured that, and the streak reached 19 consecutive reds. Same bar as its
   // siblings: one fast, deterministic, repo-wide node script, no PG or network.
   "lint:no-raw-setinterval": ["lint:no-raw-setinterval"],
+  // WI-10004205 / D-099: deterministic, repo-wide, no PG or network. Slower than its siblings
+  // (~50s, still far below the suite), and registering it keeps one unregistered leg from
+  // vetoing the rescue for every registered leg beside it (see lint:tsc:papercusp-libs above).
+  "lint:vacuous-negatives": ["lint:vacuous-negatives"],
   // P-020: the agent-state plane's standing probes. Deterministic and repo-wide like the
   // rest, so the same auto-refire applies. NOTE the census + ratchet legs are PG-backed, so
   // a re-verify at tip re-reads live state — which is correct here: if the producer resumed
@@ -5908,6 +5913,57 @@ function recordedRoundAt(
   return "?";
 }
 
+/** Upper bound on a runner failure carried into an `unavailable` summary, which is logged,
+ *  returned as the run summary and folded into gate health. */
+const REPAIR_RUNNER_FAILURE_MAX_CHARS = 600;
+
+/** WI-10004151: say WHY a repair-head runner/resolver produced no evidence, in one bounded line.
+ *  A missing exact-input dependency generation (dependency-generation.sh reserves exit 74 for
+ *  that family; the "no prewarmed …" line is its MISSING case) is named with its fingerprint
+ *  and remedy, because it never clears on its own: every tick re-holds on the same miss. */
+export function describeRepairHeadRunnerFailure(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const fingerprint =
+    /no prewarmed dependency generation for input fingerprint ([0-9a-f]{8,64})/.exec(
+      raw,
+    )?.[1];
+  if (fingerprint) {
+    // WI-10004151: --ensure-ref now builds from the head's own lockfiles whenever they are
+    // install-equivalent to the live tree's (differing only by live-only workspace links), so
+    // reaching this message means the head's lock needs a REAL install; carry that reason.
+    const refusal = /not install-equivalent to the live tree's:?\s*([\s\S]*)$/.exec(raw)?.[1];
+    const reason = refusal
+      ? `: ${refusal.replace(/\[dependency-generation\]/g, "").replace(/\s+/g, " ").trim()}`
+      : "";
+    const detail =
+      reason.length > REPAIR_RUNNER_FAILURE_MAX_CHARS
+        ? `${reason.slice(0, REPAIR_RUNNER_FAILURE_MAX_CHARS)}…`
+        : reason;
+    return (
+      `no prewarmed dependency generation exists for the repair head's lockfile inputs ` +
+      `(fingerprint ${fingerprint}); this does not clear on its own. dependency-generation.sh ` +
+      `--ensure-ref builds the head's generation from its own lockfiles only when they install ` +
+      `the same packages as the live tree's (modulo live-only workspace links); this head's ` +
+      `lock needs a real install${detail} (WI-10004151)`
+    );
+  }
+  const oneLine = raw.replace(/\s+/g, " ").trim() || "no error detail";
+  return oneLine.length > REPAIR_RUNNER_FAILURE_MAX_CHARS
+    ? `${oneLine.slice(0, REPAIR_RUNNER_FAILURE_MAX_CHARS)}…`
+    : oneLine;
+}
+
+/** Run one repair-head runner, keeping its failure as a described reason instead of `null`. */
+async function settleRepairHeadRunner<T>(
+  run: Promise<T>,
+): Promise<{ value: T } | { failure: string }> {
+  try {
+    return { value: await run };
+  } catch (error) {
+    return { failure: describeRepairHeadRunnerFailure(error) };
+  }
+}
+
 export async function verifyRepairHead(
   deps: RepairHeadVerificationDeps,
   queue: FrozenCandidateRepairQueue,
@@ -5979,13 +6035,21 @@ export async function verifyRepairHead(
         summary: `${admitted.length} admitted path(s) have no related-radius resolver at repair head ${at}; the queue holds without spending the full gate`,
       };
     }
-    const radius = await deps
-      .affectedTestsAtRef(head, admitted)
-      .catch(() => null);
+    // WI-10004151: the resolver's failure is CARRIED into the hold, never swallowed. A
+    // `.catch(() => null)` here once parked a queue for hours on a hold that named no cause
+    // (a missing dependency generation for a partial package-lock.json admission).
+    const settled = await settleRepairHeadRunner(
+      deps.affectedTestsAtRef(head, admitted),
+    );
+    const radius = "value" in settled ? settled.value : null;
     if (!radius) {
+      const cause =
+        "failure" in settled
+          ? settled.failure
+          : "the selector output was malformed or unroutable";
       return {
         kind: "unavailable",
-        summary: `the related radius of ${admitted.length} admitted path(s) could not be resolved at repair head ${at}; the queue holds without spending the full gate`,
+        summary: `the related radius of ${admitted.length} admitted path(s) could not be resolved at repair head ${at} (${cause}); the queue holds without spending the full gate`,
       };
     }
     radiusCoverageComplete = radius.coverageComplete === true;
@@ -6007,20 +6071,30 @@ export async function verifyRepairHead(
   const gateList = [...gates];
   // Sequential on purpose: both runners materialize `head` in the SAME checkpoint tree, and
   // two concurrent setupTree calls on one directory race each other's checkout.
-  const fileRun =
+  const fileSettled =
     fileList.length > 0
-      ? await deps.runTestsAtRef!(head, fileList).catch(() => null)
+      ? await settleRepairHeadRunner(deps.runTestsAtRef!(head, fileList))
       : undefined;
-  const gateRun =
-    gateList.length > 0
-      ? await deps.runGateAtRef!(head, gateList).catch(() => null)
-      : undefined;
-  if (fileRun === null || gateRun === null) {
+  // A runner that REJECTS carries its described cause; one that RESOLVES null produced no
+  // evidence either. Both hold the queue — a null must never fall through to the full gate.
+  if (fileSettled && ("failure" in fileSettled || fileSettled.value === null)) {
     return {
       kind: "unavailable",
-      summary: `the ${fileRun === null ? "file" : "gate"} runner failed to execute at repair head ${at}; nothing was measured`,
+      summary: `the file runner failed to execute at repair head ${at} (${"failure" in fileSettled ? fileSettled.failure : "it returned no result"}); nothing was measured`,
     };
   }
+  const fileRun = fileSettled?.value;
+  const gateSettled =
+    gateList.length > 0
+      ? await settleRepairHeadRunner(deps.runGateAtRef!(head, gateList))
+      : undefined;
+  if (gateSettled && ("failure" in gateSettled || gateSettled.value === null)) {
+    return {
+      kind: "unavailable",
+      summary: `the gate runner failed to execute at repair head ${at} (${"failure" in gateSettled ? gateSettled.failure : "it returned no result"}); nothing was measured`,
+    };
+  }
+  const gateRun = gateSettled?.value;
   // An optional detailed result is evidence only for this exact requested set/head.
   // Aggregate-only older runners remain conservative; malformed detail must never erase
   // a red merely because its array happens to have the right length.
@@ -15948,6 +16022,13 @@ interface PostSuiteLegs {
    *  while unwatched). */
   lintNoRawSetinterval: LegOutcome;
   lintPlane: LegOutcome;
+  /** WI-10004205 / D-099: `lint:vacuous-negatives` (dead NEGATIVE assertions pinned to
+   *  reworded wording). It ran in no gate, so its findings regrew 0 → 31 unseen. Gated
+   *  HERE, once per candidate, and deliberately NOT in test:affected's repo-wide guards:
+   *  one run costs ~50s and ~1.4 GB, and nearly every change touches its corpus, so an
+   *  `appliesTo` predicate could not narrow it for every lane's local run. It is a
+   *  shrink-only ratchet (scripts/vacuous-negative-baseline.json), wired at 0 findings. */
+  lintVacuousNegatives: LegOutcome;
   build: LegOutcome;
   /** Concatenated failure detail, appended verbatim to the suite output. */
   output: string;
@@ -16000,6 +16081,7 @@ function legsNotRun(skipReason: string): PostSuiteLegs {
     lintTimerClassification: skipped,
     lintNoRawSetinterval: skipped,
     lintPlane: skipped,
+    lintVacuousNegatives: skipped,
     build: skipped,
     output: "",
     failingSignatures: [],
@@ -16077,6 +16159,15 @@ interface PostSuiteRunOptions {
  * hasNpmScript. The ORDER is deliberate and asserted by green-checkpoint-real-deps.test.ts:
  * cheapest-and-most-diagnostic first, the expensive SPA build last.
  */
+/** WI-10004205 / D-099: the shrink-only baseline `lint:vacuous-negatives` reads. A candidate
+ *  WITHOUT it predates the ratchet (and the WI-10004204 pragmas the ratchet was seeded
+ *  against), so its older script would judge a corpus it was never made precise for. The
+ *  gate code runs from the working tree while the candidate may be an older frozen tree, so
+ *  the leg skips such a candidate instead of letting a pre-ratchet red hold promotion. */
+export const VACUOUS_NEGATIVE_BASELINE_FILE = "scripts/vacuous-negative-baseline.json";
+export const VACUOUS_NEGATIVE_PRE_RATCHET_SKIP_REASON =
+  "candidate predates the vacuous-negatives ratchet (no baseline file)";
+
 export async function runPostSuiteLegs(
   treeDir: string,
   envIn: NodeJS.ProcessEnv,
@@ -16969,6 +17060,55 @@ export async function runPostSuiteLegs(
     }
   }
 
+  // WI-10004205 / D-099: dead NEGATIVE assertions. Not in the low-memory group above: one run
+  // was measured at ~50s wall and 1.37 GB max RSS (it builds a ~110M-char corpus), well past
+  // that group's 768-MiB child pin. It runs once per candidate here instead of in every lane's
+  // test:affected. The script owns its shrink-only baseline and fails closed on a corrupt one.
+  if (haltedBy) {
+    legs.lintVacuousNegatives = { status: "skipped", skipReason: haltedBy };
+  } else {
+    const script = "lint:vacuous-negatives";
+    const check = checkNpmScript(treeDir, script);
+    if (check === "unreadable") {
+      // WI-6056: an unreadable package.json is a failure, never a silent opt-out.
+      legs.lintVacuousNegatives = { status: "failed" };
+      softFailures.push(script);
+      failingSignatures.push(script);
+      outputs.push(
+        `\n\n=== PACKAGE.JSON UNREADABLE (WI-6056) — could not read/parse package.json in ${treeDir} while checking for ${script} (VACUOUS NEGATIVES) ===\n`,
+      );
+    } else if (check === "absent") {
+      legs.lintVacuousNegatives = {
+        status: "skipped",
+        skipReason: `candidate provides no ${script} script`,
+      };
+    } else if (!existsSync(path.join(treeDir, VACUOUS_NEGATIVE_BASELINE_FILE))) {
+      legs.lintVacuousNegatives = {
+        status: "skipped",
+        skipReason: VACUOUS_NEGATIVE_PRE_RATCHET_SKIP_REASON,
+      };
+    } else {
+      const out = await exec("npm", ["run", script], {
+        cwd: treeDir,
+        env,
+        allowNonZero: true,
+        heavy: true,
+      });
+      legs.lintVacuousNegatives = {
+        status: out.code === 0 ? "passed" : "failed",
+      };
+      if (out.code !== 0) {
+        softFailures.push(script);
+        failingSignatures.push(script);
+        outputs.push(
+          `\n\n=== VACUOUS NEGATIVE ASSERTIONS FAILED (npm run ${script}) — a negative assertion pins wording its subject no longer emits, so it can never fail (WI-10004205) ===\n` +
+            out.stdout +
+            out.stderr,
+        );
+      }
+    }
+  }
+
   // P-005: the SPA build is PART of "green". A build break (a bad import, a type error in a
   // bundled module) passes the Vitest suite, then fails at the deploy's swap step
   // (`--build-spa`) and rolls back — needlessly draining + restarting the live :3070
@@ -17092,6 +17232,7 @@ export async function runPostSuiteLegs(
     legs.lintTimerClassification,
     legs.lintNoRawSetinterval,
     legs.lintPlane,
+    legs.lintVacuousNegatives,
     legs.build,
   ].some((l) => l.status === "failed");
   const record = (
@@ -17230,6 +17371,9 @@ export async function runPostSuiteLegs(
       "lint:plane-adoption",
       "lint:derived-signal-firings",
       "lint:plane-guards",
+    ]),
+    record("lint:vacuous-negatives", legs.lintVacuousNegatives, [
+      "lint:vacuous-negatives",
     ]),
     record("spa-build", legs.build, ["spa:conflict-markers", "build"]),
   ];
@@ -20119,8 +20263,9 @@ export function realCheckpointDeps(
     // P-005 / D-004: the ADMITTED paths' selective radius, resolved AT `ref` (the frozen
     // lineage's repair head). The checkpoint tree is pointed at `ref` FIRST, so the selector's
     // graph walk reads the lineage's own package graph — never the integration tree's, whose
-    // tip may carry workspaces the lineage lacks. Same honest-absence contract as runTestsAtRef:
-    // a setupTree throw propagates to the caller's .catch(() => null) → full run at `ref`.
+    // tip may carry workspaces the lineage lacks. A setupTree throw (e.g. a missing dependency
+    // generation) or a non-zero selector exit PROPAGATES as an error naming its cause;
+    // verifyRepairHead carries it into the hold (WI-10004151). `null` is only malformed output.
     async affectedTestsAtRef(ref, paths) {
       await this.setupTree(ref);
       const probe = await exec(
@@ -20139,7 +20284,18 @@ export function realCheckpointDeps(
           killProcessGroupOnTimeout: true,
         },
       );
-      return probe.code === 0 ? parseRepairHeadRadius(probe.stdout) : null;
+      if (probe.code !== 0) {
+        const tail = (probe.stderr || probe.stdout)
+          .trim()
+          .split(/\r?\n/)
+          .slice(-5)
+          .join(" | ");
+        throw new Error(
+          `affected-tests selector exited ${probe.code}` +
+            `${probe.signal ? ` via ${probe.signal}` : ""} at ${ref.slice(0, 12)}: ${tail}`,
+        );
+      }
+      return parseRepairHeadRadius(probe.stdout);
     },
     async detectSplitSourceTestPairs(input) {
       return detectSplitSourceTestPairs({

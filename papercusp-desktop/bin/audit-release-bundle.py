@@ -571,6 +571,29 @@ REDACTION_BY_KEY = {
 }
 
 
+#: The scrubber's OUTPUT vocabulary. A literal equal to one of these is never an
+#: identity to hunt: the public-source cut redacts THIS FILE with the same map, so
+#: KNOWN_SENSITIVE_IDENTITIES arrives there as {"builduser", "ownerhandle", …}, and
+#: hunting those in a tree the scrub produced reds the gate on its own redactions
+#: (measured: a fresh public-clone AppImage refused on `/home/builduser/…` and
+#: `ownerhandle6` in a shipped plan-audit JSON). Mirrors GENERIC_USERS'
+#: scrubber-vocabulary entries in scripts/lib/identity-leak-patterns.mjs.
+_REDACTION_PLACEHOLDERS = frozenset(
+    v.casefold() for v in list(REDACTION_BY_KEY.values()) + ["redacted"]
+)
+
+
+def is_redaction_placeholder(value):
+    return bool(value) and value.casefold() in _REDACTION_PLACEHOLDERS
+
+
+def _drop_placeholders(lits):
+    return {k: v for k, v in lits.items() if not is_redaction_placeholder(v)}
+
+
+KNOWN_SENSITIVE_IDENTITIES = _drop_placeholders(KNOWN_SENSITIVE_IDENTITIES)
+
+
 # ── The owner's NAME when git can no longer supply it ────────────────────────
 # DELIBERATELY the same variable the TS site gate reads
 # (apps/operator/lib/release/release-content-scrub.ts, OWNER_NAME_ENV): two gates
@@ -740,13 +763,35 @@ def print_coverage_gaps(gaps, indent="    "):
         print(f"{indent}⚠ PARTIAL COVERAGE: {g}")
 
 
+#: Unix logins that identify NOBODY, so the build box's login is not hunted when it is
+#: one of these (its home PATH still is, as build-home-path). MUST equal
+#: GENERIC_ACCOUNTS in scripts/lib/identity-leak-patterns.mjs — pinned by
+#: papercusp-desktop/test/audit-identity-literal-shape.test.js. A generic login that is
+#: also a word the product uses is the failure this exists for: a fresh VM whose login
+#: was `tester` red-ed the Server deb on 17 files that name the `tester` agent role
+#: (prompts, blueprints, SQL) and on vendor prose (open-source-release-2026-09-29 R-15,
+#: build8). A personal login stays hunted, as a whole token.
+GENERIC_ACCOUNTS = frozenset({
+    "root", "runner", "build", "ubuntu", "node", "vscode", "codespace", "ci", "agent",
+    "linuxbrew", "dev", "user", "shared", "Shared", "pcusp", "papercusp", "papercup",
+    "tester", "test", "admin", "builder", "vagrant",
+})
+
+
 def identity_literals():
     """Machine identity as LITERAL strings, resolved from the box doing the build."""
     lits = {}
     try:
         user = pwd.getpwuid(os.getuid()).pw_name
-        if user and user not in ("root", "runner", "build", "ubuntu"):
+        if user and user not in GENERIC_ACCOUNTS:
             lits["build-user-name"] = user
+            # A unix login leaks as a whole TOKEN ("tester@host", "-u tester"); the
+            # path form is build-home-path's job and stays a substring hunt. Matched
+            # as a bare case-folded substring, a dictionary-word login corrupts and
+            # reds vendor code: on a box whose user was `tester`, scrub_text rewrote
+            # Monaco's `createStereoPanner` to `creabuildusereoPanner`, and the gate
+            # then flagged libicu's `smokeTestERK…` and webkit's `IPCTester`.
+            _WORD_BOUNDED_LITERALS.add(user)
     except Exception:
         pass
     home = os.path.expanduser("~")
@@ -810,7 +855,7 @@ def identity_literals():
             del lits[k]
         for i, v in enumerate(dict.fromkeys(values)):  # de-dup, order preserved
             lits[base if i == 0 else f"{base}-{i + 1}"] = v.strip()
-    return lits
+    return _drop_placeholders(lits)
 
 
 def owner_preflight():
@@ -836,6 +881,13 @@ def owner_preflight():
         file=sys.stderr,
     )
     return 2
+
+
+#: Literals matched on word boundaries REGARDLESS of length — populated by
+#: identity_literals() with the build box's unix login. Deliberately separate from
+#: is_low_entropy(): a login is still hunted in vendor code and binaries (it is not a
+#: first name), it just has to be a whole token there.
+_WORD_BOUNDED_LITERALS = set()
 
 
 def needs_word_boundary(lit):
@@ -894,7 +946,12 @@ def lit_ere(lit):
     only non-identity hits were prose ABOUT this tradeoff and this gate's own tests.
     """
     body = case_fold_ere(re.escape(lit))
-    return rf"\b{body}\b" if needs_word_boundary(lit) else body
+    return rf"\b{body}\b" if is_word_bounded(lit) else body
+
+
+def is_word_bounded(lit):
+    """Must this literal match as a whole token? A short bare name, or the box login."""
+    return needs_word_boundary(lit) or lit in _WORD_BOUNDED_LITERALS
 
 
 def _literal_in_file(path, lit):
@@ -2449,6 +2506,16 @@ def _scrub_one(p, pairs):
         if b not in data:
             continue
         rep = placeholder.encode()[:len(b)].ljust(len(b), b"_")
+        if is_word_bounded(lit):
+            # Same token rule as the scan: a dictionary-word login must not rewrite
+            # a symbol that merely contains it (e.g. `IPCTester`, `smoketester`).
+            rx = re.compile(rb"\b" + re.escape(b) + rb"\b")
+            n = len(rx.findall(data))
+            if not n:
+                continue
+            hits.append(f"{lit} x{n}")
+            data = rx.sub(lambda _m: rep, data)
+            continue
         hits.append(f"{lit} x{data.count(b)}")
         data = data.replace(b, rep)
     if not hits or data == orig:
@@ -3567,7 +3634,12 @@ def scan_artifact(paths):
     """
     require_windows_runtime = "--require-windows-server-runtime" in paths
     want_licenses = "--licenses" in paths
-    paths = [path for path in paths if path not in ("--require-windows-server-runtime", "--licenses")]
+    # Absolute from here on: expanders run their tools with cwd=<scratch dir> (the
+    # AppImage runtime MUST, it writes a fixed squashfs-root/), so a caller-relative
+    # path resolved there is ENOENT — a manual `--scan-artifact bundle/appimage/X`
+    # crashed with a traceback instead of a verdict (R-15, 2026-09-30).
+    paths = [os.path.abspath(path) for path in paths
+             if path not in ("--require-windows-server-runtime", "--licenses")]
     if not paths:
         print("AUDIT ERROR: --scan-artifact needs at least one artifact", file=sys.stderr)
         return 2

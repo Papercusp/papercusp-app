@@ -2999,7 +2999,14 @@ function mapKeyFire(row: any): KeyFireRow {
  *  common no-announcement path. The probe is lock-free on purpose: an announcement
  *  committed after this snapshot linearizes AFTER this fire (it is a pending gate
  *  for the next fire), exactly as one registered after the locked stamp would.
- *  `announcementPending: true` is conservative — the locked stamp re-checks. */
+ *  `announcementPending: true` is conservative — the locked stamp re-checks.
+ *
+ *  P-018 (D-029 §2): the latch row is the only per-fire identity the emit has —
+ *  event_key_fires carries no id. `fire` is read from the upserted row itself, so
+ *  it is exactly the fire this call recorded: `firstFiredAtUs` survives every upsert
+ *  and resets only when clearKeyFire drops the row, and `count` is taken under the
+ *  row lock. `firstFiredAtUs` is decimal text because a bigint's wire form depends
+ *  on driver config (string vs BigInt); text is exact under both. */
 export async function recordKeyFire(input: {
   eventKey: string;
   firedBy?: string | null;
@@ -3010,7 +3017,8 @@ export async function recordKeyFire(input: {
   subscribersFrom?: { workspaceId: string; targetKind: string };
 }): Promise<{
   announcementPending: boolean;
-  eventSubscribers?: Array<{ subscriber_id: string; delivery_mode: string }>;
+  fire?: KeyFireIdentity;
+  eventSubscribers?: LatchedEventSubscriber[];
 }> {
   const { sql } = getOrgPg();
   const ws = eventsWs();
@@ -3018,7 +3026,8 @@ export async function recordKeyFire(input: {
   const subscribersSql = subs
     ? sql`, (
         SELECT COALESCE(jsonb_agg(jsonb_build_object(
-                 'subscriber_id', sub.subscriber_id, 'delivery_mode', sub.delivery_mode)
+                 'subscriber_id', sub.subscriber_id, 'delivery_mode', sub.delivery_mode,
+                 'derived_from_kind', sub.derived_from_kind, 'derived_from_ref', sub.derived_from_ref)
                ORDER BY sub.created_at ASC, sub.id ASC), '[]'::jsonb)
           FROM harness_shared.coord_entity_subscriptions AS sub
          WHERE sub.workspace_id = ${subs.workspaceId} AND sub.target_kind = ${subs.targetKind}
@@ -3038,21 +3047,52 @@ export async function recordKeyFire(input: {
              last_fired_by = ${input.firedBy ?? null},
              last_payload = ${input.payload !== undefined ? JSON.stringify(input.payload) : null}::text::jsonb,
              fire_count = harness_shared.event_key_fires.fire_count + 1
-      RETURNING 1
+      RETURNING fire_count,
+                floor(extract(epoch FROM first_fired_at) * 1000000)::bigint::text AS first_fired_at_us
     )
-    SELECT EXISTS (
+    SELECT (SELECT fire_count FROM latch) AS fire_count,
+           (SELECT first_fired_at_us FROM latch) AS first_fired_at_us,
+           EXISTS (
       SELECT 1 FROM harness_shared.event_awaits
        WHERE workspace_id = ${ws} AND policy = 'announce' AND event_key = ${input.eventKey}
          AND fired_at IS NULL AND cancelled_at IS NULL AND superseded_at IS NULL
     ) AS announcement_pending${subscribersSql}
   `;
-  // A data-modifying CTE runs to completion whether or not the main query reads it.
   const raw = subs ? rows[0]?.event_subscribers : undefined;
   const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  const count = Number(rows[0]?.fire_count);
+  const firstFiredAtUs = rows[0]?.first_fired_at_us;
   return {
     announcementPending: rows[0]?.announcement_pending !== false,
+    ...(Number.isInteger(count) && count > 0 && typeof firstFiredAtUs === 'string'
+      ? { fire: { count, firstFiredAtUs } }
+      : {}),
     ...(Array.isArray(parsed) ? { eventSubscribers: parsed } : {}),
   };
+}
+
+/** P-018 (D-029 §2): the identity of one recorded fire on the per-key latch. */
+export interface KeyFireIdentity {
+  /** The latch's fire_count after this fire (1 on the first). */
+  count: number;
+  /** The latch row's first_fired_at, as integer epoch microseconds (decimal text). */
+  firstFiredAtUs: string;
+}
+
+/** A standing event-key subscriber as the latch statement returns it. The
+ *  derived-from pair lets the emit recognise machine-maintained rows (identity
+ *  rule subscriptions, D-029 §2) by column rather than by subscriber-id shape. */
+export interface LatchedEventSubscriber {
+  subscriber_id: string;
+  delivery_mode: string;
+  derived_from_kind?: string | null;
+  derived_from_ref?: string | null;
+}
+
+/** `<eventKey>@<firstFiredAtUs>#<count>` — stable for one fire, distinct across
+ *  fires, and distinct across a clearKeyFire + re-fire (first_fired_at resets). */
+export function keyFireId(eventKey: string, fire: KeyFireIdentity): string {
+  return `${eventKey}@${fire.firstFiredAtUs}#${fire.count}`;
 }
 
 /** The latch row for one key, or null if it has never genuinely fired. */

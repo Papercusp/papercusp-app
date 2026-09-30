@@ -47,6 +47,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { presentOnDisk } from './lib/tracked-files.mjs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
@@ -68,9 +69,8 @@ function git(args) {
 
 /** Tracked .ts/.tsx source files, excluding tests/dist/node_modules/generated output. */
 function defaultCandidateFiles() {
-  return git(['ls-files', '--', '*.ts', '*.tsx'])
-    .split('\n')
-    .filter(Boolean)
+  // WI-10004176: presentOnDisk drops index entries a peer's plain `rm` left until git-sync commits it.
+  return presentOnDisk(git(['ls-files', '--', '*.ts', '*.tsx']).split('\n').filter(Boolean))
     .filter((f) => !/\.(test|spec|integration\.test)\.tsx?$/.test(f))
     .filter((f) => !/(^|\/)(dist|build|node_modules|\.papercusp)\//.test(f))
     .filter((f) => !f.startsWith('papercup-release/') && !f.startsWith('papercup-checkpoint/'));

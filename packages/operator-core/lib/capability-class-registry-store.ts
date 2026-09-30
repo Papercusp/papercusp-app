@@ -468,6 +468,86 @@ export function validateProviderInterface(input: {
   };
 }
 
+/** The blueprint-declared contract of one operation, as a compiled specification pins it. */
+export interface ProviderOperationContract {
+  inputSchema: JsonObject;
+  resultSchema: JsonObject;
+}
+
+export interface OperationProviderConformanceReport {
+  schemaVersion: 'capability-class-operation-v1';
+  ok: boolean;
+  classRef: string;
+  /** `blueprint:<harnessSlug>` — the harness blueprint that declares the operations. */
+  providerPackage: string;
+  providerVersion: string;
+  /** The compiled specification revision every operation was checked against. */
+  registryRevision: string;
+  harnessSlug: string;
+  checks: ProviderConformanceCheck[];
+  behavioral: { status: 'not-required' | 'not-run'; suiteRef: string | null };
+}
+
+/** The provider package an operation provider must carry (D-030 §1). */
+export function blueprintOperationProviderPackage(harnessSlug: string): string {
+  return `blueprint:${harnessSlug}`;
+}
+
+/**
+ * Pure structural conformance for an `operation` provider (portable-identity-
+ * packages D-030 §1): every class verb is bound to an operation the harness's
+ * compiled specification declares, with the verb's input schema and, when the
+ * verb declares one, its output schema as the operation's result schema.
+ */
+export function validateOperationProviderInterface(input: {
+  capabilityClass: CapabilityClassRow;
+  harnessSlug: string;
+  providerVersion: string;
+  specificationRevision: string;
+  verbBindings: Record<string, string>;
+  lookup: (operationId: string) => ProviderOperationContract | null;
+}): OperationProviderConformanceReport {
+  const declared = Object.keys(input.capabilityClass.interfaceVerbs).sort();
+  const extras = Object.keys(input.verbBindings).filter((verb) => !declared.includes(verb)).sort();
+  const checks = declared.map((verb): ProviderConformanceCheck => {
+    const operationId = input.verbBindings[verb] ?? null;
+    const problems: string[] = [];
+    if (!operationId) problems.push('missing provider operation binding');
+    const actual = operationId ? input.lookup(operationId) : null;
+    if (operationId && !actual) problems.push('operation is not declared by the compiled blueprint specification');
+    const expected = input.capabilityClass.interfaceVerbs[verb]!;
+    if (actual && canonicalJson(actual.inputSchema) !== canonicalJson(expected.inputSchema)) {
+      problems.push('input schema differs from the class contract');
+    }
+    if (actual && expected.outputSchema && canonicalJson(actual.resultSchema) !== canonicalJson(expected.outputSchema)) {
+      problems.push('result schema differs from the class output contract');
+    }
+    return { verb, tool: operationId, ok: problems.length === 0, problems };
+  });
+  for (const extra of extras) {
+    checks.push({
+      verb: extra,
+      tool: input.verbBindings[extra] ?? null,
+      ok: false,
+      problems: ['binding names a verb the class does not declare'],
+    });
+  }
+  return {
+    schemaVersion: 'capability-class-operation-v1',
+    ok: checks.every((check) => check.ok),
+    classRef: input.capabilityClass.ref,
+    providerPackage: blueprintOperationProviderPackage(input.harnessSlug),
+    providerVersion: input.providerVersion,
+    registryRevision: input.specificationRevision,
+    harnessSlug: input.harnessSlug,
+    checks,
+    behavioral: {
+      status: input.capabilityClass.behavioralSuiteRef ? 'not-run' : 'not-required',
+      suiteRef: input.capabilityClass.behavioralSuiteRef,
+    },
+  };
+}
+
 export type CapabilityProviderKind = 'tool' | 'recipe' | 'operation';
 export type CapabilityProviderLatencyClass = 'sync' | 'async';
 
@@ -480,6 +560,8 @@ export interface ProviderExecutionContract {
   /** Present only for recipes inspected through the canonical host inspector.
    * Legacy/synthetic kind-only rows remain unavailable to execution consumers. */
   recipeInspections?: IdentityRecipeClassConformanceReport['recipes'];
+  /** Present only for an `operation` provider: the harness whose blueprint declares the operations. */
+  operationHarnessSlug?: string;
 }
 
 export interface ProviderBindingRow {
@@ -581,6 +663,9 @@ function mapBinding(row: BindingDbRow): ProviderBindingRow & ProviderExecutionCo
   const report = jsonObject(row.report);
   const recipeInspections = row.provider_kind === 'recipe' && report.schemaVersion === 'capability-class-recipe-v1'
     ? jsonObject(report.recipes) as IdentityRecipeClassConformanceReport['recipes'] : undefined;
+  const operationHarnessSlug = row.provider_kind === 'operation' &&
+    report.schemaVersion === 'capability-class-operation-v1' && typeof report.harnessSlug === 'string'
+    ? report.harnessSlug : undefined;
   return {
     classRef: `${row.class_id}@${row.class_version}`,
     providerPackage: row.provider_package,
@@ -588,6 +673,7 @@ function mapBinding(row: BindingDbRow): ProviderBindingRow & ProviderExecutionCo
     providerKind: row.provider_kind as CapabilityProviderKind,
     latencyClass: row.latency_class as CapabilityProviderLatencyClass,
     ...(recipeInspections ? { recipeInspections } : {}),
+    ...(operationHarnessSlug ? { operationHarnessSlug } : {}),
     verbBindings: jsonObject(row.verb_bindings) as Record<string, string>,
     conformanceRunId: row.conformance_run_id,
     conformanceStatus: 'passed',
@@ -616,7 +702,7 @@ export async function recordProviderConformance(
     providerPackage: string;
     providerVersion: string;
     verbBindings: Record<string, string>;
-    report: ProviderConformanceReport | IdentityRecipeClassConformanceReport;
+    report: ProviderConformanceReport | IdentityRecipeClassConformanceReport | OperationProviderConformanceReport;
     performedBy?: string | null;
   },
 ): Promise<{ runId: string; binding: (ProviderBindingRow & ProviderExecutionContract) | null }> {
@@ -632,10 +718,24 @@ export async function recordProviderConformance(
     throw new Error('conformance report verdict does not match its per-verb checks');
   }
   if (input.report.schemaVersion !== 'capability-class-structural-v1' &&
-      input.report.schemaVersion !== 'capability-class-recipe-v1') {
+      input.report.schemaVersion !== 'capability-class-recipe-v1' &&
+      input.report.schemaVersion !== 'capability-class-operation-v1') {
     throw new Error('unsupported provider conformance report schema');
   }
-  const providerKind = input.report.schemaVersion === 'capability-class-recipe-v1' ? 'recipe' : 'tool';
+  if (input.report.schemaVersion === 'capability-class-operation-v1') {
+    // D-030 §1: the operations belong to the blueprint the package names, and
+    // each check's binding is exactly the one being recorded.
+    if (input.report.providerPackage !== blueprintOperationProviderPackage(input.report.harnessSlug)) {
+      throw new Error('an operation provider package must be blueprint:<the harness whose blueprint declares the operations>');
+    }
+    if (input.report.checks.some((check) => (input.verbBindings[check.verb] ?? null) !== check.tool)) {
+      throw new Error('operation conformance checks do not match the verb bindings being recorded');
+    }
+  }
+  const providerKind: CapabilityProviderKind =
+    input.report.schemaVersion === 'capability-class-recipe-v1' ? 'recipe'
+      : input.report.schemaVersion === 'capability-class-operation-v1' ? 'operation' : 'tool';
+  const latencyClass: CapabilityProviderLatencyClass = providerKind === 'operation' ? 'async' : 'sync';
   const runId = randomUUID();
   return sql.begin(async (tx) => {
     if (input.report.schemaVersion === 'capability-class-recipe-v1') {
@@ -651,7 +751,7 @@ export async function recordProviderConformance(
          behavioral_run_ref, report, performed_by)
       VALUES (
         ${runId}, ${input.workspaceId}, ${input.classId}, ${input.classVersion},
-        ${input.providerPackage}, ${input.providerVersion}, ${providerKind}, 'sync', ${input.report.registryRevision},
+        ${input.providerPackage}, ${input.providerVersion}, ${providerKind}, ${latencyClass}, ${input.report.registryRevision},
         ${JSON.stringify(input.verbBindings)}::text::jsonb, ${input.report.ok},
         ${input.report.behavioral.status}, NULL,
         ${JSON.stringify(input.report)}::text::jsonb, ${input.performedBy ?? null}
@@ -664,7 +764,7 @@ export async function recordProviderConformance(
          conformance_run_id, provider_kind, latency_class)
       VALUES (
         ${input.workspaceId}, ${input.classId}, ${input.classVersion},
-        ${input.providerPackage}, ${input.providerVersion}, ${runId}, ${providerKind}, 'sync'
+        ${input.providerPackage}, ${input.providerVersion}, ${runId}, ${providerKind}, ${latencyClass}
       )
       ON CONFLICT (workspace_id, class_id, class_version, provider_package, provider_version)
       DO UPDATE SET
@@ -881,8 +981,19 @@ export async function bindCapabilityProviderToPot(
     /** Omission is the old tool-only selection contract. A typed caller must
      * explicitly select any other kind; the DB proves its run and latency. */
     providerKind?: CapabilityProviderKind;
+    /** Never replace an existing pot choice (the install journal's write, P-014):
+     * a conflicting row refuses exactly like an absent provider. */
+    createOnly?: boolean;
   },
 ): Promise<void> {
+  const onConflict = input.createOnly ? sql`DO NOTHING` : sql`
+    DO UPDATE SET
+      provider_package = EXCLUDED.provider_package,
+      provider_version = EXCLUDED.provider_version,
+      provider_kind = EXCLUDED.provider_kind,
+      latency_class = EXCLUDED.latency_class,
+      bound_by = EXCLUDED.bound_by,
+      updated_at = now()`;
   const rows = await sql<{ pot_slug: string }[]>`
     INSERT INTO harness_shared.pot_capability_class_bindings
       (workspace_id, pot_slug, class_id, class_version, provider_package, provider_version, bound_by,
@@ -895,15 +1006,13 @@ export async function bindCapabilityProviderToPot(
        AND b.provider_version = ${input.providerVersion}
        AND b.provider_kind = ${input.providerKind ?? 'tool'} AND b.status = 'active'
     ON CONFLICT (workspace_id, pot_slug, class_id, class_version)
-    DO UPDATE SET
-      provider_package = EXCLUDED.provider_package,
-      provider_version = EXCLUDED.provider_version,
-      provider_kind = EXCLUDED.provider_kind,
-      latency_class = EXCLUDED.latency_class,
-      bound_by = EXCLUDED.bound_by,
-      updated_at = now()
+    ${onConflict}
     RETURNING pot_slug`;
-  if (rows.length === 0) throw new Error('capability provider is absent, inactive, or has a different execution kind');
+  if (rows.length === 0) {
+    throw new Error(input.createOnly
+      ? 'capability provider is absent, inactive, of a different execution kind, or the pot already binds this class'
+      : 'capability provider is absent, inactive, or has a different execution kind');
+  }
 }
 
 /**
@@ -920,8 +1029,12 @@ export async function deletePotCapabilityProviderBinding(
     classVersion: string;
     expectedProviderPackage: string;
     expectedProviderVersion: string;
+    /** Also require the writer's stamp, so a re-bind to the same provider by
+     * another owner is never deleted as if it were the original write. */
+    expectedBoundBy?: string;
   },
 ): Promise<boolean> {
+  const boundByClause = input.expectedBoundBy === undefined ? sql`` : sql`AND bound_by = ${input.expectedBoundBy}`;
   const rows = await sql<{ pot_slug: string }[]>`
     DELETE FROM harness_shared.pot_capability_class_bindings
      WHERE workspace_id = ${input.workspaceId}
@@ -930,6 +1043,7 @@ export async function deletePotCapabilityProviderBinding(
        AND class_version = ${input.classVersion}
        AND provider_package = ${input.expectedProviderPackage}
        AND provider_version = ${input.expectedProviderVersion}
+       ${boundByClause}
     RETURNING pot_slug`;
   return rows.length > 0;
 }

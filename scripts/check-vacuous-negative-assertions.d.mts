@@ -7,8 +7,10 @@
  * it IS in the source — the guard is pinned to that string's OLD wording.
  * ORPHANED reports only: nothing resembling the literal survives, or the literal is not
  * prose (a value pin, a shape guard, fixture-composed output).
+ * COINCIDENT and RENAMED report only: the fragment is outside the test's subject, or the
+ * file positively pins the new wording (see the header).
  *
- * @typedef {'DRIFTED' | 'ORPHANED'} VacuousVerdict
+ * @typedef {'DRIFTED' | 'ORPHANED' | 'COINCIDENT' | 'RENAMED'} VacuousVerdict
  */
 /**
  * A negative assertion with a static literal argument, as extracted from a test file.
@@ -164,19 +166,111 @@ export function driftFragment(lit: string, includes: IncludesFn): {
  */
 export function createCorpusIncludes(corpus: string, queries: Iterable<string>): IncludesFn;
 /**
+ * The SUBJECT of a test file: the corpus files its negative assertions are about. A
+ * DRIFTED verdict claims "the emitter this guard watches was reworded", and only the
+ * subject can carry that evidence (WI-10004205). Three sources, all static:
+ *   1. basename siblings: `foo.test.ts` / `foo.integration.test.ts` → `foo.*` in the same
+ *      directory, or one level up from `__tests__/` / `test/` / `tests/`;
+ *   2. every relative specifier in the file (`./x`, `../y.js`): imports, dynamic imports,
+ *      `vi.mock`, `require`, and paths the test reads, resolved the way TS resolves them;
+ *   3. every repo-relative path the test names verbatim (`'scripts/foo.sh'`).
+ * Workspace-package imports (`@papercusp/…`) are deliberately NOT followed. That misses
+ * a subject reached only through a package, whose drift is then reported COINCIDENT
+ * rather than gating; the alternative, following re-exports, re-admits the coincidental
+ * matches this exists to remove.
+ *
+ * @param {string} testPath - Repo-relative POSIX path of the test file.
+ * @param {string} text - The test file's source.
+ * @param {{ has(path: string): boolean }} corpus - Repo-relative paths eligible as corpus.
+ * @returns {string[]} Subject paths, a subset of `corpus`, sorted.
+ */
+export function resolveSubjectFiles(testPath: string, text: string, corpus: {
+    has(path: string): boolean;
+}): string[];
+/**
  * Judge one test file's negative assertions. `includes` answers "does the non-test
  * corpus contain this string" — injected so the unit tests can drive a synthetic corpus.
+ * `subjectIncludes` answers the same over the test's SUBJECT files only
+ * (resolveSubjectFiles). Omit it when the subject is unknown: drift is then judged
+ * against the whole corpus, exactly as before the locality rule.
  *
- * @param {{ file: string; text: string; includes: IncludesFn }} args
+ * @param {{ file: string; text: string; includes: IncludesFn; subjectIncludes?: IncludesFn }} args
  * @returns {{ considered: number; findings: VacuousFinding[] }}
  */
-export function judgeFile({ file, text, includes }: {
+export function judgeFile({ file, text, includes, subjectIncludes }: {
     file: string;
     text: string;
     includes: IncludesFn;
+    subjectIncludes?: IncludesFn;
 }): {
     considered: number;
     findings: VacuousFinding[];
+};
+/**
+ * One tolerated DRIFTED finding. Keyed without the line number on purpose.
+ *
+ * @typedef {object} BaselineEntry
+ * @property {string} file
+ * @property {string} kind
+ * @property {string} lit
+ */
+/**
+ * @param {{ file: string, kind: string, lit: string }} f
+ * @returns {string}
+ */
+export function baselineKey(f: {
+    file: string;
+    kind: string;
+    lit: string;
+}): string;
+/**
+ * Split the DRIFTED findings against the baseline. Pure, so the gate decision is
+ * unit-testable without building the ~110M-char corpus.
+ *
+ * `fresh` findings gate. `baselined` ones are tolerated. `stale` entries match no
+ * current finding (the assertion was fixed or deleted) and never gate: a red for an
+ * improvement would freeze the queue on good news; `--update` removes them.
+ * `overWatermark` is true when the baseline holds more entries than the cap allows.
+ *
+ * @param {{ drifted: VacuousFinding[], baseline: BaselineEntry[], watermark?: number }} args
+ * @returns {{ fresh: VacuousFinding[], baselined: VacuousFinding[], stale: BaselineEntry[], overWatermark: boolean }}
+ */
+export function partitionAgainstBaseline({ drifted, baseline, watermark }: {
+    drifted: VacuousFinding[];
+    baseline: BaselineEntry[];
+    watermark?: number;
+}): {
+    fresh: VacuousFinding[];
+    baselined: VacuousFinding[];
+    stale: BaselineEntry[];
+    overWatermark: boolean;
+};
+/**
+ * The process exit code for a partition: 1 when any finding is new or the baseline is
+ * over its cap, else 0. Stale entries never affect it. `main` returns exactly this.
+ *
+ * @param {{ fresh: readonly unknown[], overWatermark: boolean }} partition
+ * @returns {0 | 1}
+ */
+export function gateExitCode({ fresh, overWatermark }: {
+    fresh: readonly unknown[];
+    overWatermark: boolean;
+}): 0 | 1;
+/**
+ * Parse the baseline file's text. An ABSENT file is an empty baseline (the strictest
+ * reading: every finding gates). A present but malformed file is an error, never an
+ * empty baseline, because silently tolerating nothing would hide the corruption and
+ * silently tolerating everything would hide the findings.
+ *
+ * @param {string | null} text - File contents, or null when the file does not exist.
+ * @returns {{ ok: true, entries: BaselineEntry[] } | { ok: false, error: string }}
+ */
+export function parseBaseline(text: string | null): {
+    ok: true;
+    entries: BaselineEntry[];
+} | {
+    ok: false;
+    error: string;
 };
 /**
  * A prompt (a `blueprints/**\/prompts/*.md` agent brief) told every release-fixer agent
@@ -205,13 +299,16 @@ export function judgeFile({ file, text, includes }: {
  * SHOULD have caught it with — this is that quick-check for prompt drift, not yet a gate).
  */
 export const DOC_PROMPT_RE: RegExp;
+export const BASELINE_HIGH_WATERMARK: 0;
 /**
  * DRIFTED gates: a prose literal that exists nowhere emittable, while a long fragment of
  * it IS in the source — the guard is pinned to that string's OLD wording.
  * ORPHANED reports only: nothing resembling the literal survives, or the literal is not
  * prose (a value pin, a shape guard, fixture-composed output).
+ * COINCIDENT and RENAMED report only: the fragment is outside the test's subject, or the
+ * file positively pins the new wording (see the header).
  */
-export type VacuousVerdict = "DRIFTED" | "ORPHANED";
+export type VacuousVerdict = "DRIFTED" | "ORPHANED" | "COINCIDENT" | "RENAMED";
 /**
  * A negative assertion with a static literal argument, as extracted from a test file.
  */
@@ -254,5 +351,13 @@ export type VacuousFinding = {
 export type IncludesFn = (needle: string) => boolean;
 export type DocLiteral = {
     line: number;
+    lit: string;
+};
+/**
+ * One tolerated DRIFTED finding. Keyed without the line number on purpose.
+ */
+export type BaselineEntry = {
+    file: string;
+    kind: string;
     lit: string;
 };

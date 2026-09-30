@@ -68,23 +68,48 @@ export function hashAppKey(key: string): string {
 }
 
 /**
- * True when a bearer CLAIMS to be an app key. A claimed key that then fails
- * to verify must be refused outright — never handed to a weaker resolver
- * further down the auth chain.
+ * Client-credentials access tokens (P-016, D-022): `pcat_<id>_<secret>`, the same id + secret
+ * shape as a key. The id is the connected_app_access_tokens row's primary key; the row points at
+ * the PARENT service key, which every call re-checks.
+ */
+export const ACCESS_TOKEN_PREFIX = 'pcat_';
+
+/**
+ * True when a bearer CLAIMS to be an app credential: an app or service key (`pcapp_`) or a
+ * client-credentials access token (`pcat_`). A claimed credential that then fails to verify must
+ * be refused outright — never handed to a weaker resolver further down the auth chain. Both
+ * prefixes answer here so no transport can forget the second one.
  */
 export function isAppKeyShaped(token: string | null | undefined): token is string {
-  return typeof token === 'string' && token.startsWith(APP_KEY_PREFIX);
+  return typeof token === 'string' && (token.startsWith(APP_KEY_PREFIX) || token.startsWith(ACCESS_TOKEN_PREFIX));
 }
 
-/** Split a key into id + secret, or null when it is not a well-formed key. */
-export function parseAppKey(token: string): ParsedAppKey | null {
-  if (!isAppKeyShaped(token)) return null;
-  const rest = token.slice(APP_KEY_PREFIX.length);
+function parseIdAndSecret(token: string, prefix: string): ParsedAppKey | null {
+  if (!token.startsWith(prefix)) return null;
+  const rest = token.slice(prefix.length);
   if (rest.charAt(APP_KEY_ID_LENGTH) !== '_') return null;
   const id = rest.slice(0, APP_KEY_ID_LENGTH);
   const secret = rest.slice(APP_KEY_ID_LENGTH + 1);
   if (!ID_RE.test(id) || !SECRET_RE.test(secret)) return null;
   return { id, secret };
+}
+
+/** Split a key (`pcapp_` only) into id + secret, or null when it is not a well-formed key. */
+export function parseAppKey(token: string): ParsedAppKey | null {
+  return typeof token === 'string' ? parseIdAndSecret(token, APP_KEY_PREFIX) : null;
+}
+
+/** Split an access token (`pcat_` only) into id + secret, or null when it is not well-formed. */
+export function parseAccessToken(token: string): ParsedAppKey | null {
+  return typeof token === 'string' ? parseIdAndSecret(token, ACCESS_TOKEN_PREFIX) : null;
+}
+
+/** Mint a new access token. The caller stores `id` + `tokenHash` and returns `key` once. */
+export function mintAccessToken(): MintedAppKey {
+  const id = newAppKeyId();
+  const secret = randomBytes(APP_KEY_SECRET_BYTES).toString('base64url');
+  const key = `${ACCESS_TOKEN_PREFIX}${id}_${secret}`;
+  return { id, key, tokenHash: hashAppKey(key) };
 }
 
 /** Constant-time check that `key` hashes to `storedHash`. */

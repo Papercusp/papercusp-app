@@ -47,6 +47,10 @@ import {
 } from '../../release/hunk-exact-admission';
 import { containmentForPaths, integrationBranch } from '../../release/judged-sha-containment';
 import { importCompletenessPreflight } from '../../release/admission-import-completeness';
+import {
+  chainAdmissionPreflights,
+  lockfileManifestConsistencyPreflight,
+} from '../../release/admission-lockfile-consistency';
 import { admitPathsOntoRepairHead, realAdmissionGit, retractAdmission } from '../../release/repair-head-admission';
 import {
   createCheckpointTreeFixPrecheckRunner,
@@ -58,6 +62,12 @@ import {
   type FixPrecheckVerdict,
 } from '../../release/admission-fix-precheck';
 import { checkpointRootMirror } from '../../release-checkpoint-launch';
+import {
+  describeDependencyPrediction,
+  isDependencyInputPath,
+  predictDependencyGeneration,
+  type DependencyGenerationPrediction,
+} from '../../release/dependency-admission-prediction';
 import { claimRepairManifestLeg, renderAdmitCommand } from '../../release/repair-manifest';
 import { readIdentity } from '../locks/identity';
 import { readGateOwnership, shouldStandDownForLivePeer } from '../../coord/gate-ownership';
@@ -1197,15 +1207,58 @@ export default defineTool({
           // file, or the door refuses `admission-incomplete` naming the sibling to admit. The
           // The pinned whole-blob source is consulted when supplied; other modes preserve the
           // integration branch as the suggestion source. Nothing is admitted on the caller's behalf.
-          preflight: importCompletenessPreflight({
-            root,
-            probeRef: wholeBlob && args.sourceCommit !== undefined ? sourceRef : branch,
-            ...(wholeBlob ? { enforceSourceCohort: true } : {}),
-          }),
+          // WI-10004232: and a lockfile workspace entry it moves must still agree with its manifest,
+          // or npm install rewrites the lock and the promoted pin can never certify.
+          preflight: chainAdmissionPreflights(
+            importCompletenessPreflight({
+              root,
+              probeRef: wholeBlob && args.sourceCommit !== undefined ? sourceRef : branch,
+              ...(wholeBlob ? { enforceSourceCohort: true } : {}),
+            }),
+            lockfileManifestConsistencyPreflight({
+              root,
+              probeRef: wholeBlob && args.sourceCommit !== undefined ? sourceRef : branch,
+            }),
+          ),
         });
       // Build the immutable candidate first. Publication is the effect boundary,
       // and must happen only while the condition claim row is locked below.
       let outcome = buildAdmission(true);
+      // WI-10004151 part 2: an admitted lockfile/patch moves repairHead onto dependency inputs
+      // the gate must materialise (`--ensure-ref`) before it can judge anything. Ask the SAME
+      // script now whether that would succeed, so a lock no installed tree can produce is
+      // refused here instead of parking verification an hour later. `unknown` never refuses.
+      const dependencyPaths = paths.filter(isDependencyInputPath);
+      const dependencyGeneration: DependencyGenerationPrediction | null =
+        outcome.ok && dependencyPaths.length > 0
+          ? await predictDependencyGeneration({
+              integrationRoot: resolveCanonicalIntegrationRoot(root),
+              ref: outcome.commit,
+              paths: dependencyPaths,
+            })
+          : null;
+      const dependencyNote = dependencyGeneration ? describeDependencyPrediction(dependencyGeneration) : null;
+      if (outcome.ok && dependencyGeneration?.verdict === 'refused' && !dryRun && !skipPrecheck) {
+        return json({
+          ...base,
+          ok: false,
+          admitted: false,
+          refused: true,
+          dryRun: false,
+          verdict: 'refused',
+          reason: 'dependency-generation-unbuildable',
+          detail: (dependencyNote ?? '').trim(),
+          dependencyGeneration,
+          builtCommit: outcome.commit,
+          judgedSha: queue.repairHead,
+          containment: containmentAt(queue.repairHead),
+          mode,
+          note:
+            'Nothing was published. The gate could never materialise these dependency inputs, so verification would park. ' +
+            'Install the lock in the integration tree first (npm run install:safe) so a matching generation can be built, ' +
+            'admit a lock that matches what is installed, or deliberately override with skipPrecheck:true + precheckReason.',
+        });
+      }
       let precheck: FixPrecheckVerdict | null = null;
       if (precheckApplies && outcome.ok) {
         const builtCommit = outcome.commit;
@@ -1521,11 +1574,15 @@ export default defineTool({
           lineageRef: outcome.lineageRef,
           proof,
           precheck: precheckEntry,
+          ...(dependencyGeneration ? { dependencyGeneration } : {}),
           containment: containmentAt(queue.repairHead),
           note:
             `Pass confirm:true to publish admission ${outcome.commit.slice(0, 12)} onto ${outcome.lineageRef} ` +
             'and advance repairHead to it (phase ready-to-verify). The immutable candidate is never touched; ' +
-            'the commit carries exactly proof.diff and nothing else from the tip.',
+            'the commit carries exactly proof.diff and nothing else from the tip.' +
+            (dependencyGeneration?.verdict === 'refused'
+              ? ` ⚠ A confirmed admit will be REFUSED (dependency-generation-unbuildable):${dependencyNote ?? ''}`
+              : (dependencyNote ?? '')),
           ...base,
           ...provenance,
         });
@@ -1594,6 +1651,7 @@ export default defineTool({
             ? { hunks: hunksRecord }
             : { foreignHunksAccepted: foreign.count, foreignAgents: foreign.agents }),
         precheck: precheckEntry,
+        ...(dependencyGeneration ? { dependencyGeneration } : {}),
         persisted,
         ...(retracted === null ? {} : { retracted }),
       });
@@ -1612,6 +1670,7 @@ export default defineTool({
         admission: entry,
         ...provenance,
         precheck: precheckEntry,
+        ...(dependencyGeneration ? { dependencyGeneration } : {}),
         containment: containmentAt(judgedSha),
         persisted,
         auditRecorded,
@@ -1631,7 +1690,10 @@ export default defineTool({
                     ? ' ⚠ R6 pre-check did NOT run (a gate run holds the checkpoint tree) — accepted loud; the re-judge measures it.'
                     : precheckEntry.reason === 'skipped'
                       ? ' ⚠ R6 pre-check SKIPPED by the caller (skipPrecheck); the re-judge measures it.'
-                      : ''),
+                      : '') +
+                (dependencyGeneration?.verdict === 'refused'
+                  ? ` ⚠ Admitted PAST an unbuildable-dependency prediction (skipPrecheck):${dependencyNote ?? ''} Verification will park until a matching generation exists.`
+                  : (dependencyNote ?? '')),
             }
           : {
               refused: true,

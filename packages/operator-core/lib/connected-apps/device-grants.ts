@@ -53,13 +53,18 @@ export interface DeviceGrantStore {
   }): Promise<boolean>;
   findPendingGrant(userCode: string, now: Date): Promise<PendingDeviceGrant | null>;
   listPendingGrants(now: Date): Promise<readonly PendingDeviceGrant[]>;
-  /** False when no live pending grant has that code. `workspaceId` is required to approve. */
+  /**
+   * False when no live pending grant has that code. `workspaceId` is required to approve.
+   * `grantedScopes` is what the approver consented to (P-006: may be narrower than requested);
+   * the key is issued with it when given, otherwise with the requested scopes.
+   */
   decideGrant(input: {
     userCode: string;
     decision: DeviceGrantDecision;
     workspaceId: string | null;
     decidedBy: string;
     at: Date;
+    grantedScopes?: AppKeyScopes | null;
   }): Promise<boolean>;
   /** One poll. A pending grant records it (or answers slow_down); an approved one becomes a key. */
   exchangeGrant(input: { deviceCodeHash: string; now: Date; minPollIntervalMs: number }): Promise<DeviceGrantExchange>;
@@ -69,6 +74,8 @@ interface GrantRow {
   user_code: string;
   client_label: string;
   requested_scopes: AppKeyScopes;
+  granted_scopes: AppKeyScopes | null;
+  oauth_client_id: string | null;
   state: 'pending' | 'approved' | 'denied' | 'consumed';
   workspace_id: string | null;
   approved_by: string | null;
@@ -127,12 +134,14 @@ export class PostgresDeviceGrantStore implements DeviceGrantStore {
     if (input.decision === 'approved' && !input.workspaceId) return false;
     const { sql } = getOrgPg();
     const approved = input.decision === 'approved';
+    const granted = approved && input.grantedScopes ? JSON.stringify(input.grantedScopes) : null;
     const rows = await sql`
       UPDATE harness_shared.connected_app_device_grants
          SET state = ${input.decision},
              workspace_id = ${approved ? input.workspaceId : null},
              approved_by = ${input.decidedBy},
-             decided_at = ${input.at}
+             decided_at = ${input.at},
+             granted_scopes = ${granted}::jsonb
        WHERE user_code = ${input.userCode} AND state = 'pending' AND expires_at > ${input.at}
       RETURNING 1`;
     return rows.length === 1;
@@ -141,12 +150,15 @@ export class PostgresDeviceGrantStore implements DeviceGrantStore {
   async exchangeGrant(input: { deviceCodeHash: string; now: Date; minPollIntervalMs: number }): Promise<DeviceGrantExchange> {
     const { sql } = getOrgPg();
     const rows = await sql<GrantRow[]>`
-      SELECT user_code, client_label, requested_scopes, state, workspace_id, approved_by, created_at, expires_at
+      SELECT user_code, client_label, requested_scopes, granted_scopes, oauth_client_id, state, workspace_id,
+             approved_by, created_at, expires_at
         FROM harness_shared.connected_app_device_grants
        WHERE device_code_hash = ${input.deviceCodeHash}
        LIMIT 1`;
     const row = rows[0];
-    if (!row || row.state === 'consumed') return { status: 'invalid' };
+    // An OAuth authorization request (P-006) is redeemed only at the OAuth token endpoint, with
+    // its PKCE verifier — never by polling here with its handle.
+    if (!row || row.state === 'consumed' || row.oauth_client_id) return { status: 'invalid' };
     if (row.expires_at.getTime() <= input.now.getTime()) return { status: 'expired' };
     if (row.state === 'denied') return { status: 'denied' };
     if (row.state === 'pending') {
@@ -159,10 +171,11 @@ export class PostgresDeviceGrantStore implements DeviceGrantStore {
         RETURNING 1`;
       return { status: polled.length === 1 ? 'pending' : 'slow_down' };
     }
-    // approved: issue the key with exactly the scopes the app asked for, re-checked now.
+    // approved: issue the key with the scopes the approver consented to (else the ones the app
+    // asked for), re-checked against the hard-deny set now.
     let scopes: AppKeyScopes;
     try {
-      scopes = resolveAppKeyScopes(row.requested_scopes ?? {});
+      scopes = resolveAppKeyScopes(row.granted_scopes ?? row.requested_scopes ?? {});
     } catch (err) {
       if (err instanceof AppKeyScopeError) return { status: 'invalid_scope', problems: err.problems };
       throw err;

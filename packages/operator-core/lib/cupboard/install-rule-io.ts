@@ -7,15 +7,34 @@
  * result. Never throws for an expected failure. There is no seed step — a rule is
  * resolved from the store by the blueprint bundle that pins it.
  */
-import { installRuleFromCupboardCore, InstallRuleError, type InstallRuleCoreResult } from './install-rule-core';
+import {
+  installRuleFromCupboardCore,
+  InstallRuleError,
+  type AsyncRuleInstallChecker,
+  type InstallRuleCoreResult,
+} from './install-rule-core';
 import { cupboardGitDeps } from './install-io';
 import type { ContentPinRef } from './install-self-describing-core';
 import { resolveListingByKind } from './resolve-listing-by-kind';
 
 export interface InstallRuleFromCupboardInput {
+  /** The installing workspace: an async rule is checked against ITS event and class catalogs. */
+  workspaceId: string;
   listingId?: string;
   githubUrl?: string;
   listingRef?: string;
+}
+
+/** The real async-rule check (D-027 §1), read inside the workspace's own transaction. */
+function workspaceAsyncRuleChecker(workspaceId: string): AsyncRuleInstallChecker {
+  return async (rule) => {
+    const [{ withWorkspace }, { checkAsyncRuleInstall }] = await Promise.all([
+      import('@papercusp/db-org'),
+      import('../agent-identities/identity-async-rules'),
+    ]);
+    const check = await withWorkspace(workspaceId, (tx) => checkAsyncRuleInstall(tx, workspaceId, rule));
+    return check.ok ? null : check.error;
+  };
 }
 
 export type InstallRuleFromCupboardResult =
@@ -40,7 +59,11 @@ export async function installRuleFromCupboard(
   if (!githubUrl) return { ok: false, status: 400, error: 'githubUrl or listingId required' };
   if (!listingRef) return { ok: false, status: 400, error: 'listingRef required (the rule subdir)' };
   try {
-    return { ok: true, result: await installRuleFromCupboardCore({ githubUrl, listingRef, pin }, cupboardGitDeps()) };
+    return {
+      ok: true,
+      result: await installRuleFromCupboardCore(
+        { githubUrl, listingRef, pin }, cupboardGitDeps(), workspaceAsyncRuleChecker(input.workspaceId)),
+    };
   } catch (e) {
     if (e instanceof InstallRuleError) return { ok: false, status: e.status, error: e.message };
     return {

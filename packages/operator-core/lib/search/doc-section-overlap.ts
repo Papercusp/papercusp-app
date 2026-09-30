@@ -37,6 +37,7 @@
  */
 
 import { getOrgPg } from '@papercusp/db-org';
+import { withIterativeScan, type PgHandle } from '@papercusp/search';
 import {
   configureOverlapScan,
   scanOverlap,
@@ -227,7 +228,14 @@ async function neighboursOfReal(
   // crossGroupOnly rule. Dropping it at the index means the row budget is
   // spent on candidates that can actually become findings, instead of being
   // eaten by the probe's sibling anchors before the filter ever runs.
-  const rows = await sql<Array<{ source_key: string; slug: string; anchor: string; similarity: number }>>`
+  //
+  // Iterative HNSW scan (WI-10004138): the source and same-page filters apply
+  // after the capped scan, so a narrow source set came back short. Measured
+  // 2026-09-30 with sources ['harness:papercusp'] over 10 probes: 81 of 100 rows
+  // at LIMIT 10 and 158 of 250 at LIMIT 25 without it, all of them with it.
+  const rows = (await withIterativeScan(sql as unknown as PgHandle, (handle) => {
+    const sql = handle as unknown as ReturnType<typeof getOrgPg>['sql'];
+    return sql<Array<{ source_key: string; slug: string; anchor: string; similarity: number }>>`
     WITH probe AS (
       SELECT embedding FROM harness_shared.doc_sections
        WHERE source_key = ${ref.sourceKey} AND slug = ${ref.slug} AND anchor = ${ref.anchor}
@@ -243,6 +251,7 @@ async function neighboursOfReal(
        AND NOT (d.source_key = ${ref.sourceKey} AND d.slug = ${ref.slug})
      ORDER BY d.embedding <=> (SELECT embedding FROM probe)
      LIMIT ${limit}`;
+  })) as unknown as Array<{ source_key: string; slug: string; anchor: string; similarity: number }>;
   return rows.map((r) => ({
     id: encodeSectionId({ sourceKey: r.source_key, slug: r.slug, anchor: r.anchor }),
     similarity: Number(r.similarity),

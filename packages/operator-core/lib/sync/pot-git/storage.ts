@@ -114,6 +114,37 @@ function localSpawnRefusal(admission: PotGitLocalSpawnAdmission): string {
   );
 }
 
+let unguardedLocalSpawnWarned = false;
+
+/**
+ * The RSS admission guards the sidecar FALLBACK, not local git itself
+ * (WI-10004179). It exists for hosts where the spawner sidecar is the
+ * configured path (bg-host sets PAPERCUSP_SPAWNER_SIDECAR=1), so a refusal
+ * there is transient: the sidecar comes back and git resumes. A host with NO
+ * sidecar configured — every packaged desktop owner, whose Server bundle never
+ * sets the opt-in — has local spawn as its ONLY git path, so refusing there is
+ * a permanent pot-git outage once the owner crosses the ceiling (measured
+ * 2026-09-30, WI-10003976: a same-box desktop owner at 4643MB could not
+ * `init --bare` its pot store). Such a host pays the fork tax instead, and says
+ * so once. Returns the refusal text, or null when the spawn may proceed.
+ */
+export function localSpawnRefusalFor(
+  admission: PotGitLocalSpawnAdmission,
+  sidecarConfigured: boolean = gitSidecarEnabled('PAPERCUSP_POT_GIT_SPAWN_SIDECAR'),
+): string | null {
+  if (admission.allowed) return null;
+  if (sidecarConfigured) return localSpawnRefusal(admission);
+  if (!unguardedLocalSpawnWarned) {
+    unguardedLocalSpawnWarned = true;
+    console.warn(
+      `[pot-git] local git spawn at RSS ${admission.rssMb}MB (above ${admission.limitMb}MB) ` +
+        'with no spawner sidecar configured: admitting, because local spawn is the only git path ' +
+        'on this host; each call pays the parent-size fork cost (WI-10004179)',
+    );
+  }
+  return null;
+}
+
 /**
  * Local (in-process) RunGit — bounded, C-locale, never-throw. `cwd` is the bare
  * repo (git operates on it via -C-equivalent cwd; bare repos need no worktree).
@@ -129,9 +160,9 @@ export const runGitLocal: RunGit = (args, cwd, opts) =>
       resolve({ code: -1, stdout: '', stderr: 'git aborted before spawn' });
       return;
     }
-    const admission = potGitLocalSpawnAdmission(process.memoryUsage().rss);
-    if (!admission.allowed) {
-      resolve({ code: -1, stdout: '', stderr: localSpawnRefusal(admission) });
+    const refusal = localSpawnRefusalFor(potGitLocalSpawnAdmission(process.memoryUsage().rss));
+    if (refusal) {
+      resolve({ code: -1, stdout: '', stderr: refusal });
       return;
     }
     const child = spawn('git', args, {
@@ -261,9 +292,9 @@ export type RunGitStdin = (
  */
 export const runGitStdinLocal: RunGitStdin = (args, cwd, stdin, opts) =>
   new Promise((resolve) => {
-    const admission = potGitLocalSpawnAdmission(process.memoryUsage().rss);
-    if (!admission.allowed) {
-      resolve({ code: -1, stdout: Buffer.alloc(0), stderr: localSpawnRefusal(admission) });
+    const refusal = localSpawnRefusalFor(potGitLocalSpawnAdmission(process.memoryUsage().rss));
+    if (refusal) {
+      resolve({ code: -1, stdout: Buffer.alloc(0), stderr: refusal });
       return;
     }
     const child = spawn('git', args, { cwd, env: { ...process.env, LC_ALL: 'C', LANG: 'C' } });

@@ -377,6 +377,79 @@ papercusp_stage_transformers_models() {
   return 0
 }
 
+# papercusp_fetch_transformers_models <dest> — DOWNLOAD the contract-pinned pack into
+# <dest>/onnx-community/<model>/..., the layout PAPERCUSP_TRANSFORMERS_MODEL_CACHE accepts.
+#
+# WHY (WI-10003960 R-15, fresh-clone build6): the staging step above can only COPY models
+# from a cache a previous runtime download filled; nothing in the repo could PRODUCE that
+# cache, so a stranger following the README had no path to a buildable tree at all. This
+# fetches exactly what distribution-contract.json's `local-models` pack pins — the repo id,
+# the immutable revision, and every file's byte count + sha256 — so there is still ONE model
+# manifest (P-314) and the bytes are identical to what vm-release verifies. Idempotent: a
+# file whose size+sha256 already match is kept. Every file downloads to `<name>.part` and is
+# renamed only after its digest verifies, so an interrupted run never leaves a
+# final-looking shard (the fragment class EI-21121880496840788 guards against).
+# PAPERCUSP_HF_ENDPOINT overrides https://huggingface.co (a mirror, or a test server).
+papercusp_fetch_transformers_models() {
+  local dest="${1:-}"
+  if [ -z "$dest" ]; then
+    echo "FATAL: papercusp_fetch_transformers_models needs a destination dir (it will hold onnx-community/)" >&2
+    return 2
+  fi
+  local contract="${PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT:-$PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT_DEFAULT}"
+  [ -f "$contract" ] || {
+    echo "FATAL: transformers distribution contract is missing: $contract" >&2
+    return 1
+  }
+  python3 - "$contract" "$dest" "${PAPERCUSP_HF_ENDPOINT:-https://huggingface.co}" <<'PY'
+import hashlib, json, os, sys, urllib.request
+
+contract_path, dest, endpoint = sys.argv[1:]
+contract = json.load(open(contract_path))
+packs = [p for p in contract.get("server", {}).get("optionalPacks", []) if p.get("name") == "local-models"]
+if len(packs) != 1:
+    sys.exit(f"FATAL: {contract_path} must declare exactly one 'local-models' pack (found {len(packs)})")
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+fetched = kept = 0
+for model in packs[0]["models"]:
+    repo, rev = model["runtimeId"], model["revision"]
+    for entry in model["files"]:
+        rel, size, digest = entry["path"], int(entry["bytes"]), entry["sha256"]
+        final = os.path.join(dest, repo, rel)
+        if os.path.isfile(final) and os.path.getsize(final) == size and sha256(final) == digest:
+            kept += 1
+            continue
+        os.makedirs(os.path.dirname(final), exist_ok=True)
+        part = final + ".part"
+        url = f"{endpoint.rstrip('/')}/{repo}/resolve/{rev}/{rel}"
+        print(f"→ fetching {repo}@{rev[:12]} {rel} ({size} bytes)", flush=True)
+        h = hashlib.sha256()
+        got = 0
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r, open(part, "wb") as out:
+                for chunk in iter(lambda: r.read(1 << 20), b""):
+                    out.write(chunk)
+                    h.update(chunk)
+                    got += len(chunk)
+        except Exception as e:
+            sys.exit(f"FATAL: download failed for {url}: {e}")
+        if got != size or h.hexdigest() != digest:
+            os.remove(part)
+            sys.exit(f"FATAL: {url} does not match the contract (got {got} bytes sha256 {h.hexdigest()}, "
+                     f"want {size} bytes sha256 {digest}) — refusing to stage unverified weights")
+        os.replace(part, final)
+        fetched += 1
+print(f"fetched {fetched} file(s), kept {kept} already-verified file(s) -> {dest}/onnx-community")
+PY
+}
+
 # Script entry point — sourceable AND runnable, so the staging step can be exercised (and
 # tested) on its own instead of only through a full sidecar build.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
@@ -385,8 +458,9 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     present) shift; papercusp_transformers_models_present "$@" ;;
     names) printf '%s\n' "${PAPERCUSP_TRANSFORMERS_MODELS[@]}" ;;
     verify) shift; papercusp_verify_transformers_model_pack "$@" ;;
+    fetch) shift; papercusp_fetch_transformers_models "$@" ;;
     *)
-      echo "usage: $0 {stage|present|names|verify} <models_root>" >&2
+      echo "usage: $0 {stage|present|names|verify|fetch} <models_root>" >&2
       exit 2
       ;;
   esac

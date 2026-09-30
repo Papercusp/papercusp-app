@@ -76,6 +76,11 @@ export interface LoopActivity {
   mode?: 'lag' | 'since-fire';
   /** `since-fire` only: how long a fire may run before missing activity is a wedge. */
   graceMs?: number;
+  /**
+   * WI-10004133: what the loop's own outcome ledger says about its latest fire (e.g. the
+   * precision monitor's last attempt and its error), so a stale verdict carries its reason.
+   */
+  detail?: string | null;
 }
 
 /** A learning loop's identity: its blueprint id + the legacy `papercup`-slug routine name. */
@@ -108,6 +113,8 @@ export interface LearningLoopHealth {
   activityLastAt: string | null;
   daysSinceActivity: number | null;
   activitySource: string | null;
+  /** The activity ledger's own account of the latest fire ({@link LoopActivity.detail}); null when it keeps none. */
+  activityDetail: string | null;
   status: LearningLoopStatus;
   /**
    * Was this loop SUPPOSED to have a routine row? (EI-10625.) `absent` is the one
@@ -249,6 +256,7 @@ export function computeLearningLoopHealth(
       activityLastAt,
       daysSinceActivity,
       activitySource: activity?.source ?? null,
+      activityDetail: activity?.detail ?? null,
       pauseAcknowledged,
       status,
       expectedMaterialized: opts.expectedMaterialized?.(loop.blueprintId) ?? true,
@@ -294,6 +302,7 @@ export function computeActivityLaneHealth(
     activityLastAt: lane.lastActivityAt,
     daysSinceActivity,
     activitySource: lane.source,
+    activityDetail: null,
     status,
     // A routine-less lane never carries a routine `pause` at all — reviewBy is
     // therefore never applicable, so this lane can never read as acknowledged.

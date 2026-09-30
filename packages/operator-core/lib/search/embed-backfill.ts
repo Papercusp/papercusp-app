@@ -705,10 +705,20 @@ export const TARGETS: SweepTarget[] = [
     keyCols: ['id'],
     recencyCol: 'created_at',
     recencyColKind: 'epochMs',
-    readers: [{
-      file: SEARCH_SOURCES_FILE,
-      evidence: ['FROM harness_shared.operator_turns t', 'ORDER BY t.text_embedding <=> ${qVec}::vector'],
-    }],
+    readers: [
+      // search:semantic's turns source reads it as the chunk-aware leg's PARENT
+      // vector (generic-rag-chunking P-010, D-017): the leg takes the parent
+      // table and vector column from OPERATOR_TURNS_CHUNK_SURFACE.parentVector
+      // (search/chunks/registry.ts), which registry.test.ts pins to this column.
+      {
+        file: SEARCH_SOURCES_FILE,
+        evidence: ['surface: OPERATOR_TURNS_CHUNK_SURFACE', 'WITH best AS (${chunkAwareVectorLegSql(sql, {'],
+      },
+      {
+        file: 'libs/generic/search/src/chunks/vector-leg.ts',
+        evidence: ['(${sql.unsafe(parentVec)} <=> ${q}::vector) AS distance'],
+      },
+    ],
   },
   {
     table: 'harness_shared.harness_decisions',
@@ -878,18 +888,29 @@ export const TARGETS: SweepTarget[] = [
     recencyCol: 'created_ts',
     recencyColKind: 'epochMs',
     readers: [
+      // work_items:search's issue and feature legs and search:semantic's
+      // work_item source read it as the chunk-aware leg's PARENT vector
+      // (generic-rag-chunking P-011): the leg takes the vector column from
+      // WORK_ITEMS_CHUNK_SURFACE.parentVector (search/chunks/registry.ts),
+      // which registry.test.ts pins to this column.
       {
         file: 'packages/operator-core/lib/work-items.ts',
-        evidence: ['FROM harness_shared.work_items', 'ORDER BY embedding <=> ${qVec}::vector'],
-      },
-      {
-        file: 'packages/operator-core/lib/agent-tools/work_items/semantic-dupe-guard.ts',
-        evidence: ['ORDER BY embedding <=> ${vecLit}::vector'],
+        evidence: ['WITH best AS (${chunkAwareVectorLegSql(handle, {', 'surface: { ...WORK_ITEMS_CHUNK_SURFACE, parent: opts.parent },'],
       },
       // search:semantic's work_item source reads the engineer_issues view over this table.
       {
         file: SEARCH_SOURCES_FILE,
-        evidence: ['FROM harness_shared.engineer_issues', 'ORDER BY embedding <=> ${qVec}::vector'],
+        evidence: ['WITH best AS (${chunkAwareVectorLegSql(sql, {', 'surface: { ...WORK_ITEMS_CHUNK_SURFACE, parent: ENGINEER_ISSUES_CHUNK_PARENT },'],
+      },
+      {
+        file: 'libs/generic/search/src/chunks/vector-leg.ts',
+        evidence: ['(${sql.unsafe(parentVec)} <=> ${q}::vector) AS distance'],
+      },
+      // The duplicate guard compares whole items, so it stays on the parent
+      // vector (D-005).
+      {
+        file: 'packages/operator-core/lib/agent-tools/work_items/semantic-dupe-guard.ts',
+        evidence: ['ORDER BY embedding <=> ${vecLit}::vector'],
       },
     ],
   },
@@ -932,10 +953,35 @@ export const TARGETS: SweepTarget[] = [
     keyCols: ['workspace_id', 'harness_slug', 'plan_slug'],
     recencyCol: 'created_at',
     recencyColKind: 'timestamptz',
-    readers: [{
-      file: 'packages/operator-core/lib/agent-tools/plans/semantic-leg.ts',
-      evidence: ['FROM harness_shared.harness_plans', 'ORDER BY embedding <=> ${vecLit}::vector'],
-    }],
+    // The four readers D-026 (generic-rag-chunking-2026-09-29) measured.
+    readers: [
+      // plans:search reads it as the chunk-aware leg's PARENT vector (P-009):
+      // the leg takes the parent table and vector column from
+      // PLANS_CHUNK_SURFACE.parentVector (search/chunks/registry.ts), which
+      // registry.test.ts pins to this column.
+      {
+        file: 'packages/operator-core/lib/agent-tools/plans/semantic-leg.ts',
+        evidence: ['WITH best AS (${chunkAwareVectorLegSql(handle, {', 'AND (p.embedding <=> ${vecLit}::vector) <= b.distance + 1e-9)'],
+      },
+      {
+        file: 'libs/generic/search/src/chunks/vector-leg.ts',
+        evidence: ['(${sql.unsafe(parentVec)} <=> ${q}::vector) AS distance'],
+      },
+      // plans:new's duplicate guard and the two scout legs compare whole plans,
+      // so they stay on the parent vector (D-005).
+      {
+        file: 'packages/operator-core/lib/agent-tools/plans/semantic-dedup.ts',
+        evidence: ['SELECT plan_slug, 1 - (embedding <=> ${vecLit}::vector) AS similarity', 'FROM harness_shared.harness_plans'],
+      },
+      {
+        file: 'packages/operator-core/lib/scout/semantic-novelty-leg.ts',
+        evidence: ['SELECT plan_slug, 1 - (embedding <=> ${vecLit}::vector) AS similarity', 'FROM harness_shared.harness_plans'],
+      },
+      {
+        file: 'packages/operator-core/lib/scout/intent-rank-leg.ts',
+        evidence: ['SELECT plan_slug, 1 - (embedding <=> ${vecLit}::vector) AS similarity', 'FROM harness_shared.harness_plans'],
+      },
+    ],
   },
   // EI-19374072666153095: code_recipes and datatype_registry are BOTH in
   // PROSE_VECTOR_COLUMNS — so a width migration wipes them (`USING NULL`) — but
@@ -1003,11 +1049,19 @@ export const TARGETS: SweepTarget[] = [
     keyCols: ['workspace_id', 'conversation_id'],
     recencyCol: 'created_at',
     recencyColKind: 'timestamptz',
-    // consult:get_feedback's archive-first lookup.
-    readers: [{
-      file: 'packages/operator-core/lib/consult/peers-know.ts',
-      evidence: ['FROM harness_shared.consult_state', 'ORDER BY query_embedding <=> ${qVec}::vector'],
-    }],
+    // generic-rag-chunking D-027: consult:get_feedback's archive-first serve ranks
+    // by this vector alone (a duplicate decision); coord:orient's peersKnow fold
+    // ranks by the nearer of this vector and the question's chunks (retrieve).
+    readers: [
+      {
+        file: 'packages/operator-core/lib/consult/get-feedback-core.ts',
+        evidence: ['FROM harness_shared.consult_state', 'ORDER BY query_embedding <=> ${qVecStr}::vector'],
+      },
+      {
+        file: 'packages/operator-core/lib/consult/peers-know.ts',
+        evidence: ['JOIN harness_shared.consult_state c', 'WITH best AS (${chunkAwareVectorLegSql(handle, {'],
+      },
+    ],
   },
   {
     table: 'harness_shared.interest_watches',

@@ -86,10 +86,17 @@ async function readJson(request: Request): Promise<Record<string, unknown> | nul
   }
 }
 
-/** A display-only label: printable, single-line, bounded. Never an identifier. */
+/** The name a device-code client gets when it sends no usable label. */
+export const DEFAULT_CLIENT_LABEL = 'psu';
+
+/**
+ * A display-only label: printable, single-line, bounded. Never an identifier.
+ * Returns '' when nothing printable is left, so a route that requires a label can refuse it;
+ * a route that wants a fallback name applies DEFAULT_CLIENT_LABEL itself.
+ */
 export function sanitizeClientLabel(value: unknown): string {
   const text = typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim() : '';
-  return text.slice(0, 120) || 'psu';
+  return text.slice(0, 120).trim();
 }
 
 /** Accept a user code however it was typed: case, spacing and the dash are all optional. */
@@ -215,7 +222,7 @@ export function createHostedCliRoutes(deps: HostedCliRouteDependencies): Readonl
     auth: 'public',
     async handler(request) {
       const body = (await readJson(request)) ?? {};
-      const clientLabel = sanitizeClientLabel(body.clientLabel);
+      const clientLabel = sanitizeClientLabel(body.clientLabel) || DEFAULT_CLIENT_LABEL;
       const now = clock();
       const expiresAt = new Date(now.getTime() + HOSTED_CLI_DEVICE_CODE_TTL_MS);
       const code = `pdc_${randomString(random, 32)}`;

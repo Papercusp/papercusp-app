@@ -120,3 +120,10 @@ export function coverageOf(files: any, cwd?: string): {
  * clean, whereas a bare ✓ over an empty scan reads exactly like a pass.
  */
 export function describeUnscanned(unscannedOrScan: any, cwd?: string): string;
+/**
+ * Drop index entries whose path has NO directory entry on disk (WI-10004173):
+ * a tracked file rm-ed on the shared tree stays in the index until git-sync
+ * commits the deletion, and reading it throws ENOENT. Uses lstat, so a tracked
+ * dangling symlink is kept.
+ */
+export function presentOnDisk(files: string[], cwd?: string): string[];

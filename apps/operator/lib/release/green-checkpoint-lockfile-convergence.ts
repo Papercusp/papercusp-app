@@ -2,22 +2,28 @@
  * P-008 (green-gate-zero-wait-convergence-2026-09-08) — lockfile-drift auto-convergence on the
  * frozen lineage. Fixes EI-22752586902645795 (R-1, R-2, R-7).
  *
- * The exact-input dependency generation the gate materialises is keyed on LOCKFILE blobs only
+ * The exact-input dependency generation the gate materialises is keyed on DEPENDENCY-INPUT blobs
  * (`dependency-generation.sh` `dependency_generation_input_manifest_ref`: package-lock.json /
- * npm-shrinkwrap.json outside node_modules and .papercusp, recursing through gitlinks). Under
+ * npm-shrinkwrap.json AND patch-package `patches/*.patch` files outside node_modules and
+ * .papercusp, recursing through gitlinks; patches joined the key in WI-10002299 because the root
+ * postinstall runs patch-package). The walk below uses the SAME predicate (`isDependencyInputPath`,
+ * shared with the admit-time prediction) — a lockfile-only walk judged a patch-drifted repairHead
+ * `no-drift`, or admitted only its lockfile and reported `converged` while the fingerprint still
+ * missed (WI-10004230, measured on a fixture). Under
  * `--ensure-ref <repairHead>` the script publishes from the LIVE integration tree, indexes the
  * generation under the live fingerprint, then re-opens by the REF's fingerprint — so a frozen
  * repairHead whose lockfiles differ from the live tree is a PERMANENT `dependency-prewarm-missing`
  * (exit 74): no run can ever judge it, and the queue parks as an inconclusive forever.
  *
  * The convergence is deliberately narrow. When the ONLY manifest delta between repairHead and the
- * live tree is lockfile blobs the live tree already holds AND those blobs equal the integration
- * ref's committed ones, admitting the integration ref's entries for exactly those paths onto
- * repairHead (whole-blob, through the ordinary ledgered admission door, actor=gate) makes
- * repairHead's fingerprint equal the live fingerprint — the live generation is then reusable with
- * no publish. Every other delta (a live lockfile that is uncommitted, a submodule whose pinned
- * lockfiles differ from its live tree) is reported as a typed, NAMED miss so the caller can log it
- * loudly instead of parking silently.
+ * live tree is dependency-input blobs (lockfiles and patches) the live tree already holds AND those
+ * blobs equal the integration ref's committed ones, admitting the integration ref's entries for
+ * exactly those paths onto repairHead (whole-blob — a patch absent at the ref is admitted as a
+ * deletion — through the ordinary ledgered admission door, actor=gate) makes repairHead's
+ * fingerprint equal the live fingerprint — the live generation is then reusable with no publish.
+ * Every other delta (a live input that is uncommitted, a submodule whose pinned inputs differ from
+ * its live tree, a lock whose workspace manifests repairHead lacks) is reported as a typed, NAMED
+ * miss so the caller can log it loudly instead of parking silently.
  */
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -34,24 +40,19 @@ import {
   type FrozenCandidateRepairQueue,
   type FrozenRepairAdmission,
 } from "@papercusp/operator-core/lib/release/frozen-candidate-repair-queue";
+import { isDependencyInputPath } from "@papercusp/operator-core/lib/release/dependency-admission-prediction";
 
 /** The ledger actor every P-008 admission is recorded under. */
 export const LOCKFILE_CONVERGENCE_ACTOR = "gate";
 
-/** Mirrors the shell manifest's name filter — only these participate in the input fingerprint. */
-export const DEPENDENCY_INPUT_LOCKFILE_NAMES: readonly string[] = Object.freeze([
-  "package-lock.json",
-  "npm-shrinkwrap.json",
-]);
-
-/** Mirrors `dependency_generation_input_manifest_ref`'s path filter exactly. */
+/**
+ * The LOCKFILE subset of the dependency inputs — the only inputs that are JSON locks with
+ * workspace entries, so the only ones the WI-10003229 manifest-consistency check can read.
+ */
 export function isDependencyInputLockfilePath(rel: string): boolean {
-  const segments = rel.split("/");
-  const base = segments[segments.length - 1] ?? "";
-  if (!DEPENDENCY_INPUT_LOCKFILE_NAMES.includes(base)) return false;
-  return !segments
-    .slice(0, -1)
-    .some((segment) => segment === ".papercusp" || segment === "node_modules");
+  if (!isDependencyInputPath(rel)) return false;
+  const base = rel.split("/").pop() ?? "";
+  return base === "package-lock.json" || base === "npm-shrinkwrap.json";
 }
 
 /** Repo-relative path → blob sha; `null` records an ABSENT path (so a union walk can compare). */
@@ -79,7 +80,7 @@ export function parseLsTreeLockfileManifest(lsTreeZ: string): LockfileManifestAt
       gitlinks.set(rel, object);
       continue;
     }
-    if (type !== "blob" || !isDependencyInputLockfilePath(rel)) continue;
+    if (type !== "blob" || !isDependencyInputPath(rel)) continue;
     blobs.set(rel, object);
   }
   return { blobs, gitlinks };
@@ -407,7 +408,7 @@ export interface LockfileConvergenceInput {
 
 function buildAdmissionReason(paths: string[], from: string, integrationRef: string): string {
   return (
-    `P-008 lockfile-drift auto-convergence: ${paths.length} lockfile(s) at repairHead ` +
+    `P-008 lockfile-drift auto-convergence: ${paths.length} dependency input(s) at repairHead ` +
     `${from.slice(0, 12)} differ from the live integration tree only by blobs equal to ` +
     `${integrationRef}'s committed ones (${paths.join(", ")}); admitted whole-blob so the exact-input ` +
     `dependency fingerprint matches the live generation instead of missing with exit 74`
@@ -465,7 +466,7 @@ export function convergeLockfileDrift(input: LockfileConvergenceInput): Lockfile
         root: input.root,
         repairHead: input.queue.repairHead,
         integrationRef: input.integrationRef,
-        lockfiles: decision.paths,
+        lockfiles: decision.paths.filter(isDependencyInputLockfilePath),
         repairHeadBlobs: head.blobs,
         integrationBlobs: integration.blobs,
         git,
@@ -485,8 +486,8 @@ export function convergeLockfileDrift(input: LockfileConvergenceInput): Lockfile
       paths: decision.paths,
       detail:
         decision.reason === "live-diverges-from-integration-ref"
-          ? `live lockfile(s) are not ${input.integrationRef}'s committed blobs: ${decision.paths.join(", ")}`
-          : `submodule(s) pinned by repairHead ${input.queue.repairHead.slice(0, 12)} carry lockfiles that differ from their live trees: ${decision.paths.join(", ")}`,
+          ? `live dependency input(s) are not ${input.integrationRef}'s committed blobs: ${decision.paths.join(", ")}`
+          : `submodule(s) pinned by repairHead ${input.queue.repairHead.slice(0, 12)} carry dependency inputs that differ from their live trees: ${decision.paths.join(", ")}`,
     };
   }
   if (manifestDivergence.length > 0) {
@@ -537,10 +538,10 @@ export function applyLockfileConvergence(
 export function describeLockfileConvergence(outcome: LockfileConvergenceOutcome): string {
   switch (outcome.kind) {
     case "no-drift":
-      return "no lockfile drift against the live integration tree";
+      return "no dependency-input (lockfile/patch) drift against the live integration tree";
     case "converged":
       return (
-        `CONVERGED: admitted ${outcome.paths.length} lockfile(s) whole-blob onto ` +
+        `CONVERGED: admitted ${outcome.paths.length} dependency input(s) whole-blob onto ` +
         `${outcome.fromRepairHead.slice(0, 8)} → ${outcome.toRepairHead.slice(0, 8)} (actor=${LOCKFILE_CONVERGENCE_ACTOR}): ${outcome.paths.join(", ")}`
       );
     case "not-convergeable":

@@ -207,10 +207,16 @@ export async function insertHiveIfAbsent(
   const s = pg(sql);
   const pk = pubkeyToBytea(input.pubkeyBase64);
   const now = Date.now();
+  // WI-10004191: no conflict target, so EVERY unique key is an arbiter. Callers
+  // lazily backfill the same hive concurrently (a Network board refresh racing
+  // navigation). With only the slug key as arbiter, a loser that passed the
+  // pre-check before the winner's index entries existed raised a unique
+  // violation on pots_public_key_key or pots_canonical_home_slug_key instead of
+  // returning the winner's row.
   const inserted = (await s.unsafe(
     `INSERT INTO harness_shared.pots (${COLS})
        VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-     ON CONFLICT (workspace_id, pot_home_slug) DO NOTHING
+     ON CONFLICT DO NOTHING
      RETURNING ${SELECT_COLS}`,
     [
       input.workspaceId,
@@ -226,8 +232,13 @@ export async function insertHiveIfAbsent(
   // Conflict: a row already exists — return it unchanged.
   const existing = await getHiveBySlug(input.workspaceId, input.homeSlug, sql);
   if (!existing) {
-    // Should not happen (conflict implies a row), but never return a phantom.
-    throw new Error(`insertHiveIfAbsent: conflict on (${input.workspaceId}, ${input.homeSlug}) but no row found`);
+    // The conflict was on another unique key: this pubkey (or canonical slug)
+    // already belongs to a different hive. Never return a phantom, and never
+    // bind one identity to two hives.
+    throw new Error(
+      `insertHiveIfAbsent: no hive (${input.workspaceId}, ${input.homeSlug}) exists, and its pubkey or canonical slug ` +
+        `already identifies another hive; refusing to bind it twice`,
+    );
   }
   return { record: existing, created: false };
 }
@@ -252,7 +263,11 @@ export async function upsertRemoteHiveIdentity(
   const pk = pubkeyToBytea(input.pubkeyBase64);
   const now = Date.now();
   const repairKeychainIds = (input.repairKeychainIds ?? []).filter(Boolean);
-  const rows = (await s.unsafe(
+  // WI-10004191: DO UPDATE needs a single conflict target, so a concurrent
+  // upsert of the same view can lose the race on pots_public_key_key. One retry
+  // sees the winner's committed row and takes the DO UPDATE path; a genuine
+  // pubkey clash with another hive fails the retry the same way and surfaces.
+  const upsert = () => s.unsafe(
     `INSERT INTO harness_shared.pots (${COLS})
        VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
      ON CONFLICT (workspace_id, pot_home_slug) DO UPDATE
@@ -274,7 +289,11 @@ export async function upsertRemoteHiveIdentity(
       now,
       repairKeychainIds,
     ],
-  )) as unknown as HiveRow[];
+  );
+  const rows = (await upsert().catch((e: unknown) => {
+    if ((e as { code?: string } | null)?.code === '23505') return upsert();
+    throw e;
+  })) as unknown as HiveRow[];
   if (rows[0]) {
     const record = rowToRecord(rows[0]);
     return { record, created: record.createdAt === now, repaired: record.createdAt !== now };

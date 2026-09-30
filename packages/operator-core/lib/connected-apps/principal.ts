@@ -26,8 +26,10 @@
  */
 
 import type { Principal } from '@papercusp/agent-mcp';
+import { notifyAttentionOnce } from '../attention-notify';
+import { onAppKeyUsed } from './alerts';
 import { isAppKeyShaped } from './key';
-import { recordAppKeyUse, verifyAppKey, type AppKeyRefusal, type AppKeyRow } from './store';
+import { recordAppKeyUse, verifyAppKey, type AccessTokenGrant, type AppKeyRefusal, type AppKeyRow } from './store';
 
 export const APP_PRINCIPAL_SLUG_PREFIX = 'app:';
 
@@ -54,17 +56,23 @@ export function presentsAppKey(headers: Headers): boolean {
  * working after its creator leaves the organization (P-015, D-007), so no downstream check may be
  * able to tie the principal back to that person.
  */
-export function principalForAppKey(app: AppKeyRow): Principal {
+export function principalForAppKey(app: AppKeyRow, accessToken?: AccessTokenGrant): Principal {
   return {
     kind: 'service',
-    slug: `${APP_PRINCIPAL_SLUG_PREFIX}${app.id}`,
+    // A client-credentials access token (P-016) is the parent key acting through one token:
+    // `app:<keyId>/<tokenId>`. The dispatch seat (./enforce.ts) splits it, checks the parent AND
+    // the token's narrower scope, and every roll-up keys on the parent id before the slash.
+    slug: `${APP_PRINCIPAL_SLUG_PREFIX}${app.id}${accessToken ? `${ACCESS_TOKEN_SLUG_SEPARATOR}${accessToken.id}` : ''}`,
     workspaceId: app.workspace_id,
     authMethod: 'bearer-token',
     trust: 'verified',
-    capabilities: new Set(app.scopes?.capabilities ?? []),
+    capabilities: new Set((accessToken?.scopes ?? app.scopes)?.capabilities ?? []),
     label: app.label ?? `${app.kind === 'service' ? 'service key' : 'app'} ${app.id}`,
   };
 }
+
+/** Separates the parent key id from the access-token id in an app principal slug. */
+export const ACCESS_TOKEN_SLUG_SEPARATOR = '/';
 
 /**
  * The client address a request reports, for the "last used from" column. This
@@ -95,8 +103,10 @@ export async function resolveAppKeyToken(
     return { ok: false, reason: 'unavailable' };
   }
   if (!verdict.ok) return verdict;
-  void recordAppKeyUse(verdict.app.id, opts.ip ?? null).catch(() => undefined);
-  return { ok: true, principal: principalForAppKey(verdict.app), app: verdict.app };
+  // Records the use and raises the new-app / new-location alerts it implies (P-011, R-28/R-42).
+  // Off the request path and never throws.
+  void onAppKeyUsed(verdict.app, opts.ip ?? null, { recordUse: recordAppKeyUse, notify: notifyAttentionOnce });
+  return { ok: true, principal: principalForAppKey(verdict.app, verdict.accessToken), app: verdict.app };
 }
 
 /** Resolve the app key a request presents (see `resolveAppKeyToken`). */

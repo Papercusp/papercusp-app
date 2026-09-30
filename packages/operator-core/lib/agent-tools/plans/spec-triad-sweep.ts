@@ -206,6 +206,19 @@ export interface SpecTriadOpenFiling {
   ref: string;
 }
 
+/**
+ * `harness_plans.template` values the sweep never files against (WI-10004229).
+ *
+ * An acceptance rubric (`template: rubric`) is stored in the plan store, but it
+ * is a grading BAR, not a plan with work to promote: it carries no P-NNN items
+ * and no `## Requirements` / `## Design` by design. A "write the spec triad"
+ * filing against one has no correct resolution. An agent that followed it
+ * would rewrite the rubric's content under an in-flight vetting attestation or
+ * independent grade. Measured 2026-09-30: 335 rubric rows in
+ * papercusp-workspace, and at least 8 open filings against them.
+ */
+export const SPEC_TRIAD_EXCLUDED_TEMPLATES: readonly string[] = ['rubric'];
+
 /** Where a plan row actually lives, plus the fields the liveness predicate reads. */
 export interface SpecTriadPlanLocator {
   workspace_id: string;
@@ -214,18 +227,26 @@ export interface SpecTriadPlanLocator {
   status: string | null;
   archived: boolean;
   is_legacy: boolean;
+  /** `harness_plans.template` — a rubric row is never sweep-live. */
+  template: string | null;
 }
 
 /**
  * EXACT mirror of the sweep's phase-1 candidate predicate (a NULL status counts
- * as live, matching `status IS NULL OR status = ANY(LIVE_PLAN_STATUSES)`). The
+ * as live, matching `status IS NULL OR status = ANY(LIVE_PLAN_STATUSES)`; a
+ * template in SPEC_TRIAD_EXCLUDED_TEMPLATES is never live). The
  * reconciliation leg must answer "would the sweep file for this row TODAY?"
  * with the sweep's own test, or the two legs fight each other.
  */
 export function planRowIsSweepLive(
-  p: Pick<SpecTriadPlanLocator, 'status' | 'archived' | 'is_legacy'>,
+  p: Pick<SpecTriadPlanLocator, 'status' | 'archived' | 'is_legacy' | 'template'>,
 ): boolean {
-  return !p.archived && !p.is_legacy && (p.status === null || LIVE_PLAN_STATUSES.includes(p.status));
+  return (
+    !p.archived &&
+    !p.is_legacy &&
+    !(p.template !== null && SPEC_TRIAD_EXCLUDED_TEMPLATES.includes(p.template)) &&
+    (p.status === null || LIVE_PLAN_STATUSES.includes(p.status))
+  );
 }
 
 export type SpecTriadReconcileReason = 'plan-missing' | 'plan-not-live';
@@ -310,7 +331,13 @@ export function selectSpecTriadReconciliations(input: {
       continue;
     }
     if (!planRowIsSweepLive(row)) {
-      const why = row.archived ? 'archived' : row.is_legacy ? 'legacy' : `status '${row.status}'`;
+      const why = row.archived
+        ? 'archived'
+        : row.is_legacy
+          ? 'legacy'
+          : row.template !== null && SPEC_TRIAD_EXCLUDED_TEMPLATES.includes(row.template)
+            ? `a '${row.template}' template (an acceptance BAR, which has no items to promote)`
+            : `status '${row.status}'`;
       candidates.push({
         filing: f,
         reason: 'plan-not-live',
@@ -379,7 +406,7 @@ async function reconcileDanglingSpecTriadFilings(
       slugs.length === 0
         ? []
         : ((await sql`
-            SELECT workspace_id, harness_slug, plan_slug, status, archived, is_legacy
+            SELECT workspace_id, harness_slug, plan_slug, status, archived, is_legacy, template
               FROM harness_shared.harness_plans
              WHERE plan_slug = ANY(${slugs})
           `) as unknown as SpecTriadPlanLocator[]);
@@ -490,6 +517,7 @@ export async function runSpecTriadSweepOnce(
        WHERE archived = false
          AND is_legacy = false
          AND (status IS NULL OR status = ANY(${LIVE_PLAN_STATUSES}))
+         AND (template IS NULL OR NOT (template = ANY(${SPEC_TRIAD_EXCLUDED_TEMPLATES as string[]})))
     `) as unknown as PlanMetaRow[];
   } catch (err) {
     return empty(`plan scan failed: ${(err as Error).message}`);

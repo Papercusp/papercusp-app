@@ -53,6 +53,7 @@
  */
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { presentOnDisk } from './lib/tracked-files.mjs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -106,9 +107,11 @@ export function findOffenders(text) {
 }
 
 function main() {
-  const tracked = execSync('git ls-files', { cwd: ROOT, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
-    .split('\n')
-    .filter(Boolean);
+  // WI-10004176: drop index entries a peer's plain `rm` left until git-sync commits it.
+  const tracked = presentOnDisk(
+    execSync('git ls-files', { cwd: ROOT, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 }).split('\n').filter(Boolean),
+    ROOT,
+  );
 
   const offenders = [];
   for (const f of tracked) {

@@ -25,6 +25,7 @@
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { presentOnDisk } from './lib/tracked-files.mjs';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -238,7 +239,8 @@ function main() {
 
   let files;
   if (all) {
-    files = git('ls-files');
+    // WI-10004176: drop index entries a plain `rm` left behind until git-sync commits it.
+    files = presentOnDisk(git('ls-files'), ROOT);
   } else {
     const baseArg = process.argv.indexOf('--base');
     const base = baseArg >= 0 ? process.argv[baseArg + 1] : (process.env.AFFECTED_BASE || 'origin/main');

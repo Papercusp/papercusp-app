@@ -9,6 +9,7 @@ import { knowledgePackFromPin, packageDocDriver, prepareKnowledgeDocResources } 
 import { packItemMemoryWrite, knowledgePackMemoryScope, type KnowledgePackMemoryTarget } from '../knowledge-packs/seed';
 import { packageMemoryDriver } from './package-memory-driver';
 import { packageRecipeDriver } from './package-recipe-resources';
+import { packageProviderBindingDriver, PROVIDER_BINDING_RESOURCE_KIND } from './package-provider-binding-resources';
 import { packageResourceKey, preparePackageResource, releasePackageResource,
   beginPackageInstallationRelease, finishPackageInstallationRelease,
   recordPackageInstallationReleaseFailure, type PackageInstallationReleaseOptions,
@@ -79,7 +80,8 @@ export async function releasePackageInstallation(
       FROM harness_shared.blueprint_package_resources r
       JOIN harness_shared.blueprint_package_dependents d USING (workspace_id, resource_key)
       WHERE d.workspace_id = ${workspaceId} AND d.dependent_id = ${dependentId}
-        AND r.resource_kind IN ('memory', 'code-recipe', 'doc-part') ORDER BY r.resource_key`;
+        AND r.resource_kind IN ('memory', 'code-recipe', 'doc-part', ${PROVIDER_BINDING_RESOURCE_KIND})
+      ORDER BY r.resource_key`;
     const receipts: PackageResourceReceipt[] = [];
     for (const row of rows) {
       const address: PackageResourceAddress = { workspaceId, memoryScope: row.memory_scope,
@@ -88,6 +90,12 @@ export async function releasePackageInstallation(
         installedHash: row.installed_hash };
       if (row.resource_kind === 'code-recipe') {
         const receipt = await releasePackageResource(sql, address, dependentId, packageRecipeDriver(sql, address, null));
+        if (receipt) receipts.push(receipt);
+        continue;
+      }
+      if (row.resource_kind === PROVIDER_BINDING_RESOURCE_KIND) {
+        // P-014: a re-pointed or foreign pot binding is preserved, never deleted.
+        const receipt = await releasePackageResource(sql, address, dependentId, packageProviderBindingDriver(sql, address, null));
         if (receipt) receipts.push(receipt);
         continue;
       }

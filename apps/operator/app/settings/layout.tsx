@@ -57,7 +57,7 @@ export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
       { href: '/settings/profile', label: 'Profile', keywords: ['account', 'identity', 'email', 'display name', 'project directory'] },
       { href: '/settings/user', label: 'User preferences', keywords: ['user', 'me', 'override', 'password', 'session', 'logout'] },
       { href: '/settings/personal-vault', label: 'Personal Vault', keywords: ['personal', 'vault', 'gmail', 'calendar', 'contacts', 'takeout', 'facebook', 'instagram', 'x archive', 'private', 'local embeddings', 'grant', 'purge'] },
-      { href: '/settings/mobile', label: 'Mobile access', keywords: ['phone', 'device', 'pair', 'qr', 'workspace'] },
+      { href: '/settings/remote-access', label: 'Remote access', keywords: ['remote', 'phone', 'mobile', 'device', 'pair', 'qr', 'workspace', 'app', 'api key', 'service key', 'connector', 'claude', 'chatgpt', 'mcp', 'tunnel', 'kill switch', 'revoke'] },
       { href: '/settings/publishing', label: 'Publishing', keywords: ['publish', 'preview', 'subdomain', 'public', 'marketplace'] },
     ],
   },

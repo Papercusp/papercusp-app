@@ -44,7 +44,9 @@ export interface QuotaWindow {
 }
 
 /**
- * The framework's default quota windowing: run-scoped, `perRun` ceiling.
+ * The framework's default quota windowing: run-scoped, `perRun` ceiling —
+ * or, when the caller names a `quotaSubject`, windowed on that subject so a
+ * fresh `runId` per dispatch cannot reset the count.
  * A host with richer policy (per-chunk windows, session-keyed quotas, …)
  * supplies `DispatchProjectedDeps.computeQuotaWindow` to override this.
  */
@@ -54,6 +56,9 @@ export function defaultComputeQuotaWindow(
   _toolName?: string,
   _input?: unknown,
 ): QuotaWindow {
+  if (ctx.quotaSubject) {
+    return { key: `subject:${ctx.quotaSubject}`, limit: roleQuota?.perRun ?? null };
+  }
   return {
     key: ctx.runId ? `run:${ctx.runId}` : null,
     limit: roleQuota?.perRun ?? null,

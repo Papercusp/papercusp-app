@@ -67,6 +67,75 @@ export interface DesktopAuditEvent {
   details: Record<string, unknown>;
 }
 
+/**
+ * One event from either end of the hosted relay. The workspace host's adapter
+ * (`HostedHostAuditEvent`) and the control plane's broker
+ * (`HostedWorkspaceSessionAuditEvent`) both carry these fields, and both ends write
+ * desktop viewer events through {@link hostedDesktopAuditRow} — the host into its
+ * own database, the control plane into the control-plane workspace (WI-10004167).
+ */
+export interface HostedDesktopAuditSource {
+  action: string;
+  organizationId: string;
+  customerWorkspaceId: string;
+  hostId: string;
+  generation: number;
+  userId?: string;
+  hostedSessionId?: string;
+  channelId?: string;
+  detail?: string;
+}
+
+/**
+ * The relay's desktop event names, mapped onto the shared namespace.
+ *
+ * The relay names its events in its own vocabulary (`desktop_takeover_started`, …)
+ * because it must not know about the local lane. Translating here — rather than
+ * renaming them there — is what lets a single `frame-vnc.takeover-started` filter
+ * find hosted takeovers alongside frame and local ones.
+ */
+const HOSTED_DESKTOP_AUDIT_EVENTS: Readonly<Record<string, readonly [DesktopAuditMode, DesktopAuditPhase]>> = {
+  desktop_watch_started: ['watch', 'started'],
+  desktop_takeover_started: ['takeover', 'started'],
+};
+
+/** True for a relay event that IS a desktop viewer event (see {@link hostedDesktopAuditRow}). */
+export function isHostedDesktopAuditAction(action: string): boolean {
+  return Object.hasOwn(HOSTED_DESKTOP_AUDIT_EVENTS, action);
+}
+
+/**
+ * Map one hosted relay event onto an audit row.
+ *
+ * Non-desktop relay events (PTY attach, file operations) keep their own action
+ * verbatim under a `hosted-relay.` prefix: they are a different population, and
+ * folding them into the desktop namespace would pollute the very filter this module
+ * protects.
+ */
+export function hostedDesktopAuditRow(event: HostedDesktopAuditSource): DesktopAuditEvent {
+  const mapped = isHostedDesktopAuditAction(event.action) ? HOSTED_DESKTOP_AUDIT_EVENTS[event.action] : undefined;
+  const subjectRef = event.channelId ?? event.hostedSessionId ?? 'unknown';
+  const details: Record<string, unknown> = {
+    target: 'hosted',
+    organizationId: event.organizationId,
+    customerWorkspaceId: event.customerWorkspaceId,
+    hostId: event.hostId,
+    generation: event.generation,
+    ...(event.userId ? { userId: event.userId } : {}),
+    ...(event.hostedSessionId ? { hostedSessionId: event.hostedSessionId } : {}),
+    ...(event.channelId ? { channelId: event.channelId } : {}),
+    ...(event.detail ? { detail: event.detail } : {}),
+  };
+  return {
+    action: mapped ? desktopAuditAction(mapped[0], mapped[1]) : `hosted-relay.${event.action}`,
+    // The browser principal, not the host: an auditor asking "who took this over"
+    // wants the human. The host identity is still on the row, in `details.hostId`.
+    actor: event.userId ?? `host:${event.hostId}`,
+    subject: desktopAuditSubject('hosted', event.hostId, subjectRef),
+    details,
+  };
+}
+
 export interface DesktopAuditDeps {
   /** Row-id prefix, so a reader can tell which lane wrote a row without parsing details. */
   idPrefix?: string;

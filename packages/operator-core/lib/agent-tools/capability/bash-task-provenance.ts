@@ -37,6 +37,31 @@ interface BashTaskProvenanceDeps {
   readHeldWorkItems: typeof readHeldWorkItems;
 }
 
+export interface BashTaskProvenanceOptions {
+  /**
+   * WI-10004202: the work-item the caller NAMES for this launch (capability:bash
+   * `work_item_id`). It wins over the goal ref, because the goal ref is whatever the
+   * session last declared — measured: an EVL mutation run for WI-10004188 was ledgered
+   * against WI-10003976 (the declared goal) and counted in THAT item's loop-gate window.
+   */
+  explicitWorkItemId?: string | null;
+}
+
+/** A caller-named work-item the resolver can positively show is not the caller's. */
+export class BashProvenanceRefusal extends Error {
+  constructor(
+    readonly code: 'work_item_id_invalid' | 'work_item_not_held',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'BashProvenanceRefusal';
+  }
+}
+
+const WORK_ITEM_ID_RE = /^(?:WI|EI|F)-[A-Za-z0-9._-]+$/;
+/** Held-claim scan width for verifying an explicit id (the single-claim fallback reads 2). */
+const EXPLICIT_HELD_SCAN_LIMIT = 200;
+
 const DEFAULT_BASH_PROVENANCE_DEPS: BashTaskProvenanceDeps = {
   resolveIdentity: resolveAgentIdentity,
   readStamp: readAgentStateStamp,
@@ -55,6 +80,7 @@ export async function resolveBashTaskProvenance(
   ctx: ResolveIdentityCtx,
   harnessSlug: string | null,
   deps: BashTaskProvenanceDeps = DEFAULT_BASH_PROVENANCE_DEPS,
+  options: BashTaskProvenanceOptions = {},
 ): Promise<BashTaskProvenance> {
   let ownerId: string | null = null;
   try {
@@ -68,7 +94,35 @@ export async function resolveBashTaskProvenance(
     goalRef = (await deps.resolveGoal(ownerId, 'self'))?.ref ?? null;
   }
 
-  let workItemId = goalRef && /^(?:WI|EI|F)-[A-Za-z0-9._-]+$/.test(goalRef) ? goalRef : null;
+  const explicit = options.explicitWorkItemId?.trim() || null;
+  if (explicit) {
+    if (!WORK_ITEM_ID_RE.test(explicit)) {
+      throw new BashProvenanceRefusal(
+        'work_item_id_invalid',
+        `work_item_id '${explicit}' is not a work-item id (expected WI-/EI-/F-…).`,
+      );
+    }
+    // Naming an item you do not hold would move a run's cost and its loop-gate count
+    // onto someone else's item — the misattribution this option exists to remove. Refuse
+    // only on a POSITIVE read; an unreadable claim keeps the shell fail-soft.
+    if (ownerId) {
+      let held: Array<{ id: string }> | null = null;
+      try {
+        const workspaceId = ctx.workspaceId ?? ctx.principal?.workspaceId ?? '';
+        held = await deps.readHeldWorkItems(ownerId, workspaceId, { limit: EXPLICIT_HELD_SCAN_LIMIT });
+      } catch {
+        held = null;
+      }
+      if (held && !held.some((h) => h.id === explicit)) {
+        throw new BashProvenanceRefusal(
+          'work_item_not_held',
+          `work_item_id '${explicit}' is not one of your held work-items; claim it first or omit work_item_id.`,
+        );
+      }
+    }
+  }
+
+  let workItemId = explicit ?? (goalRef && WORK_ITEM_ID_RE.test(goalRef) ? goalRef : null);
   // EI-21548894457555139: the goal ref is only SOMETIMES a work-item id. A fleet leader
   // or a plan-bound agent declares `fleet:<slug>` / `<plan>#P-NNN`, so the regex above
   // yields null and the task lands in the ledger unlinked — `processes:list` then cannot

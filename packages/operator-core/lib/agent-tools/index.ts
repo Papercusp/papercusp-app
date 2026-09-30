@@ -1467,6 +1467,7 @@ import './identities/create';
 import './identities/list';
 import './identities/get';
 import './identities/validate';
+import './identities/preview';
 // domain-generic-hive-architecture-2026-06-18 P-016 — blueprint:publish, the
 // publish entry point (mirror of knowledge_packs:publish): promote a local/private
 // blueprint to the published/installed tier via the shared Cupboard core.

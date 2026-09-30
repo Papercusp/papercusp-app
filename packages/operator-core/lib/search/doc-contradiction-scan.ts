@@ -34,6 +34,9 @@ import {
   type JudgeCandidate,
   type JudgeSection,
 } from './doc-contradiction-judge';
+import { ANTHROPIC_JUDGE_MODEL } from '../memory/anthropic-judge';
+import { ensureJevDecisionClient, readJevApiKey } from '../memory/jev-settings';
+import { createJevContradictionJudge } from './jev-contradiction-judge';
 
 /** A deterministic finding, with D-004's kind attributed to it. */
 export interface KindedFinding extends DocOverlapFinding, PairKindVerdict {}
@@ -170,8 +173,14 @@ export function contradictionJudgeAvailable(opts?: { apiKey?: string }): boolean
   return Boolean((opts?.apiKey ?? process.env.ANTHROPIC_API_KEY ?? '').trim());
 }
 
-/** Haiku-class: the question is narrow and the volume is what costs money. */
-const JUDGE_MODEL = 'claude-3-5-haiku-latest';
+/**
+ * Haiku-class: the question is narrow and the volume is what costs money.
+ * Shared with the memory judge so a model retirement is fixed in one place:
+ * this used to pin `claude-3-5-haiku-latest`, which now answers HTTP 404, so
+ * every pair came back as a judge error on any keyed host (WI-10004165).
+ */
+export const DOC_CONTRADICTION_JUDGE_MODEL = ANTHROPIC_JUDGE_MODEL;
+const JUDGE_MODEL = DOC_CONTRADICTION_JUDGE_MODEL;
 
 /**
  * The gateway-routed judge.
@@ -232,6 +241,54 @@ export function createGatewayContradictionJudge(opts?: {
   };
 }
 
+export type ContradictionJudgeBackend = 'jev' | 'anthropic';
+
+export type ContradictionJudgeResolution =
+  | { readonly available: true; readonly backend: ContradictionJudgeBackend; readonly judge: ContradictionJudgeFn }
+  | { readonly available: false; readonly reason: string };
+
+export const CONTRADICTION_JUDGE_UNAVAILABLE_REASON =
+  'no Jev key is stored (Settings > Memory) and no ANTHROPIC_API_KEY resolves in this process';
+
+export interface ContradictionJudgeDeps {
+  readonly readJevKey: () => Promise<string | null>;
+  readonly anthropicAvailable: () => boolean;
+  readonly jevJudge: () => ContradictionJudgeFn;
+  readonly anthropicJudge: () => ContradictionJudgeFn;
+}
+
+const defaultContradictionJudgeDeps: ContradictionJudgeDeps = {
+  readJevKey: readJevApiKey,
+  anthropicAvailable: () => contradictionJudgeAvailable(),
+  jevJudge: () => createJevContradictionJudge({ client: ensureJevDecisionClient }),
+  anthropicJudge: () => createGatewayContradictionJudge(),
+};
+
+/**
+ * Which contradiction judge runs, if any (plan jev-decision-model-integration-2026-09-29,
+ * P-010, decisions D-017 and D-018).
+ *
+ * Jev when a Jev key is stored (it met the D-017 bar, D-018), else the Anthropic
+ * judge when ANTHROPIC_API_KEY resolves, else no judge, which `judgeContradictions`
+ * reports as inconclusive rather than clean. Same order as the memory conflict
+ * judge (resolveConflictJudge, D-016), so one stored key moves both narrow judges.
+ * A key store that cannot be read counts as "no Jev key", never as an error that
+ * disables the Anthropic fallback.
+ */
+export async function resolveContradictionJudge(
+  deps: ContradictionJudgeDeps = defaultContradictionJudgeDeps,
+): Promise<ContradictionJudgeResolution> {
+  let jevKey: string | null = null;
+  try {
+    jevKey = await deps.readJevKey();
+  } catch {
+    jevKey = null;
+  }
+  if (jevKey) return { available: true, backend: 'jev', judge: deps.jevJudge() };
+  if (deps.anthropicAvailable()) return { available: true, backend: 'anthropic', judge: deps.anthropicJudge() };
+  return { available: false, reason: CONTRADICTION_JUDGE_UNAVAILABLE_REASON };
+}
+
 /**
  * Parse the judge's reply. Returns `null` for anything not recognisably a
  * verdict — an unparseable answer is a judge error, not a "no".
@@ -263,16 +320,18 @@ export interface RunContradictionLegOptions {
   /** Overridable for tests; defaults to the live flag / credential / stores. */
   deps?: Partial<{
     enabled: () => Promise<boolean>;
-    judgeAvailable: () => boolean;
+    /** Which judge runs. Defaults to {@link resolveContradictionJudge}. */
+    resolveJudge: () => Promise<ContradictionJudgeResolution>;
     loadTitles: (ids: readonly string[]) => Promise<Map<string, string>>;
     loadSections: (ids: readonly string[]) => Promise<Map<string, JudgeSection>>;
-    judge: ContradictionJudgeFn;
   }>;
 }
 
 export interface ContradictionLegResult {
   kinded: KindedFinding[];
   report: ContradictionReport;
+  /** Which judge answered, or null when none could be built. */
+  judgeBackend: ContradictionJudgeBackend | null;
 }
 
 /**
@@ -286,7 +345,9 @@ export async function runContradictionLeg(
 ): Promise<ContradictionLegResult> {
   const deps = opts.deps ?? {};
   const enabled = await (deps.enabled ?? contradictionScanEnabled)();
-  const judgeAvailable = (deps.judgeAvailable ?? (() => contradictionJudgeAvailable()))();
+  // Resolved BEFORE any section content is loaded, so an unavailable judge is
+  // never fed (the reason contradictionJudgeAvailable exists).
+  const resolution = await (deps.resolveJudge ?? resolveContradictionJudge)();
 
   const titleIds = Array.from(new Set(opts.findings.flatMap((f) => [f.a, f.b])));
   const titles = await (deps.loadTitles ?? loadSectionTitles)(titleIds);
@@ -297,10 +358,10 @@ export async function runContradictionLeg(
     judgeThreshold: opts.judgeThreshold,
     maxJudged: opts.maxJudged,
     enabled,
-    judgeAvailable,
+    judgeAvailable: resolution.available,
     loadSections: deps.loadSections ?? loadJudgeSections,
-    judge: deps.judge ?? createGatewayContradictionJudge(),
+    judge: resolution.available ? resolution.judge : async () => null,
   });
 
-  return { kinded, report };
+  return { kinded, report, judgeBackend: resolution.available ? resolution.backend : null };
 }

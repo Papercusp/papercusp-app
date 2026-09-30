@@ -60,6 +60,7 @@ export default defineTool({
 
     const { installRuleFromCupboard } = await import('../../cupboard/install-rule-io');
     const outcome = await installRuleFromCupboard({
+      workspaceId: subject,
       ...(args.listingId ? { listingId: args.listingId } : {}),
       ...(args.githubUrl ? { githubUrl: args.githubUrl } : {}),
       ...(args.listingRef ? { listingRef: args.listingRef } : {}),

@@ -43,6 +43,10 @@ export interface PackageResourceDriver {
   cancel(writeKey: string): Promise<void>;
   /** Must compare AND remove atomically; a get-then-forget adapter is unsafe. */
   removeIfUnchanged(resource: PackageExternalResource): Promise<'removed' | 'absent' | 'changed'>;
+  /** Opt in only when admission recovery itself refuses every foreign change
+   * (P-014 pot bindings): a resource detached by a later owner's change may then
+   * start a fresh operation. Without it that resource needs explicit review. */
+  readmitsChanged?: boolean;
 }
 
 export interface PackageResourceReceipt {
@@ -275,9 +279,13 @@ export async function preparePackageResource(
       ON CONFLICT (workspace_id, resource_key) DO NOTHING`;
     const receipt = (await readPackageResourceReceipt(tx, address.workspaceId, key))!;
     if (receipt.installed_hash !== address.installedHash) throw new Error('package resource content changed under an exact pin');
-    if (receipt.phase === 'detached') throw new Error('package resource was edited; explicit review is required');
+    // Detached only because it was never ours (adopted owned:false): nothing was
+    // edited, so a fresh install re-adopts or re-creates it like a deleted one.
+    const readmitted = receipt.phase === 'detached' && (driver.readmitsChanged === true ||
+      (receipt.external_refs.length > 0 && receipt.external_refs.every((ref) => ref.disposition === 'unowned')));
+    if (receipt.phase === 'detached' && !readmitted) throw new Error('package resource was edited; explicit review is required');
     if (receipt.phase === 'cleanup_failed') throw new Error('package resource needs cleanup recovery before installation');
-    if (receipt.phase === 'deleted') {
+    if (receipt.phase === 'deleted' || readmitted) {
       // A fresh install starts a new operation; deleted history cannot be replayed as ready.
       await tx`UPDATE harness_shared.blueprint_package_resources
         SET write_key = gen_random_uuid(), phase = 'intent', external_refs = '[]'::jsonb, error = NULL, updated_at = now()

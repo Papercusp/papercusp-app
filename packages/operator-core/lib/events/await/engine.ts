@@ -37,8 +37,10 @@ import {
   expireLapsedAwaits,
   fireAwaitsForKey,
   listActiveAwaitsForKey,
+  keyFireId,
   recordKeyFire,
   stampAnnouncementsFired,
+  type LatchedEventSubscriber,
   fireTimedOutAwaits,
   insertDeliveries,
   lastWokenAtForSubscribers,
@@ -314,14 +316,32 @@ export async function emitAwaitedEvent(opts: EmitAwaitedEventOpts): Promise<Emit
   let announcementPending = true;
   // WI-10003631: the latch statement also returns the standing event-key
   // subscribers; undefined (latch failed / stub) ⇒ the separate read below.
-  let latchedSubscribers: Array<{ subscriber_id: string; delivery_mode: string }> | undefined;
+  let latchedSubscribers: LatchedEventSubscriber[] | undefined;
+  const subscriberScope = eventKeySubscriberScope();
   try {
     const latch = await recordKeyFire({
       eventKey: opts.key, firedBy: opts.source ?? null, payload: opts.payload,
-      subscribersFrom: eventKeySubscriberScope(),
+      subscribersFrom: subscriberScope,
     });
     if (latch && latch.announcementPending === false) announcementPending = false;
     latchedSubscribers = latch?.eventSubscribers;
+    // P-018 (D-029 §2): worn async identity rules subscribe as muted rows. Each one
+    // this fire reached becomes a durable reaction keyed by the latch's fire
+    // identity; without that identity (latch failed) nothing is enqueued. Loaded
+    // lazily so the emit path carries no identity/DBOS graph unless a derived row
+    // exists; enqueueIdentityReactions keeps only the identity-rule kind.
+    const identityRows = latchedSubscribers?.filter((s) => s.derived_from_kind != null) ?? [];
+    if (latch?.fire && identityRows.length > 0) {
+      try {
+        const { enqueueIdentityReactions } = await import('../identity-reaction');
+        await enqueueIdentityReactions({
+          workspaceId: subscriberScope.workspaceId, eventKey: opts.key,
+          fireId: keyFireId(opts.key, latch.fire), payload: opts.payload, rows: identityRows,
+        });
+      } catch (e) {
+        log(`identity reaction enqueue failed for ${opts.key}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
   } catch (e) {
     // WI-10003882: a Postgres lock failure's `detail` names both sides of the lock
     // cycle (which process waits on which transaction). The message alone

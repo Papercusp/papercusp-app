@@ -60,6 +60,16 @@ export const JEV_EGRESS_NOTICE =
 export const JEV_MEASURED_VERDICT =
   'Measured 2026-09-30 on jev-1.13.0: with On, off-topic test questions received an irrelevant memory 0 to 1 times in 30, against 8 in 30 with the current system, and relevant memories were kept as often as before. The test set is small, so the improvement is real but borderline. Off stays the default.';
 
+/**
+ * P-009 / D-016: a saved key also makes Jev the contradiction checker for new
+ * memories (memory/conflict-judge.ts prefers it over ANTHROPIC_API_KEY). That
+ * use reads the KEY only, not the mode above, so it runs even under Off; the
+ * card must say so beside the key, before the owner saves one. Refusal wording
+ * mirrors agent-tools/memory/remember.ts (force=true or forget the older one).
+ */
+export const JEV_KEY_CONFLICT_USE =
+  'The key is also used to check each new memory for contradictions with memories already saved, in every mode including Off. A new memory that contradicts a saved one is refused unless it is saved with force or the older memory is removed first.';
+
 export interface JevView {
   /** The stored choice, for the mode select. */
   choice: JevMode;

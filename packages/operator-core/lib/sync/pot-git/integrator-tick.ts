@@ -84,6 +84,15 @@ export interface IntegratorTickInput {
    */
   lastAnnouncedStagingSha?: string | null;
   /**
+   * WI-10004249 — the staging the local worktree bridge last ACCEPTED
+   * (`worktree_bridge.stagingSha`, which is what `refs/hive/staging` and GitHub
+   * egress follow). Integration folds it into the base first, so an advance is
+   * always a fast-forward of what receivers hold — see `integrateMemberHeads`'
+   * `floorSha`. Deliberately NOT `lastAnnouncedStagingSha`: an announced-but-
+   * rejected staging is exactly the sha that must not become the floor.
+   */
+  acceptedStagingFloorSha?: string | null;
+  /**
    * WI-10003820 — the GitHub bridge's P-005-ADMITTED github-origin head (the
    * `routines.metadata.github_bridge.last_admitted` watermark), keyed by the
    * synthetic github-origin namespace (`githubOriginNamespaceKey(remote)`).
@@ -316,7 +325,7 @@ export async function runIntegratorTick(input: IntegratorTickInput): Promise<Int
       repoPath,
       input.integratorDevicePubkeyBase64,
       toIntegrate,
-      { runGit, scope: input.context, authority: input.authority },
+      { runGit, scope: input.context, authority: input.authority, floorSha: input.acceptedStagingFloorSha ?? null },
     );
   } catch (e) {
     errors.push(`integrateMemberHeads failed: ${e instanceof Error ? e.message : e}`);

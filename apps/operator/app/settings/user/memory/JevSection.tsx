@@ -17,6 +17,7 @@ import { toast } from 'sonner';
 import { Select } from '@/app/harness/Select';
 import {
   JEV_EGRESS_NOTICE,
+  JEV_KEY_CONFLICT_USE,
   JEV_MEASURED_VERDICT,
   JEV_MODE_OPTIONS,
   jevKeyDraftProblem,
@@ -188,6 +189,9 @@ export function JevSection(): React.ReactElement {
                 Remove
               </button>
             )}
+          </div>
+          <div data-testid="jev-key-conflict-use" style={muted}>
+            {JEV_KEY_CONFLICT_USE}
           </div>
 
           <form

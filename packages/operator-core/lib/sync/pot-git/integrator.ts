@@ -88,6 +88,10 @@ export interface IntegrationResult {
   /** Heads integrated after their ONLY conflicts were host-local state paths
    *  (resolved to staging's side — see {@link isHostLocalStatePath}). */
   resolvedHostLocalState: HostLocalStateResolution[];
+  /** WI-10004249: the base had fallen off the accepted staging floor and this
+   *  pass folded the floor back in (fast-forward or merge). Optional so
+   *  hand-built results in other callers' fixtures stay valid. */
+  floorRestored?: boolean;
 }
 
 /**
@@ -215,7 +219,24 @@ export async function integrateMemberHeads(
   repoPath: string,
   integratorDevicePubkeyBase64: string,
   memberHeads: MemberHead[],
-  opts: { runGit?: RunGit; scope?: SignedProtocolScope; authority?: HiveEffectAuthority | null } = {},
+  opts: {
+    runGit?: RunGit;
+    scope?: SignedProtocolScope;
+    authority?: HiveEffectAuthority | null;
+    /**
+     * WI-10004249 — the staging receivers last ACCEPTED (the canonical floor).
+     * Staging never rewinds: receivers accept an advance only as a fast-forward
+     * of what they accepted before. The integrator's base can nonetheless fall
+     * off that line, because own-head-publish writes the SAME
+     * `ns/<integrator>/refs/heads/staging` ref with the local worktree head, and
+     * once the worktree has failed to fast-forward onto one accepted merge the
+     * published head no longer contains it. Every later advance is then non-FF,
+     * terminally rejected, and canonical + GitHub egress freeze (measured: 22h,
+     * papercusp, 2026-09-29T18:03Z → 2026-09-30). Folding the floor into the
+     * base first makes every integration a descendant of what was accepted.
+     */
+    floorSha?: string | null;
+  } = {},
 ): Promise<IntegrationResult> {
   const runGit = opts.runGit ?? defaultRunGit;
   const base = await readNamespaceRef(repoPath, integratorDevicePubkeyBase64, STAGING_REF, runGit);
@@ -223,6 +244,34 @@ export async function integrateMemberHeads(
   const integrated: string[] = [];
   const skippedConflicts: SkippedConflict[] = [];
   const resolvedHostLocalState: HostLocalStateResolution[] = [];
+  let floorRestored = false;
+
+  const floor = opts.floorSha ?? null;
+  if (floor && floor !== staging && (await runGit(['cat-file', '-e', `${floor}^{commit}`], repoPath)).code === 0) {
+    if (staging === null || (await isAncestor(repoPath, staging, floor, runGit))) {
+      staging = floor;
+      floorRestored = true;
+    } else if (!(await isAncestor(repoPath, floor, staging, runGit))) {
+      const merged = await mergeTree(repoPath, staging, floor, runGit);
+      if ('tree' in merged) {
+        staging = await commitMerge(
+          repoPath,
+          merged.tree,
+          [staging, floor],
+          `integrate accepted staging ${floor.slice(0, 8)}`,
+          runGit,
+        );
+        floorRestored = true;
+      } else {
+        skippedConflicts.push({
+          deviceHex: 'accepted-staging-floor',
+          sha: floor,
+          paths: 'conflict' in merged ? merged.paths : [],
+          ...('error' in merged ? { error: merged.error } : {}),
+        });
+      }
+    }
+  }
 
   // Deterministic order so every observer of the same head-set gets the same
   // staging lineage (device-hex is peer-stable).
@@ -306,7 +355,7 @@ export async function integrateMemberHeads(
       base ?? '0'.repeat(40),
     );
   }
-  return { staging, advanced, integrated, skippedConflicts, resolvedHostLocalState };
+  return { staging, advanced, integrated, skippedConflicts, resolvedHostLocalState, floorRestored };
 }
 
 /** Read the integrator's currently-published staging sha (null if none). */

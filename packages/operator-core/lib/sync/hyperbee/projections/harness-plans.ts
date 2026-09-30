@@ -229,6 +229,38 @@ async function authorizePlanWrite(
   };
 }
 
+/**
+ * WI-10004146 / endgame D-093 option B: the rubric federates, but the subject
+ * plan's acceptance_bar_* columns and spec clauses are machine-local. After a
+ * remote plan OR rubric apply, re-derive them from the federated rubric so both
+ * arrival orders converge. Never writes the rubric, never throws into this tx.
+ */
+async function reseedAcceptanceBarsAfterRemoteApply(
+  tx: Parameters<typeof withPlanDependencyAdmissionTransaction>[0]['sql'],
+  workspaceId: string,
+  row: HarnessPlanRow,
+  templateData: unknown,
+): Promise<void> {
+  const { federatedApplySeedSubject, seedAcceptanceBarsOnFederatedApply } = await import(
+    '../../../acceptance-bar-receiver-seed'
+  );
+  const subject = federatedApplySeedSubject({
+    workspaceId,
+    harness_slug: row.harness_slug,
+    plan_slug: row.plan_slug,
+    template: row.template ?? null,
+    template_data: templateData,
+  });
+  if (!subject) return;
+  const outcome = await seedAcceptanceBarsOnFederatedApply(tx, subject);
+  if (outcome.status === 'failed') {
+    console.warn(
+      `[acceptance-bar-receiver-seed] '${subject.harnessSlug}/${subject.planSlug}' after remote apply of ` +
+        `'${row.plan_slug}': ${outcome.error}`,
+    );
+  }
+}
+
 async function planPartFederationOn(opts: HarnessPlansProjectionOpts): Promise<boolean> {
   if (opts.isFlagOn) return opts.isFlagOn();
   const { getFlag } = await import('@papercusp/flags/server');
@@ -401,6 +433,7 @@ async function writeToPg(
             { workspaceId: opts.workspaceId, harnessSlug: row.harness_slug, planSlug: row.plan_slug },
             deriveIndexFromContent(row.content),
           );
+          if (origin === 'remote') await reseedAcceptanceBarsAfterRemoteApply(tx, opts.workspaceId, row, templateDataForWrite);
         }
         return;
       }
@@ -463,6 +496,7 @@ async function writeToPg(
           { workspaceId: opts.workspaceId, harnessSlug: row.harness_slug, planSlug: row.plan_slug },
           deriveIndexFromContent(row.content),
         );
+        if (origin === 'remote') await reseedAcceptanceBarsAfterRemoteApply(tx, opts.workspaceId, row, templateDataForWrite);
       }
     },
   );

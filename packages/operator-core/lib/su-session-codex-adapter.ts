@@ -44,6 +44,7 @@ import { createCodexTimelineParser, type TimelineLineParser } from './session-ti
 import { gatewayServedAccountForOwner } from './compaction-usage';
 import {
   SuSessionHost,
+  nativeRecordKey,
   registerSuSessionHost,
   type SuSessionCommandContext,
   type SuSessionCommandOutcome,
@@ -539,11 +540,12 @@ export class CodexSuSessionAdapter {
 
   /** Consume one complete native JSONL record. Partial trailing records must be
    * retained by the source until their newline arrives. */
-  ingestNativeLine(line: string, { preserveLifecycle = false }: { preserveLifecycle?: boolean } = {}): void {
+  ingestNativeLine(line: string, { preserveLifecycle = false, replay = false }: { preserveLifecycle?: boolean; replay?: boolean } = {}): void {
     let record: Record<string, unknown>;
     try {
       record = JSON.parse(line) as Record<string, unknown>;
     } catch {
+      if (!this.host.claimNativeRecord(nativeRecordKey(line, {})) && replay) return;
       this.host.emit({
         type: 'error',
         scope: 'transport',
@@ -553,6 +555,10 @@ export class CodexSuSessionAdapter {
       } as SuSessionEventInput<'codex'>);
       return;
     }
+
+    // A replayed rollout only adds records this host has not shown yet (see
+    // SuSessionHost.claimNativeRecord, WI-10004162).
+    if (!this.host.claimNativeRecord(nativeRecordKey(line, record)) && replay) return;
 
     const payload = asRecord(record.payload);
     const payloadType = typeof payload?.type === 'string' ? payload.type : '';
@@ -688,7 +694,7 @@ export class CodexSuSessionAdapter {
     if (!this.runtimeValue.rolloutPath) {
       throw new Error('Codex runtime has no resolved rollout path');
     }
-    for await (const line of readCodexRolloutSnapshotLines(this.runtimeValue.rolloutPath)) this.ingestNativeLine(line, { preserveLifecycle });
+    for await (const line of readCodexRolloutSnapshotLines(this.runtimeValue.rolloutPath)) this.ingestNativeLine(line, { preserveLifecycle, replay: true });
   }
 
   /** P-004 calls this after an exact resume/carry replacement attaches. The

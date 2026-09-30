@@ -57,7 +57,6 @@ export function resolveIdentityLiterals(readCmd?: (cmd: string, args: string[]) 
     scope?: "box" | "owner" | "all";
     env?: NodeJS.ProcessEnv;
 }): Record<string, string>;
-/** The match rule for one literal — word-anchored and case-sensitive when low-entropy. */
 export function literalPattern(lit: any): RegExp;
 /**
  * Find bare box-identity literals in `text`.

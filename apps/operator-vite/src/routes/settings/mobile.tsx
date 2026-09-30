@@ -1,10 +1,11 @@
-import { createFileRoute } from '@tanstack/react-router';
-import Page from '@/app/settings/mobile/page';
+import { createFileRoute, redirect } from '@tanstack/react-router';
 
 /**
- * /settings/mobile — translated from `apps/operator/app/settings/mobile/page.tsx`.
- * Client page; re-exported via the page-import pattern (B-4).
+ * /settings/mobile — replaced by Settings → Remote access (external-app-access P-010, D-025);
+ * phone pairing lives there as "Pair a phone". Old links land on that panel.
  */
 export const Route = createFileRoute('/settings/mobile')({
-  component: Page,
+  beforeLoad: () => {
+    throw redirect({ to: '/settings/remote-access', search: { pair: true } as never });
+  },
 });

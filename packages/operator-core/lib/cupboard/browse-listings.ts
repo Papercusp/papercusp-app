@@ -12,6 +12,10 @@
 import { resolveCupboardBaseUrl } from './base-url';
 import type { ListingKind, ListingVisibility, PricingModel } from './types';
 
+/** The blueprint facets the worker stores and filters on (`blueprint_kind`). */
+export const BLUEPRINT_LISTING_FACET_KINDS = ['identity', 'hive', 'harness'] as const;
+export type BlueprintListingFacetKind = (typeof BLUEPRINT_LISTING_FACET_KINDS)[number];
+
 export interface BrowseCupboardListingsInput {
   /** harness | blueprint | plugin | pack | knowledge-pack | template | app | all. */
   kind?: ListingKind | 'all';
@@ -23,6 +27,12 @@ export interface BrowseCupboardListingsInput {
   limit?: number;
   /** Opaque pagination cursor from a prior page's next_cursor. */
   cursor?: string;
+  /**
+   * Narrow to one blueprint facet (worker migrations 009/035): 'identity' lists
+   * portable identities, 'hive' pot templates, 'harness' harness blueprints.
+   * Implies kind 'blueprint'.
+   */
+  blueprintKind?: BlueprintListingFacetKind;
 
   // ── Catalog filters (worker migration 018 / shared-pot-dao-cupboard-v1 P-008).
   // Every one NARROWS the unauthenticated public read, which already sees only
@@ -103,6 +113,7 @@ export async function browseCupboardListings(
   if (input.project) url.searchParams.set('project', input.project);
   url.searchParams.set('limit', String(input.limit ?? 50));
   if (input.cursor) url.searchParams.set('cursor', input.cursor);
+  if (input.blueprintKind) url.searchParams.set('blueprint_kind', input.blueprintKind);
   if (input.visibility && input.visibility !== 'all') {
     url.searchParams.set('visibility', input.visibility);
   }
@@ -141,6 +152,11 @@ export async function browseCupboardListings(
         ) {
           return { ok: true, listings: [] };
         }
+        // Same fail-closed reading for a worker whose blueprint facet predates the
+        // value asked for (migration 035 added 'identity').
+        if (err?.error === 'invalid_field' && err.field === 'blueprint_kind' && input.blueprintKind) {
+          return { ok: true, listings: [] };
+        }
       }
       return { ok: false, status: res.status, error: `cupboard_http_${res.status}` };
     }
@@ -152,13 +168,21 @@ export async function browseCupboardListings(
       total?: number;
       kind_facets?: Partial<Record<ListingKind, number>>;
     };
-    const listings = data.results ?? data.harnesses ?? data.listings ?? [];
+    const page = data.results ?? data.harnesses ?? data.listings ?? [];
+    // A worker predating the ?blueprint_kind= filter ignores the param and answers
+    // with the unfiltered page. Narrow here too, so the caller never receives rows
+    // it filtered out; when that removed anything, the worker's total and facets
+    // describe the unfiltered population, so they are withheld rather than misread.
+    const listings = input.blueprintKind
+      ? page.filter((row) => row.listing_kind === 'blueprint' && row.blueprint_kind === input.blueprintKind)
+      : page;
+    const summaryHolds = listings.length === page.length;
     return {
       ok: true,
       listings,
       ...(typeof data.next_cursor === 'string' ? { next_cursor: data.next_cursor } : {}),
-      ...(typeof data.total === 'number' && Number.isFinite(data.total) ? { total: data.total } : {}),
-      ...(data.kind_facets && typeof data.kind_facets === 'object'
+      ...(summaryHolds && typeof data.total === 'number' && Number.isFinite(data.total) ? { total: data.total } : {}),
+      ...(summaryHolds && data.kind_facets && typeof data.kind_facets === 'object'
         ? { kind_facets: data.kind_facets }
         : {}),
     };

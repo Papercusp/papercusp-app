@@ -78,8 +78,9 @@ by the test exactly as written:
       },
       "acceptance": {
         "resultSchema": {
-          "type": "object", "required": ["answer"],
-          "properties": { "answer": { "type": "string" } }, "additionalProperties": false
+          "type": "object", "required": ["outcome", "resolved"],
+          "properties": { "outcome": { "type": "string" }, "resolved": { "type": "boolean" } },
+          "additionalProperties": false
         }
       }
     }
@@ -158,7 +159,11 @@ already been validated against `acceptance.resultSchema`.
 ## Direct program operation
 
 A program operation uses the same verbs; only the declaration differs. It still
-creates exactly one work item and no plan:
+creates exactly one work item and no plan. Its result is the program's own outcome,
+not free-form output: a gateless program settles `{ "outcome": "done", "resolved": true }`,
+and a spine `gate` op that resolves adds its `decision`. Declare
+`acceptance.resultSchema` to admit that shape — a schema the program cannot produce
+settles the root `failed`, not `succeeded`:
 
 ```json runnable=submit-program
 { "harness": "docs-example", "operationId": "extract-program", "requestKey": "program-1", "input": { "value": "hello" }, "title": "Extract (program)" }
@@ -382,7 +387,113 @@ capability gate (`missing_capability`, HTTP 403):
 
 ## Performance
 
-> **Placeholder — to be filled from P-013 measurements.** The P-013 paired benchmark
-> (plan `blueprint-backed-work-item-execution-2026-09-23`) compares each operation
-> shape against its non-operation control. Numbers will be added here from that
-> evidence; none are claimed until then.
+P-013 of plan `blueprint-backed-work-item-execution-2026-09-23` measured each operation shape against
+the non-operation path it replaces, on one host, with deterministic provider fixtures (no model
+latency) and a dedicated PostgreSQL. Every number below is the median of five process-isolated
+repetitions, rendered from the evidence file named under each table. Latency is measured from
+ingress to the business event.
+
+A cell passes when the candidate stays inside the D-016 bar set against its own paired control:
+warm p50 at most 1.15x control + 15 ms, warm p95 at most 1.25x + 25 ms, warm p99 at most 1.5x + 50 ms,
+cold p95 at most 1.75x + 500 ms, and throughput at 8 concurrent callers at least 0.80x control.
+
+### A. Direct work-item operation — PASS 9/9
+
+| Metric     | Callers | Control | Candidate | Limit   | Result |
+| ---------- | ------- | ------- | --------- | ------- | ------ |
+| warm p50   | 1       | 479 ms  | 468 ms    | 566 ms  | pass   |
+| warm p95   | 1       | 562 ms  | 553 ms    | 727 ms  | pass   |
+| warm p99   | 1       | 1365 ms | 679 ms    | 2097 ms | pass   |
+| cold p95   | 1       | 3088 ms | 3190 ms   | 5903 ms | pass   |
+| warm p50   | 8       | 2346 ms | 2185 ms   | 2712 ms | pass   |
+| warm p95   | 8       | 3106 ms | 3156 ms   | 3907 ms | pass   |
+| warm p99   | 8       | 3723 ms | 3575 ms   | 5634 ms | pass   |
+| cold p95   | 8       | 2834 ms | 2880 ms   | 5460 ms | pass   |
+| throughput | 8       | 3.21/s  | 3.20/s    | 2.57/s  | pass   |
+
+Evidence: `docs/evidence/p013-workload-a-2026-09-28.json`.
+
+Not proven by this workload:
+
+* Actual-model latency: this matrix uses deterministic provider fixtures only; the bounded actual-model smoke is separate.
+* Which call pays the \~1.1 s cold first-use cost in each arm is inferred from phase sums, not probed per call.
+
+### B. Plan-target fork/join DAG — PASS 9/9
+
+| Metric     | Callers | Control  | Candidate | Limit    | Result |
+| ---------- | ------- | -------- | --------- | -------- | ------ |
+| warm p50   | 1       | 2001 ms  | 2006 ms   | 2316 ms  | pass   |
+| warm p95   | 1       | 2650 ms  | 2459 ms   | 3337 ms  | pass   |
+| warm p99   | 1       | 4862 ms  | 3547 ms   | 7343 ms  | pass   |
+| cold p95   | 1       | 6526 ms  | 7566 ms   | 11920 ms | pass   |
+| warm p50   | 8       | 12549 ms | 11381 ms  | 14447 ms | pass   |
+| warm p95   | 8       | 14814 ms | 13357 ms  | 18543 ms | pass   |
+| warm p99   | 8       | 15684 ms | 14863 ms  | 23576 ms | pass   |
+| cold p95   | 8       | 15888 ms | 11388 ms  | 28304 ms | pass   |
+| throughput | 8       | 0.63/s   | 0.68/s    | 0.51/s   | pass   |
+
+Evidence: `docs/evidence/p013-workload-b-2026-09-28.json`.
+
+Not proven by this workload:
+
+* Actual-model latency: this matrix uses a deterministic fixture worker only.
+* Absolute latency on an idle box: the box was shared with fleet work throughout; only the paired candidate/control ratio is graded.
+
+### C. Four-step conditional program — FAIL 6/9
+
+| Metric     | Callers | Control  | Candidate | Limit    | Result |
+| ---------- | ------- | -------- | --------- | -------- | ------ |
+| warm p50   | 1       | 46 ms    | 47 ms     | 80 ms    | pass   |
+| warm p95   | 1       | 52 ms    | 95 ms     | 115 ms   | pass   |
+| warm p99   | 1       | 54 ms    | 101 ms    | 182 ms   | pass   |
+| cold p95   | 1       | 83 ms    | 233 ms    | 646 ms   | pass   |
+| warm p50   | 8       | 46 ms    | 93 ms     | 80 ms    | fail   |
+| warm p95   | 8       | 54 ms    | 122 ms    | 118 ms   | fail   |
+| warm p99   | 8       | 59 ms    | 148 ms    | 188 ms   | pass   |
+| cold p95   | 8       | 82 ms    | 274 ms    | 643 ms   | pass   |
+| throughput | 8       | 149.94/s | 72.93/s   | 119.95/s | fail   |
+
+Evidence: `docs/evidence/p013-workload-c-final-2026-09-29.json`.
+
+This workload does not meet its budget: warm p50 at 8 callers, warm p95 at 8 callers, throughput at 8 callers fail. It stays graded against the same control and limits as the other workloads (plan decision D-036). The remaining cost is in the canonical work-item write path, and it is tracked as WI-10003818.
+
+Not proven by this workload:
+
+* Invariants (zero harness\_plans / plan\_runs rows on both arms, stable step ids across every sample, no duplicated step effects) are asserted inside the test per repetition (all 5 passed); they are not re-derived here.
+* Persistence counters are dedicated-cluster pg\_stat deltas per sample; they attribute cost to the whole cluster, not to a specific table.
+* No wait-event sampler ran during c-run3, so no wait-class attribution accompanies this grade.
+
+### D. Durable recipe (orchestrate:run) — PASS 9/9
+
+| Metric     | Callers | Control | Candidate | Limit   | Result |
+| ---------- | ------- | ------- | --------- | ------- | ------ |
+| warm p50   | 1       | 78 ms   | 110 ms    | 166 ms  | pass   |
+| warm p95   | 1       | 89 ms   | 131 ms    | 255 ms  | pass   |
+| warm p99   | 1       | 103 ms  | 151 ms    | 431 ms  | pass   |
+| cold p95   | 1       | 236 ms  | 318 ms    | 1589 ms | pass   |
+| warm p50   | 8       | 197 ms  | 176 ms    | 346 ms  | pass   |
+| warm p95   | 8       | 244 ms  | 253 ms    | 527 ms  | pass   |
+| warm p99   | 8       | 318 ms  | 335 ms    | 914 ms  | pass   |
+| cold p95   | 8       | 278 ms  | 297 ms    | 1694 ms | pass   |
+| throughput | 8       | 39.49/s | 42.71/s   | 25.67/s | pass   |
+
+Evidence: `docs/evidence/p013-workload-d-2026-09-28.json`.
+
+Not proven by this workload:
+
+* dbRoundTrips is null (UNKNOWN, not zero) for both arms; control dbBytes/durableSteps are null because the foreground arm has no DBOS persistence to measure.
+* The bounded actual-provider smoke (kept separate from fixture latency by D-016).
+* The exactly-once idempotent write invariant is asserted inside the test per sample (test passed on all 5 repetitions); it is not re-derived here.
+* Host load was not held constant across reps (shared box); per-rep load is not recorded in this artifact.
+
+### Actual-model smoke (ungraded)
+
+One bounded run with a real model (claude-haiku-4-5), 5 samples per arm after
+1 warmup. It is not graded; it shows how much of a real call is platform overhead.
+
+| Arm                  | Total p50 | Model p50 | Platform overhead p50 | Overhead share |
+| -------------------- | --------- | --------- | --------------------- | -------------- |
+| Control (foreground) | 552.3 ms  | 449.4 ms  | 102.9 ms              | 19.5%          |
+| Candidate (durable)  | 565.3 ms  | 426.4 ms  | 135.8 ms              | 24.5%          |
+
+Every run made exactly one provider call and exactly one business write (10 runs, 10 writes). Evidence: `docs/evidence/p013-actual-model-smoke-2026-09-28.json`.

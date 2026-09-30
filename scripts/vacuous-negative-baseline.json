@@ -1,0 +1,4 @@
+{
+  "_comment": "Shrink-only baseline for scripts/check-vacuous-negative-assertions.mjs (WI-10004205, D-099). Entries are tolerated DRIFTED findings keyed by file + kind + lit. `--update` only removes entries; growing this file also requires raising BASELINE_HIGH_WATERMARK in the script.",
+  "entries": []
+}

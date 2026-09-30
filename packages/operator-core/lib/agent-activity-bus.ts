@@ -79,6 +79,16 @@ function scheduleRetry(): void {
   retryTimer.unref?.();
 }
 
+/**
+ * WI-10004194: bumped by every close. A start still in flight when the last
+ * handler leaves belongs to an older generation: the close already ended its
+ * pool, which makes postgres.js destroy the pending LISTEN (CONNECTION_DESTROYED).
+ * That rejection is our own teardown, not a failed start — it must not be
+ * logged as one, and it must not reset state a newer start now owns. A hub
+ * subscription that lands after its close is released at once.
+ */
+let generation = 0;
+
 /** Close the listener if there are no handlers left (cleanup to avoid listener leak). */
 async function maybeCloseListener(): Promise<void> {
   if (handlers.size !== 0) return;
@@ -87,21 +97,16 @@ async function maybeCloseListener(): Promise<void> {
   // bus and leak a connection nobody asked for.
   clearRetry();
   if (!started) return;
-  if (hubUnsub) {
-    hubUnsub();
-    hubUnsub = null;
-    started = false;
-    return;
-  }
-  if (listenerSql) {
-    try {
-      await listenerSql.end({ timeout: 5 }).catch(() => {});
-    } catch {
-      // Ignore errors during close
-    }
-    listenerSql = null;
-    started = false;
-  }
+  // Also covers a start still in flight: it sees the new generation and
+  // stands down instead of reporting our close as its failure.
+  generation++;
+  started = false;
+  const unsub = hubUnsub;
+  const sql = listenerSql;
+  hubUnsub = null;
+  listenerSql = null;
+  if (unsub) unsub();
+  if (sql) await sql.end({ timeout: 5 }).catch(() => {});
 }
 
 /** Parse the NOTIFY payload "<workspace_id>::<owner_id>" → owner_id (best-effort). */
@@ -124,24 +129,35 @@ function fanout(ownerId: string): void {
 async function ensureStarted(): Promise<void> {
   if (started) return;
   started = true;
+  const gen = generation;
   try {
     const onNotify = (payload: string) => {
       if (handlers.size === 0) return;
       fanout(ownerFromPayload(payload));
     };
     if (listenHubEnabled()) {
-      hubUnsub = await hubListen("agent_activity", onNotify);
+      const unsub = await hubListen("agent_activity", onNotify);
+      if (gen !== generation) {
+        unsub();
+        return;
+      }
+      hubUnsub = unsub;
     } else {
+      // Assigned straight to the module singleton so pool-idle-timeout-declared
+      // still sees this LISTEN site (its allowlist entry must keep matching it).
       listenerSql = postgres(getHarnessAdminUrl(), {
         ...longLivedPoolConnectionOptions("agent-activity-bus"),
         max: 1,
         // LISTEN: idle by design — never reap for idleness (would drop the subscription).
         idle_timeout: 0,
       });
-      await listenerSql.listen("agent_activity", onNotify);
+      const sql = listenerSql;
+      await sql.listen("agent_activity", onNotify);
+      if (gen !== generation) return;
     }
     clearRetry();
   } catch (err) {
+    if (gen !== generation) return;
     console.error("[agent-activity-bus] failed to start (will retry):", err);
     started = false;
     listenerSql = null;
@@ -152,6 +168,7 @@ async function ensureStarted(): Promise<void> {
 
 export async function _stopForTests(): Promise<void> {
   clearRetry();
+  generation++;
   if (hubUnsub) {
     hubUnsub();
     hubUnsub = null;

@@ -14,7 +14,8 @@ contributions:
     refresh: turn
     inputKind: setting
     ref: current-brief
-    producerRef: existing.brief
+    producerRef: papercusp.mode-state@1
+    verb: read
     availability: required
   - id: current-guidance
     purpose: prompt
@@ -22,5 +23,6 @@ contributions:
     refresh: launch
     inputKind: prompt-file
     ref: current-guidance
-    producerRef: existing.guidance
+    producerRef: papercusp.turn-start-orientation@1
+    verb: render
     availability: optional

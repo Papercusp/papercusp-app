@@ -36,15 +36,29 @@ function summarize(r: ResolveResult) {
   };
 }
 
-function summarizeIdentity(result: ReturnType<typeof inspectIdentitySource>) {
+/**
+ * P-015 (D-033): a runnable identity is also compiled in the caller's pot, so
+ * compile and grant issues and the declared surface appear here too.
+ */
+async function summarizeIdentity(
+  result: ReturnType<typeof inspectIdentitySource>,
+  target: { workspaceId?: string; potSlug?: string; identityId?: string; source?: Record<string, unknown> },
+) {
   if (!result.ok && !('errors' in result)) {
     return { ok: false, parseError: result.error };
   }
   const identity = result.identity;
+  let pkg = null;
+  if (result.ok && result.runnable) {
+    const { identityPackageValidation } = await import('../../agent-identities/identity-preview');
+    pkg = await identityPackageValidation({ workspaceId: target.workspaceId, potSlug: target.potSlug,
+      ...(target.identityId ? { identityId: target.identityId } : { source: target.source }) });
+  }
   return {
-    ok: result.ok,
+    ok: result.ok && (pkg?.ok ?? true),
     errors: result.errors,
     warnings: result.warnings,
+    ...(pkg ? { package: pkg } : {}),
     summary: {
       id: identity?.id,
       version: identity?.version,
@@ -97,8 +111,9 @@ export default defineTool({
       source: z.string().min(1).optional().describe('Inline blueprint as YAML or JSON'),
     })
     .refine((a) => a.id != null || a.source != null, { message: 'pass either id or source' }),
-  async handler(args) {
+  async handler(args, ctx) {
     let result: ResolveResult;
+    const pot = { workspaceId: ctx?.workspaceId, potSlug: ctx?.harnessSlug };
     if (args.id != null) {
       try {
         const resolver = operatorResolveExtends();
@@ -107,7 +122,8 @@ export default defineTool({
         const raw = parseBlueprintSource(readFileSync(file, 'utf8'));
         if (parseBlueprintSourceDocument(raw).kind === 'identity') {
           const sourcePath = trustPathForIdentity(args.id, file);
-          return { content: [{ type: 'text' as const, text: JSON.stringify(summarizeIdentity(inspectIdentitySource(raw, { sourcePath }))) }] };
+          const summary = await summarizeIdentity(inspectIdentitySource(raw, { sourcePath }), { ...pot, identityId: args.id });
+          return { content: [{ type: 'text' as const, text: JSON.stringify(summary) }] };
         }
         const loaded = loadBlueprintFromFile(file, resolver);
         result = { ok: loaded.validation.ok, blueprint: loaded.blueprint, validation: loaded.validation };
@@ -118,7 +134,8 @@ export default defineTool({
       try {
         const raw = parseBlueprintSource(args.source!);
         if (parseBlueprintSourceDocument(raw).kind === 'identity') {
-          return { content: [{ type: 'text' as const, text: JSON.stringify(summarizeIdentity(inspectIdentitySource(raw))) }] };
+          const summary = await summarizeIdentity(inspectIdentitySource(raw), { ...pot, source: raw });
+          return { content: [{ type: 'text' as const, text: JSON.stringify(summary) }] };
         }
         result = resolveAndValidate(raw);
       } catch (e) {

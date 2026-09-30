@@ -236,8 +236,20 @@ export function collectHarnessSlugArgs(
   const skip = new Set(options?.skip ?? HIVE_CLAMP_LITERAL_ARGS);
   const exempt = new Set(Object.keys(HIVE_CLAMP_ARG_EXEMPTIONS));
   const out: Array<{ arg: string; slug: string }> = [];
+  // EI-24646272383071079: `harness:create { slug }` names the harness being CREATED. It
+  // is not registered yet (the tool refuses an existing slug), so it has no hive and can
+  // never equal the caller's. When `pot` is given, the new harness is born INTO that hive
+  // (create.ts stamps hive_slug from it), so `pot` is the only hive reference this call
+  // makes, and it is collected below like any other harness-designating arg. Without
+  // `pot` the new harness would be hive-less, so `slug` stays collected and the clamp
+  // refuses it (a hive-confined session could not operate on a hive-less harness).
+  const createsIntoPot =
+    options?.toolName === 'harness:create' &&
+    typeof (args as Record<string, unknown>).pot === 'string' &&
+    ((args as Record<string, unknown>).pot as string).trim() !== '';
   for (const [arg, value] of Object.entries(args as Record<string, unknown>)) {
     if (skip.has(arg)) continue;
+    if (createsIntoPot && arg === 'slug') continue;
     // workspace:work_scope sets a workspace-wide POLICY. Its allow-list names
     // destinations the policy governs; it does not route this call into them.
     // A hive-bound operator must be able to preserve existing sibling entries

@@ -218,15 +218,28 @@ export default defineTool({
         hint: 'repoDir must be a git repo with a GitHub origin remote.',
       });
     }
-    const blueprintKind: 'hive' | 'harness' =
-      prepared.source.raw.kind === 'hive' || prepared.source.raw.kind === 'pot' ? 'hive' : 'harness';
+    // The listing facet (P-016): hive | harness | identity, plus an identity's
+    // declared surface derived from the exact closure the release signs.
+    const { blueprintListingFacet } = await import('../../cupboard/identity-listing-surface');
+    let facet: ReturnType<typeof blueprintListingFacet>;
+    try {
+      facet = blueprintListingFacet(prepared.source);
+    } catch (error) {
+      return text({
+        ok: false,
+        error: 'identity_surface_invalid',
+        detail: error instanceof Error ? error.message : String(error),
+        status: 422,
+      });
+    }
+    const blueprintKind = facet.blueprint_kind;
 
     // 3. Publish the kind='blueprint' listing through the one shared Cupboard core.
     const { publishListingToCupboard } = await import('../../cupboard/publish-listing');
     const result = await publishListingToCupboard({
       listing_kind: 'blueprint',
       listing_ref: args.blueprintId,
-      blueprint_kind: blueprintKind,
+      ...facet,
       project_ref: `${coords.github_owner}/${coords.github_name}`,
       github_repository_id: coords.github_repository_id,
       github_owner: coords.github_owner,

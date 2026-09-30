@@ -263,6 +263,27 @@ export function leasedHiveDesktops(): string[] {
   return [...leases.keys()];
 }
 
+/**
+ * WI-10004206 — release every lease whose desktop is gone, and return their slugs.
+ *
+ * A dead lease otherwise sits in `leases` (and its row stays `ready`) until something
+ * happens to call `ensureHiveDesktop` for that hive, so every reader in between is
+ * offered a desktop nothing serves. The identity check keeps a lease that was replaced
+ * while an earlier release was awaited from being torn down in its predecessor's place.
+ */
+export async function reapDeadHiveDesktops(): Promise<string[]> {
+  const reaped: string[] = [];
+  for (const [potSlug, desktop] of [...leases]) {
+    if (desktop.isAlive?.() !== false || leases.get(potSlug) !== desktop) continue;
+    console.warn(`[desktop-lease] pot=${potSlug} display=${desktop.display}: the desktop is gone — releasing its lease`);
+    await releaseHiveDesktop(potSlug).catch((err) => {
+      console.warn(`[desktop-lease] releasing dead desktop pot=${potSlug} failed: ${String(err)}`);
+    });
+    reaped.push(potSlug);
+  }
+  return reaped;
+}
+
 /** Tear down EVERY leased desktop (operator shutdown). */
 export async function releaseAllHiveDesktops(): Promise<void> {
   const all = [...leases.values()];

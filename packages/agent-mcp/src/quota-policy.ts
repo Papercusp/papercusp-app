@@ -19,6 +19,10 @@
  *     Key on the stable auth session (`uiClientId` carries the auth_session_id)
  *     so the workspace's operator-tier quota actually applies across the
  *     session. `perRun` cap. See omp-power-user-bundle-2026-05-20.md §4.1.
+ *   - **named quota subject** — the same problem for in-process callers that
+ *     mint a fresh `runId` per dispatch but act for one party (identity work run
+ *     as its wearer: `subject:wearer:<ownerId>`). Key on `ctx.quotaSubject`.
+ *     `perRun` cap. See portable-identity-packages-2026-09-26 D-032.
  *   - **everyone else** — run-windowed (`run:<runId>`), capped by `perRun`.
  */
 
@@ -39,6 +43,11 @@ export function papercuspComputeQuotaWindow(
   } else if (ctx.isPowerUser && ctx.uiClientId) {
     window = {
       key: `power-user:${ctx.uiClientId}`,
+      limit: roleQuota?.perRun ?? null,
+    };
+  } else if (ctx.quotaSubject) {
+    window = {
+      key: `subject:${ctx.quotaSubject}`,
       limit: roleQuota?.perRun ?? null,
     };
   } else {

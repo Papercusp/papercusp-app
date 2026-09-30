@@ -414,7 +414,7 @@ scenario_p202_workdist() {
       _wd_bad "WD-8 METER — the spend writer SHIPS in this bundle but no spend row was written for '$WD_FLEET' (the ledger has a writer and it did not fire)"
     fi
   else
-    _wd_skip "WD-8 METER — DETECTED: recordSpendDurable is ABSENT from the VM's tree-shaken bundle, so the metering ledger has NO production writer on this build. The tables exist and are READ (loadMeteringLedger, host-availability) but nothing in production writes them. P-202's meter leg is UNBUILT, not broken"
+    _wd_skip "WD-8 METER — DETECTED: recordSpendDurable is ABSENT from the VM's tree-shaken bundle, so the metering ledger has NO production writer on this build. The tables exist, but nothing in production writes them (their only production reader, host-availability, was deleted with the dead kind:work offer-executor seam). P-202's meter leg is UNBUILT, not broken"
   fi
 
   echo

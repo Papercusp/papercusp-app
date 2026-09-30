@@ -59,6 +59,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { presentOnDisk } from './lib/tracked-files.mjs';
 import { execFileSync } from 'node:child_process';
 
 import { stripCommentsAndStrings } from './lib/strip-comments-and-strings.mjs';
@@ -101,7 +102,8 @@ function listIntegrationTestFiles() {
     ['ls-files', '--', ...ROOTS.map((r) => `${r}/**/*.integration.test.ts`)],
     { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 },
   );
-  return out.split('\n').map((s) => s.trim()).filter(Boolean);
+  // WI-10004176: drop index entries a peer's plain `rm` left until git-sync commits it.
+  return presentOnDisk(out.split('\n').map((s) => s.trim()).filter(Boolean));
 }
 
 /**

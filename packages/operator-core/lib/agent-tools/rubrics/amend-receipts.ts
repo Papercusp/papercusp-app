@@ -41,6 +41,17 @@ function asEntry(row: ReceiptRow): AmendReceiptEntry {
 /**
  * Reserve the key before invoking the amend. A same-key request on another
  * worker reads the shared row rather than starting duplicate work.
+ *
+ * A FAILED receipt is re-run, never replayed (EI-24680663429090445). The key is
+ * minted deterministically from the request, so a retry of the same payload
+ * always lands on the same row. Replaying the stored failure therefore made
+ * every retry for the next hour return the ORIGINAL error, even after the defect
+ * behind it was fixed and deployed: an apply refused on a stale build kept
+ * failing on the fixed one, and read exactly like the fix not working. A
+ * failure commits nothing (the amendment transaction rolled back), and the rare
+ * case where it committed and a later step threw is reconciled by amendRubric's
+ * own Amendment-Id replay check, so running again is always safe. The claim is
+ * an atomic `failed -> running` UPDATE, so concurrent retries still run once.
  */
 export async function trackAmendRun(
   idempotencyKey: string,
@@ -63,7 +74,14 @@ export async function trackAmendRun(
     ON CONFLICT (workspace_id, rubric_ref, idempotency_key) DO NOTHING
     RETURNING idempotency_key
   `;
-  if (inserted.length === 0) {
+  const reclaimed = inserted.length > 0 ? [] : await sql<Array<{ idempotency_key: string }>>`
+    UPDATE harness_shared.rubric_amend_receipts
+       SET state = 'running', result_json = NULL, error = NULL, started_at = now(), finished_at = NULL
+     WHERE workspace_id = ${workspaceId} AND rubric_ref = ${rubricRef}
+       AND idempotency_key = ${idempotencyKey} AND state = 'failed'
+    RETURNING idempotency_key
+  `;
+  if (inserted.length === 0 && reclaimed.length === 0) {
     const existing = await getAmendReceipt(rubricRef, idempotencyKey);
     if (!existing) throw new Error('rubric amend receipt disappeared during same-key retry');
     if (existing.result) return existing.result;

@@ -1358,6 +1358,19 @@ export function applyOmpToolsAllowlist(mcpJsonText: any, toolNames: any, compact
  *  that spawned it (root-caused 2026-07-02, P-030: a :3170-pinned relaunch still hit :3070).
  *  Pure string→string; returns the input unchanged on any parse failure. Exported for tests. */
 export function applyOmpOperatorOrigin(mcpJsonText: any, operatorUrl: any): any;
+/** Replace the bearer on every papercusp SUPERUSER `/api/mcp` server (`?superuser=1`) in an OMP
+ *  mcp.json with `bearer`, the token the target operator actually validates.
+ *
+ *  WHY (WI-10003604): the user-level template bakes the bearer it was minted with and normally
+ *  points at the :9071 proxy, which re-injects the CURRENT superuser token on every request.
+ *  applyOmpOperatorOrigin re-points that origin — for the in-process PUI engine, straight at the
+ *  operator — so the proxy's refresh no longer runs and the stale template bearer reaches an
+ *  operator validating `$PAPERCUSP_HOME/superuser-token`. Result: `superuser_invalid_bearer` on
+ *  every tools/list, OMP starts with only its native tools, and the SU turn fails
+ *  `omp_connection_failed`. The credential must follow the origin. Any case variant of the
+ *  Authorization header is replaced so the server never receives two. An empty bearer, a
+ *  non-superuser server, or unparseable input is left unchanged. Pure; exported for tests. */
+export function applyOmpOperatorBearer(mcpJsonText: any, bearer: any): any;
 /**
  * Probe an OMP session's operator MCP endpoint without requiring auth or a
  * valid MCP request. Any HTTP response proves that a listener is serving the

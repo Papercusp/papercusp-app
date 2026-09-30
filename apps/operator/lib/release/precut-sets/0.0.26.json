@@ -57,59 +57,6 @@
         { "path": "packages/operator-core/lib/p2p/delegated-spawn-honor.ts", "marker": "readMemberLogTail" },
         { "path": "packages/operator-core/lib/p2p/honor-account-resolution.ts", "marker": "extractAuthFailureExcerpt" }
       ]
-    },
-    {
-      "id": "WI-10003964",
-      "label": "drill leg I (F6 remainder: phase I, host receipt, producer)",
-      "paths": [
-        "packages/operator-core/lib/hive-git-drill-failure-summary-guard.test.ts",
-        "packages/operator-core/lib/hive-git-drill-phase-select.test.ts",
-        "packages/operator-core/lib/hive-git-drill-zero-skip-guard.test.ts",
-        "packages/operator-core/lib/sync/pot-git/physical-drill-evidence.ts",
-        "packages/operator-core/lib/sync/pot-git/physical-drill-host-receipt.test.ts",
-        "packages/operator-core/lib/sync/pot-git/physical-drill-host-receipt.ts",
-        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.fixture.ts",
-        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.test.ts",
-        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.ts",
-        "packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts",
-        "papercusp-desktop/bin/hive-git-drill.sh",
-        "papercusp-desktop/bin/vm-rig/hive-git-physical-probe.sh",
-        "papercusp-desktop/bin/vm-rig/hive-git-physical-scenario.sh"
-      ]
-    },
-    {
-      "id": "WI-10003961",
-      "label": "drill leg J (F4 target-apply outage)",
-      "note": "done 03:02Z (attempt 3 passed, VH run 20260930T025148Z-2551065); shakedown, not release evidence (D-085). Paths from its completion.filesChanged plus the fixture its test imports",
-      "paths": [
-        { "path": "packages/operator-core/lib/sync/pot-git/physical-drill-phase-j.ts", "marker": "PHASE_J_RESULT_SCHEMA" },
-        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-j.fixture.ts",
-        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-j.test.ts",
-        "packages/operator-core/lib/hive-git-drill-zero-skip-guard.test.ts",
-        { "path": "papercusp-desktop/bin/vm-rig/hive-git-physical-scenario.sh", "marker": "phase_j_contract" }
-      ]
-    },
-    {
-      "id": "WI-10003963",
-      "label": "drill leg H (F3 serving identity; installed-artifact owner restart)",
-      "note": "leader msg 02:18Z named it; open, rig shakedown still owed. Add paths if the shakedown changes code",
-      "paths": [
-        { "path": "packages/operator-core/lib/sync/pot-git/physical-drill-phase-h.ts", "marker": "after.build === before.build" },
-        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-h.fixture.ts",
-        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-h.test.ts",
-        { "path": "papercusp-desktop/bin/vm-rig/hive-git-physical-scenario.sh", "marker": "HIVE_GIT_PHYSICAL_VM_OWNER_LAUNCHER" }
-      ]
-    },
-    {
-      "id": "WI-10004062",
-      "label": "physical drill probe pins the tower-side producer",
-      "note": "done (terminal su-3ee17ad9). No filesChanged on its completion; paths are the in-tree sites tagged WI-10004062",
-      "paths": [
-        { "path": "papercusp-desktop/bin/vm-rig/hive-git-physical-probe.sh", "marker": "PIN ONE SOURCE AND RUN IT ON BOTH HOSTS" },
-        "papercusp-desktop/bin/vm-rig/hive-git-physical-scenario.sh",
-        "packages/operator-core/lib/hive-git-physical-pinned-source.test.ts",
-        "packages/operator-core/lib/hive-git-drill-zero-skip-guard.test.ts"
-      ]
     }
   ]
 }

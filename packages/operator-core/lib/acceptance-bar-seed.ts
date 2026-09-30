@@ -69,6 +69,9 @@ export type AcceptanceBarSeedCode =
   | 'bar_amendment_required'
   | 'bar_projection_conflict'
   | 'bar_seed_persistence_failed'
+  // WI-10004146 / D-093: a federated receiver found no agreeing rubric yet; it wrote
+  // nothing and waits for the other row's apply to re-run the receiver seed.
+  | 'bar_receiver_rubric_pending'
   // review-system-rework-reduction P-003/P-029: an activation seed refuses a BAR whose
   // contract would force a later barHash-changing amendment (after proof is bound).
   | 'bar_contract_method_missing'
@@ -880,6 +883,17 @@ export interface TransactionalAcceptanceBarSeedInput {
   dryRun?: boolean;
   /** Activation-door policy; see {@link AcceptanceBarSeedBuildInput.requireContractCompleteness}. */
   requireContractCompleteness?: boolean;
+  /**
+   * WI-10004146 / D-093 — federated-receiver mode. The rubric row federates but the
+   * plan's acceptance_bar_* columns and its spec clauses are machine-local, so a
+   * receiver re-derives them here. It must never author or revise the rubric: it
+   * proceeds only when a discovered active rubric already equals the rebuilt one,
+   * and otherwise refuses `bar_receiver_rubric_pending` before any write.
+   * Call it through `seedAcceptanceBarsOnFederatedApply` (acceptance-bar-receiver-seed.ts):
+   * that supplies the rubric's own barContract pins, which the receiver's local plan
+   * version and trigger-stamped epoch/cohort cannot.
+   */
+  receiverOnly?: boolean;
 }
 
 export interface TransactionalAcceptanceBarSeedSuccess {
@@ -1019,18 +1033,31 @@ export async function seedAcceptanceBarsInTransaction(
   // change is an amendment, never a migration/seed overwrite; provenance is
   // canonicalized from the locked subject-plan state before any SQL write.
   if (existingTemplate?.success && existingTemplate.data.barContract) {
-    const guarded = guardAcceptanceBarTemplateDataWrite({
-      slug: rubricSlug,
-      storedTemplateData: existing.template_data,
-      nextTemplateData: built.templateData,
-      subjectPlan: {
-        status: input.planStatus,
-        revision: input.planVersion,
-        adoptionEpoch: input.adoptionEpoch,
-        cohort: input.cohort,
-      },
-      actorId: input.actorId,
-    });
+    let guarded: ReturnType<typeof guardAcceptanceBarTemplateDataWrite>;
+    try {
+      guarded = guardAcceptanceBarTemplateDataWrite({
+        slug: rubricSlug,
+        storedTemplateData: existing.template_data,
+        nextTemplateData: built.templateData,
+        subjectPlan: {
+          status: input.planStatus,
+          revision: input.planVersion,
+          adoptionEpoch: input.adoptionEpoch,
+          cohort: input.cohort,
+        },
+        actorId: input.actorId,
+      });
+    } catch (error) {
+      // A receiver whose local plan changed BAR meaning against the federated rubric
+      // is waiting for the author's amendment to arrive; that is a deferral, not an error.
+      if (!input.receiverOnly) throw error;
+      return refusal([{
+        code: 'bar_receiver_rubric_pending',
+        detail: `federated rubric '${rubricSlug}' does not match the local plan (${
+          error instanceof Error ? error.message : String(error)
+        }); receiver seed deferred without writing`,
+      }]) as Exclude<AcceptanceBarSeedBuildResult, { ok: true }>;
+    }
     built = {
       ...built,
       templateData: guarded.data,
@@ -1055,6 +1082,18 @@ export async function seedAcceptanceBarsInTransaction(
   }
 
   const rubricChanged = !existing || stableJson(existing.template_data) !== stableJson(built.templateData);
+  // WI-10004146 / D-093: a receiver never authors or revises the federated rubric.
+  // Rubric absent (the plan arrived first) or not yet agreeing with the local plan
+  // (a newer revision of either is still in flight): write nothing. The other row's
+  // apply re-runs this seed, so the two arrival orders converge on one rubric row.
+  if (input.receiverOnly && (!discovered || rubricChanged)) {
+    return refusal([{
+      code: 'bar_receiver_rubric_pending',
+      detail: !discovered
+        ? `no federated acceptance rubric for '${input.planSlug}' yet; receiver seed deferred without writing`
+        : `federated rubric '${rubricSlug}' does not match the local plan; receiver seed deferred without writing`,
+    }]) as Exclude<AcceptanceBarSeedBuildResult, { ok: true }>;
+  }
   const rubricRevision = rubricChanged ? provisionalRevision : existingRevision;
   if (!rubricChanged && rubricRevision !== provisionalRevision) {
     built = buildAcceptanceBarSeed({
@@ -1232,7 +1271,9 @@ export async function seedAcceptanceBarsInTransaction(
            acceptance_bar_rubric_slug = ${rubricSlug},
            acceptance_bar_rubric_revision = ${rubricRevision},
            acceptance_bar_seeded_at = ${input.now},
-           acceptance_bar_seeded_by = ${input.actorId}
+           acceptance_bar_seeded_by = ${input.actorId},
+           -- WI-10004146: the rubric pin governs here; a receiver re-stamps this after.
+           acceptance_bar_verified_revision = NULL
      WHERE workspace_id = ${input.workspaceId}
        AND harness_slug = ${input.harnessSlug}
        AND plan_slug = ${input.planSlug}`;

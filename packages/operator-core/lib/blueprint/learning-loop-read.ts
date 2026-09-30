@@ -20,7 +20,11 @@ import { getFlag } from '@papercusp/flags/server';
 import { LEARNING_SINGLETONS } from './seed-learning-singletons';
 import { operatorHomeHarnessSlug } from '../harness/operator-home-harness';
 import { DEFAULT_SCOUT_CYCLE_TIMEOUT_MS } from '../scout/scheduler';
-import { PRECISION_BENCH_WORKER_TIMEOUT_MS } from '../memory/bench/precision-read';
+import {
+  describePrecisionAttempt,
+  PRECISION_BENCH_WORKER_TIMEOUT_MS,
+  readLatestPrecisionAttempt,
+} from '../memory/bench/precision-read';
 import {
   computeLearningLoopHealth,
   singletonRoutineName,
@@ -85,6 +89,7 @@ async function readPrecisionActivity(sql: Sql, workspaceId: string): Promise<Loo
       source: 'memory_precision_bench',
       mode: 'since-fire',
       graceMs: PRECISION_ACTIVITY_GRACE_MS,
+      detail: describePrecisionAttempt(await readLatestPrecisionAttempt(sql, workspaceId)),
     };
   } catch {
     return undefined;

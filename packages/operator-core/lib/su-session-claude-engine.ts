@@ -22,6 +22,7 @@ import { killTask } from './task-manager/control';
 import type { TaskSpec } from './task-manager/types';
 import { SuSessionStartupTimeoutError, type SuSessionHost, type SuSessionEventInput } from './su-session-host';
 import { SuNativeCards } from './su-session-native-cards';
+import { loadSuOwnerTurnReceipts } from './su-session-commands';
 
 export type ClaudeEngineQuery = AsyncIterable<SDKMessage> & Pick<Query, 'initializationResult' | 'mcpServerStatus' | 'interrupt' | 'close'>;
 /** Who the engine is (plan pui-chat-first-ux-2026-09-28 D-004). `su` is the
@@ -245,6 +246,7 @@ export function startClaudeSuEngine(
   });
   const adapter = createClaudeSuSessionAdapter(binding, runtime, {
     ...options, ready: false, runtimeReady: () => ready && !closed, ownerTurnCorrelation: 'transport', cardSource: 'transport',
+    ownerTurnReceipts: (identity) => loadSuOwnerTurnReceipts(identity),
     controls: {
       async ownerTurn({ content, turnId }) {
         if (!ready || closed) return unavailable('The structured Claude connection is not ready');
@@ -454,6 +456,16 @@ export function startClaudeSuEngine(
   const startup = (async () => {
     if (!options.query) await probeScopeSupport();
     if (closed) throw new Error('Claude startup was cancelled');
+    if (options.resume) {
+      // WI-10004162: show the saved conversation now, not after the SDK launch,
+      // its initialization and the SU tool connection (seconds, or never when
+      // startup fails). Best-effort: the replay after the SU tool connection
+      // stays authoritative, adds only what the native runtime wrote since, and
+      // surfaces a missing transcript; the host never shows a record twice.
+      enterStartupStage('transcript restore');
+      await adapter.consumeTranscriptSnapshot({ preserveLifecycle: true }).catch(() => undefined);
+      if (closed) throw new Error('Claude connection closed during startup');
+    }
     enterStartupStage('SDK launch');
     sdk = (options.query ?? query)({ prompt: input, options: sdkOptions });
     done = (async () => {

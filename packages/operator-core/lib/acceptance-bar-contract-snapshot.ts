@@ -176,6 +176,13 @@ export interface AcceptanceBarSubjectPlanSource {
   rubricRevision: number | null;
   seededAt: string | null;
   seededBy: string | null;
+  /**
+   * WI-10004146: the LOCAL plan revision at which a federated receiver verified its
+   * BAR state against the federated rubric. Non-null only on a receiver, where the
+   * rubric's `subjectPlanRevision` names the author's local counter; there this pin,
+   * not the rubric's, must equal `revision`. Absent/null = the rubric pin governs.
+   */
+  verifiedRevision?: number | null;
 }
 
 export interface AcceptanceBarPlanItemSource {
@@ -967,7 +974,8 @@ export function projectAcceptanceBarContractSnapshot(
     rubric &&
     (plan.rubricSlug !== rubric.rubricId ||
       plan.rubricRevision !== (rubric.revision ?? null) ||
-      rubric.barContract?.subjectPlanRevision !== plan.revision)
+      // A federated receiver's own verification pin replaces the author's local one.
+      (plan.verifiedRevision ?? rubric.barContract?.subjectPlanRevision) !== plan.revision)
   ) {
     addProblem(problems, {
       code: 'bar_snapshot_rubric_revision_mismatch',
@@ -1730,12 +1738,13 @@ async function defaultReadPlans(planSlug: string, scope?: { harnessSlug: string 
       acceptance_bar_rubric_revision: number | string | null;
       acceptance_bar_seeded_at: Date | string | null;
       acceptance_bar_seeded_by: string | null;
+      acceptance_bar_verified_revision: number | string | null;
     }>
   >`
     SELECT workspace_id, harness_slug, plan_slug, status, version, content_hash,
            acceptance_bar_epoch, acceptance_bar_cohort, acceptance_bar_set_hash,
            acceptance_bar_rubric_slug, acceptance_bar_rubric_revision,
-           acceptance_bar_seeded_at, acceptance_bar_seeded_by
+           acceptance_bar_seeded_at, acceptance_bar_seeded_by, acceptance_bar_verified_revision
       FROM harness_shared.harness_plans
      WHERE workspace_id = ${workspaceId}
        AND plan_slug = ${planSlug}
@@ -1757,6 +1766,8 @@ async function defaultReadPlans(planSlug: string, scope?: { harnessSlug: string 
       rubricRevision: row.acceptance_bar_rubric_revision == null ? null : Number(row.acceptance_bar_rubric_revision),
       seededAt: pgTimestampToIsoOrNull(row.acceptance_bar_seeded_at),
       seededBy: row.acceptance_bar_seeded_by,
+      verifiedRevision:
+        row.acceptance_bar_verified_revision == null ? null : Number(row.acceptance_bar_verified_revision),
     })),
     1,
   );

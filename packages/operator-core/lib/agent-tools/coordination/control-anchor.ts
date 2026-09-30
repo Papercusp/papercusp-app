@@ -21,6 +21,7 @@ import { getSessionBrief, type SessionBriefLifecycle } from '../../session-brief
 import { notifyAgentOrdersChanged } from '../../agent-orders-notify';
 import { fetchSelfWake, type SelfWakeSignals, type SelfWakeSource } from './presence-selfwake';
 import { stackRefsForSession } from '../../stack-binding-channel';
+import { trackDetached } from '../../detached-imports';
 import {
   carryIdentityReceiptForControlActivation,
   parseSuLaunchSpecRecord,
@@ -1189,7 +1190,17 @@ export async function buildControlAnchorState(
     return leg;
   };
   const modesP = guard(getModes(workspaceId, ownerId, sql));
-  const modeCatalogP = guard(import('../../agent-identities/source').then((module) => module.getSelectedModeCatalog()));
+  // The import leg is orphaned the same way when a sibling rejects first, and it is
+  // still loading agent-identities/source → agent-tools/blueprint/_resolve →
+  // harness-ops/proxy → … when the test file's environment is torn down. In the pure
+  // lane (isolate:false) that leaves `_resolve` half-evaluated for every co-resident
+  // file: domain-default-packs.test.ts then failed `resolveAndValidate` with
+  // "Cannot access '__vite_ssr_import_4__' before initialization" (WI-10004029).
+  // trackDetached lets the unit-layer drain wait for the module graph only; the
+  // catalog read itself stays untracked so a slow read never stalls teardown.
+  const modeCatalogP = guard(
+    trackDetached(import('../../agent-identities/source')).then((module) => module.getSelectedModeCatalog()),
+  );
   const loopP = guard(
     opts.loop === undefined ? getLoopStatus(ownerId, { sql }) : Promise.resolve(opts.loop),
   );

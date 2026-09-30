@@ -442,10 +442,20 @@ verify_sweep_fence() {
       || die "could not build the named-resource lock query; refusing an in-tree mutation."
     lock_list_json="$(ptool_json locks:list "$lock_list_args" '{"pick":["holders[].resource","holders[].owner","holders[].mode","holders[].status","holders[].expires_ts"]}')" \
       || die "could not read the named-resource lock list; refusing an in-tree mutation."
-    minimum_resource_ms=$(( (GUARD_MAX_SEC + 120) * 1000 ))
-    printf '%s' "$lock_list_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const owner=process.argv[1],resource=process.argv[2],minimum=Number(process.argv[3]);const h=(JSON.parse(s).holders||[]).find(x=>x.resource===resource&&x.owner===owner&&x.mode==="exclusive"&&x.status==="held"&&Date.parse(x.expires_ts)>=Date.now()+minimum);if(!h)process.exit(1)}catch{process.exit(2)}})' "$owner_id" "$resource" "$minimum_resource_ms" \
-      || die "this session must hold an exclusive '$resource' lock through the mutation window before probing in-tree."
-    log "verified this session's exclusive $resource lock through the mutation window"
+    minimum_resource_sec=$(( GUARD_MAX_SEC + 120 ))
+    minimum_resource_ms=$(( minimum_resource_sec * 1000 ))
+    # WI-10004155: separate "not held" (exit 1) from "held, but the lease ends
+    # before the mutation window plus its 120s margin" (exit 3, prints the seconds
+    # left). One refusal message for both read as operator error on a lease that
+    # WAS held, just too short for the configured window.
+    resource_left_sec="$(printf '%s' "$lock_list_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const owner=process.argv[1],resource=process.argv[2],minimum=Number(process.argv[3]);const held=(JSON.parse(s).holders||[]).filter(x=>x.resource===resource&&x.owner===owner&&x.mode==="exclusive"&&x.status==="held");if(!held.length)process.exit(1);const until=Math.max(...held.map(x=>Date.parse(x.expires_ts)));if(!Number.isFinite(until))process.exit(2);const left=until-Date.now();process.stdout.write(String(Math.max(0,Math.floor(left/1000))));if(left<minimum)process.exit(3)}catch{process.exit(2)}})' "$owner_id" "$resource" "$minimum_resource_ms")"
+    case $? in
+      0) ;;
+      1) die "this session must hold an exclusive '$resource' lock through the mutation window before probing in-tree; none is held by $owner_id. Acquire it first: locks:acquire_resource { resource: '$resource', mode: 'exclusive', ttl_sec: 1200 }." ;;
+      3) die "this session's exclusive '$resource' lock is held but expires in ${resource_left_sec}s, and the mutation window needs at least ${minimum_resource_sec}s (MUTATION_PROBE_WINDOW_MAX_SEC=$GUARD_MAX_SEC plus a 120s margin). Extend it with locks:heartbeat_resource { lock_id, ttl_sec: 1200 } (lock_id is returned by locks:acquire_resource), or lower MUTATION_PROBE_WINDOW_MAX_SEC, then retry." ;;
+      *) die "could not read this session's '$resource' lease from the named-resource lock list; refusing an in-tree mutation." ;;
+    esac
+    log "verified this session's exclusive $resource lock through the mutation window (${resource_left_sec}s left; ${minimum_resource_sec}s required)"
   }
 }
 

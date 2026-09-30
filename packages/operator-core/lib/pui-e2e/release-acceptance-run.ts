@@ -121,10 +121,47 @@ export async function runCloudDeviceStartSmoke(origin = 'https://app.papercusp.c
 }
 
 const STOCK_LINUX_IMAGES = ['ubuntu:24.04', 'debian:stable-slim'];
-const DOCKER_START_PROBE_TIMEOUT_MS = 20_000;
+/**
+ * Per-attempt budget. It must separate a SLOW launch from a WEDGED one. On the
+ * release host (2026-09-30, ~100 running containers) an ordinary first launch
+ * took 24.6s and the next 1.4s, while the WI-10003403 wedge lasts 2-30 minutes.
+ * A 20s budget refused every attempt of a healthy host (WI-10004239).
+ */
+export const DOCKER_START_PROBE_TIMEOUT_MS = 90_000;
 const DOCKER_START_PROBE_ATTEMPTS = 3;
-type DockerRun = (args: string[], timeout: number) => { status: number | null; error?: { message: string } };
+const PROBE_NAME_PREFIX = 'pui-release-preflight-';
+type DockerRun = (args: string[], timeout: number) => { status: number | null; stdout?: string; error?: { message: string } };
 const defaultDockerRun: DockerRun = (args, timeout) => spawnSync('docker', args, { encoding: 'utf8', timeout });
+function defaultPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Remove probe containers left behind by acceptance runs that have exited.
+ *
+ * A client killed on timeout does not cancel the daemon's create, so the
+ * per-attempt `rm --force` can run before the container exists and the create
+ * then completes into a Created container nothing removes (seen 2026-09-30:
+ * eight of them from three runs). The name carries the creating pid, so a
+ * container whose pid is gone is an orphan; a live pid may be a concurrent run
+ * still probing, and its containers are left alone.
+ */
+export function sweepOrphanedProbeContainers(run: DockerRun = defaultDockerRun,
+  pidAlive: (pid: number) => boolean = defaultPidAlive): string[] {
+  const listed = run(['ps', '--all', '--filter', `name=${PROBE_NAME_PREFIX}`, '--format', '{{.Names}}'], 20_000);
+  if (listed.status !== 0 || listed.error || !listed.stdout) return [];
+  const orphans = listed.stdout.split('\n').map((line) => line.trim()).filter((name) => {
+    const pid = Number(new RegExp(`^${PROBE_NAME_PREFIX}(\\d+)-`).exec(name)?.[1]);
+    return Number.isInteger(pid) && pid > 0 && pid !== process.pid && !pidAlive(pid);
+  });
+  if (orphans.length) run(['rm', '--force', ...orphans], 60_000);
+  return orphans;
+}
 
 /**
  * Detect a responsive daemon whose overlay create/start path is stalled.
@@ -134,17 +171,20 @@ const defaultDockerRun: DockerRun = (args, timeout) => spawnSync('docker', args,
  * wedge: the next attempt usually returns in seconds, and refusing on it threw
  * away whole acceptance runs (EI-24453068584648808). Each attempt is named so a
  * launch the client abandoned on timeout is removed rather than left behind in
- * the Created state, where `--rm` never reaches it.
+ * the Created state, where `--rm` never reaches it; a removal that loses the
+ * race with the daemon is caught by the next run's orphan sweep.
  */
-export function probeDockerCreateStart(run: DockerRun = defaultDockerRun): string | null {
+export function probeDockerCreateStart(run: DockerRun = defaultDockerRun,
+  pidAlive: (pid: number) => boolean = defaultPidAlive): string | null {
   // A fresh release host may not have the image yet. The stock smoke below
   // pulls it; the offline create/start probe applies only to an existing image.
   const image = STOCK_LINUX_IMAGES[0];
   const cached = run(['image', 'inspect', image], 5_000);
   if (cached.status !== 0 || cached.error) return null;
+  sweepOrphanedProbeContainers(run, pidAlive);
   const failures: string[] = [];
   for (let attempt = 1; attempt <= DOCKER_START_PROBE_ATTEMPTS; attempt++) {
-    const name = `pui-release-preflight-${process.pid}-${Date.now()}-${attempt}`;
+    const name = `${PROBE_NAME_PREFIX}${process.pid}-${Date.now()}-${attempt}`;
     const result = run(['run', '--rm', '--name', name, '--pull=never', '--network=none',
       '--entrypoint', '/bin/sh', image, '-c', 'true'], DOCKER_START_PROBE_TIMEOUT_MS);
     if (result.status === 0 && !result.error) return null;

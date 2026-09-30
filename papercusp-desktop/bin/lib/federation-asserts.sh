@@ -993,9 +993,40 @@ EOF
 # The ASSIGN side of port self-discovery: hand an instance a known-free port via
 # PAPERCUSP_HONO_PORT / PAPERCUSP_PG_PORT instead of hardcoding one that may
 # collide. Single source for every rig (the from-repo smoke delegates here).
+#
+# It also RESERVES the port it returns (WI-10004241). An `ss` probe only proves a port is free
+# right now, but a sidecar binds its embedded PG ~100 s after the pick, and every rig searches
+# from the same bases (18071/18532). On 2026-09-30 a same-box rig and a live-federation-gate run
+# both picked :18532 within seconds and the loser's postgres died on EADDRINUSE. A reservation is
+# a file "<pid> <epoch>" under FED_PORT_RESERVE_DIR. The PID is the launching script: `$$` names
+# the top-level shell even inside the `$(…)` every caller uses, which an flock fd would not survive.
+# A port is skipped while it listens OR a live launcher other than this one reserved it less than
+# FED_PORT_RESERVE_TTL_SEC ago (default 900). A dead or expired reservation is reclaimed. The
+# claim is a noclobber create, so two concurrent pickers never both win one port. Each call
+# reserves a distinct port, including a second pick by the same launcher.
 fed_pick_free_port() {
-  local p="${1:-18000}"
-  while ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; do p=$((p + 1)); done
+  local p="${1:-18000}" dir="${FED_PORT_RESERVE_DIR:-${TMPDIR:-/tmp}/papercusp-port-reservations}"
+  local ttl="${FED_PORT_RESERVE_TTL_SEC:-900}" now f rpid rts
+  mkdir -p "$dir" 2>/dev/null || dir=""
+  now="$(date +%s)"
+  while :; do
+    if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then p=$((p + 1)); continue; fi
+    [ -n "$dir" ] || break
+    f="$dir/$p"
+    if ( set -C; printf '%s %s\n' "$$" "$now" > "$f" ) 2>/dev/null; then break; fi
+    rpid="" rts=""
+    read -r rpid rts < "$f" 2>/dev/null || true
+    case "$rpid" in ''|*[!0-9]*) rpid=0 ;; esac
+    case "$rts" in ''|*[!0-9]*) rts=0 ;; esac
+    if [ "$rpid" -gt 0 ] && kill -0 "$rpid" 2>/dev/null && [ $((now - rts)) -lt "$ttl" ]; then
+      p=$((p + 1)); continue
+    fi
+    # Stale (dead launcher or expired): reclaim it. If a concurrent picker reclaims it first,
+    # our noclobber create fails and we move on to the next port.
+    rm -f "$f" 2>/dev/null
+    if ( set -C; printf '%s %s\n' "$$" "$now" > "$f" ) 2>/dev/null; then break; fi
+    p=$((p + 1))
+  done
   echo "$p"
 }
 

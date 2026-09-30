@@ -12,6 +12,7 @@
 import { z } from 'zod';
 import { defineTool } from '@papercusp/agent-mcp';
 import { LISTING_KINDS } from '../../cupboard/types';
+import { BLUEPRINT_LISTING_FACET_KINDS } from '../../cupboard/browse-listings';
 
 const text = (payload: Record<string, unknown>) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
@@ -28,6 +29,7 @@ function project(row: Record<string, unknown>): Record<string, unknown> {
     title: pick('title'),
     description: desc && desc.length > 240 ? `${desc.slice(0, 240)}…` : desc,
     github_url: pick('github_url'),
+    ...(pick('blueprint_kind') ? { blueprintKind: pick('blueprint_kind') } : {}),
     ...(pick('review_status') ? { review_status: pick('review_status') } : {}),
   };
 }
@@ -54,6 +56,10 @@ export default defineTool({
       .enum([...LISTING_KINDS, 'all'] as unknown as [string, ...string[]])
       .optional()
       .describe('Restrict to one listing kind, or "all" (default: all kinds).'),
+    blueprintKind: z
+      .enum(BLUEPRINT_LISTING_FACET_KINDS)
+      .optional()
+      .describe('Blueprint facet: "identity" lists portable identities, "hive" pot templates. Implies kind blueprint.'),
     q: z.string().max(200).optional().describe('Free-text search across the storefront.'),
     project: z.string().max(200).optional().describe('Filter to a project_ref (owner/repo).'),
     limit: z.number().int().min(1).max(100).optional().describe('Page size (default 50).'),
@@ -63,6 +69,7 @@ export default defineTool({
     const { browseCupboardListings } = await import('../../cupboard/browse-listings');
     const result = await browseCupboardListings({
       ...(args.kind ? { kind: args.kind as never } : {}),
+      ...(args.blueprintKind ? { blueprintKind: args.blueprintKind } : {}),
       ...(args.q ? { q: args.q } : {}),
       ...(args.project ? { project: args.project } : {}),
       ...(args.limit ? { limit: args.limit } : {}),

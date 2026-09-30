@@ -30,10 +30,12 @@ import {
 } from './reconcile';
 import { scanProcesses, type ScanOptions, type ScanResult } from './scan';
 import { inspectTaskUnitTerminals, resetFailedTaskUnit } from './scope-terminal-state';
+import { readJobLogTerminal, type JobLogTerminal } from './job-log-terminal';
 import {
   clearVanishedUnaccounted,
   listLiveTasks,
   markEndedUnobserved,
+  markRecoveredFromJobLog,
   markStranded,
   residueTaskId,
   touchAlive,
@@ -60,6 +62,9 @@ export interface ReconcileTickDeps {
    * release-only seam so existing tests can still exercise that narrow verdict. */
   inspectTaskUnitTerminals?: typeof inspectTaskUnitTerminals;
   resetFailedTaskUnit?: typeof resetFailedTaskUnit;
+  /** WI-10004208 — read the runner's durable JOB END from a row's log. Injected
+   *  for tests; defaults to the real bounded tail read. */
+  readJobLogTerminal?: (logPath: string) => JobLogTerminal | null;
 }
 
 export interface ReconcileTickResult {
@@ -93,6 +98,12 @@ export interface ReconcileTickResult {
   touched: number;
   strandedCount: number;
   endedUnobservedCount: number;
+  /**
+   * Released rows closed from the runner's durable JOB END marker instead of as
+   * `ended_unobserved` — the watcher was lost (operator host restart) but the
+   * payload's own exit survived in its log (WI-10004208).
+   */
+  recoveredFromJobLogCount: number;
   unaccountedPersisted: number;
   residueCleared: number;
   /**
@@ -181,6 +192,7 @@ export async function reconcileTick(deps: ReconcileTickDeps = {}): Promise<Recon
       touched: 0,
       strandedCount: 0,
       endedUnobservedCount: 0,
+      recoveredFromJobLogCount: 0,
       unaccountedPersisted: 0,
       residueCleared: 0,
       confirmedUnaccounted: [],
@@ -226,6 +238,7 @@ export async function reconcileTick(deps: ReconcileTickDeps = {}): Promise<Recon
   // ── destructive writes only on a trustworthy scan ────────────────────────
   let strandedCount = 0;
   let endedUnobservedCount = 0;
+  let recoveredFromJobLogCount = 0;
   let unaccountedPersisted = 0;
   let residueCleared = 0;
   if (!degraded) {
@@ -235,7 +248,34 @@ export async function reconcileTick(deps: ReconcileTickDeps = {}): Promise<Recon
       const terminalProvenance = scopeUnit ? (terminalByUnit.get(scopeUnit) ?? null) : null;
       return terminalProvenance ? { ...verdict, terminalProvenance } : verdict;
     });
-    endedUnobservedCount = await markEndedUnobserved(endedWithTerminal);
+    // WI-10004208: systemd garbage-collects a SUCCESSFUL transient service at
+    // once, so a row whose watcher died with its operator host reaches here with
+    // no exit status. The runner wrote the payload's exit to the log before the
+    // unit went away; read it before settling for `ended_unobserved`. A systemd
+    // exit status, when present, stays authoritative and the log is not read.
+    const readTerminal = deps.readJobLogTerminal ?? readJobLogTerminal;
+    const recovered: Parameters<typeof markRecoveredFromJobLog>[0][number][] = [];
+    const unobserved: typeof endedWithTerminal = [];
+    for (const verdict of endedWithTerminal) {
+      const terminalProvenance = 'terminalProvenance' in verdict ? verdict.terminalProvenance : null;
+      const logPath = byTaskId.get(verdict.taskId)?.logPath;
+      const marker = terminalProvenance?.execMainStatus == null && logPath ? readTerminal(logPath) : null;
+      if (!marker) {
+        unobserved.push(verdict);
+        continue;
+      }
+      recovered.push({
+        taskId: verdict.taskId,
+        state: marker.status === 'killed' ? 'killed' : marker.status === 'timed_out' ? 'timed_out' : 'exited',
+        exitCode: marker.exitCode,
+        reason:
+          `runner-log: JOB END status=${marker.status} exit=${marker.exitCode ?? 'null'} read from ${logPath} — ` +
+          `the operator-host watcher was lost before it recorded the exit (${verdict.reason})`,
+        terminalProvenance,
+      });
+    }
+    endedUnobservedCount = await markEndedUnobserved(unobserved);
+    recoveredFromJobLogCount = await markRecoveredFromJobLog(recovered);
     // The failed unit was deliberately retained at spawn so its Result/exit
     // status/MemoryPeak could reach the ledger. Release it only after the writer
     // returns; a failed persistence throws before this point and leaves the unit
@@ -283,6 +323,7 @@ export async function reconcileTick(deps: ReconcileTickDeps = {}): Promise<Recon
     touched,
     strandedCount,
     endedUnobservedCount,
+    recoveredFromJobLogCount,
     unaccountedPersisted,
     residueCleared,
     confirmedUnaccounted,

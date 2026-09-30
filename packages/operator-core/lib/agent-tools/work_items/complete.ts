@@ -245,6 +245,7 @@ import { designCompareDepsFor } from '../../design-compare/host-install';
 import { typeEvidenceGapInCompletion } from '../type-evidence-gap';
 export { typeEvidenceGapInCompletion } from '../type-evidence-gap';
 import { claimSubjectBaselineMismatches } from '../../claim-subject-baseline';
+import { holderIsCaller } from '../../work-item-holder-identity';
 
 // EI-7031: coerce structured LLM mis-shapes (scalar↔array swaps, missing summary)
 // to the CompletionRecord contract BEFORE validation. A bare string is intentionally
@@ -3084,8 +3085,16 @@ async function completeOne(
   // completions still WARN (this tool's record-and-warn contract, EI-24), but a terminal close
   // refuses before any completion/state write when the caller is not the current assignee — a
   // warning alone is too late once it clears the peer's claim.
+  // EI-23701433507513915: a short-form holder stored before assignments were canonicalized
+  // (`su-851c1a7a`) that resolves UNIQUELY to the caller IS the caller. Exact equality
+  // refused the real holder's own close; an ambiguous or unknown prefix still matches no one.
   const callerOwnsAssignee =
-    !existing.assignee || existing.assignee === ident.ownerId || existing.assignee === ident.adoptedName;
+    !existing.assignee ||
+    existing.assignee === ident.ownerId ||
+    existing.assignee === ident.adoptedName ||
+    (await holderIsCaller(existing.assignee, ident.ownerId, {
+      workspaceId: ctx.workspaceId ?? ctx.principal?.workspaceId ?? activeWorkspaceId(),
+    }));
   const assigneeMismatchWarning =
     existing.assignee && !callerOwnsAssignee
       ? `completing ${it.id} but it is currently assigned to '${existing.assignee}', not you ('${ident.ownerId}') — ` +

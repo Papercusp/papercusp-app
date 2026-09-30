@@ -32,12 +32,19 @@
  * degrades to lexical-only — that part was always right — but it now SAYS SO.
  */
 
+import type { Sql } from 'postgres';
 import { withWorkspace } from '@papercusp/db-org';
-import type { Embedder, Listing, SearchSourceParams } from '@papercusp/search';
+import { chunkAwareVectorLegSql, withIterativeScan } from '@papercusp/search';
+import type { Embedder, Listing, PgHandle, SearchSourceParams } from '@papercusp/search';
 
 import { resolvePlanScope, type PlanSourceOpts } from './source';
+import { PLANS_CHUNK_SURFACE } from '../../search/chunks/registry';
 // The prose column width contract — ONE source, not a restated `384` (D-005 §5).
-import { fitsProseColumns, resolveProseProfileIdSelection } from '../../search/prose-vector-dims';
+import {
+  fitsProseColumns,
+  proseProfilePredicateSql,
+  resolveProseProfileIdSelection,
+} from '../../search/prose-vector-dims';
 
 export interface PlanSemanticHit {
   slug: string;
@@ -47,6 +54,55 @@ export interface PlanSemanticHit {
   archived: boolean;
   /** Cosine similarity (1 − pgvector `<=>` distance) in the active space. */
   similarity: number;
+  /**
+   * generic-rag-chunking P-009: the heading of the plan section a CHUNK match
+   * fell in (e.g. "D-014 …"). Absent when the plan's own vector won, or when
+   * the matched window lies before the plan's first heading.
+   */
+  matchedSection?: string;
+}
+
+/**
+ * The last markdown ATX heading in `text` (its words, without the #s), ignoring
+ * lines inside fenced code blocks; null when there is none. plans:search uses it
+ * to name the section a matched window falls in: plans are window-split
+ * (D-014), so a chunk records no anchor of its own.
+ */
+export function lastMarkdownHeading(text: string): string | null {
+  let heading: string | null = null;
+  let fence: string | null = null;
+  for (const line of text.split('\n')) {
+    const fenceMark = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fenceMark) {
+      if (fence === null) fence = fenceMark[0]!;
+      else if (fenceMark[0] === fence) fence = null;
+      continue;
+    }
+    if (fence !== null) continue;
+    const m = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line);
+    if (m && m[1]) heading = m[1];
+  }
+  return heading;
+}
+
+/**
+ * Where in a plan's content to look for the section a winning window matched
+ * in: the window's MIDPOINT, so a window that starts at the end of one section
+ * and runs on into the next is attributed to the section most of it covers.
+ * Window i starts at i × (size − overlap) (splitWindows).
+ */
+export function planWindowGeometry(): { step: number; half: number } {
+  const { splitter } = PLANS_CHUNK_SURFACE;
+  if (splitter.kind !== 'window') {
+    throw new Error('plans chunk surface is not window-split; derive the section from the chunk anchor instead');
+  }
+  return { step: splitter.size - splitter.overlap, half: Math.floor(splitter.size / 2) };
+}
+
+/** planWindowGeometry, applied: the content offset of window `chunkIdx`'s midpoint. */
+export function planWindowMidpoint(chunkIdx: number): number {
+  const { step, half } = planWindowGeometry();
+  return chunkIdx * step + half;
 }
 
 /** Injectable seams (tests + any future non-553 store). */
@@ -62,7 +118,9 @@ export interface PlanSearchDeps {
 
 export async function queryTopPlansReal(
   vec: number[],
-  mode: string,
+  // The space comes from `identity` (proseProfilePredicateSql); the mode is
+  // kept for the PlanSearchDeps.queryTopPlans signature.
+  _mode: string,
   opts: PlanSourceOpts & { includeArchived?: boolean; limit: number },
   identity?: SearchSourceParams['embeddingProfile'],
 ): Promise<PlanSemanticHit[]> {
@@ -72,31 +130,80 @@ export async function queryTopPlansReal(
   if (!selection) return [];
   const { workspaceId, harnessSlug } = await resolvePlanScope(opts);
   const vecLit = `[${vec.join(',')}]`;
-  const rows = await withWorkspace(workspaceId, async (tx) => {
-    const archivedFilter = opts.includeArchived ? tx`` : tx`AND archived = false`;
-    return tx<Array<{ plan_slug: string; harness_slug: string; title: string | null; status: string | null; archived: boolean; similarity: number }>>`
-      SELECT plan_slug, harness_slug, title, status, archived,
-             1 - (embedding <=> ${vecLit}::vector) AS similarity
-        FROM harness_shared.harness_plans
-       WHERE workspace_id = ${workspaceId} AND harness_slug = ${harnessSlug}
-         AND embedding IS NOT NULL
-         AND (embedding_profile = ${selection.profileId}
-              OR (${selection.legacyMode !== null}
-                  AND embedding_profile IS NULL
-                  AND embedding_mode = ${selection.legacyMode ?? mode}))
-         AND template_slug IS NULL
-         ${archivedFilter}
-       ORDER BY embedding <=> ${vecLit}::vector
-       LIMIT ${opts.limit}`;
+  const surface = PLANS_CHUNK_SURFACE;
+  const margin = surface.chunkMargin ?? 0;
+  const { step, half } = planWindowGeometry();
+  // generic-rag-chunking P-009: rank PLANS by the nearer of the plan's own
+  // vector (title + first 2,000 characters) and its window chunks (D-014), so a
+  // plan whose only match lies past the cut is still found. The parent predicates
+  // are applied inside both legs before their LIMIT. Rows come back one per plan
+  // at its smallest distance; a tie goes to the plan's own vector.
+  type Row = {
+    plan_slug: string;
+    harness_slug: string;
+    title: string | null;
+    status: string | null;
+    archived: boolean;
+    distance: number;
+    section_prefix: string | null;
+  };
+  const rows = await withWorkspace(workspaceId, (tx) =>
+    withIterativeScan(tx as unknown as PgHandle, async (handle) => {
+      const sql = handle as unknown as Sql;
+      const space = (profileColumn: string | null, modeColumn: string | null) =>
+        profileColumn && modeColumn ? proseProfilePredicateSql(sql, selection, profileColumn, modeColumn) : sql`FALSE`;
+      const parentFilter = sql`p.workspace_id = ${workspaceId} AND p.harness_slug = ${harnessSlug}
+        AND p.template_slug IS NULL ${opts.includeArchived ? sql`` : sql`AND p.archived = false`}`;
+      // The winning chunk, when a chunk won: the lowest-index chunk whose
+      // distance equals the pooled one. Read through the chunk table's primary
+      // key (surface, parent_key, chunk_idx) — at most maxChunks rows per plan —
+      // and only for the plans returned. Its window's midpoint, as a content
+      // prefix, is what names the matched section (lastMarkdownHeading).
+      return sql<Row[]>`
+        WITH best AS (${chunkAwareVectorLegSql(handle, {
+          surface,
+          qVec: vecLit,
+          limit: opts.limit,
+          mode: 'retrieve',
+          parentFilter,
+          // D-011: the embedding-space rule stays here; the helper only names
+          // the qualified columns. A missing column fails closed.
+          spaceFilter: (cols) => space(cols.profileColumn, cols.modeColumn),
+        })})
+        SELECT p.plan_slug, p.harness_slug, p.title, p.status, p.archived, b.distance,
+               CASE WHEN w.chunk_idx IS NULL THEN NULL
+                    ELSE left(p.content, w.chunk_idx * ${step}::int + ${half}::int)
+               END AS section_prefix
+          FROM best b
+          JOIN harness_shared.harness_plans p
+            ON p.workspace_id = b.workspace_id AND p.harness_slug = b.harness_slug AND p.plan_slug = b.plan_slug
+          LEFT JOIN LATERAL (
+            SELECT min(c.chunk_idx) AS chunk_idx
+              FROM harness_shared.text_chunks c
+             WHERE c.surface = ${surface.surface}
+               AND c.parent_key = ARRAY[p.workspace_id, p.harness_slug, p.plan_slug]
+               AND c.embedding IS NOT NULL
+               AND ${space('c.embedding_profile', 'c.embedding_mode')}
+               AND (c.embedding <=> ${vecLit}::vector) + ${margin}::float8 <= b.distance + 1e-9
+               AND NOT (p.embedding IS NOT NULL
+                        AND ${space('p.embedding_profile', 'p.embedding_mode')}
+                        AND (p.embedding <=> ${vecLit}::vector) <= b.distance + 1e-9)
+          ) w ON TRUE
+         ORDER BY b.distance, p.plan_slug`;
+    }),
+  );
+  return rows.map((r) => {
+    const section = r.section_prefix === null ? null : lastMarkdownHeading(r.section_prefix);
+    return {
+      slug: r.plan_slug,
+      harness: r.harness_slug,
+      title: r.title,
+      status: r.status,
+      archived: r.archived,
+      similarity: 1 - Number(r.distance),
+      ...(section ? { matchedSection: section } : {}),
+    };
   });
-  return rows.map((r) => ({
-    slug: r.plan_slug,
-    harness: r.harness_slug,
-    title: r.title,
-    status: r.status,
-    archived: r.archived,
-    similarity: Number(r.similarity),
-  }));
 }
 
 export const realPlanSearchDeps: PlanSearchDeps = {

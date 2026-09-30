@@ -6428,6 +6428,9 @@ async function runIntegratorLeg(slug: string, workspaceId: string): Promise<void
         },
         rows[0]?.worktree_bridge?.stagingSha ?? null,
       ),
+      // WI-10004249: never let an advance fall off what this machine already
+      // accepted — a non-FF advance is terminally rejected and freezes egress.
+      acceptedStagingFloorSha: rows[0]?.worktree_bridge?.stagingSha ?? null,
       context: signedProtocolContext,
       authority: effectAuthority,
       acceptedSnapshots: snapshots[0]?.state?.replayFloors ?? {},

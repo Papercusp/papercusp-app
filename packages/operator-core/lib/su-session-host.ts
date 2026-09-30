@@ -7,6 +7,7 @@
  * Persistence/re-materialisation across operator replacement belongs to the
  * downstream P-004 lane.
  */
+import { createHash } from 'node:crypto';
 import {
   SU_SESSION_PROTOCOL_VERSION,
   SU_SESSION_SCHEMA,
@@ -244,6 +245,15 @@ function hostChannelKey(identity: SuSessionIdentity): string {
   )}:${encodeURIComponent(identity.agentChatId)}`;
 }
 
+/** Stable identity of one native transcript record for `claimNativeRecord`:
+ * its own id when the backend writes one (Claude `uuid`, OMP `id`), else the
+ * exact line, which an append-only transcript never rewrites. */
+export function nativeRecordKey(line: string, record: Record<string, unknown>): string {
+  const id = typeof record.uuid === 'string' && record.uuid ? record.uuid
+    : typeof record.id === 'string' && record.id ? record.id : null;
+  return id ? `id:${id}` : `line:${createHash('sha256').update(line).digest('hex')}`;
+}
+
 export class SuSessionHost<B extends SuSessionBackend = SuSessionBackend> {
   readonly channelKey: string;
   private readonly channel: BusChannel<SuSessionEvent<B>>;
@@ -265,6 +275,19 @@ export class SuSessionHost<B extends SuSessionBackend = SuSessionBackend> {
   private descriptorWriteRevision = 0;
   private pendingDescriptorWrite: { descriptor: SuSessionDescriptor<B>; key: string; revision: number } | null = null;
   private descriptorWriteWaiters: Array<{ revision: number; resolve: (ok: boolean) => void }> = [];
+  /** Native transcript records this host has already turned into events, keyed
+   * by `nativeRecordKey`. It outlives any one adapter, so a transcript replayed
+   * by a second engine on the same host (a resume retry, an early and a late
+   * replay) adds nothing the owner has already been shown (WI-10004162). */
+  private readonly nativeRecords = new Set<string>();
+
+  /** Record that this host has ingested one native record. True the first time
+   * a key is seen; false when the host already holds it. */
+  claimNativeRecord(key: string): boolean {
+    if (this.nativeRecords.has(key)) return false;
+    this.nativeRecords.add(key);
+    return true;
+  }
 
   constructor(options: SuSessionHostOptions<B>) {
     validateDescriptor(options.descriptor);

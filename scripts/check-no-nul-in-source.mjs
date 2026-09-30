@@ -74,7 +74,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { coverageOf, describeUnscanned } from './lib/tracked-files.mjs';
+import { coverageOf, describeUnscanned, presentOnDisk } from './lib/tracked-files.mjs';
 
 const FIX = process.argv.includes('--fix');
 
@@ -112,10 +112,12 @@ function trackedFiles() {
     cwd: ROOT,
     maxBuffer: 64 * 1024 * 1024,
   });
-  return out
+  const files = out
     .toString('utf8')
     .split(NUL_CHAR)
     .filter((p) => p && SOURCE_RE.test(p) && !SKIP_RE.test(p));
+  // WI-10004176: drop index entries a plain `rm` left behind until git-sync commits it.
+  return presentOnDisk(files, ROOT);
 }
 
 const scannedFiles = trackedFiles();

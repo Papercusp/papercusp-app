@@ -46,6 +46,38 @@ pub struct PendingSuTurn {
 /// live keys, with these known kinds kept in a stable order.
 pub const CUPBOARD_KINDS: [&str; 5] = ["all", "harness", "blueprint", "pack", "plugin"];
 
+/// Opt-in trace of every SU-session event PUI reduces: `PUI_SU_EVENT_LOG=<path>`
+/// appends one line per event (its sequence, the cursor and replay head it met,
+/// and the event itself, clipped). A replay/dedupe fault is otherwise invisible:
+/// the screen shows only the merged result (WI-10004184). Off by default.
+fn trace_su_event(
+    event: &crate::su_session::SuSessionEvent,
+    sequence: u64,
+    last_sequence: u64,
+    replay_head: u64,
+) {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(path) = PATH
+        .get_or_init(|| std::env::var("PUI_SU_EVENT_LOG").ok().filter(|p| !p.is_empty()))
+        .as_deref()
+    else {
+        return;
+    };
+    let mut body = format!("{event:?}");
+    if body.len() > 600 {
+        let mut cut = 600;
+        while !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        body.truncate(cut);
+    }
+    let line = format!("seq={sequence} last={last_sequence} head={replay_head} {body}\n");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 fn normalize_cupboard_kind(kind: &str) -> &str {
     if kind == "tool-pack" {
         "pack"
@@ -2584,6 +2616,14 @@ pub struct App {
     pub su_open_in_flight: bool,
     pub su_active_command_id: Option<String>,
     su_rendered_owner_turns: BTreeSet<String>,
+    /// WI-10004162: saved messages held aside while an engine replay re-reads
+    /// a restored chat, so each replayed reply lands under its own owner turn.
+    /// Released as the replay reaches each later owner turn; the rest when the
+    /// replay completes or a live event arrives.
+    su_replay_tail: Vec<ChatMessage>,
+    /// Where the next replay anchor search starts in `chat_messages`, so a
+    /// repeated question anchors to the right occurrence.
+    su_replay_floor: usize,
     /// P-014: open question cards, correlation id → the prompt they show. A
     /// card event carries no tool-call id, so the prompt is what joins a card
     /// to the question tool that asked it (`question_tool_prompts`).
@@ -2998,6 +3038,8 @@ impl App {
             su_open_in_flight: false,
             su_active_command_id: None,
             su_rendered_owner_turns: BTreeSet::new(),
+            su_replay_tail: Vec::new(),
+            su_replay_floor: 0,
             su_card_prompts: std::collections::BTreeMap::new(),
             su_skipped_prompts: BTreeSet::new(),
             su_answered_prompts: BTreeSet::new(),
@@ -3661,6 +3703,47 @@ impl App {
         }
     }
 
+    /// P-010 / D-008 adoption: attach the SU session of the chat this pane is
+    /// bound to when nothing is attached yet — a live row, or an ended row
+    /// that can resume from its native transcript. At most once per
+    /// advSessionId, and never while this pane's own open is in flight.
+    /// Called when an inventory frame lands and when a chat load binds a chat,
+    /// because either can arrive second.
+    fn adopt_bound_su_session(&mut self) -> Option<Action> {
+        if self.su_session.is_some() || self.su_open_in_flight {
+            return None;
+        }
+        let bound = self.agent_chat_id.as_deref()?;
+        let (chat_id, adv_session_id, backend) = self
+            .su_session_inventory
+            .iter()
+            .find(|entry| {
+                entry.agent_chat_id == bound
+                    && match entry.reconciliation {
+                        crate::su_session::SuSessionReconciliation::Attached => !entry.terminal,
+                        crate::su_session::SuSessionReconciliation::EndedArchived => {
+                            !entry.native_session_id.is_empty()
+                        }
+                        _ => false,
+                    }
+            })
+            .map(|entry| {
+                (
+                    entry.agent_chat_id.clone(),
+                    entry.adv_session_id,
+                    entry.backend,
+                )
+            })?;
+        self.su_adopted_sessions
+            .insert(adv_session_id)
+            .then(|| Action::AttachSuSession {
+                harness: self.harness.clone(),
+                chat_id,
+                adv_session_id,
+                backend,
+            })
+    }
+
     pub fn reset_agent_chat_binding(&mut self) {
         self.session_setup_accepted = false;
         self.chat_load_token = self.chat_load_token.saturating_add(1);
@@ -3673,6 +3756,8 @@ impl App {
         self.su_connection_error = None;
         self.su_launch_refusal = None;
         self.su_rendered_owner_turns.clear();
+        self.su_replay_tail.clear();
+        self.su_replay_floor = 0;
         self.su_card_prompts.clear();
         self.su_skipped_prompts.clear();
         self.su_answered_prompts.clear();
@@ -3913,6 +3998,8 @@ impl App {
             return Action::None; // replay duplicate
         }
         let replayed = envelope.sequence <= state.replay_head;
+        let replay_done = envelope.sequence >= state.replay_head;
+        trace_su_event(&event, envelope.sequence, state.last_sequence, state.replay_head);
         if envelope.sequence > state.last_sequence.saturating_add(1) {
             // Keep rendering the newest event, but make the missing range
             // visible to the operator; the next reconnect starts from the
@@ -3925,6 +4012,13 @@ impl App {
             progress.applied_sequence = envelope.sequence;
         }
         self.agent_chat_id = Some(envelope.session.agent_chat_id.clone());
+        // WI-10004162: a live event lands after the whole restored history.
+        // Field access, not `flush_su_replay_tail`: `state` still borrows
+        // `self.su_session` for the arms below.
+        if !replayed && !self.su_replay_tail.is_empty() {
+            let tail = std::mem::take(&mut self.su_replay_tail);
+            self.chat_messages.extend(tail);
+        }
 
         match event {
             crate::su_session::SuSessionEvent::Session { descriptor, .. } => {
@@ -4018,7 +4112,24 @@ impl App {
                 }
                 if let Some(text) = content.filter(|text| !text.is_empty()) {
                     if role == "owner" && phase == "completed" {
-                        if self.su_rendered_owner_turns.insert(turn_id) {
+                        if self.su_rendered_owner_turns.contains(&turn_id) {
+                            if replayed {
+                                // Already on screen from the saved record: the
+                                // replayed reply that follows belongs under it.
+                                self.anchor_su_replay_at_owner_turn(&text);
+                            }
+                        } else if replayed && self.anchor_su_replay_at_owner_turn(&text) {
+                            // WI-10004247: a replacement runtime re-reads the
+                            // native transcript and mints its own turn ids
+                            // (Claude `claude:<record>:N`, OMP per record), so
+                            // a replayed turn can carry an id the saved record
+                            // never held. The saved owner turn with the same
+                            // words, past the replay floor, IS this turn;
+                            // pushing it again showed it twice and dropped its
+                            // reply when the next turn held the tail aside.
+                            self.su_rendered_owner_turns.insert(turn_id);
+                        } else {
+                            self.su_rendered_owner_turns.insert(turn_id);
                             self.chat_messages.push(ChatMessage::user(&text));
                         }
                     } else if role == "assistant" && phase == "completed" {
@@ -4267,8 +4378,61 @@ impl App {
                 }
             }
         }
+        if replay_done {
+            self.flush_su_replay_tail();
+        }
         self.converge_su_rematerialize();
         Action::Render
+    }
+
+    /// WI-10004162: a restored SU chat shows its saved owner turns before the
+    /// engine replays the conversation, and SU replies are not in that record.
+    /// (See `trace_su_event` for the opt-in per-event trace.)
+    /// When the replay reaches an owner turn already on screen, the saved
+    /// messages after it wait aside, so the replayed reply lands under its own
+    /// question instead of after every saved question. No match (a native
+    /// transcript that words the turn differently) keeps the old behaviour.
+    /// Returns whether a saved owner turn with these words was found.
+    fn anchor_su_replay_at_owner_turn(&mut self, text: &str) -> bool {
+        let is_turn = |m: &ChatMessage| m.role == "user" && m.content.trim() == text.trim();
+        if let Some(pos) = self.su_replay_tail.iter().position(is_turn) {
+            let rest = self.su_replay_tail.split_off(pos + 1);
+            let released = std::mem::replace(&mut self.su_replay_tail, rest);
+            self.chat_messages.extend(released);
+            self.su_replay_floor = self.chat_messages.len();
+            return true;
+        }
+        let floor = self.su_replay_floor.min(self.chat_messages.len());
+        let Some(pos) = self.chat_messages[floor..]
+            .iter()
+            .position(is_turn)
+            .map(|offset| floor + offset)
+        else {
+            return false;
+        };
+        self.su_replay_floor = pos + 1;
+        if pos + 1 < self.chat_messages.len()
+            && !self.chat_messages[pos + 1..].iter().any(|m| m.streaming)
+        {
+            let mut held = self.chat_messages.split_off(pos + 1);
+            // WI-10004184: a reply already on screen after this turn came from
+            // the same history the replay is now re-rendering. Held aside and
+            // put back after the replay, it showed that reply twice (measured
+            // in the P-005 review after /resume). Only saved owner turns and
+            // local notes wait aside; the replay re-renders the replies.
+            held.retain(|m| m.role != "assistant");
+            held.append(&mut self.su_replay_tail);
+            self.su_replay_tail = held;
+        }
+        true
+    }
+
+    /// Put every held saved message back, after the replayed history.
+    fn flush_su_replay_tail(&mut self) {
+        if !self.su_replay_tail.is_empty() {
+            let tail = std::mem::take(&mut self.su_replay_tail);
+            self.chat_messages.extend(tail);
+        }
     }
 
     /// Advance the archive-replay banner after an event has been reduced.
@@ -4352,9 +4516,17 @@ impl App {
             return Action::Render;
         };
         self.su_command_counter = self.su_command_counter.saturating_add(1);
+        // WI-10004247: the counter restarts with every PUI process (a reopened
+        // PUI sent `pui-2-interrupt-1` again, measured). A host that outlives
+        // the process answers a repeated id with the same payload as a replay
+        // (SuSessionHost.dispatchCommand), so that control would stop nothing.
+        // The nonce makes each control its own.
         let command_id = format!(
-            "pui-{}-{}-{}",
-            identity.adv_session_id, command_type, self.su_command_counter
+            "pui-{}-{}-{}-{}",
+            identity.adv_session_id,
+            command_type,
+            crate::command_nonce(),
+            self.su_command_counter
         );
         let command = control.command_json(identity, &command_id, "pui");
         let Some(chat_id) = self.agent_chat_id.clone() else {
@@ -4544,6 +4716,31 @@ impl App {
         self.chat_draft.clear();
         self.chat_vertical_column = None;
         self.chat_slash_selected = 0;
+    }
+
+    /// The engine is restoring a saved conversation and no owner turn of this
+    /// PUI is in flight. `Resuming` locks input like a running turn, but there
+    /// is nothing for Esc to stop.
+    /// True when a SU session is open (or opening) but no turn is running: the
+    /// engine is still starting, restoring the saved conversation, or idle.
+    /// Esc must not send an interrupt then. WI-10004247 measured both
+    /// windows on real Claude: the reopened PUI sent its interrupt while the
+    /// engine still reported `starting` (before `resuming`), so checking
+    /// `resuming` alone missed it.
+    fn su_nothing_to_interrupt(&self) -> bool {
+        if self.su_pending_turn.is_some() || self.su_active_command_id.is_some() {
+            return false;
+        }
+        match self.su_session.as_ref() {
+            Some(session) => matches!(
+                session.lifecycle,
+                crate::su_session::SuSessionLifecycleState::Starting
+                    | crate::su_session::SuSessionLifecycleState::Resuming
+                    | crate::su_session::SuSessionLifecycleState::Ready
+                    | crate::su_session::SuSessionLifecycleState::Interrupted
+            ),
+            None => self.su_open_in_flight,
+        }
     }
 
     /// Stop the running turn (Esc in the composer, or Ctrl+X). Queued lines are
@@ -6009,6 +6206,18 @@ impl App {
         // The setup note describes the owner's last action; blockers render live
         // from `setup_blocker()`, so a config refresh has nothing stale to clear.
         self.operator_config = c;
+        // D-010: a setup panel opened before this read landed was built on the
+        // client default engine. Until the owner picks one, it follows the
+        // operator's configured engine, or Review launches the wrong one.
+        if let Some(configured) = self.configured_su_backend() {
+            if let Some(setup) = self.session_setup.as_mut() {
+                if !setup.backend_chosen && setup.backend != configured {
+                    setup.backend = configured;
+                    setup.model = None;
+                    setup.effort = None;
+                }
+            }
+        }
         let Some((axis, selected_id)) = open_selection else {
             return;
         };
@@ -6364,6 +6573,7 @@ impl App {
                                 "omp" => crate::su_session::SuSessionBackend::Omp,
                                 _ => crate::su_session::SuSessionBackend::Claude,
                             };
+                            setup.backend_chosen = true;
                             setup.model = None;
                             setup.effort = None;
                         }
@@ -6550,13 +6760,14 @@ impl App {
             .unwrap_or_else(|| "new".to_string());
         let model = self.chat_model.as_deref().unwrap_or("server default");
         let effort = self.chat_effort.as_deref().unwrap_or("model/default");
-        let account = self.chat_account.as_deref().unwrap_or("default");
         let mode = self.chat_mode.as_deref().unwrap_or("manual");
-        let selected_backend = self
+        let selected = self
             .su_backend
             .or(self.configured_su_backend())
-            .unwrap_or(crate::su_session::PUI_DEFAULT_SU_BACKEND)
-            .label();
+            .unwrap_or(crate::su_session::PUI_DEFAULT_SU_BACKEND);
+        let account =
+            crate::session_config::account_label(self.chat_account.as_deref(), selected);
+        let selected_backend = selected.label();
         let backend = self
             .backend_identity_status()
             .unwrap_or_else(|| "backend loading".to_string());
@@ -7614,10 +7825,16 @@ impl App {
             setup.backend = backend;
         }
         if self.agent_chat_id.is_none() && self.su_session.is_none() {
-            setup.backend = self.su_backend.unwrap_or(setup.backend);
+            if let Some(backend) = self.su_backend {
+                setup.backend = backend;
+                setup.backend_chosen = true;
+            }
             setup.model = self.chat_model.clone();
             setup.effort = self.chat_effort.clone();
-            setup.account = self.chat_account.clone().or(Some("default".into()));
+            // WI-10004164 / D-011: keep an unchosen account unchosen. This is
+            // also bare `pui`'s chat-first quick start, so pre-filling
+            // `default` here sent an explicit account on every first launch.
+            setup.account = self.chat_account.clone();
             setup.mode = self.chat_mode.clone();
         }
         self.session_setup = Some(setup);
@@ -11773,41 +11990,7 @@ impl App {
                 //  - at most once per advSessionId (see `su_adopted_sessions`);
                 //  - never while this pane's own open is in flight, since the
                 //    row it would adopt is the session that open is creating.
-                if self.su_session.is_none() && !self.su_open_in_flight {
-                    let adoptable = self
-                        .su_session_inventory
-                        .iter()
-                        .find(|entry| {
-                            Some(entry.agent_chat_id.as_str()) == self.agent_chat_id.as_deref()
-                                && match entry.reconciliation {
-                                    crate::su_session::SuSessionReconciliation::Attached => {
-                                        !entry.terminal
-                                    }
-                                    crate::su_session::SuSessionReconciliation::EndedArchived => {
-                                        !entry.native_session_id.is_empty()
-                                    }
-                                    _ => false,
-                                }
-                        })
-                        .map(|entry| {
-                            (
-                                entry.agent_chat_id.clone(),
-                                entry.adv_session_id,
-                                entry.backend,
-                            )
-                        });
-                    if let Some((chat_id, adv_session_id, backend)) = adoptable {
-                        if self.su_adopted_sessions.insert(adv_session_id) {
-                            return Action::AttachSuSession {
-                                harness: self.harness.clone(),
-                                chat_id,
-                                adv_session_id,
-                                backend,
-                            };
-                        }
-                    }
-                }
-                Action::Render
+                self.adopt_bound_su_session().unwrap_or(Action::Render)
             }
             Event::ConversationContextProjectionLoaded { target, projection } => {
                 // A slow response for the previously focused native session is
@@ -11902,9 +12085,23 @@ impl App {
                     self.chat_messages = messages;
                     self.chat_focus = None;
                     self.su_rendered_owner_turns = owner_turn_ids.into_iter().collect();
+                    self.su_replay_tail.clear();
+                    self.su_replay_floor = 0;
                     self.pending_approvals = approvals;
                     self.chat_scroll = 0;
                     self.refresh_open_conversation_picker();
+                    // WI-10004247: a load with no selected chat (startup, a
+                    // pot switch) picks its default chat HERE, after
+                    // `agent_chat_load` already delivered the inventory frame.
+                    // That frame found nothing bound, so the workbench showed
+                    // the ended chat with only the owner's turns and never
+                    // resumed it (D-008). Adopt against the inventory already
+                    // held. Chat-first resumes only through /resume (D-008).
+                    if !self.chat_first {
+                        if let Some(action) = self.adopt_bound_su_session() {
+                            return action;
+                        }
+                    }
                 }
                 Action::Render
             }
@@ -13187,8 +13384,13 @@ impl App {
             }
             return match code {
                 // Esc stops a running turn (Claude Code / Codex parity); with
-                // nothing running it leaves the message box as before.
-                KeyCode::Esc if self.chat_streaming => self.interrupt_chat_turn(),
+                // nothing running it leaves the message box as before. A saved
+                // conversation being restored is not a running turn
+                // (WI-10004247: Esc on a just-reopened chat sent an interrupt to
+                // the resuming engine and left the owner stuck in the box).
+                KeyCode::Esc if self.chat_streaming && !self.su_nothing_to_interrupt() => {
+                    self.interrupt_chat_turn()
+                }
                 KeyCode::Esc => {
                     self.chat_composing = false;
                     Action::Render
@@ -17443,6 +17645,47 @@ mod tests {
         }
     }
 
+    /// D-010 / WI-10004164: a setup panel opened before the agent-config read
+    /// landed was built on the client default engine. It follows the configured
+    /// engine when the read lands, unless the owner picked one in the meantime.
+    #[test]
+    fn session_setup_opened_before_the_config_read_follows_the_configured_engine() {
+        use crate::su_session::SuSessionBackend;
+        let omp_config = |a: &App| {
+            let mut config = a.operator_config.clone();
+            config.agent =
+                Some(serde_json::from_value(json!({ "effectiveBackend": "omp" })).unwrap());
+            config
+        };
+
+        let mut a = setup_app();
+        a.operator_config.agent = None;
+        a.open_session_setup();
+        let setup = a.session_setup.as_ref().unwrap();
+        assert_eq!(setup.backend, crate::su_session::PUI_DEFAULT_SU_BACKEND);
+        assert!(!setup.backend_chosen);
+        let config = omp_config(&a);
+        a.set_operator_config(config);
+        assert_eq!(a.session_setup.as_ref().unwrap().backend, SuSessionBackend::Omp);
+        assert_eq!(
+            crate::session_config::account_label(
+                a.session_setup.as_ref().unwrap().account.as_deref(),
+                a.session_setup.as_ref().unwrap().backend
+            ),
+            "default (not chosen; a gateway model uses auto)"
+        );
+
+        // A backend the owner picked is never overwritten by a late read.
+        let mut b = setup_app();
+        b.operator_config.agent = None;
+        b.su_backend = Some(SuSessionBackend::Codex);
+        b.open_session_setup();
+        assert!(b.session_setup.as_ref().unwrap().backend_chosen);
+        let config = omp_config(&b);
+        b.set_operator_config(config);
+        assert_eq!(b.session_setup.as_ref().unwrap().backend, SuSessionBackend::Codex);
+    }
+
     #[test]
     fn session_setup_first_send_requires_review_and_preserves_exact_initial_turn() {
         let mut a = setup_app();
@@ -17505,7 +17748,46 @@ mod tests {
             a.su_pending_turn.as_ref().unwrap().content,
             "  first λ 雪  "
         );
-        assert_eq!(a.chat_account.as_deref(), Some("default"));
+        // WI-10004164 / D-011: the quick start never chose an account, so
+        // none is sent and launch-su resolves it (OMP gateway model -> auto).
+        assert_eq!(a.chat_account, None);
+        match action {
+            Action::OpenSuSession { launch, .. } => assert_eq!(launch.account, None),
+            other => panic!("expected a launch, got {other:?}"),
+        }
+    }
+
+    /// WI-10004164 / D-011: the new-session form leaves an account the owner
+    /// has not chosen unchosen, names that honestly, and keeps a real choice.
+    #[test]
+    fn session_setup_leaves_an_unchosen_account_unchosen() {
+        let mut a = chat_first_app();
+        a.open_session_setup();
+        assert_eq!(a.session_setup.as_ref().unwrap().account, None);
+        assert_eq!(
+            crate::session_config::account_label(None, crate::su_session::SuSessionBackend::Claude),
+            "default (not chosen)"
+        );
+        assert_eq!(
+            crate::session_config::account_label(None, crate::su_session::SuSessionBackend::Omp),
+            "default (not chosen; a gateway model uses auto)"
+        );
+        assert_eq!(
+            crate::session_config::account_label(
+                Some("default"),
+                crate::su_session::SuSessionBackend::Omp
+            ),
+            "default",
+            "an explicit default is shown as the choice it is"
+        );
+
+        let mut b = chat_first_app();
+        b.chat_account = Some("acct-7".into());
+        b.open_session_setup();
+        assert_eq!(
+            b.session_setup.as_ref().unwrap().account.as_deref(),
+            Some("acct-7")
+        );
     }
 
     /// pui-chat-first-ux P-012: Enter moves the message into the transcript
@@ -18261,6 +18543,25 @@ mod tests {
             Action::Render
         );
         assert!(a.session_note.as_deref().unwrap().contains("unsupported"));
+
+        // WI-10004247: a second PUI process starts its counter at 1 again. Its
+        // control ids must still differ, or a host that outlived the first
+        // process answers the repeat as a replay and stops nothing.
+        let mut reopened = App::new();
+        reopened.agent_chat_id = a.agent_chat_id.clone();
+        reopened.su_session = a.su_session.clone();
+        reopened.su_command_counter = 0;
+        a.su_command_counter = 0;
+        let id_of = |app: &mut App| match app.su_session_control(
+            crate::su_session::SuSessionControl::Interrupt { reason: None },
+        ) {
+            Action::SendSuSessionCommand { command, .. } => command["commandId"].as_str().unwrap().to_string(),
+            other => panic!("expected typed SU command, got {other:?}"),
+        };
+        let first = id_of(&mut a);
+        let repeat = id_of(&mut reopened);
+        assert!(first.starts_with("pui-7-interrupt-"), "{first}");
+        assert_ne!(first, repeat, "each process's controls are distinct");
     }
 
     /// A chat with a running SU engine bound, as P-009's quit paths see it.
@@ -18526,6 +18827,289 @@ mod tests {
                 .any(|m| m.content.contains("what did you conclude?")),
             "the archived transcript must be reduced, not discarded as a replay duplicate"
         );
+    }
+
+    /// WI-10004162 (measured in the real-engine review frame 05a): a restored
+    /// SU chat loads its saved owner turns, whose replies are not in the
+    /// record, then the engine replays the conversation. Each replayed reply
+    /// must land under its own question, not after every saved question, and a
+    /// saved turn the replay never reaches still shows, last.
+    #[test]
+    fn su_replay_puts_each_reply_under_its_restored_owner_turn() {
+        let mut app = App::new();
+        app.agent_chat_id = Some("chat-1".into());
+        app.chat_messages = vec![
+            ChatMessage::user("same question"),
+            ChatMessage::user("second question"),
+            ChatMessage::user("same question"),
+            ChatMessage::user("never delivered"),
+        ];
+        app.su_rendered_owner_turns = ["t1", "t2", "t3", "t4"].map(String::from).into_iter().collect();
+        app.set_su_session_binding(su_binding());
+        app.apply_su_session_snapshot(su_archived_snapshot(1, 9, Some(su_rematerialize_verdict())));
+        let mut sequence = 0;
+        let mut send = |app: &mut App, phase: &str, turn: &str, role: &str, content: Option<&str>| {
+            sequence += 1;
+            let mut event = su_event_base("transcript", sequence);
+            event["phase"] = json!(phase);
+            event["turnId"] = json!(turn);
+            event["role"] = json!(role);
+            event["channel"] = json!(if role == "owner" { "primary" } else { "text" });
+            if let Some(content) = content {
+                event["content"] = json!(content);
+            }
+            app.apply_su_session_event(su_event(event));
+        };
+        for (turn, question, reply) in [
+            ("t1", "same question", "reply one"),
+            ("t2", "second question", "reply two"),
+            ("t3", "same question", "reply three"),
+        ] {
+            send(&mut app, "completed", turn, "owner", Some(question));
+            send(&mut app, "started", turn, "assistant", None);
+            if turn == "t2" {
+                // Mid-replay, the later saved turns wait aside.
+                assert_eq!(app.chat_messages.last().map(|m| m.streaming), Some(true));
+                assert!(!app.chat_messages.iter().any(|m| m.content == "never delivered"));
+            }
+            send(&mut app, "completed", turn, "assistant", Some(reply));
+        }
+        let rendered: Vec<(&str, &str)> = app
+            .chat_messages
+            .iter()
+            .map(|m| (m.role.as_str(), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                ("user", "same question"),
+                ("assistant", "reply one"),
+                ("user", "second question"),
+                ("assistant", "reply two"),
+                ("user", "same question"),
+                ("assistant", "reply three"),
+                ("user", "never delivered"),
+            ],
+            "each replayed reply belongs under its own question"
+        );
+        assert!(app.su_replay_tail.is_empty());
+    }
+
+    /// WI-10004184 (measured in the real-engine review frame 05 after
+    /// /resume): a chat that already shows its replies is replayed again. The
+    /// replies on screen must not be held aside and put back after the
+    /// replayed copies, which showed a reply twice once the next turn began.
+    #[test]
+    fn su_replay_over_rendered_replies_shows_each_reply_once() {
+        let mut app = App::new();
+        app.agent_chat_id = Some("chat-1".into());
+        app.chat_messages = vec![
+            ChatMessage::user("first question"),
+            ChatMessage::assistant("reply one"),
+            ChatMessage::user("second question"),
+            ChatMessage::assistant("reply two"),
+        ];
+        app.su_rendered_owner_turns = ["t1", "t2"].map(String::from).into_iter().collect();
+        app.set_su_session_binding(su_binding());
+        app.apply_su_session_snapshot(su_archived_snapshot(1, 6, Some(su_rematerialize_verdict())));
+        let mut sequence = 0;
+        let mut send = |app: &mut App, phase: &str, turn: &str, role: &str, content: Option<&str>| {
+            sequence += 1;
+            let mut event = su_event_base("transcript", sequence);
+            event["phase"] = json!(phase);
+            event["turnId"] = json!(turn);
+            event["role"] = json!(role);
+            event["channel"] = json!(if role == "owner" { "primary" } else { "text" });
+            if let Some(content) = content {
+                event["content"] = json!(content);
+            }
+            app.apply_su_session_event(su_event(event));
+        };
+        for (turn, question, reply) in [("t1", "first question", "reply one"), ("t2", "second question", "reply two")] {
+            send(&mut app, "completed", turn, "owner", Some(question));
+            send(&mut app, "started", turn, "assistant", None);
+            send(&mut app, "completed", turn, "assistant", Some(reply));
+        }
+        // The next owner turn is live, past the replayed history.
+        send(&mut app, "completed", "t3", "owner", Some("third question"));
+        let rendered: Vec<(&str, &str)> = app
+            .chat_messages
+            .iter()
+            .map(|m| (m.role.as_str(), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                ("user", "first question"),
+                ("assistant", "reply one"),
+                ("user", "second question"),
+                ("assistant", "reply two"),
+                ("user", "third question"),
+            ],
+            "each reply shows once, in conversation order"
+        );
+        assert!(app.su_replay_tail.is_empty());
+    }
+
+    /// WI-10004247 (measured on the installed PUI with real Claude, reopen of
+    /// the greeting journey): a replacement runtime re-reads the native
+    /// transcript and mints its own turn ids, which the saved record's
+    /// receipts never held. Claude's replay carries ONE id for the whole
+    /// history (the native file has no turn-end records); OMP mints one per
+    /// record. Both shapes must render each saved turn once, reply beneath.
+    #[test]
+    fn su_replay_with_native_turn_ids_anchors_at_the_saved_owner_turns() {
+        for per_turn_ids in [false, true] {
+            let mut app = App::new();
+            app.agent_chat_id = Some("chat-1".into());
+            app.chat_messages = vec![
+                ChatMessage::user("greeting"),
+                ChatMessage::user("file request"),
+                ChatMessage::user("follow-up"),
+            ];
+            app.su_rendered_owner_turns =
+                ["pui-turn-1", "pui-turn-2", "pui-turn-3"].map(String::from).into_iter().collect();
+            app.set_su_session_binding(su_binding());
+            app.apply_su_session_snapshot(su_archived_snapshot(1, 9, Some(su_rematerialize_verdict())));
+            let mut sequence = 0;
+            let mut send = |app: &mut App, phase: &str, turn: &str, role: &str, content: Option<&str>| {
+                sequence += 1;
+                let mut event = su_event_base("transcript", sequence);
+                event["phase"] = json!(phase);
+                event["turnId"] = json!(turn);
+                event["role"] = json!(role);
+                event["channel"] = json!(if role == "owner" { "primary" } else { "text" });
+                if let Some(content) = content {
+                    event["content"] = json!(content);
+                }
+                app.apply_su_session_event(su_event(event));
+            };
+            for (index, (question, reply)) in [
+                ("greeting", "hello back"),
+                ("file request", "file contents"),
+                ("follow-up", "continued"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let turn = if per_turn_ids {
+                    format!("omp:record-{index}:{}", index + 1)
+                } else {
+                    "claude:first-record:1".to_string()
+                };
+                send(&mut app, "completed", &turn, "owner", Some(question));
+                send(&mut app, "started", &turn, "assistant", None);
+                send(&mut app, "completed", &turn, "assistant", Some(reply));
+            }
+            let rendered: Vec<(&str, &str)> = app
+                .chat_messages
+                .iter()
+                .map(|m| (m.role.as_str(), m.content.as_str()))
+                .collect();
+            assert_eq!(
+                rendered,
+                vec![
+                    ("user", "greeting"),
+                    ("assistant", "hello back"),
+                    ("user", "file request"),
+                    ("assistant", "file contents"),
+                    ("user", "follow-up"),
+                    ("assistant", "continued"),
+                ],
+                "per_turn_ids={per_turn_ids}: each saved turn once, its reply beneath"
+            );
+            assert!(app.su_replay_tail.is_empty());
+        }
+    }
+
+    /// Calibration for the case above: a LIVE owner turn with an unknown id is
+    /// new conversation and is shown, even when its words repeat a saved turn.
+    #[test]
+    fn su_live_owner_turn_with_repeated_words_is_still_shown() {
+        let mut app = App::new();
+        app.agent_chat_id = Some("chat-1".into());
+        app.chat_messages = vec![ChatMessage::user("continue")];
+        app.su_rendered_owner_turns = ["pui-turn-1"].map(String::from).into_iter().collect();
+        app.set_su_session_binding(su_binding());
+        let mut event = su_event_base("transcript", 1);
+        event["phase"] = json!("completed");
+        event["turnId"] = json!("pui-turn-2");
+        event["role"] = json!("owner");
+        event["channel"] = json!("primary");
+        event["content"] = json!("continue");
+        app.apply_su_session_event(su_event(event));
+        let users = app.chat_messages.iter().filter(|m| m.role == "user").count();
+        assert_eq!(users, 2, "a live repeat is a new turn");
+    }
+
+    /// WI-10004247: Esc on a just-reopened chat, while the engine restores
+    /// the saved conversation, leaves the message box. Nothing is running, so
+    /// no interrupt goes to the resuming engine.
+    #[test]
+    fn chat_first_esc_while_restoring_leaves_the_box_without_interrupting() {
+        // Opening: no session bound yet, the open request is in flight.
+        let mut opening = chat_first_app();
+        opening.agent_chat_id = Some("chat-1".into());
+        opening.chat_streaming = true;
+        opening.su_open_in_flight = true;
+        opening.chat_composing = true;
+        let action = opening.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(action, Action::Render, "no interrupt while the session opens");
+        assert!(!opening.chat_composing, "Esc leaves the message box while opening");
+
+        // Starting: the real reopened-Claude window (WI-10004247) — the
+        // engine reported `starting` when Esc arrived, before `resuming`.
+        let mut starting = chat_first_app();
+        starting.agent_chat_id = Some("chat-1".into());
+        starting.set_su_session_binding(su_binding());
+        let mut still_starting = su_event_base("lifecycle", 1);
+        still_starting["previousState"] = json!("starting");
+        still_starting["state"] = json!("starting");
+        still_starting["runtimeGeneration"] = json!(1);
+        // The event carries the session identity, so an interrupt WOULD be
+        // sendable: the assertion below tests the decision, not a missing id.
+        starting.apply_su_session_event(su_event(still_starting));
+        assert!(starting.su_session.as_ref().unwrap().identity.is_some());
+        starting.chat_streaming = true;
+        starting.chat_composing = true;
+        let action = starting.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(action, Action::Render, "no interrupt while the engine starts");
+        assert!(!starting.chat_composing, "Esc leaves the message box while starting");
+
+        let mut a = chat_first_app();
+        a.agent_chat_id = Some("chat-1".into());
+        a.set_su_session_binding(su_binding());
+        let mut resuming = su_event_base("lifecycle", 1);
+        resuming["previousState"] = json!("ready");
+        resuming["state"] = json!("resuming");
+        resuming["runtimeGeneration"] = json!(1);
+        a.apply_su_session_event(su_event(resuming));
+        assert!(a.chat_streaming, "restoring locks input");
+        a.chat_composing = true;
+        let action = a.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(action, Action::Render, "no interrupt while restoring");
+        assert!(!a.chat_composing, "Esc leaves the message box");
+
+        // Calibration: once an owner turn is in flight, Esc stops it.
+        a.chat_composing = true;
+        a.su_active_command_id = Some("pui-1".into());
+        let action = a.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_ne!(action, Action::Render, "a running turn is interrupted, got {action:?}");
+
+        // Calibration: a turn running on the engine (another client's, or
+        // one whose command already settled) is still interruptible.
+        let mut running = chat_first_app();
+        running.agent_chat_id = Some("chat-1".into());
+        running.set_su_session_binding(su_binding());
+        let mut engine_running = su_event_base("lifecycle", 1);
+        engine_running["previousState"] = json!("ready");
+        engine_running["state"] = json!("running");
+        engine_running["runtimeGeneration"] = json!(1);
+        running.apply_su_session_event(su_event(engine_running));
+        assert!(running.chat_streaming, "a running engine locks input");
+        running.chat_composing = true;
+        let action = running.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_ne!(action, Action::Render, "a running engine turn is interrupted, got {action:?}");
     }
 
     /// The progress surfaced while an archive is replayed must be a measured
@@ -19255,6 +19839,61 @@ mod tests {
             Action::Render,
             "an ended row with no native id must not adopt"
         );
+    }
+
+    /// WI-10004247: on startup (no restored chat) `agent_chat_load` sends the
+    /// inventory frame BEFORE the load that picks the default chat. The frame
+    /// finds nothing bound, so adoption must also run when the load binds the
+    /// chat; before this fix the workbench showed the ended chat with only the
+    /// owner's turns and never resumed it. Chat-first resumes only via /resume.
+    #[test]
+    fn startup_load_adopts_the_default_chat_after_the_inventory_frame() {
+        let mut ended = inventory_row_for(
+            "chat-1",
+            crate::su_session::SuSessionReconciliation::EndedArchived,
+        );
+        ended.lifecycle = crate::su_session::SuSessionLifecycleState::Ended;
+        ended.terminal = true;
+        let startup = |chat_first: bool| -> (Action, Action) {
+            let mut app = App::new();
+            app.chat_first = chat_first;
+            let token = app.next_agent_chat_load_token();
+            let harness = app.harness.clone();
+            let frame = app.update(Event::SuSessionInventory {
+                harness: harness.clone(),
+                selected_chat_id: None,
+                entries: vec![ended.clone()],
+            });
+            let load = app.update(Event::AgentChatLoaded {
+                harness,
+                chat_id: Some("chat-1".into()),
+                role: "operator".into(),
+                load_token: token,
+                summaries: vec![chat_summary_for("chat-1")],
+                messages: Vec::new(),
+                owner_turn_ids: Vec::new(),
+                approvals: Vec::new(),
+            });
+            (frame, load)
+        };
+        let (frame, load) = startup(false);
+        assert_eq!(
+            frame,
+            Action::Render,
+            "nothing is bound when the frame lands"
+        );
+        assert_eq!(
+            load,
+            Action::AttachSuSession {
+                harness: "papercup".into(),
+                chat_id: "chat-1".into(),
+                adv_session_id: 42,
+                backend: crate::su_session::SuSessionBackend::Codex,
+            },
+            "the workbench resumes the default chat it landed on"
+        );
+        let (_, load) = startup(true);
+        assert_eq!(load, Action::Render, "chat-first never resumes on load");
     }
 
     /// P-010: failed rows are "preserved for inspection" and converged to an

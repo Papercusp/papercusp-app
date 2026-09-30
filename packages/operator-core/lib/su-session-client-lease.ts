@@ -74,6 +74,12 @@ export interface SuClientLeaseStore {
   expired(advSessionIds: readonly number[]): Promise<number[]>;
 }
 
+// grant and renew deliberately ignore ended_at (WI-10004247). An attached
+// resume starts its engine, and so grants its lease, BEFORE
+// finalizeAdvSessionResume reopens the row; a client that attaches during that
+// start renews it then too. Filtering on ended_at made both no-ops, leaving the
+// previous run's lapsed lease for the sweep to end the resumed engine with. A
+// lease on a row with no engine is inert: only a supervised engine is judged.
 export const pgSuClientLeaseStore: SuClientLeaseStore = {
   async grant(advSessionId, ttlMs) {
     const { sql } = getOrgPg();
@@ -81,7 +87,7 @@ export const pgSuClientLeaseStore: SuClientLeaseStore = {
       UPDATE harness_shared.adv_sessions
          SET su_client_lease_until = now() + make_interval(secs => ${ttlMs}::double precision / 1000),
              su_client_detached_at = NULL
-       WHERE id = ${advSessionId} AND ended_at IS NULL`;
+       WHERE id = ${advSessionId}`;
   },
   async renew(advSessionIds, ttlMs) {
     if (advSessionIds.length === 0) return;
@@ -91,7 +97,7 @@ export const pgSuClientLeaseStore: SuClientLeaseStore = {
          SET su_client_lease_until = GREATEST(
                COALESCE(su_client_lease_until, now()),
                now() + make_interval(secs => ${ttlMs}::double precision / 1000))
-       WHERE id = ANY(${[...advSessionIds]}::bigint[]) AND ended_at IS NULL`;
+       WHERE id = ANY(${[...advSessionIds]}::bigint[])`;
   },
   async detach(advSessionId) {
     const { sql } = getOrgPg();

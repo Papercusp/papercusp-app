@@ -955,6 +955,11 @@ export const GATE_CODE_OWNERSHIP: Record<PlanAcceptanceGateCode, PlanAcceptanceG
   design_evidence_unavailable: 'unmeasured',
   spec_coverage_unavailable: 'unmeasured',
 
+  // --- the repair belongs to another node -----------------------------------
+  // WI-10004178 / endgame D-095: a federated receiver cannot grade or ship; the
+  // authoring node the refusal names does. Never a grader here, never author work here.
+  acceptance_authored_on_other_node: 'not-here',
+
   // --- never reaches classification -----------------------------------------
   // `gradeable` short-circuits this to a 'not-applicable' obligation well above.
   plan_items_unfinished: 'not-here',

@@ -29,13 +29,18 @@
  * channel carries exactly one request.
  */
 import type { Sql } from 'postgres';
-import { isAppKeyShaped } from '../connected-apps/key';
+import { isAppKeyShaped, parseAppKey } from '../connected-apps/key';
+import { isRelayableTokenAnswer, relayedBasic, relayedTokenFields } from '../connected-apps/mcp-oauth';
+import { publicOriginOf } from '../connected-apps/mcp-oauth-discovery';
+// portal-mcp-oauth imports this module for TYPES only, so this runtime import makes no cycle.
+import { portalResourceMetadataUrl } from '../connected-apps/portal-mcp-oauth';
 import { EXTERNAL_INGRESS_MARKER_HEADER } from '../auth/forwarded-request-trust';
 import { isHostedConnectorLive } from '../endpoint-route/hosted-workspace-connector';
 import {
   HOSTED_OPERATOR_HTTP_MAX_REQUEST_BODY_BYTES,
   OperatorHttpChannel,
   decideRelayRoute,
+  localOperatorOrigin,
   type OperatorHttpAudit,
   type OperatorHttpFetch,
   type OperatorHttpRoute,
@@ -135,6 +140,166 @@ export function createAppHttpChannel(options: AppHttpChannelOptions): OperatorHt
     requestHeaders: appHttpRequestHeaders,
     responseHeaders: APP_HTTP_RESPONSE_HEADERS,
   });
+}
+
+// ─── Machine side: the app-key-mint channel (P-325, D-021) ──────────────────
+
+/**
+ * The machine's loopback route that mints a key for a grant the portal's consent page approved
+ * (routes/connected-apps/oauth.ts). Only {@link AppKeyMintChannel} calls it: neither relay plane's
+ * allowlist can reach `/api/connected-apps/*`, and the route is `auth:'loopback'` besides.
+ */
+export const PORTAL_MINT_ROUTE_PATH = '/api/connected-apps/portal-mint';
+/** Below the portal's own 30 s wait, so the portal hears `mint.error` rather than a timeout. */
+export const APP_KEY_MINT_FETCH_TIMEOUT_MS = 20_000;
+/** Who approved the grant, as the portal names them. Recorded as the key's creator. */
+export const PORTAL_APPROVER_RE = /^portal:[A-Za-z0-9_.@:+-]{1,200}$/;
+const MINT_LABEL_MAX = 200;
+
+export interface AppKeyMintChannelOptions {
+  send: OperatorHttpSend;
+  audit: OperatorHttpAudit;
+  /** Called once, after the one answer is sent: the host drops the channel and tells the portal. */
+  done: (reason: string) => void;
+  origin?: string;
+  fetch?: OperatorHttpFetch;
+  timeoutMs?: number;
+}
+
+/**
+ * The machine's loopback half of the PORTAL's client-credentials grant (P-016, D-022). The portal
+ * token endpoint relays a `grant_type=client_credentials` request as one `token.request`; this
+ * machine authenticates the client and issues the `pcat_` token, so the portal never sees a stored
+ * secret. Same channel kind and one-request rule as the mint.
+ */
+export const PORTAL_TOKEN_ROUTE_PATH = '/api/connected-apps/portal-token';
+
+type MintAnswer =
+  | { type: 'mint.issued'; requestId: string; key: string; scopes: unknown }
+  | { type: 'mint.error'; requestId: string | null; code: string }
+  | { type: 'token.answer'; requestId: string; status: number; body: Record<string, unknown> };
+
+/**
+ * The machine's end of one `app-key-mint` channel: exactly one `mint.request`, answered with
+ * `mint.issued` or `mint.error`. The request is checked here (shape, approver, label) and again by
+ * the loopback route, which also resolves the scopes against this machine's tool catalog — so a
+ * scope the portal consented to but this machine refuses comes back as `invalid_scope`.
+ *
+ * The forward carries NO ingress marker: this is the machine acting on its own connector's
+ * instruction, the same trust the operator-http plane's loopback forward relies on (D-418). A
+ * closed channel aborts the forward; a key the operator minted just before the abort is never
+ * delivered and its secret is gone (only the hash is stored), so it cannot be used.
+ */
+export class AppKeyMintChannel {
+  private used = false;
+  private closed = false;
+  private readonly controller = new AbortController();
+  private readonly origin: string;
+  private readonly fetchImpl: OperatorHttpFetch;
+
+  constructor(private readonly options: AppKeyMintChannelOptions) {
+    this.origin = options.origin ?? localOperatorOrigin();
+    this.fetchImpl = options.fetch ?? ((url, init) => fetch(url, init));
+  }
+
+  async accept(type: string, payload: Record<string, unknown>): Promise<void> {
+    if (this.closed) return;
+    const requestId = typeof payload.requestId === 'string' && payload.requestId.length <= 256 ? payload.requestId : null;
+    if (type !== 'mint.request' && type !== 'token.request') {
+      return this.answer({ type: 'mint.error', requestId, code: 'channel_kind_mismatch' }, false);
+    }
+    if (!requestId) return this.answer({ type: 'mint.error', requestId, code: 'invalid_request' });
+    if (this.used) return this.answer({ type: 'mint.error', requestId, code: 'mint_already_requested' }, false);
+    this.used = true;
+    if (type === 'token.request') return this.token(requestId, payload);
+    const label = typeof payload.label === 'string' ? payload.label.trim().slice(0, MINT_LABEL_MAX) : '';
+    const approvedBy = typeof payload.approvedBy === 'string' ? payload.approvedBy : '';
+    const scopes = payload.scopes && typeof payload.scopes === 'object' && !Array.isArray(payload.scopes) ? payload.scopes : null;
+    if (!label || !scopes || !PORTAL_APPROVER_RE.test(approvedBy)) {
+      return this.answer({ type: 'mint.error', requestId, code: 'invalid_request' });
+    }
+    const timer = setTimeout(() => this.controller.abort(), this.options.timeoutMs ?? APP_KEY_MINT_FETCH_TIMEOUT_MS);
+    timer.unref?.();
+    try {
+      const response = await this.fetchImpl(`${this.origin}${PORTAL_MINT_ROUTE_PATH}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ label, scopes, approvedBy }),
+        signal: this.controller.signal,
+      });
+      const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      // Strict: a mint yields a long-lived `pcapp_` key, never a `pcat_` token (isAppKeyShaped admits both).
+      if (response.ok && body?.ok === true && typeof body.key === 'string' && parseAppKey(body.key) !== null) {
+        this.options.audit('app_key_minted', approvedBy);
+        return this.answer({ type: 'mint.issued', requestId, key: body.key, scopes: body.scopes ?? scopes });
+      }
+      const error = body?.error;
+      const code =
+        typeof error === 'string'
+          ? error
+          : error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code
+            : `http_${response.status}`;
+      this.options.audit('app_key_mint_refused', code);
+      return this.answer({ type: 'mint.error', requestId, code: /^[a-z0-9_]{1,64}$/.test(code) ? code : 'mint_failed' });
+    } catch {
+      if (this.closed) return;
+      const code = this.controller.signal.aborted ? 'mint_timeout' : 'operator_unreachable';
+      this.options.audit('app_key_mint_failed', code);
+      return this.answer({ type: 'mint.error', requestId, code });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** One relayed client-credentials token request → `token.answer` (or `mint.error` on a relay fault). */
+  private async token(requestId: string, payload: Record<string, unknown>): Promise<void> {
+    const fields = relayedTokenFields(payload.fields);
+    const basic = relayedBasic(payload.basic);
+    const audience = typeof payload.audience === 'string' && payload.audience.length <= 1024 ? payload.audience : '';
+    if (!fields || basic === undefined || !audience) return this.answer({ type: 'mint.error', requestId, code: 'invalid_request' });
+    const timer = setTimeout(() => this.controller.abort(), this.options.timeoutMs ?? APP_KEY_MINT_FETCH_TIMEOUT_MS);
+    timer.unref?.();
+    try {
+      const response = await this.fetchImpl(`${this.origin}${PORTAL_TOKEN_ROUTE_PATH}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ fields, basic, audience }),
+        signal: this.controller.signal,
+      });
+      const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      if (response.ok && body?.ok === true && isRelayableTokenAnswer(body.status, body.body)) {
+        const status = body.status as number;
+        const answer = body.body as Record<string, unknown>;
+        this.options.audit(status === 200 ? 'app_token_issued' : 'app_token_refused', status === 200 ? 'client_credentials' : String(answer.error));
+        return this.answer({ type: 'token.answer', requestId, status, body: answer });
+      }
+      this.options.audit('app_token_failed', `http_${response.status}`);
+      return this.answer({ type: 'mint.error', requestId, code: 'token_failed' });
+    } catch {
+      if (this.closed) return;
+      const code = this.controller.signal.aborted ? 'mint_timeout' : 'operator_unreachable';
+      this.options.audit('app_token_failed', code);
+      return this.answer({ type: 'mint.error', requestId, code });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The portal (or the host) closed the channel: abort an in-flight forward. */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.controller.abort();
+  }
+
+  private answer(frame: MintAnswer, finish = true): void {
+    if (this.closed) return;
+    this.options.send(frame);
+    if (!finish) return;
+    this.closed = true;
+    this.options.done('mint_complete');
+  }
 }
 
 // ─── Portal side: limits (D-006) ────────────────────────────────────────────
@@ -274,12 +439,19 @@ export interface AppRelayChannel {
   close(reason: string): void;
 }
 
+/**
+ * The in-process channels the portal itself opens: `app-http` carries one relayed app call (P-007);
+ * `app-key-mint` carries one key mint for a consented MCP OAuth grant (P-325, D-021).
+ */
+export type AppRelayChannelKind = 'app-http' | 'app-key-mint';
+
 /** What the relay needs from the connector broker (`HostedWorkspaceSessionBroker` implements it). */
 export interface AppRelayPort {
   appConnector(customerWorkspaceId: string): AppRelayConnector | null;
   openAppChannel(
     connector: AppRelayConnector,
     handlers: { onFrame: (payload: Record<string, unknown>) => void; onClose: (reason: string) => void },
+    kind?: AppRelayChannelKind,
   ): AppRelayChannel | null;
 }
 
@@ -348,7 +520,13 @@ export async function handleHostedAppRelay(request: Request, deps: HostedAppRela
   // alone, so an owner or admin ticket, a JWT or a cookie session is never accepted.
   if (!readAppKeyBearer(request.headers.get('authorization'))) {
     audit('app_relay_refused', 'app_key_required');
-    return refuse(401, 'app_key_required', { 'www-authenticate': 'Bearer' });
+    // P-325: an MCP client that has no key yet learns from this header where the portal's
+    // authorization server for THIS workspace is (RFC 9728 §5.1), and gets one by OAuth.
+    const challenge =
+      target.machinePath === '/api/mcp'
+        ? `Bearer resource_metadata="${portalResourceMetadataUrl(publicOriginOf(request), target.customerWorkspaceId)}"`
+        : 'Bearer';
+    return refuse(401, 'app_key_required', { 'www-authenticate': challenge });
   }
 
   // D-008: an offline machine is refused at once. Nothing is queued, held or stored.

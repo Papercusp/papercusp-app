@@ -60,6 +60,36 @@ HOST_WORKER_OUTPUTS=(
   snapshot-fold.worker.mjs
 )
 
+# Dependency-free on-disk scripts that the bundled host resolves as SIBLINGS of
+# its entry module (dirname(import.meta.url) collapses to the bundle's own dir),
+# so they can never be inlined: git execs git-ext-bridge.mjs as the pot-git
+# `ext::` transport, and systemd-scope.ts execs systemd-scope-env-runner.mjs.
+# Every builder must stage ALL of them. Repo-relative sources; the output name
+# is the basename. worker-scripts-bundled.test.ts reads THIS list, so a new
+# sibling added here is enforced on every bundler automatically. (The
+# current-build rig once staged only the runner, so every same-box hive-git
+# fetch died "Cannot find module .../git-ext-bridge.mjs" — WI-10003976.)
+HOST_RUNTIME_SIBLING_SOURCES=(
+  packages/operator-core/lib/systemd-scope-env-runner.mjs
+  packages/operator-core/lib/sync/pot-git/git-ext-bridge.mjs
+)
+HOST_RUNTIME_SIBLING_OUTPUTS=()
+for __pc_sibling in "${HOST_RUNTIME_SIBLING_SOURCES[@]}"; do
+  HOST_RUNTIME_SIBLING_OUTPUTS+=("${__pc_sibling##*/}")
+done
+unset __pc_sibling
+
+bundle_host_runtime_siblings() { # <repo root> <out dir>
+  local repo_root="$1" out_dir="$2" source output tmp
+  mkdir -p "$out_dir" || return 1
+  for source in "${HOST_RUNTIME_SIBLING_SOURCES[@]}"; do
+    output="${source##*/}"
+    [ -s "$repo_root/$source" ] || { echo "FATAL: missing runtime sibling $repo_root/$source" >&2; return 1; }
+    tmp="$out_dir/$output.new.$$"
+    cp "$repo_root/$source" "$tmp" && mv -f "$tmp" "$out_dir/$output" || return 1
+  done
+}
+
 bundle_host_workers() {
   local repo_root="$1" out_dir="$2" source output tmp
   local -a sources=(

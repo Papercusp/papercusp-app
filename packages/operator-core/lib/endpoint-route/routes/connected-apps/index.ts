@@ -43,7 +43,7 @@ import {
 } from '../../../connected-apps/store';
 import { RotationOverlapError, SpendCapError } from '../../../connected-apps/service-keys';
 import { PostgresDeviceGrantStore, type DeviceGrantStore } from '../../../connected-apps/device-grants';
-import { normalizeUserCode, sanitizeClientLabel } from '../hosted-cli';
+import { DEFAULT_CLIENT_LABEL, normalizeUserCode, sanitizeClientLabel } from '../hosted-cli';
 
 export const CONNECTED_APP_DEVICE_CODE_TTL_MS = 10 * 60_000;
 export const CONNECTED_APP_POLL_INTERVAL_MS = 5_000;
@@ -114,11 +114,53 @@ function scopeRequestOf(body: Record<string, unknown>): AppKeyScopeRequest | nul
   return out;
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }
 
-function htmlPage(title: string, body: string, status = 200): Response {
+/**
+ * The consent form: names the workspace (a choice) and the exact scope, which the approver may
+ * narrow — the key receives what is submitted here, not what was asked for (P-006, R-37). Posts
+ * to the local-only decision route. `hidden` carries the OAuth request handle for the redirect.
+ */
+export function consentFormHtml(opts: {
+  userCode: string;
+  scopes: AppKeyScopes;
+  workspaces: ReadonlyArray<{ id: string; name: string }>;
+  hidden?: Record<string, string>;
+}): string {
+  const options = opts.workspaces
+    .map((w) => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`)
+    .join('');
+  const hidden = Object.entries(opts.hidden ?? {})
+    .map(([k, v]) => `<input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}">`)
+    .join('');
+  const tools = (opts.scopes.tools ?? []).join(' ');
+  const harnesses = (opts.scopes.harnesses ?? []).join(' ');
+  return `<form method="post" action="${DEVICE_PAGE_PATH}/decision"><input type="hidden" name="user_code" value="${escapeHtml(opts.userCode)}">${hidden}
+<p><label>Workspace <select name="workspace_id" required>${options}</select></label></p>
+<p><label>Tools it may call (remove any you do not want to allow)<br><input name="tools" size="48" value="${escapeHtml(tools)}" placeholder="plans:get work_items:*"></label></p>
+<p><label>Harnesses (empty = any)<br><input name="harnesses" size="48" value="${escapeHtml(harnesses)}"></label></p>
+<div class="row"><button type="submit" name="decision" value="approve">Allow</button>
+<button type="submit" name="decision" value="deny">Deny</button></div></form>`;
+}
+
+/** The scope fields of a decision (space- or comma-separated form fields, or JSON arrays). */
+export function grantedScopeRequestOf(fields: Record<string, unknown>): AppKeyScopeRequest | null {
+  const out: AppKeyScopeRequest = {};
+  let any = false;
+  for (const field of ['tools', 'harnesses'] as const) {
+    const value = fields[field];
+    if (value === undefined) continue;
+    any = true;
+    if (typeof value === 'string') out[field] = value.split(/[\s,]+/).filter(Boolean);
+    else if (Array.isArray(value) && value.every((v) => typeof v === 'string')) out[field] = value as string[];
+    else return null;
+  }
+  return any ? out : {};
+}
+
+export function htmlPage(title: string, body: string, status = 200): Response {
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHtml(title)} · Papercusp</title><style>:root{color-scheme:light dark;font-family:system-ui,sans-serif}
 body{margin:0;min-height:100vh;display:grid;place-items:center}main{max-width:30rem;padding:2rem}
@@ -212,6 +254,9 @@ export function createConnectedAppRoutes(deps: ConnectedAppRouteDependencies): R
     auth: 'loopback',
     async handler(req) {
       if (!deps.isLocal(req)) return jsonError('local_only', 403);
+      // A page on another site can POST a text/plain JSON body to 127.0.0.1 with no preflight; the
+      // Remote access screen's "Connect an app" is a same-origin caller (P-010), so refuse the rest.
+      if (!isSameOriginOrNonBrowser(req)) return jsonError('cross_origin_blocked', 403);
       const body = await readJson(req);
       if (!body) return jsonError('invalid_json', 400);
       const label = typeof body.label === 'string' ? sanitizeClientLabel(body.label) : '';
@@ -297,7 +342,7 @@ export function createConnectedAppRoutes(deps: ConnectedAppRouteDependencies): R
       } catch (err) {
         return scopeRefusal(err);
       }
-      const clientLabel = sanitizeClientLabel(body.clientLabel);
+      const clientLabel = sanitizeClientLabel(body.clientLabel) || DEFAULT_CLIENT_LABEL;
       const now = clock();
       const expiresAt = new Date(now.getTime() + CONNECTED_APP_DEVICE_CODE_TTL_MS);
       const code = `pad_${randomString(32)}`;
@@ -360,18 +405,11 @@ export function createConnectedAppRoutes(deps: ConnectedAppRouteDependencies): R
       if (!grant) return htmlPage('Code not found', '<p>This code has expired, was already used, or does not exist.</p>', 404);
       const tools = grant.requestedScopes.tools?.length ? grant.requestedScopes.tools.map(escapeHtml).join(', ') : 'none';
       const harnesses = grant.requestedScopes.harnesses?.length ? grant.requestedScopes.harnesses.map(escapeHtml).join(', ') : 'any';
-      const options = deps
-        .listWorkspaces()
-        .map((w) => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`)
-        .join('');
       return htmlPage(
         `Allow ${grant.clientLabel} to use a workspace?`,
         `<p>Check that the app shows <code>${escapeHtml(grant.userCode)}</code>.</p>
 <p>It asks to call these tools: <b>${tools}</b>, in harnesses: <b>${harnesses}</b>.</p>
-<form method="post" action="${DEVICE_PAGE_PATH}/decision"><input type="hidden" name="user_code" value="${escapeHtml(grant.userCode)}">
-<label>Workspace <select name="workspace_id" required>${options}</select></label>
-<div class="row"><button type="submit" name="decision" value="approve">Allow</button>
-<button type="submit" name="decision" value="deny">Deny</button></div></form>`,
+${consentFormHtml({ userCode: grant.userCode, scopes: grant.requestedScopes, workspaces: deps.listWorkspaces() })}`,
       );
     },
   });
@@ -407,9 +445,36 @@ export function createConnectedAppRoutes(deps: ConnectedAppRouteDependencies): R
       if (decision === 'approved' && (!workspaceId || !deps.workspaceExists(workspaceId))) {
         return jsonError('workspace_not_found', 400);
       }
-      const decided = await deps.grants.decideGrant({ userCode, decision, workspaceId, decidedBy: LOCAL_OWNER_EMAIL, at: clock() });
+      // What the approver consented to (P-006, R-37). Absent fields keep the requested scopes.
+      const grantedRequest = grantedScopeRequestOf(fields);
+      if (!grantedRequest) return jsonError('invalid_request', 400);
+      let grantedScopes: AppKeyScopes | null = null;
+      if (decision === 'approved' && Object.keys(grantedRequest).length > 0) {
+        try {
+          grantedScopes = deps.resolveScopes(grantedRequest);
+        } catch (err) {
+          return scopeRefusal(err);
+        }
+      }
+      const decided = await deps.grants.decideGrant({
+        userCode,
+        decision,
+        workspaceId,
+        decidedBy: LOCAL_OWNER_EMAIL,
+        at: clock(),
+        grantedScopes,
+      });
       if (!isForm) return decided ? Response.json({ ok: true, decision }, { headers: noStore }) : jsonError('grant_not_pending', 404);
       if (!decided) return htmlPage('Code not found', '<p>This code has expired or was already used.</p>', 404);
+      // An OAuth consent (P-006) goes straight back to the client: the continue endpoint turns
+      // the decision into a redirect with a code or with access_denied.
+      const oauthHandle = typeof fields.oauth_handle === 'string' ? fields.oauth_handle : '';
+      if (/^paz_[A-Za-z0-9_-]{43}$/.test(oauthHandle)) {
+        return new Response(null, {
+          status: 303,
+          headers: { location: `/api/connected-apps/oauth/continue?request=${encodeURIComponent(oauthHandle)}`, ...noStore },
+        });
+      }
       return decision === 'approved'
         ? htmlPage('App connected', '<p>The app will receive its key on its next check. You can close this page.</p>')
         : htmlPage('Sign-in denied', '<p>The app was not connected.</p>');

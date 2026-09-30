@@ -30,7 +30,7 @@
 import { getOrgPg } from '@papercusp/db-org';
 import { healOrphanedRemoteOriginIfAuthorEnded } from './work-items-orphan-author';
 import { selfHealTerminalOwnerOriginIfStranded } from './work-items-terminal-owner-origin-heal';
-import type { TransactionSql } from 'postgres';
+import type { Fragment, TransactionSql } from 'postgres';
 import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
 import { systemDistinctId } from './flag-distinct-id';
@@ -53,6 +53,7 @@ import { DEFAULT_COORD_WORKSPACE, withPgContentionRetry } from '@papercusp/coord
 // SEARCH_SOURCES (coverage-gate.test.ts), so adding a key there would fail the suite.
 import { assessSurfaceCoverage, type CoverageSnapshot, type SourceCoverageAssessment } from './search/coverage-gate';
 import { activeWorkspaceId } from './workspace-registry';
+import { canonicalizeAssigneeOwnerId } from './work-item-holder-identity';
 import { checkAndEscalateSteeringChurn } from './steering-churn';
 import { checkSteeringLease, recordSteeringProposal } from './steering-lease';
 import { featureRef, FEATURE_KIND, isQualifiedFeatureRef } from './issue-blocks-merge';
@@ -207,13 +208,18 @@ import {
   type ProseProfileSelection,
 } from './search/prose-vector-dims';
 import {
+  chunkAwareVectorLegSql,
   runHybridSearch,
+  withIterativeScan,
+  type ChunkSurface,
+  type PgHandle,
   type SearchSource,
   type SearchSourceParams,
   type Listing,
   type SearchLegs,
   type AppliedDefaults,
 } from '@papercusp/search';
+import { WORK_ITEMS_CHUNK_SURFACE } from './search/chunks/registry';
 // Installs papercusp's engine-level ranking policy (P-017) on import — the
 // same side-effect import every other engine caller uses. Without it this
 // surface would call the engine and inherit NO floor, which is the exact
@@ -1933,6 +1939,49 @@ function issueHarnessClause(sql: OrgSql, harness: string) {
 }
 
 /**
+ * work_items:search's semantic leg (generic-rag-chunking P-011, D-015): each item
+ * ranked by the nearer of its own vector (title + first 2,000 characters) and its
+ * window chunks, so an item whose only match lies past the cut is still found.
+ * `parent` is the relation a family ranks over — the base table, or the
+ * feature-family view, which keeps the base table's key names — and `filter` is
+ * that family's scope, applied inside both legs before their LIMIT.
+ */
+async function workItemChunkLeg(
+  pg: PgHandle,
+  opts: {
+    parent: ChunkSurface['parent'];
+    filter: (sql: OrgSql) => Fragment;
+    selection: ProseProfileSelection | null;
+    qVec: string;
+    limit: number;
+  },
+): Promise<Array<{ id: string; title: string; body: string | null; score: number }>> {
+  return withIterativeScan(pg, async (handle) => {
+    const sql = handle as unknown as OrgSql;
+    const space = (profile: string | null, mode: string | null) =>
+      profile && mode ? proseProfilePredicateSql(sql, opts.selection, profile, mode) : sql`FALSE`;
+    return sql<Array<{ id: string; title: string; body: string | null; score: number }>>`
+      WITH best AS (${chunkAwareVectorLegSql(handle, {
+        surface: { ...WORK_ITEMS_CHUNK_SURFACE, parent: opts.parent },
+        parentAlias: 'w',
+        qVec: opts.qVec,
+        limit: opts.limit,
+        mode: 'retrieve',
+        parentFilter: opts.filter(sql),
+        // D-011: the embedding-space rule stays here; the helper only names the
+        // qualified columns. A missing column fails closed.
+        spaceFilter: (cols) => space(cols.profileColumn, cols.modeColumn),
+      })})
+      SELECT w.feature_id AS id, w.title, w.summary AS body, 1 - b.distance AS score
+        FROM best b
+        JOIN ${sql.unsafe(opts.parent.table)} w
+          ON w.harness_slug = b.harness_slug AND w.feature_id = b.feature_id
+    ORDER BY b.distance, w.feature_id
+       LIMIT ${opts.limit}`;
+  });
+}
+
+/**
  * The issue-family `SearchSource` — ranked over the BASE table
  * `harness_shared.work_items`, not the `engineer_issues` view: the view is a
  * straight projection of that table (verified against `pg_get_viewdef`) and
@@ -1989,16 +2038,13 @@ function issueSearchSource(f: WorkItemSearchFilters, selection: ProseProfileSele
     ...(selection
       ? {
           async embedding({ sql: pg, limit, qVec }): Promise<Listing> {
-            const sql = pg as OrgSql;
-            const rows = await sql<Array<{ id: string; title: string; body: string | null; score: number }>>`
-              SELECT feature_id AS id, title, summary AS body,
-                     1 - (embedding <=> ${qVec}::vector) AS score
-                FROM harness_shared.work_items
-               WHERE ${scoped(sql)}
-                 AND embedding IS NOT NULL
-                 AND ${proseProfilePredicateSql(sql, selection, 'embedding_profile', 'embedding_mode')}
-            ORDER BY embedding <=> ${qVec}::vector
-               LIMIT ${limit}`;
+            const rows = await workItemChunkLeg(pg, {
+              parent: WORK_ITEMS_CHUNK_SURFACE.parent,
+              filter: scoped,
+              selection,
+              qVec,
+              limit,
+            });
             return toListing(rows, 'embeddings');
           },
         }
@@ -2051,16 +2097,15 @@ function featureSearchSource(f: WorkItemSearchFilters, selection: ProseProfileSe
     ...(selection
       ? {
           async embedding({ sql: pg, limit, qVec }): Promise<Listing> {
-            const sql = pg as OrgSql;
-            const rows = await sql<Array<{ id: string; title: string; body: string | null; score: number }>>`
-              SELECT feature_id AS id, title, summary AS body,
-                     1 - (embedding <=> ${qVec}::vector) AS score
-                FROM harness_shared.harness_features_consolidated
-               WHERE ${scoped(sql)}
-                 AND embedding IS NOT NULL
-                 AND ${proseProfilePredicateSql(sql, selection, 'embedding_profile', 'embedding_mode')}
-            ORDER BY embedding <=> ${qVec}::vector
-               LIMIT ${limit}`;
+            // The feature-family view is a straight projection of work_items
+            // under the same key names, so it is the chunk leg's parent here.
+            const rows = await workItemChunkLeg(pg, {
+              parent: { table: 'harness_shared.harness_features_consolidated', key: WORK_ITEMS_CHUNK_SURFACE.parent.key },
+              filter: scoped,
+              selection,
+              qVec,
+              limit,
+            });
             return toListing(rows, 'embeddings');
           },
         }
@@ -5257,6 +5302,22 @@ export async function claimWorkItem(
     agentReviewAdmission?: AgentReviewClaimAdmission;
   } = {},
 ): Promise<WorkItem | null> {
+  // EI-23701433507513915: the WRITE backstop — a truncated su- owner id is never persisted as
+  // `taken_by`. Every assign path funnels through here (the claim tool's `assignee`,
+  // plan-items:assign, dispatch): expand to the unique full owner id, or refuse the claim
+  // (null, this function's existing refusal) rather than store a prefix that every exact
+  // holder check will later mistake for someone else.
+  {
+    let scopeWorkspace: string | null = null;
+    try {
+      scopeWorkspace = activeWorkspaceId() ?? null;
+    } catch {
+      scopeWorkspace = null; // unscoped lookup: an ambiguous prefix still refuses
+    }
+    const canonical = await canonicalizeAssigneeOwnerId(assignee, { workspaceId: scopeWorkspace });
+    if (!canonical.ok) return null;
+    assignee = canonical.ownerId;
+  }
   // EI-1545: resolve the issue-scope workspace ONCE, up front, and reuse that SAME
   // value for both the existence/family check below AND the actual claimIssue()
   // write. resolveIssuesScopeWorkspace()/issuesScopeWorkspace() re-derive their

@@ -161,30 +161,6 @@ export function isSaturatedFor(
   });
 }
 
-/**
- * Pure capacity count: how many local inference slots are free RIGHT NOW across the whole
- * pool — Σ measured engine free slots over ENABLED + HEALTHY backends.
- *
- * Deliberately MODEL-AGNOSTIC, unlike `pickLeastLoaded`/`isSaturatedFor`: those answer "can I
- * route THIS request", while this answers "how much local capacity does this host have to
- * offer" — the D-007 PHYSICS input the p2p claim gate reads (host-availability.ts), where no
- * model is known at claim time. It shares their eligibility predicate (enabled + healthy) on
- * purpose so a backend that selection refuses can never be counted as offerable capacity.
- * Unknown/stale engine readings contribute zero: headroom fails closed even
- * though routing treats those readings as unbounded.
- *
- * Unit = SLOTS, matching the `local` budget axis (offer-budget.ts) and the `axis.slots`
- * absolute cap a P-201 gpu allotment row carries — so `min(cap, freeSlots)` is unit-correct.
- */
-export function freeSlots(candidates: readonly LocalBackendCandidate[]): number {
-  let free = 0;
-  for (const c of candidates) {
-    if (!c.backend.enabled || !c.healthy) continue;
-    free += engineFreeSlots(c) ?? 0;
-  }
-  return free;
-}
-
 /** Outcome kind of one affinity-aware selection (P-028): `hit` = the owner's sticky backend was
  *  chosen (KV prefix survives); `switch` = the owner HAD a sticky backend but it was ineligible
  *  (saturated/unhealthy/tried) so a different one was picked — the re-prefill event the dashboard's

@@ -11,12 +11,31 @@
  * or state store. The writer remains `papercusp-desktop/bin/live-federation-
  * gate.sh`; all deployment paths share this one fail-closed interpretation.
  */
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
 export const LIVE_RELEASE_CERTIFICATION_SCHEMA_VERSION = 2 as const;
 export const LIVE_RELEASE_CERTIFICATION_BANK_ENV = 'PAPERCUSP_LIVE_CERTIFICATION_BANK';
+
+/**
+ * EI-24610020645182418 — how many consecutive exact-source runs of ONE target may end with the
+ * same dirty tree before that dirt is read as deterministic.
+ *
+ * The certification rig builds a fresh checkout at the target sha, so dirt the build itself
+ * leaves behind (a `package-lock.json` rewritten by an install whose lock disagrees with a
+ * `package.json`, WI-10004232) recurs on every run. It used to classify as `unqualified`, which
+ * release-trigger treats as "not judged yet" and relaunches every 15-minute tick: 93f1c720 ran
+ * six ~45-minute heavy builds, each ending `certification-source-dirty-at-build-end` with the
+ * single dirty path ` M package-lock.json`. One retry still absorbs genuinely transient dirt;
+ * the second identical result is reported as `failed`, which stops the relaunch and surfaces
+ * as `live-certification-failed` until a new green pin supersedes it.
+ */
+export const LIVE_CERTIFICATION_SOURCE_DIRT_REPEAT_LIMIT = 2;
+
+/** The gate's per-run list of paths `git status --porcelain` reported dirty after the build. */
+export const LIVE_CERTIFICATION_BUILD_END_DIRT_FILE = 'dirty-files-build-end.txt';
 
 export interface LiveFederationVerdictRecord {
   schema_version?: number;
@@ -64,7 +83,11 @@ export interface ReadLiveReleaseCertificationOptions {
   bankPath?: string;
   nowMs?: number;
   readText?: (filePath: string) => Promise<string>;
+  /** Resolve the dirty paths a record's run left behind; `null` when unknown. */
+  resolveDirtyPaths?: DirtyPathResolver;
 }
+
+export type DirtyPathResolver = (record: LiveFederationVerdictRecord) => readonly string[] | null;
 
 const SHA_RE = /^[0-9a-f]{7,64}$/i;
 
@@ -175,6 +198,61 @@ function recordTargets(record: LiveFederationVerdictRecord, targetSha: string): 
 }
 
 /**
+ * Count the newest consecutive exact-source rebuilds of `targetSha` that ended with the SAME
+ * dirty tree. Only rebuilt records are runs; freshness/no-op tokens are skipped rather than
+ * breaking the streak. A clean run, or dirt with different counts or paths, ends it. Paths are
+ * compared only when both runs resolve them, so a pruned work directory degrades to counts.
+ */
+function sourceDirtStreak(
+  parsed: readonly LiveFederationVerdictRecord[],
+  targetSha: string,
+  resolveDirtyPaths: DirtyPathResolver,
+): { runs: number; paths: readonly string[] | null } {
+  let runs = 0;
+  let first: { start: unknown; terminal: unknown; paths: readonly string[] | null } | null = null;
+  for (let i = parsed.length - 1; i >= 0; i -= 1) {
+    const record = parsed[i]!;
+    if (!recordTargets(record, targetSha) || record.source_mode !== 'rebuilt') continue;
+    if (
+      !certificationShaMatches(record.source_head, targetSha) ||
+      !certificationShaMatches(record.head, targetSha) ||
+      (record.source_dirty_files === 0 && record.terminal_dirty_files === 0)
+    ) {
+      break;
+    }
+    const paths = resolveDirtyPaths(record);
+    const normalized = paths ? [...new Set(paths.map((p) => p.trim()).filter(Boolean))].sort() : null;
+    if (!first) {
+      first = { start: record.source_dirty_files, terminal: record.terminal_dirty_files, paths: normalized };
+    } else if (
+      record.source_dirty_files !== first.start ||
+      record.terminal_dirty_files !== first.terminal ||
+      (first.paths && normalized && first.paths.join('\n') !== normalized.join('\n'))
+    ) {
+      break;
+    }
+    runs += 1;
+  }
+  return { runs, paths: first?.paths ?? null };
+}
+
+/** The gate writes each run's work directory under the system temp dir; nothing else is read. */
+const GATE_WORK_DIR_RE = /^\/tmp\/live-fed-gate-[\w.-]+$/;
+
+/** Read a run's build-end dirt list from its gate work directory; `null` once it is pruned. */
+export function readBuildEndDirtyPaths(record: LiveFederationVerdictRecord): readonly string[] | null {
+  const work = typeof record.work === 'string' ? record.work : '';
+  if (!GATE_WORK_DIR_RE.test(work)) return null;
+  try {
+    return readFileSync(path.join(work, LIVE_CERTIFICATION_BUILD_END_DIRT_FILE), 'utf8')
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Assess the newest bank record attributable to `targetSha`.
  *
  * Append order is authoritative. A newer exact-source red invalidates an older
@@ -187,6 +265,7 @@ export function assessLiveReleaseCertification(
   targetSha: string,
   nowMs = Date.now(),
   bankPath: string | null = null,
+  resolveDirtyPaths: DirtyPathResolver = () => null,
 ): LiveReleaseCertification {
   const normalizedTarget = targetSha.trim().toLowerCase();
   if (!SHA_RE.test(normalizedTarget)) {
@@ -306,10 +385,23 @@ export function assessLiveReleaseCertification(
     );
   }
   if (evidence.source_dirty_files !== 0 || evidence.terminal_dirty_files !== 0) {
+    const dirt = sourceDirtStreak(parsed, normalizedTarget, resolveDirtyPaths);
+    const counts = `start=${String(evidence.source_dirty_files)}, terminal=${String(evidence.terminal_dirty_files)}`;
+    const paths = dirt.paths ? `; dirty: ${dirt.paths.join(', ')}` : '';
+    if (dirt.runs >= LIVE_CERTIFICATION_SOURCE_DIRT_REPEAT_LIMIT) {
+      return result(
+        'failed',
+        normalizedTarget,
+        `the exact-source build left the same tracked files dirty on ${dirt.runs} consecutive certification runs (${counts}${paths}) — the dirt is deterministic at this sha, so a re-run cannot certify it; fix the source and let a new green pin supersede it`,
+        evidence,
+        invalidLines,
+        bankPath,
+      );
+    }
     return result(
       'unqualified',
       normalizedTarget,
-      `the certified source was not clean (start=${String(evidence.source_dirty_files)}, terminal=${String(evidence.terminal_dirty_files)})`,
+      `the certified source was not clean (${counts}${paths}); run ${dirt.runs} of ${LIVE_CERTIFICATION_SOURCE_DIRT_REPEAT_LIMIT} before identical dirt counts as deterministic`,
       evidence,
       invalidLines,
       bankPath,
@@ -385,7 +477,13 @@ export async function readLiveReleaseCertification(
   const bankPath = opts.bankPath ?? liveReleaseCertificationBankPath();
   const readText = opts.readText ?? ((filePath: string) => readFile(filePath, 'utf8'));
   try {
-    return assessLiveReleaseCertification(await readText(bankPath), targetSha, opts.nowMs ?? Date.now(), bankPath);
+    return assessLiveReleaseCertification(
+      await readText(bankPath),
+      targetSha,
+      opts.nowMs ?? Date.now(),
+      bankPath,
+      opts.resolveDirtyPaths ?? readBuildEndDirtyPaths,
+    );
   } catch (error) {
     const code = (error as NodeJS.ErrnoException)?.code;
     return result(

@@ -81,16 +81,31 @@ export async function revokeDevice(deviceId: string, workspaceId: string): Promi
   });
 }
 
+/**
+ * True when a device must be refused: unknown, revoked, or paused on the Remote access screen
+ * (external-app-access P-010 — a paused phone is refused until it is resumed, like a paused key).
+ */
 export async function isRevoked(deviceId: string): Promise<boolean> {
   // Read without workspace context — the auth middleware needs to check
   // before knowing which workspace the device belongs to. Uses admin role.
   const { sql } = getOrgPg();
-  const rows = await sql<{ revoked_at: Date | null }[]>`
-    SELECT revoked_at FROM harness_shared.connected_apps
+  const rows = await sql<{ revoked_at: Date | null; paused_at: Date | null }[]>`
+    SELECT revoked_at, paused_at FROM harness_shared.connected_apps
      WHERE id = ${deviceId} AND kind = 'mobile' LIMIT 1
   `;
   if (rows.length === 0) return true; // unknown device → treat as revoked
-  return rows[0].revoked_at != null;
+  return rows[0].revoked_at != null || rows[0].paused_at != null;
+}
+
+/** Pause (true) or resume (false) a paired phone. Returns false when no live phone has that id. */
+export async function setDevicePaused(workspaceId: string, deviceId: string, paused: boolean): Promise<boolean> {
+  const rows = await withWorkspace(workspaceId, async (tx) => tx<{ id: string }[]>`
+    UPDATE harness_shared.connected_apps
+       SET paused_at = CASE WHEN ${paused}::boolean THEN now() ELSE NULL END
+     WHERE id = ${deviceId} AND kind = 'mobile' AND revoked_at IS NULL
+    RETURNING id
+  `);
+  return rows.length > 0;
 }
 
 /**

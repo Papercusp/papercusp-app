@@ -22,20 +22,21 @@ import { parseDepSpec } from '@papercusp/blueprint-distribution';
 import { getOrgPg } from '@papercusp/db-org';
 import { parse as parseYaml } from 'yaml';
 import { INSTALLED_BLUEPRINTS_DIR, operatorResolveExtends } from '../blueprint/installed-blueprints';
+import { blueprintInstallJournal } from './blueprint-install-journal';
 import {
-  bindCapabilityProviderToPot,
-  deletePotCapabilityProviderBinding,
   getPotCapabilityProviderBinding,
   listActiveCapabilityProviderCandidates,
   parseCapabilityClassRef,
-  type CapabilityProviderKind,
 } from '../capability-class-registry-store';
+import { IDENTITY_GRANT_PROVIDER_KINDS } from '../agent-identities/grant-provider-kinds';
 import { activeWorkspaceId } from '../workspace-registry';
 import { potHomeSlugForHarness } from '../hive-federation';
 import { resolveCupboardBaseUrl } from './base-url';
 import { validateListingManifest, type CupboardReleaseManifest } from './listing-manifest';
 import { importCupboardClassContracts, type ClassContractConsent } from './class-contract-payload';
-import type { RecipeProviderConsent } from './capability-grant-resolver';
+import type { CapabilityGrantResolverDeps, RecipeProviderConsent } from './capability-grant-resolver';
+import type { IdentityInstallConsent } from './identity-install-consent';
+import type { ListedBlueprintFacet } from './identity-listing-surface';
 import { derivePackCatalog, depHostSetsFromCatalog } from './pack-catalog';
 import {
   installBlueprintFromCupboardCore,
@@ -61,8 +62,9 @@ import {
 } from './blueprint-release';
 
 /** Install resolves, binds and compensates tool AND inspected recipe providers;
- * recipe selections pass install-core's consent seat first (P-013, D-019). */
-const INSTALL_PROVIDER_KINDS: readonly CapabilityProviderKind[] = ['tool', 'recipe'];
+ * recipe selections pass install-core's consent seat first (P-013, D-019). The
+ * launch compiler resolves the same set, so what installs also launches (P-020). */
+const INSTALL_PROVIDER_KINDS = IDENTITY_GRANT_PROVIDER_KINDS;
 
 export interface InstallBlueprintFromCupboardInput {
   /** Resolve the repo URL + listing_ref from the Cupboard listing. */
@@ -96,6 +98,10 @@ export interface InstallBlueprintFromCupboardInput {
   /** P-013: consent to bind selected recipe providers, echoing the exact
    * `consentSubject` a `capability_recipe_provider_consent_required` refusal returned. */
   recipeProviderConsent?: RecipeProviderConsent;
+  /** P-014: consent to the release's grants, bindings, hooks, operations,
+   * plugin code and shared content, echoing the exact `consentSubject` an
+   * `identity_install_consent_required` refusal returned. */
+  identityInstallConsent?: IdentityInstallConsent;
 }
 
 export interface InstallBlueprintClosureResult extends InstallBlueprintCoreResult {
@@ -116,6 +122,7 @@ async function resolveBlueprintListing(
   releaseVersion?: string;
   releaseContentHash?: string;
   releaseManifest?: CupboardReleaseManifest;
+  listing: ListedBlueprintFacet;
   moderationApproved: boolean;
 } | { error: string; status: number }> {
   const base = resolveCupboardBaseUrl();
@@ -166,7 +173,13 @@ async function resolveBlueprintListing(
   }
   // This is the Cupboard row's moderation status, not the publisher-authored
   // reviewStatus inside the signed release manifest.
-  return { githubUrl, listingRef, releaseVersion, releaseContentHash, releaseManifest,
+  // The facet the storefront previewed (P-016); install recomputes the surface
+  // from the verified clone and refuses a listing that describes something else.
+  const listing: ListedBlueprintFacet = {
+    blueprintKind: typeof row.blueprint_kind === 'string' ? row.blueprint_kind : null,
+    identitySurface: typeof row.identity_surface === 'string' ? row.identity_surface : null,
+  };
+  return { githubUrl, listingRef, releaseVersion, releaseContentHash, releaseManifest, listing,
     moderationApproved: row.review_status === 'approved' };
 }
 
@@ -203,6 +216,37 @@ export async function fetchCupboardBlueprintIds(): Promise<Set<string>> {
   }
 }
 
+/** The pot's capability-grant resolver: its exact bindings and active
+ *  candidates. The install path and the identity preview resolve through it. */
+export function capabilityGrantDepsForPot(
+  capabilityScope: { workspaceId: string; potSlug: string },
+): CapabilityGrantResolverDeps {
+  return {
+    async getPotBinding(classRef: string) {
+      const parsed = parseCapabilityClassRef(classRef);
+      if (!parsed) return null;
+      return getPotCapabilityProviderBinding(getOrgPg().sql, {
+        ...capabilityScope,
+        classId: parsed.id,
+        classVersion: parsed.version,
+        providerKinds: INSTALL_PROVIDER_KINDS,
+      });
+    },
+    async listCandidates(classRef: string) {
+      const parsed = parseCapabilityClassRef(classRef);
+      if (!parsed) return [];
+      const rows = await listActiveCapabilityProviderCandidates(
+        getOrgPg().sql,
+        capabilityScope.workspaceId,
+        parsed.id,
+        parsed.version,
+        { providerKinds: INSTALL_PROVIDER_KINDS },
+      );
+      return rows.map((row) => ({ ...row, price: null }));
+    },
+  };
+}
+
 /** Install-core deps (clone + dirs + resolver + host sets), shared by the
  *  top-level install and the recursive spawned-blueprint closure install so both
  *  resolve `dependencies.blueprints` against the same built-in/installed/Cupboard
@@ -234,30 +278,7 @@ function makeInstallCoreDeps(
         const { validateIdentityInstallGrants } = await import('../capability-envelope/identity-grants-port');
         return validateIdentityInstallGrants({ ...capabilityScope, role: context.role, resolution });
       },
-      capabilityGrantDeps: {
-        async getPotBinding(classRef: string) {
-          const parsed = parseCapabilityClassRef(classRef);
-          if (!parsed) return null;
-          return getPotCapabilityProviderBinding(getOrgPg().sql, {
-            ...capabilityScope,
-            classId: parsed.id,
-            classVersion: parsed.version,
-            providerKinds: INSTALL_PROVIDER_KINDS,
-          });
-        },
-        async listCandidates(classRef: string) {
-          const parsed = parseCapabilityClassRef(classRef);
-          if (!parsed) return [];
-          const rows = await listActiveCapabilityProviderCandidates(
-            getOrgPg().sql,
-            capabilityScope.workspaceId,
-            parsed.id,
-            parsed.version,
-            { providerKinds: INSTALL_PROVIDER_KINDS },
-          );
-          return rows.map((row) => ({ ...row, price: null }));
-        },
-      },
+      capabilityGrantDeps: capabilityGrantDepsForPot(capabilityScope),
       reviewCapabilityProviderPackages: (selections) =>
         reviewCapabilityProviderPackageClosure(selections, {
           deriveCatalog: () => derivePackCatalog({}),
@@ -278,103 +299,11 @@ function makeInstallCoreDeps(
               : installed;
           },
         }),
-      async commitCapabilitySelections(selections) {
-        const sql = getOrgPg().sql;
-        const applied = await sql.begin(async (tx) => {
-          const changes: Array<{
-            classId: string;
-            classVersion: string;
-            providerPackage: string;
-            providerVersion: string;
-            previous: Awaited<ReturnType<typeof getPotCapabilityProviderBinding>>;
-          }> = [];
-          for (const selection of selections) {
-            const parsed = parseCapabilityClassRef(selection.classRef);
-            if (!parsed) throw new Error('invalid selected class ref ' + selection.classRef);
-            const previous = await getPotCapabilityProviderBinding(tx, {
-              ...capabilityScope,
-              classId: parsed.id,
-              classVersion: parsed.version,
-              includeInactiveProvider: true,
-              providerKinds: INSTALL_PROVIDER_KINDS,
-            });
-            if (previous?.status === 'active') {
-              if (
-                previous.providerPackage === selection.providerPackage &&
-                previous.providerVersion === selection.providerVersion
-              ) {
-                continue;
-              }
-              throw new Error(
-                selection.classRef + ' was concurrently bound to ' +
-                  previous.providerPackage + '@' + previous.providerVersion,
-              );
-            }
-            await bindCapabilityProviderToPot(tx, {
-              ...capabilityScope,
-              classId: parsed.id,
-              classVersion: parsed.version,
-              providerPackage: selection.providerPackage,
-              providerVersion: selection.providerVersion,
-              boundBy: 'cupboard:install-blueprint',
-              providerKind: selection.providerKind,
-            });
-            changes.push({
-              classId: parsed.id,
-              classVersion: parsed.version,
-              providerPackage: selection.providerPackage,
-              providerVersion: selection.providerVersion,
-              previous,
-            });
-          }
-          return changes;
-        });
-
-        return {
-          rollback: async () => {
-            await sql.begin(async (tx) => {
-              for (const change of [...applied].reverse()) {
-                const current = await getPotCapabilityProviderBinding(tx, {
-                  ...capabilityScope,
-                  classId: change.classId,
-                  classVersion: change.classVersion,
-                  includeInactiveProvider: true,
-                  providerKinds: INSTALL_PROVIDER_KINDS,
-                });
-                if (
-                  !current ||
-                  current.providerPackage !== change.providerPackage ||
-                  current.providerVersion !== change.providerVersion
-                ) {
-                  throw new Error(
-                    change.classId + '@' + change.classVersion +
-                      ' changed after install-time selection; refusing to clobber the newer binding',
-                  );
-                }
-                if (change.previous) {
-                  await bindCapabilityProviderToPot(tx, {
-                    ...capabilityScope,
-                    classId: change.classId,
-                    classVersion: change.classVersion,
-                    providerPackage: change.previous.providerPackage,
-                    providerVersion: change.previous.providerVersion,
-                    boundBy: change.previous.boundBy,
-                    providerKind: change.previous.providerKind,
-                  });
-                } else {
-                  await deletePotCapabilityProviderBinding(tx, {
-                    ...capabilityScope,
-                    classId: change.classId,
-                    classVersion: change.classVersion,
-                    expectedProviderPackage: change.providerPackage,
-                    expectedProviderVersion: change.providerVersion,
-                  });
-                }
-              }
-            });
-          },
-        };
-      },
+      // P-014 / D-034: bindings are journaled resources of the pot's install.
+      blueprintInstallJournal: ({ blueprintId, bindings }) => blueprintInstallJournal(
+        { sql: getOrgPg().sql, workspaceId: capabilityScope.workspaceId, blueprintId },
+        { operation: 'install', potSlug: capabilityScope.potSlug, bindings },
+      ),
     } : {}),
   };
 }
@@ -391,15 +320,22 @@ export async function installBlueprintFromCupboard(
   if (operation === 'rollback' || operation === 'uninstall') {
     const id = input.blueprintId?.trim() ?? '';
     if (!id) return { ok: false, status: 400, error: `blueprintId required for ${operation}` };
+    // D-034: both converge and clean every pot install of this blueprint in the workspace.
+    const journal = blueprintInstallJournal(
+      { sql: getOrgPg().sql, workspaceId: input.workspaceId?.trim() || activeWorkspaceId(), blueprintId: id },
+      { operation },
+    );
     try {
       if (operation === 'uninstall') {
-        return { ok: true, result: await uninstallBlueprintRelease({ installedDir: INSTALLED_BLUEPRINTS_DIR(), id }) };
+        return { ok: true, result: await uninstallBlueprintRelease({ installedDir: INSTALLED_BLUEPRINTS_DIR(), id, journal }) };
       }
       const target = input.targetVersion?.trim() ?? '';
       if (!target) return { ok: false, status: 400, error: 'targetVersion required for rollback' };
-      return { ok: true, result: await rollbackBlueprintRelease({ installedDir: INSTALLED_BLUEPRINTS_DIR(), id, target }) };
+      return { ok: true, result: await rollbackBlueprintRelease({ installedDir: INSTALLED_BLUEPRINTS_DIR(), id, target, journal }) };
     } catch (error) {
-      if (error instanceof BlueprintLifecycleError) return { ok: false, status: error.status, error: error.message };
+      if (error instanceof BlueprintLifecycleError) {
+        return { ok: false, status: error.status, error: error.code ?? error.message, ...(error.code ? { detail: error.message } : {}) };
+      }
       return { ok: false, status: 500, error: `${operation} failed`, detail: error instanceof Error ? error.message.slice(0, 300) : String(error) };
     }
   }
@@ -407,7 +343,7 @@ export async function installBlueprintFromCupboard(
   let githubUrl = typeof input.githubUrl === 'string' ? input.githubUrl.trim() : '';
   let listingRef = typeof input.listingRef === 'string' ? input.listingRef.trim() : undefined;
   let expectedRelease:
-    | { version?: string; contentHash?: string; manifest?: CupboardReleaseManifest }
+    | { version?: string; contentHash?: string; manifest?: CupboardReleaseManifest; listing?: ListedBlueprintFacet }
     | undefined;
   let modeApproval: { listingId: string; approvedArtifactContentHash: string } | undefined;
 
@@ -420,6 +356,7 @@ export async function installBlueprintFromCupboard(
       ...(resolved.releaseVersion ? { version: resolved.releaseVersion } : {}),
       ...(resolved.releaseContentHash ? { contentHash: resolved.releaseContentHash } : {}),
       ...(resolved.releaseManifest ? { manifest: resolved.releaseManifest } : {}),
+      listing: resolved.listing,
     };
     if (resolved.moderationApproved && resolved.releaseContentHash) {
       modeApproval = { listingId: String(input.listingId), approvedArtifactContentHash: resolved.releaseContentHash };
@@ -461,6 +398,7 @@ export async function installBlueprintFromCupboard(
       expectedRelease,
       modeApproval,
       ...(input.classContractConsent ? { classContractConsent: input.classContractConsent } : {}),
+      ...(input.identityInstallConsent ? { identityInstallConsent: input.identityInstallConsent } : {}),
       ...(capabilityContext ? { capabilityContext } : {}),
     }, makeInstallCoreDeps(capabilityScope, workspaceId));
 

@@ -32,6 +32,7 @@
  *    reply verbs). expires_at derives from the contract.
  */
 import type { Sql } from 'postgres';
+import { withIterativeScan, type PgHandle } from '@papercusp/search';
 import type { RouteResult, RoutingCandidate, SelectionVia } from './relevance-router';
 import type { SessionState } from '../agent-tools/coordination/presence-wakeability';
 import { DEFAULT_SIM_FLOOR, selectResponders, selectionSnapshot } from './relevance-router';
@@ -946,19 +947,27 @@ export async function getFeedbackCore(
   let archiveHit: ConsultArchiveRow | null = null;
   if (qVecStr) {
     try {
-      const rows = (await sql`
+      // Iterative HNSW scan (WI-10004138), as the peers-know twin of this read
+      // runs: closed_answered is ~14% of the table. At today's 2.3k rows the
+      // planner does not choose the HNSW index and nothing is lost (measured
+      // 2026-09-30); this keeps the read whole once it does.
+      const queryProfile = route.queryProfile;
+      const rows = (await withIterativeScan(sql as unknown as PgHandle, (handle) => {
+        const s = handle as unknown as Sql;
+        return s`
       SELECT conversation_id, responder_id, outcome, closed_at, question,
                1 - (query_embedding <=> ${qVecStr}::vector) AS sim
           FROM harness_shared.consult_state
          WHERE workspace_id = ${req.workspaceId}
            AND state = 'closed_answered'
            AND query_embedding IS NOT NULL
-           AND ${proseProfilePredicateSql(sql, route.queryProfile, 'query_embedding_profile', 'query_embedding_mode')}
+           AND ${proseProfilePredicateSql(s, queryProfile, 'query_embedding_profile', 'query_embedding_mode')}
            AND (outcome->>'source' IS DISTINCT FROM 'archive')
            AND (responder_id IS NULL OR responder_id <> ALL(${excludeOwners}::text[]))
       ORDER BY query_embedding <=> ${qVecStr}::vector
          LIMIT 3
-      `) as unknown as ConsultArchiveRow[];
+      `;
+      })) as unknown as ConsultArchiveRow[];
       embeddingColumnOk = true;
       const top = rows.find(
         (candidate) =>

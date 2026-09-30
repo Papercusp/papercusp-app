@@ -464,38 +464,6 @@ export async function checkP2pCapability(
 }
 
 /**
- * H9 production seam (WI-1937): the PUBLIC, non-transaction counterpart to
- * `currentGrantorEpochTx` — the offer-executor's epoch-fence read
- * (`OfferExecutorDeps.currentGrantorEpoch`). Mirrors the internal tx helper
- * exactly (same table, same fail-closed-to-0-when-never-bumped semantics);
- * kept as a thin wrapper rather than exporting the tx fn directly so callers
- * outside this module never need to thread a transaction just to READ the
- * epoch. `workspaceId` is resolved via the same one-helper invariant every
- * other grant-store read/write uses (`resolveP2pGrantWorkspace`) — an
- * unresolvable workspace throws (fail-closed: a silent 0 here would let a
- * stale/replayed claim slip the H9 fence rather than refuse it).
- */
-export async function currentGrantorEpoch(
-  workspaceId: string | null | undefined,
-  potSlug: string,
-  grantorGithubUserId: number,
-  sqlOverride?: OrgSql,
-): Promise<number> {
-  const ws = resolveP2pGrantWorkspace(workspaceId);
-  if (!ws) {
-    throw new Error(
-      "currentGrantorEpoch refused: unresolvable workspace partition (WI-1564) — the H9 epoch fence must fail-closed, never silently read epoch 0.",
-    );
-  }
-  const hive = potSlug?.trim();
-  if (!hive) {
-    throw new Error('currentGrantorEpoch refused: potSlug (hive) is required.');
-  }
-  const sql = sqlOverride ?? getOrgPg().sql;
-  return currentGrantorEpochTx(sql, ws, hive, grantorGithubUserId);
-}
-
-/**
  * X6 receiver side: advance the high-water epoch for a grantor after APPLYING
  * a federated grant op. Monotonic (GREATEST) — never lowers. Called by the
  * projection (projections/p2p-peer-grants.ts) with the op's verified epoch.

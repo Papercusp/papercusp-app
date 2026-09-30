@@ -710,15 +710,22 @@ export interface AutoReviewVerdict {
 }
 
 function lazyConflictJudge(): LlmJudge {
-  // Lazy — mirrors manage.ts's realJudge(): pulling the Anthropic client at
+  // Lazy — mirrors manage.ts's realJudge(): pulling the judge clients at
   // module load would tax every importer of this module.
   return async (input) => {
-    const { createAnthropicJudge, conflictJudgeAvailable, warnKnowledgePackJudgeUnavailableOnce } =
-      await import('../memory/anthropic-judge');
-    // EI-18746586784230719: unconditional, no feature flag — warn so an
-    // unkeyed judge silently passing every candidate isn't invisible.
-    if (!conflictJudgeAvailable()) warnKnowledgePackJudgeUnavailableOnce();
-    return createAnthropicJudge()(input);
+    const [{ resolveConflictJudge }, { warnKnowledgePackJudgeUnavailableOnce }] = await Promise.all([
+      import('../memory/conflict-judge'),
+      import('../memory/anthropic-judge'),
+    ]);
+    // P-009 (D-016): Jev when a key is stored, else Anthropic. EI-18746586784230719:
+    // unconditional, no feature flag — warn so a missing judge silently passing
+    // every candidate isn't invisible.
+    const resolved = await resolveConflictJudge();
+    if (!resolved.available) {
+      warnKnowledgePackJudgeUnavailableOnce();
+      return { conflicts: [] };
+    }
+    return resolved.judge(input);
   };
 }
 

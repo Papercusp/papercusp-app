@@ -40,6 +40,8 @@ import { backpressureMiddleware } from './host-backpressure';
 import { requestDeadlineMiddleware } from './host-request-deadline';
 import { runWithLoopbackPeerVerdict } from '@papercusp/operator-core/lib/auth/loopback-peer-trust';
 import { runAsExternalIngress } from '@papercusp/operator-core/lib/auth/forwarded-request-trust';
+import { isServedOnExternalIngress, notServedOnExternalIngress } from './external-ingress-paths';
+import { MCP_OAUTH_WELL_KNOWN } from '@papercusp/operator-core/lib/connected-apps/mcp-oauth-discovery';
 
 const host = new Hono();
 
@@ -108,6 +110,20 @@ host.route('/', publicDocsRoutes);
 // 6. Page-namespace routes (`/wiki`, `/drizzle-studio`).
 host.route('/', pageRoutes);
 
+// 6.5. MCP OAuth discovery (external-app-access P-006). MCP clients look for the RFC 9728
+//      protected-resource document and the RFC 8414 authorization-server document at the
+//      ROOT well-known paths — the resource-suffixed form for `/api/mcp` first, then the bare
+//      one. Both are served by the connected-apps OAuth routes; this only maps the paths.
+//      Exact paths, not a `/*` catch: an unknown well-known path falls through as before.
+for (const [wellKnownPath, target] of Object.entries(MCP_OAUTH_WELL_KNOWN)) {
+  host.get(wellKnownPath, (c) => {
+    const url = new URL(c.req.url);
+    url.pathname = target;
+    url.search = '';
+    return app.fetch(new Request(url, c.req.raw), c.env);
+  });
+}
+
 // 7. Local API fallthrough — every remaining `/api/*` request goes to the
 //    inner Hono app. Calling `app.fetch(c.req.raw)` (not `c.req`) preserves
 //    the original Web `Request` object — `_hono/app.ts` handlers index off
@@ -150,10 +166,17 @@ export async function handler(
  * runs as external ingress, so every local-trust gate refuses it — even one whose
  * tunnel rewrote Host to localhost and stripped every forwarding header (D-010's
  * third case, which headers alone cannot tell apart from the desktop).
+ *
+ * WI-10004174: it serves ONLY the MCP resource and its OAuth sign-in
+ * (external-ingress-paths.ts). Every other path is refused here, before the app sees it, so
+ * a tunnel does not expose the operator's `auth:'public'` routes.
  */
 export function externalIngressHandler(
   req: Request,
   env?: HttpBindings | Http2Bindings,
 ): Promise<Response> {
+  if (!isServedOnExternalIngress(new URL(req.url).pathname)) {
+    return Promise.resolve(notServedOnExternalIngress());
+  }
   return runAsExternalIngress('external-ingress', () => handler(req, env));
 }

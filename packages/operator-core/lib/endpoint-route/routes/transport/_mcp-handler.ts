@@ -3,6 +3,17 @@ import { createMcpHandler } from 'mcp-handler';
 import { managedSetInterval, type ManagedHandle } from '@papercusp/scheduled-registry';
 import { loopPressure } from '../../../event-loop-lag-monitor';
 import { withMcpAdmission, ADMISSION_CONTROL_ENABLED } from './mcp-admission';
+import { mcpAuthChallenge, type McpAuthChallengeDependencies } from './mcp-auth-challenge';
+import { isLoopbackRequest } from '../../../superuser-token';
+import { isAppKeyShaped } from '../../../connected-apps/key';
+
+const mcpAuthChallengeDependencies: McpAuthChallengeDependencies = {
+  isLocal: isLoopbackRequest,
+  isAppKeyShaped,
+  // Lazy: the store pulls in the org database client, which this light module must not load
+  // until an app key is actually presented.
+  verifyAppKey: async (token) => (await import('../../../connected-apps/store')).verifyAppKey(token),
+};
 type BuildMcpToolContextForTests = typeof import('./_mcp-host')['__buildMcpToolContext_forTests'];
 type ResolveMcpTargetAfterPluginHostWarm = typeof import('./_mcp-host')['resolveMcpTargetAfterPluginHostWarm'];
 
@@ -192,6 +203,10 @@ export function primeSseResponse(res: Response, keepaliveMs: number = DEFAULT_KE
 // rationale live in ./mcp-admission (kept out of this heavy side-effect module so it's
 // unit-testable). Fail-open when no lag monitor is running (loopPressure() → 'ok').
 const mcpHandler = async (req: Request): Promise<Response> => {
+  // external-app-access P-006: an outside client with no (or a bad) credential gets the HTTP 401
+  // that starts MCP OAuth discovery, before the transport — see ./mcp-auth-challenge.
+  const refused = await mcpAuthChallenge(req, mcpAuthChallengeDependencies);
+  if (refused) return refused;
   const handler = await getMcpRouteHandler();
   return withMcpAdmission(req, loopPressure(), ADMISSION_CONTROL_ENABLED, async () =>
     primeSseResponse(await handler(req)),

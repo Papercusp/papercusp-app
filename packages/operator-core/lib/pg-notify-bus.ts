@@ -77,27 +77,46 @@ export function createNotifyBus(channel: string, label: string = channel): Notif
     retryTimer.unref?.();
   };
 
+  /**
+   * WI-10004194: bumped by every close. A start still in flight when the last
+   * handler leaves belongs to an older generation: the close already ended its
+   * pool, which makes postgres.js destroy the pending LISTEN (CONNECTION_DESTROYED).
+   * That rejection is our own teardown, not a failed start — it must not be
+   * logged as one, and it must not reset state a newer start now owns. A hub
+   * subscription that lands after its close is released at once.
+   */
+  let generation = 0;
+
   const ensureStarted = async (): Promise<void> => {
     if (started) return;
     started = true;
+    const gen = generation;
     try {
       const onNotify = (payload: string) => {
         if (handlers.size === 0) return;
         fanout(payload ?? "");
       };
       if (listenHubEnabled()) {
-        hubUnsub = await hubListen(channel, onNotify);
+        const unsub = await hubListen(channel, onNotify);
+        if (gen !== generation) {
+          unsub();
+          return;
+        }
+        hubUnsub = unsub;
       } else {
-        listenerSql = postgres(getHarnessAdminUrl(), {
+        const sql = postgres(getHarnessAdminUrl(), {
           ...longLivedPoolConnectionOptions(`notify-bus:${label}`),
           max: 1,
           // LISTEN: idle by design — never reap for idleness (would drop the subscription).
           idle_timeout: 0,
         });
-        await listenerSql.listen(channel, onNotify);
+        listenerSql = sql;
+        await sql.listen(channel, onNotify);
+        if (gen !== generation) return;
       }
       clearRetry();
     } catch (err) {
+      if (gen !== generation) return;
       console.error(`[${label}] failed to start (will retry):`, err);
       started = false;
       listenerSql = null;
@@ -113,21 +132,16 @@ export function createNotifyBus(channel: string, label: string = channel): Notif
     // into an empty bus and leak a connection nobody asked for.
     clearRetry();
     if (!started) return;
-    if (hubUnsub) {
-      hubUnsub();
-      hubUnsub = null;
-      started = false;
-      return;
-    }
-    if (listenerSql) {
-      try {
-        await listenerSql.end({ timeout: 5 }).catch(() => {});
-      } catch {
-        // ignore errors during close
-      }
-      listenerSql = null;
-      started = false;
-    }
+    // Also covers a start still in flight: it sees the new generation and
+    // stands down instead of reporting our close as its failure.
+    generation++;
+    started = false;
+    const unsub = hubUnsub;
+    const sql = listenerSql;
+    hubUnsub = null;
+    listenerSql = null;
+    if (unsub) unsub();
+    if (sql) await sql.end({ timeout: 5 }).catch(() => {});
   };
 
   return {
@@ -141,6 +155,7 @@ export function createNotifyBus(channel: string, label: string = channel): Notif
     },
     async _stopForTests() {
       clearRetry();
+      generation++;
       if (hubUnsub) {
         hubUnsub();
         hubUnsub = null;

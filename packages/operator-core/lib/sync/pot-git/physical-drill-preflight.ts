@@ -19,9 +19,14 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { projectDirForSlug } from '../../operator-notes';
 import { listCommsTrust, type CommsTrustEntry } from '../../trust/comms-trust';
+import { listIntegrationRequests, type IntegrationRequest } from './integration-requests';
+import { physicalDrillTarget } from './physical-drill-phase-a';
 import { PHASE_D_TIER_HOLD_NOTE_PREFIX, PHASE_D_TIER_HOLD_TIER, PHASE_D_WORKSPACE } from './physical-drill-phase-d';
 import { readPhysicalPhaseEMode } from './physical-drill-phase-e';
+import { defaultRunGit, hiveGitRepoPath } from './storage';
+import { WORKTREE_STAGING_REF } from './worktree-bridge';
 
 export const PHYSICAL_DRILL_PREFLIGHT_SCHEMA = 'hive-git-physical-rig-preflight/v1' as const;
 
@@ -32,6 +37,7 @@ export const PHYSICAL_DRILL_PREFLIGHT_CHECKS = [
   'vm-trust-hold-ready',
   'vm-payload-current',
   'hosts-answering',
+  'integration-queue-clear',
 ] as const;
 export type PhysicalDrillPreflightCheckId = (typeof PHYSICAL_DRILL_PREFLIGHT_CHECKS)[number];
 
@@ -119,7 +125,24 @@ export type DrillSourceObservation =
       phaseD: string | null;
     };
 
+/**
+ * What `integration-queue-clear` judges, read on the tower (the integrator) for the
+ * drill target's store and worktree.
+ */
+export type IntegrationBaselineObservation = {
+  /** `<pot home>/<repo key>`, for the refusal text. */
+  target: string;
+  /** refs/hive/staging in the tower's store; null when the integrator never advanced it. */
+  canonicalStagingOid: string | null;
+  worktreeHeadOid: string | null;
+  /** The worktree HEAD is canonical staging or an ancestor of it (so a bridge can fast-forward it). */
+  worktreeContained: boolean;
+  /** Pending ratify-queue rows whose head a device still publishes and staging does not contain. */
+  blockedHeads: ReadonlyArray<{ devicePubkey: string; headSha: string; reason: string }>;
+};
+
 export type PhysicalDrillPreflightDeps = {
+  observeIntegrationBaseline?: () => Promise<IntegrationBaselineObservation>;
   listTrust?: () => Promise<CommsTrustEntry[]>;
   readCanaryMode?: () => Promise<{ mode: string; source: string }>;
   /** Gathers the drill-source observation (pinned or unpinned; D-086). */
@@ -303,7 +326,104 @@ export function hostsViolation(
   return down.length > 0 ? `${down.join('; ')} — start the owner before a run` : null;
 }
 
+/**
+ * Phase D waits for the tower worktree to reach the run-bound staging head. It can
+ * only get there by fast-forward, so the drill must start with every member head
+ * already absorbed into canonical staging. Two states make that impossible, and
+ * neither heals on its own: a member head the integrator holds in its ratify queue
+ * (an author below the steer tier is never integrated automatically), and a tower
+ * worktree carrying a commit staging does not contain.
+ * Measured: same-box run 12 (WI-10003976) started with both owners' rig-up heads
+ * queued `below-steer-tier`; Phase D ratified only its own head, so the tower
+ * worktree stayed on its unabsorbed commit and the phase burned its 20-minute
+ * convergence budget on 'lagging worktree'.
+ */
+export function integrationBaselineViolation(observed: IntegrationBaselineObservation): string | null {
+  if (!observed.canonicalStagingOid) {
+    return (
+      `the tower's ${observed.target} store has no canonical staging (${WORKTREE_STAGING_REF}) — the integrator ` +
+      'never advanced it, so no phase has a head to converge on; let git-sync integrate the member heads first'
+    );
+  }
+  const problems: string[] = [];
+  if (observed.blockedHeads.length > 0) {
+    const heads = observed.blockedHeads
+      .map((head) => `${head.devicePubkey.slice(0, 12)}@${head.headSha.slice(0, 12)} (${head.reason})`)
+      .join(', ');
+    problems.push(
+      `the tower integrator holds ${observed.blockedHeads.length} member head(s) in its ratify queue that staging ` +
+        `${observed.canonicalStagingOid.slice(0, 12)} does not contain: ${heads}`,
+    );
+  }
+  if (!observed.worktreeContained) {
+    problems.push(
+      `the tower worktree HEAD ${(observed.worktreeHeadOid ?? 'unreadable').slice(0, 12)} is not contained in ` +
+        `canonical staging ${observed.canonicalStagingOid.slice(0, 12)}, so Phase D's tower convergence can never reach the run-bound head`,
+    );
+  }
+  if (problems.length === 0) return null;
+  return (
+    `${problems.join('; ')} — raise the member to steer (trust:comms set) or ratify the queued heads, ` +
+    'then let git-sync integrate them before a run'
+  );
+}
+
 // ── default gatherers (read-only) ───────────────────────────────────────────
+
+export type IntegrationBaselineDeps = {
+  repoPath?: string;
+  worktreePath?: string;
+  listPending?: () => Promise<IntegrationRequest[]>;
+};
+
+/** Read-only: git reads on the tower's store and worktree, one ratify-queue read. */
+export async function observeIntegrationBaseline(deps: IntegrationBaselineDeps = {}): Promise<IntegrationBaselineObservation> {
+  const target = physicalDrillTarget();
+  const repoPath = deps.repoPath ?? hiveGitRepoPath(target.potHome, target.repoKey);
+  // Explicit workspace: the default resolves to an empty registry under a bare rig-profile
+  // env (measured on same-box rig r13), and the ratify queue below is read in this workspace.
+  const worktreePath = deps.worktreePath ?? (await projectDirForSlug(target.gitSyncSlug, PHASE_D_WORKSPACE));
+  if (!worktreePath) throw new Error(`cannot resolve the ${target.gitSyncSlug} worktree`);
+  const rev = async (cwd: string, ref: string): Promise<string | null> => {
+    const result = await defaultRunGit(['rev-parse', '--verify', '-q', `${ref}^{commit}`], cwd);
+    return result.code === 0 ? result.stdout.trim() || null : null;
+  };
+  const staging = await rev(repoPath, WORKTREE_STAGING_REF);
+  // A commit the store never received is not contained (merge-base exits non-zero on it).
+  const contained = async (sha: string): Promise<boolean> =>
+    staging !== null &&
+    (sha === staging || (await defaultRunGit(['merge-base', '--is-ancestor', sha, staging], repoPath)).code === 0);
+  const worktreeHeadOid = await rev(worktreePath, 'HEAD');
+  const published = await defaultRunGit(['for-each-ref', '--format=%(objectname) %(refname)', 'refs/namespaces/'], repoPath);
+  const current = new Set(
+    published.stdout
+      .split('\n')
+      .filter((line) => line.includes('/refs/heads/'))
+      .map((line) => line.split(' ')[0]),
+  );
+  const pending = deps.listPending
+    ? await deps.listPending()
+    : await listIntegrationRequests({
+        workspaceId: PHASE_D_WORKSPACE,
+        potSlug: target.potHome,
+        repoKey: target.repoKey,
+        state: 'pending',
+        limit: 500,
+      });
+  const blockedHeads: IntegrationBaselineObservation['blockedHeads'][number][] = [];
+  for (const request of pending) {
+    // A row whose head no device publishes any more is not gated by the integrator.
+    if (request.state !== 'pending' || !current.has(request.headSha) || (await contained(request.headSha))) continue;
+    blockedHeads.push({ devicePubkey: request.devicePubkey, headSha: request.headSha, reason: request.reason });
+  }
+  return {
+    target: `${target.potHome}/${target.repoKey}`,
+    canonicalStagingOid: staging,
+    worktreeHeadOid,
+    worktreeContained: worktreeHeadOid !== null && (await contained(worktreeHeadOid)),
+    blockedHeads,
+  };
+}
 
 const execFileAsync = promisify(execFile);
 /** Read per call: the probe exports PAPERCUSP_REPO_DIR, and tests point it at a temp repo. */
@@ -491,6 +611,8 @@ export async function runPhysicalDrillPreflight(
       ]);
       return hostsViolation(tower, vm, { towerPort, vmOwnerPort });
     },
+    'integration-queue-clear': async () =>
+      integrationBaselineViolation(await (deps.observeIntegrationBaseline ?? (() => observeIntegrationBaseline()))()),
   };
 
   const results = await Promise.all(

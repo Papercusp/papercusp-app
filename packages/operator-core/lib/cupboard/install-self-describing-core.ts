@@ -99,6 +99,9 @@ export interface SelfDescribingKindSpec<TMeta> {
    *  metadata reported here matches what the corresponding `*:list` will show once
    *  installed. Return null ⇒ the dir does not parse (422). */
   readDir: (dir: string, ref: string) => TMeta | null;
+  /** Checks a parse cannot make (the workspace's catalogs), run before anything
+   *  lands. Returns a refusal message (422), or null to proceed. */
+  validate?: (meta: TMeta) => Promise<string | null>;
   /** Absolute path of the writable user layer for this kind. */
   userDir: () => string;
 }
@@ -293,6 +296,10 @@ export async function installSelfDescribingFromCupboard<TMeta>(
         `${spec.label} "${ref}" failed to parse its ${spec.manifestFile}`,
         422,
       );
+    }
+    const refusal = spec.validate ? await spec.validate(meta) : null;
+    if (refusal) {
+      throw new InstallSelfDescribingError(`${spec.label} "${ref}" cannot install: ${refusal}`, 422);
     }
 
     const userDir = spec.userDir();

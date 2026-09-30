@@ -91,17 +91,25 @@ PTY_PORT="${OPERATOR_DEV_PTY_PORT:-$((PORT + 4))}"
 # Degrades safely: git-via-sidecar falls back to a local spawn on ANY sidecar
 # problem (unreachable, stale build, a real git error), so this can only change
 # performance, never correctness.
-# Preserve an explicit caller bind across the inner `.env.local` source. The
-# isolated Tauri verifier pins loopback here; without this re-application the
-# shared dev file's 0.0.0.0 value wins later and remote-auth-policy correctly
-# crash-loops the private verifier before its desktop can start
-# (EI-21140610191173818). No caller value means no override, so ordinary dev
-# launches retain the existing `.env.local` contract.
-DEV_BIND_OVERRIDE=""
-if [ -n "${PAPERCUSP_BIND_HOST:-}" ]; then
-  printf -v DEV_BIND_HOST_Q '%q' "$PAPERCUSP_BIND_HOST"
-  DEV_BIND_OVERRIDE="PAPERCUSP_BIND_HOST=$DEV_BIND_HOST_Q "
-fi
+# Preserve explicit caller values across the inner `.env.local` source, which
+# runs under `set -a` and would otherwise overwrite them:
+#   - PAPERCUSP_BIND_HOST: the isolated Tauri verifier pins loopback here;
+#     without this the shared dev file's 0.0.0.0 value wins later and
+#     remote-auth-policy correctly crash-loops the private verifier before its
+#     desktop can start (EI-21140610191173818).
+#   - PAPERCUSP_CUPBOARD_URL: a verifier pointed at a local Cupboard worker
+#     (`wrangler dev` on loopback) otherwise talks to whatever origin the dev
+#     file names, so the assertions read live listings instead of the seeded
+#     ones (EI-24688600845424660).
+# No caller value means no override, so ordinary dev launches retain the
+# existing `.env.local` contract.
+DEV_CALLER_OVERRIDES=""
+for DEV_CALLER_KEY in PAPERCUSP_BIND_HOST PAPERCUSP_CUPBOARD_URL; do
+  if [ -n "${!DEV_CALLER_KEY:-}" ]; then
+    printf -v DEV_CALLER_VALUE_Q '%q' "${!DEV_CALLER_KEY}"
+    DEV_CALLER_OVERRIDES+="$DEV_CALLER_KEY=$DEV_CALLER_VALUE_Q "
+  fi
+done
 # An isolated verifier supplies PAPERCUSP_DEV_SOURCE_ROOT. Resolve it exactly
 # (marker check, no walk-up) and fail closed if it is incomplete: the verifier
 # must never silently fall back to the mutable shared checkout. With no
@@ -164,7 +172,7 @@ printf -v DEV_OPERATOR_DIR_Q '%q' "$DEV_OPERATOR_DIR"
 # their 40-malloc-arena.conf drop-ins (host-memory-reduction-2026-09-27 D-027:
 # this host held 1.8 GB in 64 MiB arenas without it). boot-malloc-arena.ts
 # re-execs an uncapped host as a backstop; setting it here skips that exec.
-DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_BIND_OVERRIDE}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT $DEV_HOST_COMMAND"
+DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_CALLER_OVERRIDES}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT $DEV_HOST_COMMAND"
 # hono-host ASSUMES a reachable database (env URL, embedded-pg.json, or native
 # :5432 harness_admin), which every developer box has and a fresh clone does
 # not. With none reachable, boot bin/serve.ts instead: it starts its own
@@ -182,7 +190,7 @@ if [ "$DEV_OPERATOR_MODE" = embedded-pg ]; then
   echo "[tauri] no reachable developer database — booting bin/serve.ts with its own embedded Postgres"
   # Same .env.local + malloc cap, but serve.ts owns its lifecycle (embedded PG,
   # in-process background workers), so none of the hono-host dev pins apply.
-  DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_BIND_OVERRIDE}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_SERVE_UI=1 npx tsx bin/serve.ts --ui"
+  DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_CALLER_OVERRIDES}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_SERVE_UI=1 npx tsx bin/serve.ts --ui"
 fi
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.

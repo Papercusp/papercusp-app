@@ -108,6 +108,8 @@ export interface HostedDesktopBackendDeps {
   captureDir?: string;
   /** Override the KasmVNC websocket path. */
   websocketPath?: string;
+  /** Override the KasmVNC dial deadline (tests). */
+  dialTimeoutMs?: number;
   createSocket?: (url: string, headers: Record<string, string>) => HostedDesktopWireSocket;
   /** Injected for tests. */
   now?: () => number;
@@ -169,6 +171,17 @@ function toBuffer(data: unknown): Buffer | null {
  * server closes the connection outright without it.
  */
 export const KASMVNC_WEBSOCKET_SUBPROTOCOL = 'binary';
+
+/**
+ * How long a KasmVNC dial may wait for the upgrade to open (WI-10004214).
+ *
+ * The host sends `desktop.ready` only after the dial resolves, so a dial with no
+ * deadline turns a stalled upgrade into a viewer that says "Opening your desktop…"
+ * forever with no error anywhere — measured on the owner's first Take control on
+ * owner-test, 2026-09-30. A loopback upgrade that has not opened in this long is not
+ * going to; failing it reports `desktop_dial_failed` and lets the viewer retry.
+ */
+export const KASMVNC_DIAL_TIMEOUT_MS = 10_000;
 
 /**
  * Everything KasmVNC demands on the upgrade BEYOND the credential.
@@ -258,10 +271,11 @@ export function rosterEntryForSession(session: DesktopSessionRecord): HostedDesk
  */
 export async function dialDesktopSocket(
   input: HostedDesktopDialInput,
-  deps: Pick<HostedDesktopBackendDeps, 'createSocket' | 'websocketPath'> = {},
+  deps: Pick<HostedDesktopBackendDeps, 'createSocket' | 'websocketPath' | 'dialTimeoutMs'> = {},
 ): Promise<HostedDesktopSocket> {
   const create = deps.createSocket ?? defaultCreateSocket;
   const path = deps.websocketPath ?? KASMVNC_WEBSOCKET_PATH;
+  const dialTimeoutMs = deps.dialTimeoutMs ?? KASMVNC_DIAL_TIMEOUT_MS;
   const url = `ws://${endpointHost(input.endpoint)}:${input.endpoint.port}${path}`;
   const socket = create(url, kasmvncUpgradeHeaders({ endpoint: input.endpoint, grant: input.grant }));
 
@@ -285,19 +299,33 @@ export async function dialDesktopSocket(
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
+    const deadline = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      // Abort the pending upgrade so the half-open socket does not outlive the dial.
+      try {
+        socket.close(1000, 'dial_timeout');
+      } catch {
+        /* already gone */
+      }
+      reject(new HostedDesktopDialError('desktop_dial_failed', `dial_timeout_${dialTimeoutMs}ms`));
+    }, dialTimeoutMs);
     socket.on('open', () => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       resolve();
     });
     socket.on('error', (error) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       reject(new HostedDesktopDialError('desktop_dial_failed', String(error)));
     });
     socket.on('close', (code) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       // A close BEFORE open must reject the dial rather than resolve a dead pipe.
       //
       // ⚠ Do NOT read this as "the credential was rejected" — that reading cost real
@@ -351,19 +379,25 @@ export function createHostedDesktopBackend(deps: HostedDesktopBackendDeps): Host
   const now = deps.now ?? Date.now;
   const warn = deps.onWarning ?? (() => {});
 
-  let reconciled: Promise<void> | null = null;
-  const reconcileOnce = (): Promise<void> => {
+  // Every roster/start reconciles, not only the first (WI-10004206): a desktop can die
+  // at any point after boot, and a roster read once is how a dead one stayed `ready`.
+  // Concurrent callers share the pass in flight rather than each paying for one.
+  let reconciling: Promise<void> | null = null;
+  const reconcile = (): Promise<void> => {
     if (!deps.reconcile) return Promise.resolve();
-    reconciled ??= deps.reconcile().then(
-      (reaped) => {
-        if (reaped > 0) warn(`hosted-desktop-backend — retired ${reaped} desktop row(s) no live lease backs`);
-      },
-      (error) => {
-        reconciled = null;
-        warn(`hosted-desktop-backend — desktop reconcile failed: ${String(error)}`);
-      },
-    );
-    return reconciled;
+    reconciling ??= deps.reconcile()
+      .then(
+        (reaped) => {
+          if (reaped > 0) warn(`hosted-desktop-backend — retired ${reaped} desktop row(s) no live lease backs`);
+        },
+        (error) => {
+          warn(`hosted-desktop-backend — desktop reconcile failed: ${String(error)}`);
+        },
+      )
+      .finally(() => {
+        reconciling = null;
+      });
+    return reconciling;
   };
 
   const displayFor = async (desktopSessionId: string): Promise<number | null> => {
@@ -389,6 +423,7 @@ export function createHostedDesktopBackend(deps: HostedDesktopBackendDeps): Host
       return dialDesktopSocket(input, {
         ...(deps.createSocket ? { createSocket: deps.createSocket } : {}),
         ...(deps.websocketPath ? { websocketPath: deps.websocketPath } : {}),
+        ...(deps.dialTimeoutMs ? { dialTimeoutMs: deps.dialTimeoutMs } : {}),
       });
     },
 
@@ -402,12 +437,12 @@ export function createHostedDesktopBackend(deps: HostedDesktopBackendDeps): Host
     },
 
     async roster(): Promise<HostedDesktopRosterEntry[]> {
-      await reconcileOnce();
+      await reconcile();
       return (await deps.listSessions()).map(rosterEntryForSession);
     },
 
     async start(): Promise<HostedDesktopRosterEntry | null> {
-      await reconcileOnce();
+      await reconcile();
       const desktopSessionId = await deps.ensureDesktop();
       // Served only when BOTH halves hold: the row names it, and this process holds
       // the live lease `lookup` dials through. Either alone gives the viewer an id

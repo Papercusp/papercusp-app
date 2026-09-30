@@ -266,13 +266,13 @@ command -v mkfs.hfsplus >/dev/null 2>&1 || fail "mkfs.hfsplus not found (apt ins
 [[ -f "$SRC_TAURI/Info.plist" ]] || fail "src-tauri/Info.plist missing (the ATS/mic keys merged into every bundle)"
 [[ "$VERSION" != "unknown" && -n "$VERSION" ]] || fail "could not resolve the build version (PAPERCUSP_BUILD_VERSION or tauri.conf.json)"
 for a in "${ARCHES[@]}"; do
-  rustup target list --installed 2>/dev/null | grep -qx "$a" || fail "rustup target $a not installed (rustup target add $a)"
+  rustup target list --installed 2>/dev/null | grep -cx "$a" >/dev/null || fail "rustup target $a not installed (rustup target add $a)"
 done
 # Darwin sidecar must be built AND actually darwin (a stray linux sidecar here
 # would ship an app that dies with 'exec format error' on macOS).
 [[ -d "$DARWIN_SIDECAR/apps" && -f "$DARWIN_SIDECAR/bin/node" ]] \
   || fail "darwin sidecar not found at $DARWIN_SIDECAR — build it: TARGET_OS=darwin TARGET_ARCH=x64 PAPERCUSP_SIDECAR_OUT=$DARWIN_SIDECAR bin/build-desktop-sidecar.sh"
-file "$DARWIN_SIDECAR/bin/node" 2>/dev/null | grep -q 'Mach-O' \
+file "$DARWIN_SIDECAR/bin/node" 2>/dev/null | grep -c 'Mach-O' >/dev/null \
   || fail "sidecar at $DARWIN_SIDECAR is NOT darwin (bin/node is not Mach-O) — rebuild the darwin sidecar"
 # ...and it must be a build that carries what this cut is shipping (EI-19446480107603858).
 # The two asserts above are loud when the sidecar is MISSING or the WRONG ARCH, and

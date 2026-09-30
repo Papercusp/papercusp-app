@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   WORKSPACE_HOST_CREDENTIAL_DELIVERY_ENTRYPOINT,
   WORKSPACE_HOST_PUI_COMPANION_PATH,
@@ -478,6 +479,9 @@ export function evaluateWorkspaceHostNativeDependencyCoverage(
     providers,
   };
 }
+
+/** Replaced by the sha256 of the rendered bootstrap; see service_restart_needed (WI-10004242). */
+const WORKSPACE_HOST_BOOTSTRAP_FINGERPRINT_PLACEHOLDER = '__PAPERCUSP_BOOTSTRAP_FINGERPRINT__';
 
 /** Ordered, observable phases of every generated install/upgrade/rollback. */
 export const WORKSPACE_HOST_BOOTSTRAP_PHASES = [
@@ -2939,7 +2943,31 @@ export function buildWorkspaceHostBootstrap(
     // process, and the failure trap rolled the symlink back. Enable persistence separately, then
     // unconditionally restart so first install and every release switch share one execution gate.
     'systemctl enable "$SERVICE_NAME.service" || { service_diagnostics; die "workspace service failed to enable"; }',
-    'systemctl restart "$SERVICE_NAME.service" || { service_diagnostics; die "workspace service failed to start"; }',
+    // WI-10004242: GCE re-runs this whole bootstrap as the startup-script on EVERY boot. The unit
+    // is enabled, so systemd has already started it by the time this line runs, and customers can
+    // already have opened desktops and sessions on it. Restarting it ~3 minutes after boot killed
+    // all of them (the desktop units are BindsTo= this service). So the restart is skipped only
+    // when this boot re-runs a bootstrap that already COMPLETED on an earlier boot: the same
+    // rendered script, `current` unchanged by this run, and the unit active. A release switch,
+    // a changed rendering, or a second run within one boot still restarts (P-018 r7 above).
+    `BOOTSTRAP_FINGERPRINT=${WORKSPACE_HOST_BOOTSTRAP_FINGERPRINT_PLACEHOLDER}`,
+    'BOOTSTRAP_COMPLETE_MARKER="$RUNTIME_ROOT/.bootstrap-complete"',
+    'BOOT_ID="$(cat /proc/sys/kernel/random/boot_id)"',
+    'service_restart_needed() {',
+    '  local marker_fingerprint="" marker_boot_id=""',
+    '  [[ -s "$BOOTSTRAP_COMPLETE_MARKER" ]] || return 0',
+    '  read -r marker_fingerprint marker_boot_id < "$BOOTSTRAP_COMPLETE_MARKER" || return 0',
+    '  [[ "$marker_fingerprint" == "$BOOTSTRAP_FINGERPRINT" ]] || return 0',
+    '  [[ -n "$marker_boot_id" && "$marker_boot_id" != "$BOOT_ID" ]] || return 0',
+    '  [[ -n "$PREVIOUS_TARGET" && "$PREVIOUS_TARGET" == "$(readlink -f "$RUNTIME_ROOT/current")" ]] || return 0',
+    '  [[ "$(systemctl is-active "$SERVICE_NAME.service" 2>/dev/null)" == "active" ]] || return 0',
+    '  return 1',
+    '}',
+    'if service_restart_needed; then',
+    '  systemctl restart "$SERVICE_NAME.service" || { service_diagnostics; die "workspace service failed to start"; }',
+    'else',
+    '  log "service:unchanged — this boot re-runs the bootstrap that completed on an earlier boot; $SERVICE_NAME.service keeps running"',
+    'fi',
     "",
     `phase '${WORKSPACE_HOST_BOOTSTRAP_PHASES[6]}'`,
     'systemctl is-active --quiet "$SERVICE_NAME.service" || { service_diagnostics; die "workspace service is not active after start"; }',
@@ -3056,10 +3084,19 @@ export function buildWorkspaceHostBootstrap(
     'chmod 0640 "$ATTESTATION_PATH"',
     `printf '${WORKSPACE_HOST_BOOTSTRAP_ATTESTATION_PREFIX}%s\\n' "$(base64 --wrap=0 < \"$ATTESTATION_PATH\")"`,
     "SWITCHED=0",
+    // WI-10004242: only a run that got this far may let a LATER boot skip the service restart.
+    'printf "%s %s\\n" "$BOOTSTRAP_FINGERPRINT" "$BOOT_ID" > "$BOOTSTRAP_COMPLETE_MARKER.next"',
+    'mv -Tf "$BOOTSTRAP_COMPLETE_MARKER.next" "$BOOTSTRAP_COMPLETE_MARKER"',
     'log "bootstrap complete"',
   ];
 
-  return `${lines.join('\n')}\n`;
+  // The fingerprint is the hash of the rendered script itself (with the placeholder in place),
+  // so any change to the release, the service unit, or the host configuration changes it.
+  const script = `${lines.join('\n')}\n`;
+  return script.replace(
+    WORKSPACE_HOST_BOOTSTRAP_FINGERPRINT_PLACEHOLDER,
+    createHash('sha256').update(script).digest('hex'),
+  );
 }
 
 function addMismatch(

@@ -58,6 +58,13 @@ export const SETUP_STEPS: readonly StepDef[] = [
     required: false,
   },
   {
+    id: 'own-tunnel',
+    title: 'Remote access (optional)',
+    summary:
+      'Let outside apps like Claude.ai or ChatGPT reach this computer through a tunnel in your own account — Cloudflare in one click, or your own Tailscale Funnel/ngrok. No router changes.',
+    required: false,
+  },
+  {
     id: 'backups',
     title: 'Backups',
     summary: 'Local snapshot layer that protects against agent mistakes.',

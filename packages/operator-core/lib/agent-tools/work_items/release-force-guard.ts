@@ -32,6 +32,7 @@ import type { LivenessVerdict } from '../coordination/liveness-oracle';
 import { agentToolInvocationPredicate } from '../sessions/automatic-tool-names';
 import type { WorkItemReleaseRequest } from '../../work-items-release-request';
 import { hasWorkItemProgressAfterReleaseRequest } from '../../work-items-release-request';
+import { resolveHolderOwnerId } from '../../work-item-holder-identity';
 
 export type ForceReleaseBasis =
   | 'holder-not-live'
@@ -192,6 +193,8 @@ export interface ForceReleaseDeps {
     ownerId: string,
   ) => Promise<{ fleetSlug: string | null; fleetRole: string | null } | null>;
   getFleet?: (workspaceId: string, fleetSlug: string) => Promise<{ leaderOwnerId: string | null } | null>;
+  /** EI-23701433507513915: canonical owner id for a stored holder (injectable for tests). */
+  resolveHolderOwnerId?: (stored: string, opts: { workspaceId: string | null }) => Promise<string>;
   endedRecordedOwnerIds?: (ownerIds: string[]) => Promise<Set<string>>;
   /** Positive teardown acknowledgement written by session:end after the
    * managed host confirms it accepted the shutdown request. */
@@ -292,18 +295,26 @@ export async function assessForceRelease(
       const map = await resolveSessionStates([{ ownerId }], { hydratePerId: true });
       return map.get(ownerId) ?? null;
     });
+  // EI-23701433507513915: every liveness + fleet lookup is keyed on the CANONICAL holder. A
+  // legacy short-form holder (`su-851c1a7a`) matched no presence row and no fleet membership,
+  // so even the holder's own fleet leader was refused `force_unauthorized`. The expansion is
+  // unique-or-unchanged, so it can only find the agent the stored string already names.
+  // Raw-vs-raw comparisons (the release request's recorded holder, below) keep the stored string.
+  const lookupHolder = await (deps.resolveHolderOwnerId ?? resolveHolderOwnerId)(input.holderOwnerId, {
+    workspaceId: input.workspaceId || null,
+  }).catch(() => input.holderOwnerId);
   const [holderPres, lastToolInvocationAt, endedOwners, shutdownAcceptedOwners, oracleSignal] = await Promise.all([
-    getPresence(input.holderOwnerId).catch(() => null),
-    getLastToolInvocationAt(input.holderOwnerId).catch(() => null),
-    endedOwnersOf([input.holderOwnerId]).catch(() => new Set<string>()),
-    shutdownAcceptedOwnersOf([input.holderOwnerId]).catch(() => new Set<string>()),
-    resolveHolderSessionState(input.holderOwnerId).catch(() => null),
+    getPresence(lookupHolder).catch(() => null),
+    getLastToolInvocationAt(lookupHolder).catch(() => null),
+    endedOwnersOf([lookupHolder]).catch(() => new Set<string>()),
+    shutdownAcceptedOwnersOf([lookupHolder]).catch(() => new Set<string>()),
+    resolveHolderSessionState(lookupHolder).catch(() => null),
   ]);
   const oracleSessionState = typeof oracleSignal === 'string' ? oracleSignal : (oracleSignal?.sessionState ?? null);
   const oracleWakeAttemptMiss =
     oracleSignal != null && typeof oracleSignal === 'object' ? oracleSignal.wakeAttemptMiss === true : null;
-  const recordedEnded = endedOwners.has(input.holderOwnerId);
-  const shutdownAccepted = shutdownAcceptedOwners.has(input.holderOwnerId);
+  const recordedEnded = endedOwners.has(lookupHolder);
+  const shutdownAccepted = shutdownAcceptedOwners.has(lookupHolder);
   // 'suspect' = the oracle CONFIRMED the process is gone (pid-probed ESRCH or
   // 30-min hard-stale) but is withholding a flat `ended` verdict only because
   // claims are still held — exactly the state a force-reclaim is FOR, so it
@@ -437,7 +448,7 @@ export async function assessForceRelease(
     deps.getFleet ??
     (async (ws: string, slug: string) => (await import('../../agent-fleets-store')).getFleet(ws, slug));
 
-  const holderFleet = (await membershipOf(input.workspaceId, input.holderOwnerId).catch(() => null))?.fleetSlug ?? null;
+  const holderFleet = (await membershipOf(input.workspaceId, lookupHolder).catch(() => null))?.fleetSlug ?? null;
   const leaderOwnerId = holderFleet
     ? ((await fleetOf(input.workspaceId, holderFleet).catch(() => null))?.leaderOwnerId ?? null)
     : null;

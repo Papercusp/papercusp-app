@@ -11,7 +11,22 @@ export {
   syncChunkSurfaces,
   type ChunkPlan,
 } from './engine';
-export { sharedChunkStore, parentShaSql, type SharedChunkStoreOptions } from './shared-store';
+export {
+  sharedChunkStore,
+  parentShaSql,
+  SHARED_CHUNK_EMBEDDED_TEXT_SQL,
+  type SharedChunkStoreOptions,
+} from './shared-store';
+export {
+  chunkEmbedTargets,
+  validateChunkEmbedTarget,
+  selectPendingChunks,
+  embedPendingChunks,
+  type ChunkEmbedder,
+  type PendingChunk,
+  type EmbedPendingChunksOptions,
+  type EmbedPendingChunksResult,
+} from './embed';
 export {
   chunkAwareVectorLeg,
   chunkAwareVectorLegSql,
@@ -19,6 +34,7 @@ export {
   type ChunkAwareVectorLegOptions,
   type ChunkAwareLegRow,
   type ChunkLegMode,
+  type ChunkLegScan,
   type ParentVectorColumns,
   type SpaceFilterColumns,
 } from './vector-leg';
@@ -31,6 +47,7 @@ export type {
   ResolvedChunkSurface,
   ChunkStore,
   ChunkVectorTable,
+  ChunkEmbedTarget,
   StaleParent,
   ExistingChunk,
   PlannedChunk,

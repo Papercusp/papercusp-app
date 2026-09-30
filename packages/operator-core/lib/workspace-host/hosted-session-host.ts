@@ -40,7 +40,7 @@ import {
   type HostedDesktopGrant,
 } from '../desktop/hosted-desktop-channel';
 import { OperatorHttpChannel, type OperatorHttpFetch } from './hosted-operator-http';
-import { createAppHttpChannel } from './hosted-app-relay';
+import { AppKeyMintChannel, createAppHttpChannel } from './hosted-app-relay';
 
 export const HOSTED_HOST_MAX_MESSAGE_BYTES = 1024 * 1024;
 export const HOSTED_HOST_MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -402,7 +402,12 @@ type Channel =
        * own key is the credential, checked by this operator's bearer chain.
        */
       plane?: 'app';
-    };
+    }
+  /**
+   * One key mint for a grant the portal's consent page approved (P-325, D-021). Carries only
+   * `mint.request`; answered once, then closed. No viewer and no PTY: the connector is the caller.
+   */
+  | { kind: 'app-key-mint'; mint: AppKeyMintChannel };
 
 type DesktopChannel = {
   channelId: string;
@@ -883,6 +888,31 @@ export class HostedWorkspaceHostSessionAdapter {
       this.audit('app_http_attached', identity, appChannelId);
       return;
     }
+    if (message.kind === 'app-key-mint') {
+      // P-325 (D-021): the portal's MCP OAuth token endpoint asks this machine to mint the key
+      // for a grant its consent page approved. The machine mints and keeps checking the key.
+      const mintChannelId = string(message.channelId, 256);
+      if (!mintChannelId || message.audience !== 'portal-oauth') return;
+      if (this.channels.has(mintChannelId)) {
+        this.options.send({ type: 'relay.close', channelId: mintChannelId, reason: 'channel_already_open' });
+        return;
+      }
+      const identity = { userId: 'portal-oauth', hostedSessionId: mintChannelId };
+      const mint = new AppKeyMintChannel({
+        send: (payload) => this.send(mintChannelId, payload),
+        audit: (action, detail) => this.audit(action, identity, mintChannelId, detail),
+        done: (reason) => {
+          if (this.channels.get(mintChannelId)?.kind !== 'app-key-mint') return;
+          this.channels.delete(mintChannelId);
+          this.options.send({ type: 'relay.close', channelId: mintChannelId, reason });
+        },
+        ...(this.options.operatorHttp?.origin ? { origin: this.options.operatorHttp.origin } : {}),
+        ...(this.options.operatorHttp?.fetch ? { fetch: this.options.operatorHttp.fetch } : {}),
+      });
+      this.channels.set(mintChannelId, { kind: 'app-key-mint', mint });
+      this.audit('app_key_mint_attached', identity, mintChannelId);
+      return;
+    }
     const channelId = string(message.channelId, 256);
     const userId = string(message.userId);
     const hostedSessionId = string(message.hostedSessionId);
@@ -1113,7 +1143,13 @@ export class HostedWorkspaceHostSessionAdapter {
       else this.send(channelId, { type: 'http.error', code: 'channel_kind_mismatch', requestType: type });
       return;
     }
-    if (type.startsWith('http.')) return;
+    // Same rule for the key channel: it carries one `mint.request` or `token.request` and nothing
+    // else (AppKeyMintChannel.accept refuses any other type).
+    if (channel.kind === 'app-key-mint') {
+      await channel.mint.accept(type, payload);
+      return;
+    }
+    if (type.startsWith('http.') || type.startsWith('mint.') || type.startsWith('token.')) return;
 
     // HOST-level operations, answered on ANY authenticated channel.
     //
@@ -1332,6 +1368,8 @@ export class HostedWorkspaceHostSessionAdapter {
   private channelIdentity(channelId: string, channel: Channel): { userId: string; hostedSessionId: string } {
     if (channel.kind === 'operator-http') {
       return { userId: channel.userId, hostedSessionId: channel.hostedSessionId };
+    } else if (channel.kind === 'app-key-mint') {
+      return { userId: 'portal-oauth', hostedSessionId: channelId };
     } else if (channel.kind === 'desktop') {
       const desktop = this.desktopChannels.get(channelId);
       if (desktop) return { userId: desktop.userId, hostedSessionId: desktop.hostedSessionId };
@@ -1430,7 +1468,9 @@ export class HostedWorkspaceHostSessionAdapter {
       this.audit('operation_denied', identity, channelId, `desktop.start ${code}`);
     };
     if (!requestId) return refuse('request_id_required');
-    if (channel.kind === 'operator-http' || channel.role !== 'controller') return refuse('controller_required');
+    if (channel.kind === 'operator-http' || channel.kind === 'app-key-mint' || channel.role !== 'controller') {
+      return refuse('controller_required');
+    }
     const backend = this.options.desktop;
     if (!backend) return refuse('desktop_unsupported');
 
@@ -1575,6 +1615,12 @@ export class HostedWorkspaceHostSessionAdapter {
       this.audit('operator_http_detached', channel, channelId, reason);
       return;
     }
+    if (channel.kind === 'app-key-mint') {
+      // The portal gave up (its own timeout, or its answer arrived): abort an in-flight mint.
+      channel.mint.close();
+      this.audit('app_key_mint_detached', { userId: 'portal-oauth', hostedSessionId: channelId }, channelId, reason);
+      return;
+    }
     if (channel.kind === 'desktop') {
       const desktop = this.desktopChannels.get(channelId);
       // The control plane initiated this close, so it needs no echo back.
@@ -1589,7 +1635,10 @@ export class HostedWorkspaceHostSessionAdapter {
   }
 
   private closeOperatorHttpChannels(): void {
-    for (const channel of this.channels.values()) if (channel.kind === 'operator-http') channel.http.close();
+    for (const channel of this.channels.values()) {
+      if (channel.kind === 'operator-http') channel.http.close();
+      else if (channel.kind === 'app-key-mint') channel.mint.close();
+    }
   }
 
   /** Route one PTY's output and exit through THIS adapter (a fresh session, or an adopted one). */

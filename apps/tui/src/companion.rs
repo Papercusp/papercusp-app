@@ -208,9 +208,16 @@ impl Companion {
 }
 
 /// Are we running inside a zellij session? (`$ZELLIJ` is set by zellij for every
-/// pane/command it owns.)
+/// pane/command it owns.) An EMPTY value is not a session: a launcher that
+/// cannot unset the variable blanks it (the PUI PTY acceptance does), and
+/// treating that as inside made an installed bare `pui` start a `zellij pipe`
+/// child (WI-10004247 class A). Matches keyboard.rs / chat_copy.rs.
 fn inside_zellij() -> bool {
-    std::env::var_os("ZELLIJ").is_some()
+    zellij_value_means_inside(std::env::var_os("ZELLIJ").as_deref())
+}
+
+fn zellij_value_means_inside(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
 }
 
 /// Resolve the plugin wasm: `$PUI_COMPANION_WASM` override, else the companion
@@ -290,6 +297,16 @@ fn map_plugin_event(ev: PluginEvent) -> Event {
 mod tests {
     use super::*;
     use pui_companion_proto::{PaneNode, TabNode, Topology};
+
+    /// WI-10004247 class A: a blanked `$ZELLIJ` is outside zellij, so a bare
+    /// installed `pui` starts no `zellij pipe` child.
+    #[test]
+    fn empty_zellij_value_is_not_inside_a_session() {
+        use std::ffi::OsStr;
+        assert!(!zellij_value_means_inside(None));
+        assert!(!zellij_value_means_inside(Some(OsStr::new(""))));
+        assert!(zellij_value_means_inside(Some(OsStr::new("0"))));
+    }
 
     #[test]
     fn pipe_argv_shape() {

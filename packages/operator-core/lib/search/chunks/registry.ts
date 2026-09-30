@@ -104,9 +104,135 @@ export const CHUNK_STORES: readonly ChunkStoreRegistration[] = [
   },
 ];
 
+/**
+ * Plans (P-009, D-014): 1,500-character windows with 250 overlap, up to 32
+ * windows (~41k characters), chunk margin 0 — the bench arm D-014 chose. The
+ * markdown splitter had the best tail MRR but cost short plans too much, so
+ * D-014 rejected it; window chunks carry no anchor, and plans:search derives the
+ * matched section from the winning window's position instead
+ * (agent-tools/plans/semantic-leg.ts). Plans past 32 windows (233 of 2,164,
+ * measured 2026-09-30) lose their tail, counted in parentsTruncatedByMaxChunks.
+ * The header is the title, which the parent vector also embeds
+ * (title + left(content, 2000)). Templates are never searched, so never chunked.
+ * Reader: plans:search, in retrieve mode. plans:new's duplicate guard and the
+ * scout novelty and intent legs read the parent vector alone (D-005).
+ */
+export const PLANS_CHUNK_SURFACE: PapercuspChunkSurface = {
+  surface: 'plans',
+  parent: {
+    table: 'harness_shared.harness_plans',
+    key: ['workspace_id', 'harness_slug', 'plan_slug'],
+  },
+  textSql: 'p.content',
+  headerSql: 'p.title',
+  eligibleSql: 'p.template_slug IS NULL',
+  versionSql: 'p.updated_at',
+  splitter: { kind: 'window', size: 1500, overlap: 250 },
+  maxChunks: 32,
+  // D-029 (P-015): D-014 chose margin 0, but the live re-run lowered short-row
+  // MRR by .0134 against R-2's .01 bound; 0.02 is the smallest margin that meets
+  // it on live data (.0054) and keeps tail recall@1 at .890 (.898 at margin 0).
+  chunkMargin: 0.02,
+  parentVector: { column: 'embedding', profileColumn: 'embedding_profile', modeColumn: 'embedding_mode' },
+};
+
+/**
+ * Operator (chat) turns (P-010, D-017): 1,500-character windows with 250
+ * overlap, up to 8 windows (~11k characters), each chunk's similarity lowered
+ * by 0.06 before best-match pooling — the bench arm D-017 chose (at margin 0
+ * the collection would not be chunked at all). Turns past 8 windows (268 over
+ * 80k characters at P-001) lose their tail, counted in
+ * parentsTruncatedByMaxChunks.
+ *
+ * A turn's text never changes after its INSERT (operator-conversations.ts
+ * appendTurn; turn-answer.ts updates `tools` only), so its creation time
+ * (epoch milliseconds) is its version. No header: a turn has no title line.
+ * Reader: the search:semantic 'turns' source, in retrieve mode.
+ */
+export const OPERATOR_TURNS_CHUNK_SURFACE: PapercuspChunkSurface = {
+  surface: 'operator_turns',
+  // id is uuid: declaring the type casts the chunk side, so the prune anti-join
+  // and the vector leg's join keep the primary-key index.
+  parent: { table: 'harness_shared.operator_turns', key: [{ column: 'id', type: 'uuid' }] },
+  textSql: 'p.text',
+  versionSql: 'to_timestamp(p.created_at / 1000.0)',
+  splitter: { kind: 'window', size: 1500, overlap: 250 },
+  maxChunks: 8,
+  chunkMargin: 0.06,
+  parentVector: { column: 'text_embedding', profileColumn: 'text_embedding_profile', modeColumn: 'text_embedding_mode' },
+  searchSource: 'turns',
+};
+
+/**
+ * Work items (P-011, D-015): 1,500-character windows with 250 overlap, up to 4
+ * windows (~5.3k characters), no chunk margin — the bench arm D-015 chose.
+ * Every kind and lane shares the table, observations included, so every row
+ * whose summary runs past the parent vector's 2,000 characters is chunked
+ * (12,026 of 240,329 rows, measured 2026-09-30). The header is the title, which
+ * the parent vector also embeds.
+ *
+ * Version: `updated_ts` (epoch milliseconds). Audited 2026-09-30: every
+ * UPDATE that rewrites `summary` (or the engineer_issues view's `body`, whose
+ * trigger sets `updated_ts` from `updated_at`) also advances it. A writer that
+ * rewrites `summary` without touching it would leave that item's chunks stale
+ * until its next edit.
+ *
+ * Readers in retrieve mode: search:semantic's work_item source (through the
+ * engineer_issues view) and work_items:search's issue and feature legs
+ * (work-items.ts). The duplicate guard, the admission promoter and census and
+ * the scout novelty legs read the parent vector alone (D-005).
+ */
+export const WORK_ITEMS_CHUNK_SURFACE: PapercuspChunkSurface = {
+  surface: 'work_items',
+  parent: { table: 'harness_shared.work_items', key: ['harness_slug', 'feature_id'] },
+  textSql: 'p.summary',
+  headerSql: 'p.title',
+  versionSql: 'to_timestamp(p.updated_ts / 1000.0)',
+  splitter: { kind: 'window', size: 1500, overlap: 250 },
+  maxChunks: 4,
+  chunkMargin: 0,
+  parentVector: { column: 'embedding', profileColumn: 'embedding_profile', modeColumn: 'embedding_mode' },
+  searchSource: 'work_item',
+};
+
+/**
+ * Consult questions (P-012, D-016): 1,500-character windows with 250 overlap, up
+ * to 8 windows, chunk margin 0.04 — the bench arm D-016 chose. Escalations are not
+ * registered (D-018: too few rows past the cut to measure).
+ *
+ * Version: `created_at`. A consult's question is written once when the consult
+ * opens and never rewritten, while `updated_at` moves on every routing and state
+ * change, which would only re-read unchanged text.
+ *
+ * Readers (D-027): coord:orient's peersKnow fold (consult/peers-know.ts) reads the
+ * chunks in retrieve mode, so a declared intent that matches part of a long settled
+ * question still surfaces it. consult:get_feedback's archive-first serve
+ * (get-feedback-core.ts) stays on the parent vector: it answers a new question
+ * with a past answer in place of a live consult, which is a duplicate decision
+ * (D-005), not a search.
+ */
+export const CONSULT_QUESTIONS_CHUNK_SURFACE: PapercuspChunkSurface = {
+  surface: 'consult_questions',
+  parent: { table: 'harness_shared.consult_state', key: ['workspace_id', 'conversation_id'] },
+  textSql: 'p.question',
+  versionSql: 'p.created_at',
+  splitter: { kind: 'window', size: 1500, overlap: 250 },
+  maxChunks: 8,
+  chunkMargin: 0.04,
+  parentVector: {
+    column: 'query_embedding',
+    profileColumn: 'query_embedding_profile',
+    modeColumn: 'query_embedding_mode',
+  },
+};
+
 export const CHUNK_SURFACES: readonly PapercuspChunkSurface[] = [
   // Session turns (P-007): the dedicated store above, not the shared table.
   SESSION_TURN_CHUNK_SURFACE,
+  PLANS_CHUNK_SURFACE,
+  OPERATOR_TURNS_CHUNK_SURFACE,
+  WORK_ITEMS_CHUNK_SURFACE,
+  CONSULT_QUESTIONS_CHUNK_SURFACE,
 ];
 
 /** Bare table name (the storage-growth-alarm's key form). */

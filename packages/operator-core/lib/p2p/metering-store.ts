@@ -17,8 +17,9 @@
  * WI-1564 one-helper workspace resolver invariant.
  *
  * WIRED BY (when those legs land — the WI-1938 scope is the durable substrate):
- * the offer-executor spawn leg (WI-1937, owner-gated) records spend as foreign
- * sessions draw; the lease/serve path records contribution. Until then the only
+ * a foreign-session spawn leg records spend as foreign sessions draw (the old
+ * offer-executor leg was deleted as dead under D-023/D-092); the lease/serve
+ * path records contribution. Until then the only
  * callers are the drill + tests — the LIVE-2 drill's METERING skip flips when
  * real rows flow, not at table creation.
  */

@@ -352,6 +352,10 @@ export interface NewHarnessInput {
    * install-time signature check reachable (identities-v1-2026-08-30 D-074).
    */
   release_manifest?: string | null;
+  /** An identity listing's declared surface as canonical JSON (migration 035 /
+   *  portable-identity-packages P-016); null on every other listing. The installer
+   *  recomputes it from the verified clone, so the Worker only bounds and well-forms it. */
+  identity_surface?: string | null;
   release_published_at?: number | null;
   // Content pin (migration 028 / cupboard-release-pipeline-content-trust P-001).
   // Set by the Worker for self-describing kinds from what IT fetched (D-003);
@@ -379,11 +383,11 @@ export async function insertHarness(db: D1Database, h: NewHarnessInput): Promise
           price_amount_micros, price_currency,
           compatibility_json, required_permissions,
           release_version, release_content_hash, release_manifest_digest,
-          release_signature, release_manifest, release_published_at,
+          release_signature, release_manifest, identity_surface, release_published_at,
           pinned_commit_sha, pinned_tree_digest, pinned_at,
           claim_status,
           created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unclaimed', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unclaimed', ?, ?)`,
     )
     .bind(
       h.id,
@@ -429,6 +433,7 @@ export async function insertHarness(db: D1Database, h: NewHarnessInput): Promise
       h.release_manifest_digest ?? null,
       h.release_signature ?? null,
       h.release_manifest ?? null,
+      h.identity_surface ?? null,
       h.release_published_at ?? null,
       h.pinned_commit_sha ?? null,
       h.pinned_tree_digest ?? null,
@@ -534,6 +539,9 @@ export interface ListOpts {
   claim_status?: 'unclaimed' | 'claimed';
   /** Filter to one storefront kind (migration 004). Omit for all kinds. */
   kind?: ListingKind;
+  /** Narrow blueprint listings to one facet — 'hive' | 'harness' | 'identity'
+   *  (migrations 009/035). Rows of other kinds never match. */
+  blueprint_kind?: string;
   /** Filter to one project remote (D-008 project rollup). */
   project_ref?: string;
 }
@@ -652,6 +660,10 @@ function compileHarnessListPredicate(
     where.push('h.listing_kind = ?');
     binds.push(opts.kind);
   }
+  if (config.includeKind && opts.blueprint_kind) {
+    where.push(`h.listing_kind = 'blueprint' AND h.blueprint_kind = ?`);
+    binds.push(opts.blueprint_kind);
+  }
   if (opts.project_ref) {
     where.push('h.project_ref = ?');
     binds.push(opts.project_ref);
@@ -769,6 +781,10 @@ export async function listHarnesses(db: D1Database, opts: ListOpts): Promise<Har
   if (opts.kind) {
     where.push('listing_kind = ?');
     binds.push(opts.kind);
+  }
+  if (opts.blueprint_kind) {
+    where.push(`listing_kind = 'blueprint' AND blueprint_kind = ?`);
+    binds.push(opts.blueprint_kind);
   }
   if (opts.project_ref) {
     where.push('project_ref = ?');

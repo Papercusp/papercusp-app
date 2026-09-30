@@ -428,7 +428,9 @@ function gitTestFiles() {
   const patterns = ['*.test.ts', '*.test.tsx', '*.spec.ts', '*.spec.tsx'];
   const files = (git(['ls-files', ...patterns], { allowFail: true }) ?? '')
     .split('\n')
-    .filter(Boolean);
+    .filter(Boolean)
+    // WI-10004176: drop index entries a plain `rm` left behind until git-sync commits it.
+    .filter((file) => existsSync(resolve(ROOT, file)));
   // Root `git ls-files` sees only a submodule's gitlink, never its internal tests. A runtime
   // export added inside a submodule can strand an enumerating mock in that same submodule, so
   // ask each owning repository for its tracked test corpus and restore the superproject prefix.
@@ -442,7 +444,8 @@ function gitTestFiles() {
       ...submoduleFiles
         .split('\n')
         .filter(Boolean)
-        .map((file) => `${prefix}/${file}`),
+        .map((file) => `${prefix}/${file}`)
+        .filter((file) => existsSync(resolve(ROOT, file))),
     );
   }
   return [...new Set(files)];

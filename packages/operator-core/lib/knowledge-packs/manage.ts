@@ -101,15 +101,22 @@ function notifyPackQueries(names: string[], deps: Pick<ManageDeps, 'notifyInvali
 }
 
 function realJudge(): LlmJudge {
-  // Lazy — pulling the Anthropic client at module load would tax every importer.
+  // Lazy — pulling the judge clients at module load would tax every importer.
   return async (input) => {
-    const { createAnthropicJudge, conflictJudgeAvailable, warnKnowledgePackJudgeUnavailableOnce } =
-      await import('../memory/anthropic-judge');
-    // EI-18746586784230719: classification here is unconditional (no feature
-    // flag gates it like memory:remember's conflict-check), so an unkeyed
-    // judge silently classifies everything 'clean' with zero signal. Say so.
-    if (!conflictJudgeAvailable()) warnKnowledgePackJudgeUnavailableOnce();
-    return createAnthropicJudge()(input);
+    const [{ resolveConflictJudge }, { warnKnowledgePackJudgeUnavailableOnce }] = await Promise.all([
+      import('../memory/conflict-judge'),
+      import('../memory/anthropic-judge'),
+    ]);
+    // P-009 (D-016): Jev when a key is stored, else Anthropic. EI-18746586784230719:
+    // classification here is unconditional (no feature flag gates it like
+    // memory:remember's conflict-check), so with no judge everything classifies
+    // 'clean' with zero signal. Say so.
+    const resolved = await resolveConflictJudge();
+    if (!resolved.available) {
+      warnKnowledgePackJudgeUnavailableOnce();
+      return { conflicts: [] };
+    }
+    return resolved.judge(input);
   };
 }
 

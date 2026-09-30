@@ -37,6 +37,7 @@ import {
   getCapabilityClass,
   getPotCapabilityProviderBinding,
   parseCapabilityClassRef,
+  type CapabilityProviderKind,
 } from '../capability-class-registry-store';
 
 /** The scheme a standalone rule's `fire` uses: `class:<id>@<version>#<verb>`. */
@@ -161,10 +162,16 @@ export type ResolveClassFireResult =
   | {
       status: 'resolved';
       target: ClassFireTarget;
-      /** The concrete tool mcp name this pot's provider binds the verb to. */
+      /**
+       * What the pot's provider binds the verb to: a tool mcp name for a `tool`
+       * provider, a blueprint operation id for an `operation` provider.
+       */
       tool: string;
       providerPackage: string;
       providerVersion: string;
+      providerKind: CapabilityProviderKind;
+      /** The harness whose blueprint declares the operation (`operation` providers only). */
+      operationHarnessSlug?: string;
     }
   | { status: 'unbound'; target: ClassFireTarget; error: string }
   | { status: 'invalid'; error: string };
@@ -174,10 +181,19 @@ export type ResolveClassFireResult =
  * verb -> tool map this needs; it was built for P-043 conformance, and the header
  * invariant there ("pot bindings may only reference a provider backed by a passing
  * run") is what makes resolving through it safe without re-checking conformance.
+ *
+ * `providerKinds` defaults to tools only. An identity reaction also admits
+ * `operation` providers (portable-identity-packages D-030), which it submits as a
+ * blueprint operation; no other caller may resolve one.
  */
 export async function resolveClassFireTarget(
   sql: postgres.Sql | postgres.TransactionSql,
-  input: { workspaceId: string; potSlug: string; fire: string },
+  input: {
+    workspaceId: string;
+    potSlug: string;
+    fire: string;
+    providerKinds?: readonly CapabilityProviderKind[];
+  },
 ): Promise<ResolveClassFireResult> {
   const target = parseClassFireTarget(input.fire);
   if (!target) {
@@ -192,6 +208,7 @@ export async function resolveClassFireTarget(
     potSlug: input.potSlug,
     classId: target.classId,
     classVersion: target.classVersion,
+    ...(input.providerKinds ? { providerKinds: input.providerKinds } : {}),
   });
 
   if (!binding) {
@@ -223,5 +240,7 @@ export async function resolveClassFireTarget(
     tool: tool.trim(),
     providerPackage: binding.providerPackage,
     providerVersion: binding.providerVersion,
+    providerKind: binding.providerKind,
+    ...(binding.operationHarnessSlug ? { operationHarnessSlug: binding.operationHarnessSlug } : {}),
   };
 }

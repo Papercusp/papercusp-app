@@ -6087,6 +6087,29 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
     },
   },
 
+  // `remoteAccess.overview` — Settings → Remote access (external-app-access P-010, D-025): ONE row
+  // with the workspace's switch, every live phone / app key / service key of the workspace (with
+  // creator, last use and state, R-26 / D-007), and the install's own-tunnel route + health
+  // (P-009). The screen's writes (routes/remote-access, /connected-apps/rotate) invalidate it.
+  'remoteAccess.overview': {
+    backingTables: ['harness_shared.connected_apps', 'harness_shared.connected_app_access_settings'],
+    argsSchema: z.object({ workspaceId: z.string().trim().min(1).max(200).default('default') }),
+    resolve: async (args) => {
+      const { workspaceId } = args as { workspaceId: string };
+      const { getRemoteAccess, listRemoteAccessEntries } = await import('../connected-apps/remote-access');
+      const [remoteAccess, entries] = await Promise.all([getRemoteAccess(workspaceId), listRemoteAccessEntries(workspaceId)]);
+      let ownTunnel: unknown = null;
+      let ownTunnelError: string | null = null;
+      try {
+        const { ownTunnelStatus } = await import('../own-tunnel/service');
+        ownTunnel = await ownTunnelStatus();
+      } catch (err) {
+        ownTunnelError = err instanceof Error ? err.message : String(err);
+      }
+      return [{ workspaceId, remoteAccess, entries, ownTunnel, ownTunnelError }];
+    },
+  },
+
   // `p2p.devices` — the Identity & devices section (P-002): the LOCAL actor
   // identity (github user + device pubkey) plus, per hive membership, each
   // attested device and whether THIS device is missing from a hive's

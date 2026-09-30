@@ -21,7 +21,14 @@ import {
   parseConflictResponse,
 } from './conflict-check';
 
-const MODEL = 'claude-haiku-4-5';
+/**
+ * The Anthropic model every narrow LLM judge here uses — this one and the
+ * doc-contradiction judge (search/doc-contradiction-scan.ts). One constant so
+ * the two cannot drift: the doc judge pinned `claude-3-5-haiku-latest` after it
+ * was retired, and every call 404'd into a judge error (WI-10004165).
+ */
+export const ANTHROPIC_JUDGE_MODEL = 'claude-haiku-4-5';
+const MODEL = ANTHROPIC_JUDGE_MODEL;
 const MAX_TOKENS = 256;
 const TIMEOUT_MS = 5_000;
 
@@ -65,11 +72,11 @@ export function warnConflictJudgeUnavailableOnce(): void {
   // fail-on-console treats a console.warn under vitest as a test failure.
   if (process.env.NODE_ENV === 'test') return;
   console.warn(
-    '[memory] conflict-check is ENABLED (PAPERCUSP_MEMORY_CONFLICT_CHECK) but no ANTHROPIC_API_KEY ' +
-      'resolves in this process, so the judge is a no-op and no contradiction can ever be detected. ' +
-      'The neighbour search that feeds it is being SKIPPED rather than paid for. ' +
-      'Set a key (gateway-routed) to enable it for real, or set PAPERCUSP_MEMORY_CONFLICT_CHECK=off ' +
-      'to make the intent explicit.',
+    '[memory] conflict-check is ENABLED (PAPERCUSP_MEMORY_CONFLICT_CHECK) but no Jev key is stored ' +
+      '(Settings > Memory) and no ANTHROPIC_API_KEY resolves in this process, so there is no judge and no ' +
+      'contradiction can ever be detected. The neighbour search that feeds it is being SKIPPED rather than ' +
+      'paid for. Store a Jev key (preferred, jev-decision-model-integration-2026-09-29 D-016) or set an ' +
+      'Anthropic key to enable it for real, or set PAPERCUSP_MEMORY_CONFLICT_CHECK=off to make the intent explicit.',
   );
 }
 
@@ -96,9 +103,10 @@ export function warnKnowledgePackJudgeUnavailableOnce(): void {
   if (process.env.NODE_ENV === 'test') return;
   console.warn(
     '[knowledge-packs] conflict/duplicate classification (classifyPackInstall, sweepHiveConflicts, ' +
-      'candidate auto-review) runs unconditionally, but no ANTHROPIC_API_KEY resolves in this process, ' +
-      'so the judge is a no-op: every item classifies as "clean"/no-pair regardless of actual conflicts. ' +
-      'Set a key (gateway-routed) to enable real conflict detection for knowledge packs.',
+      'candidate auto-review) runs unconditionally, but no Jev key is stored (Settings > Memory) and no ' +
+      'ANTHROPIC_API_KEY resolves in this process, so there is no judge: every item classifies as ' +
+      '"clean"/no-pair regardless of actual conflicts. Store a Jev key (preferred) or set an Anthropic key ' +
+      'to enable real conflict detection for knowledge packs.',
   );
 }
 

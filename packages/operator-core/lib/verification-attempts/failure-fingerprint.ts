@@ -17,7 +17,8 @@
  *     and all — two runs of the SAME failure never compared equal.
  *  2. `log` — the hive-git physical drill's `phase <X> (<fn>): <reason>` summary (alone on
  *     a line, or inside its `… adapter failed (exit N) in phase …` line), else the LAST
- *     error-shaped line of the log tail, with volatile tokens masked.
+ *     error-shaped line of the log tail, with volatile tokens masked. The capability:bash
+ *     runner's own marker lines (JOB END / JOB DIED) are never that line.
  *  3. `exit` — nothing readable: the exit reason and code alone.
  *
  * Pure: no I/O. The ledger (attempt-ledger.ts) reads the log tail and calls this.
@@ -64,6 +65,16 @@ const ERRORISH_RE =
   /\b(error|errors|fail|failed|failure|failing|refus(?:ed|al|es)|fatal|panic|assert(?:ion)?|traceback|exception|timed? ?out|timeout|denied|not found|cannot|unable|aborted?|mismatch)\b|✗|❌/i;
 /** Lines that mention failure only to report that there was none. */
 const ZERO_FAILURE_RE = /\b(fail(?:ed|ures?|ing)?|errors?)\s*[=:]\s*0\b|\b0\s+(failed|failures?|errors?)\b|\bno (errors?|failures?)\b/i;
+
+/**
+ * Prefix of the lines the capability:bash runner itself appends to a job log
+ * (`[capability:bash] JOB END: status=failed exit=N …`, `… JOB DIED`, …). They describe the
+ * WRAPPER, not the attempt: every failed job ends with one, so reading it as the failure line
+ * made two different drill failures share one fingerprint (WI-10004209). Such lines are never
+ * fingerprinted; a log with nothing else readable falls through to the exit-code fingerprint.
+ * Pinned against bash-jobs.ts's JOB_LOG_*_MARKER_PREFIX in failure-fingerprint.test.ts.
+ */
+export const RUNNER_MARKER_PREFIX = '[capability:bash] ';
 
 /** Mask the tokens that differ between two runs of the same failure. */
 export function normalizeFailureText(raw: string): string {
@@ -113,7 +124,7 @@ export function failureFingerprint(input: FailureFingerprintInput): FailureFinge
     .replace(ANSI_RE, '')
     .split(/\r?\n/)
     .map((l) => l.trim())
-    .filter(Boolean);
+    .filter((l) => l && !l.startsWith(RUNNER_MARKER_PREFIX));
 
   for (let i = lines.length - 1; i >= 0; i--) {
     const summary = parseSummaryLine(lines[i]!);

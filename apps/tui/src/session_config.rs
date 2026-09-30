@@ -97,6 +97,11 @@ pub struct SessionSetup {
     pub show_help: bool,
     pub help_scroll: u16,
     pub backend: crate::su_session::SuSessionBackend,
+    /// Whether the owner picked `backend` (the backend picker, or an explicit
+    /// chat pick carried in). An unpicked backend follows the operator's
+    /// configured engine, including when that read lands after the panel
+    /// opened (D-010; measured: a fast Enter launched Claude on an OMP box).
+    pub backend_chosen: bool,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub account: Option<String>,
@@ -126,9 +131,12 @@ impl SessionSetup {
             show_help: false,
             help_scroll: 0,
             backend: crate::su_session::PUI_DEFAULT_SU_BACKEND,
+            backend_chosen: false,
             model: None,
             effort: None,
-            account: Some("default".into()),
+            // WI-10004164 / D-011: an account the owner has not chosen is not
+            // sent, so launch-su can resolve it (an OMP gateway model -> auto).
+            account: None,
             mode: None,
             message,
             editing_message: false,
@@ -528,6 +536,21 @@ pub fn chat_account_options(pool: &[AccountRow]) -> Vec<PickerOption> {
         );
     }
     out
+}
+
+/// How the setup panel and the status line name a fresh launch's account
+/// (WI-10004164 / D-011). An account the owner never chose is omitted from the
+/// launch and launch-su resolves it: the system `default`, except an OMP
+/// gateway model, which it routes to `auto`. Printing a bare "default" for the
+/// unchosen case would misname that route and read like an explicit choice.
+pub fn account_label(account: Option<&str>, backend: crate::su_session::SuSessionBackend) -> String {
+    match account {
+        Some(account) => account.to_string(),
+        None if backend == crate::su_session::SuSessionBackend::Omp => {
+            "default (not chosen; a gateway model uses auto)".to_string()
+        }
+        None => "default (not chosen)".to_string(),
+    }
 }
 
 pub fn chat_account_pick(id: &str) -> Option<String> {

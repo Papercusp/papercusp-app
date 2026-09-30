@@ -30,7 +30,7 @@
  * change the basis to look better?" reading this command exists to prevent.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
@@ -94,7 +94,9 @@ function trackedFiles(patterns: string[]): string[] {
         // tree but are not our work — counting them would overstate authored volume,
         // which is the one direction a proof artifact must never err in.
         !f.includes('/vendor/'),
-    );
+    )
+    // WI-10004176: drop index entries a plain `rm` left behind until git-sync commits it.
+    .filter((f) => existsSync(join(REPO_ROOT, f)));
 }
 
 /**
@@ -108,7 +110,8 @@ function trackedFiles(patterns: string[]): string[] {
 function superprojectOnlyFiles(patterns: string[]): string[] {
   return git('ls-files', '-z', ...patterns)
     .split('\0')
-    .filter((f) => f.length > 0 && !f.startsWith('_retired/') && !f.includes('/vendor/'));
+    .filter((f) => f.length > 0 && !f.startsWith('_retired/') && !f.includes('/vendor/'))
+    .filter((f) => existsSync(join(REPO_ROOT, f)));
 }
 
 /**
