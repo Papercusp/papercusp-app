@@ -710,6 +710,36 @@ export function defaultLaunchAccount(_platform: NodeJS.Platform = process.platfo
   return 'default';
 }
 
+/** An OMP model id served only by the Papercusp inference gateway. */
+export const OMP_GATEWAY_MODEL_RE = /^papercusp-gateway\//i;
+
+/**
+ * The account for a launch whose caller named NONE, given the backend and the
+ * model it will actually run (WI-10004158, plan pui-chat-first-ux-2026-09-28
+ * D-011). An OMP `papercusp-gateway/*` model runs only on the gateway, and the
+ * default account refuses it (psu-launcher resolveOmpSessionModel), so an
+ * omitted account follows that model to `auto` instead of to a certain refusal.
+ * Stock `omp` with the same config uses the gateway too.
+ *
+ * The model is resolved with the engine's own precedence
+ * (su-session-rpc-engine): the `PAPERCUSP_OMP_MODEL_SELECTOR` override, then the
+ * requested model, then the OMP native default (`modelRoles.default`). Only an
+ * OMITTED account is decided here; an explicit account, `default` included, is
+ * never rewritten by the caller.
+ */
+export function defaultLaunchAccountFor(opts: {
+  agent: string;
+  model?: string | null;
+  ompSelector?: string | null;
+  ompNativeDefault?: () => string | null;
+}): string {
+  if (opts.agent === 'omp') {
+    const effective = String(opts.ompSelector || opts.model || opts.ompNativeDefault?.() || '').trim();
+    if (OMP_GATEWAY_MODEL_RE.test(effective)) return 'auto';
+  }
+  return defaultLaunchAccount();
+}
+
 export interface MemberLaunchOpts {
   fleetSlug: string;
   agent: string;

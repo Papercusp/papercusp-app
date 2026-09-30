@@ -15,8 +15,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { deviceNamespaceKey } from './storage';
 import {
-  PHASE_A_POT_HOME,
-  PHASE_A_REPO_KEY,
+  physicalDrillTarget,
   physicalDrillGitSyncSlug,
   type PhysicalDrillGitSyncSlug,
 } from './physical-drill-phase-a';
@@ -164,7 +163,8 @@ function assertRunId(runId: string): void {
 }
 
 function assertCanonicalRepoPath(repoPath: string): void {
-  const suffix = join(PHASE_A_POT_HOME, `${PHASE_A_REPO_KEY}.git`);
+  const target = physicalDrillTarget();
+  const suffix = join(target.potHome, `${target.repoKey}.git`);
   if (!isAbsolute(repoPath) || !resolve(repoPath).endsWith(suffix)) {
     throw new Error(`physical Phase B repo path must target ${suffix}: ${repoPath}`);
   }

@@ -5,8 +5,8 @@
   "year": 2026,
   "source": {
     "repo": "Papercusp/papercup",
-    "ref": "af68b44255af32245d5298c51aaaaabc23d2a0e8",
-    "commit": "af68b44255af32245d5298c51aaaaabc23d2a0e8"
+    "ref": "e89081eeca350093f221036099aa831a5a644384",
+    "commit": "e89081eeca350093f221036099aa831a5a644384"
   },
   "submodules": [
     {
@@ -63,7 +63,7 @@
     },
     {
       "path": "libs/generic/memory",
-      "sha": "168b7f3d215c8dc8704cbb09b61749cb335faeb4"
+      "sha": "b301f060a6c8494dc43ef90d712fd80726218e4c"
     },
     {
       "path": "libs/generic/model-pricing",
@@ -135,7 +135,7 @@
     },
     {
       "path": "libs/papercusp",
-      "sha": "896ebc5a4dce88a095b5dca6365cdb468c5a379a"
+      "sha": "ee96bb9a042aae643ec113236dc183c5eea783c1"
     },
     {
       "path": "libs/papercusp-db",
@@ -147,7 +147,7 @@
     },
     {
       "path": "libs/test-config",
-      "sha": "207ec8484f9747af1563d27fe08e3b9a217c3956"
+      "sha": "2fcab943fd54434a0f3111337eab7764c465d7a3"
     },
     {
       "path": "libs/testing-shell",
@@ -155,12 +155,12 @@
     },
     {
       "path": "papercusp-desktop",
-      "sha": "e080779f9bc3a3a4e304b2706e3ee84eccbff73b"
+      "sha": "32adf1c69fcd8b54038a1fcb4c5125833f829e51"
     }
   ],
   "notShipped": [
     "libs/generic/prospect-contract"
   ],
-  "fileCount": 16141,
+  "fileCount": 16180,
   "generatedBy": "scripts/source-preview.mjs"
 }

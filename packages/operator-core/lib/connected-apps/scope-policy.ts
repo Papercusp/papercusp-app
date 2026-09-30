@@ -92,6 +92,7 @@ export const HARD_DENY_GROUPS: Readonly<Record<string, string>> = Object.freeze(
   autonomy: 'autonomy policy',
   mode: 'session authority modes',
   connected_apps: 'minting or managing app keys',
+  access: 'listing, minting, pausing or revoking app keys (local-only access:* tools, P-012)',
   // Agent spawning and meta-dispatch (an app key must not start agents or re-dispatch).
   fleet: 'spawns agents',
   pot: 'creates pots and spawns agents',

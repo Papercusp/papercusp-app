@@ -76,6 +76,13 @@ export interface SeedManifest {
   ids: Record<string, string[]>;
   /** Corpus keys whose remember() persisted nothing (honest failures). */
   failed: string[];
+  /**
+   * Corpus key → the last error remember() threw for it. A failure used to be
+   * recorded with no reason, so a schema fault that rejected EVERY write
+   * (WI-10004107: a NOT NULL column with no filler) read only as "114 failed"
+   * for four weeks. Guards that refuse an under-seeded run quote the first one.
+   */
+  errors: Record<string, string>;
   /** Wall-clock ms per remember() call, in corpus order. */
   rememberMs: number[];
   /** Total characters written (the embed-cost driver). */
@@ -113,6 +120,13 @@ export interface QueryOutcome {
    * second retrieval instead of the one these metrics describe.
    */
   candidates?: CandidateHit[];
+  /**
+   * Set when `backend.search` THREW for this query. The outcome then carries an
+   * empty hit list that measured nothing — not a real miss — so a run with any
+   * errored query is refused unless the caller opted into tolerating them
+   * (`RetrievalOptions.tolerateSearchErrors`); see `searchFailureReason`.
+   */
+  error?: string;
   /** Search wall-clock ms. */
   ms: number;
 }

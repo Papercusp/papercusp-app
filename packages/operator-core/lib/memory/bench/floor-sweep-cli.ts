@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { runFloorSweep, renderFloorSweepMarkdown, seedCorpus } from '@papercusp/memory/bench';
+import { runFloorSweep, renderFloorSweepMarkdown, seedCorpus, seedFailureReason } from '@papercusp/memory/bench';
 
 import { pushSearchFloors } from '../injection';
 import { makeBackendCtx, BENCH_SCOPE, type BenchBackendName } from './run-bench';
@@ -61,7 +61,11 @@ const gold = loadGoldSetFixture().queries;
 const ctx = await makeBackendCtx(backend, keep);
 try {
   log(`[${backend}] seeding ${corpus.length} corpus entries…`);
-  await seedCorpus(ctx.backend, corpus, { scope: BENCH_SCOPE, verbatim: true, concurrency: seedConcurrency });
+  const seeded = await seedCorpus(ctx.backend, corpus, { scope: BENCH_SCOPE, verbatim: true, concurrency: seedConcurrency });
+  // The manifest used to be discarded here, so a store that never seeded swept to
+  // "every floor admits nothing" and read as a precision result (WI-10004107).
+  const seedFailure = seedFailureReason(seeded, corpus.length);
+  if (seedFailure) throw new Error(`${seedFailure} — refusing to sweep floors over a partially seeded store`);
 
   log(
     `[${backend}] sweeping floors ${floors.join(', ')} over ${gold.length} gold queries ` +

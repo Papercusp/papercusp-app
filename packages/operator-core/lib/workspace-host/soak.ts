@@ -34,9 +34,14 @@ export const WORKSPACE_HOST_SOAK_SCHEMA_VERSION = 1 as const;
 /** `workspace_host_logs.unit` for soak samples; the stream is `controller` (the observer). */
 export const WORKSPACE_HOST_SOAK_LOG_UNIT = 'workspace-host-soak';
 
-/** The release stage a qualifying soak settles. Shorter soaks run, but never write it. */
-export const WORKSPACE_HOST_SOAK_ACCEPTANCE_STAGE = 'acceptance.soak-24h';
-export const WORKSPACE_HOST_SOAK_ACCEPTANCE_DURATION_MS = 24 * 60 * 60_000;
+/**
+ * The release stage a qualifying soak settles. Shorter soaks run, but never write it. The name carries
+ * no duration: the policy (duration included) is part of the stage identity, so the window can change
+ * without renaming the stage. Journals from before 2026-09-30 record the retired `acceptance.soak-24h`.
+ */
+export const WORKSPACE_HOST_SOAK_ACCEPTANCE_STAGE = 'acceptance.soak';
+/** One hour (owner owner, 2026-09-30, replacing the D-391 24h window for BYOC P-318). */
+export const WORKSPACE_HOST_SOAK_ACCEPTANCE_DURATION_MS = 60 * 60_000;
 
 export const WORKSPACE_HOST_SOAK_MIN_INTERVAL_MS = 60_000;
 export const WORKSPACE_HOST_SOAK_MAX_DURATION_MS = 7 * 24 * 60 * 60_000;
@@ -75,7 +80,9 @@ export interface WorkspaceHostSoakPolicy {
 
 export const DEFAULT_WORKSPACE_HOST_SOAK_POLICY: WorkspaceHostSoakPolicy = Object.freeze({
   durationMs: WORKSPACE_HOST_SOAK_ACCEPTANCE_DURATION_MS,
-  intervalMs: 5 * 60_000,
+  // One-minute samples keep a one-hour window at 61 expected samples, so the coverage and reach-rate
+  // tolerances below still admit a few unmeasured reads and one isolated IAP drop.
+  intervalMs: 60_000,
   maxGapIntervals: 3,
   maxReachFailureRate: 0.02,
   maxConsecutiveReachFailures: 1,

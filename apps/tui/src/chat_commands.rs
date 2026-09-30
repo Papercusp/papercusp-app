@@ -27,6 +27,7 @@ pub enum SlashKind {
     Details,
     Expand,
     Copy,
+    Detach,
     Exit,
 }
 
@@ -58,8 +59,13 @@ pub const COMMANDS: &[SlashCommand] = &[
         kind: SlashKind::Copy,
     },
     SlashCommand {
+        name: "detach",
+        summary: "Quit and keep this conversation running",
+        kind: SlashKind::Detach,
+    },
+    SlashCommand {
         name: "exit",
-        summary: "Quit pui",
+        summary: "Quit pui and end this conversation (resume it later)",
         kind: SlashKind::Exit,
     },
 ];
@@ -119,7 +125,11 @@ mod tests {
         assert_eq!(query("/he"), Some("he"));
         assert_eq!(query("hello"), None);
         assert_eq!(query(" /help"), None, "a leading space sends the text");
-        assert_eq!(query("/tmp is full"), None, "text with a space is a message");
+        assert_eq!(
+            query("/tmp is full"),
+            None,
+            "text with a space is a message"
+        );
         assert_eq!(query("/a\nb"), None, "a multi-line draft is a message");
     }
 
@@ -137,9 +147,30 @@ mod tests {
     fn resolve_prefers_the_exact_name_then_the_highlighted_row() {
         assert_eq!(resolve("exit", 0).map(|c| c.kind), Some(SlashKind::Exit));
         assert_eq!(resolve("e", 1).map(|c| c.kind), Some(SlashKind::Exit));
-        assert_eq!(resolve("e", 9).map(|c| c.kind), Some(SlashKind::Exit), "clamped");
+        assert_eq!(
+            resolve("e", 9).map(|c| c.kind),
+            Some(SlashKind::Exit),
+            "clamped"
+        );
         assert_eq!(resolve("", 0).map(|c| c.kind), Some(SlashKind::Help));
         assert_eq!(resolve("nope", 0), None);
+    }
+
+    #[test]
+    fn detach_is_its_own_command_and_never_shadows_details() {
+        assert_eq!(
+            resolve("detach", 0).map(|c| c.kind),
+            Some(SlashKind::Detach)
+        );
+        let de: Vec<_> = matching("de").iter().map(|c| c.name).collect();
+        assert_eq!(de, vec!["details", "detach"]);
+        assert_eq!(
+            resolve("de", 0).map(|c| c.kind),
+            Some(SlashKind::Details),
+            "the highlighted first row, not detach, runs on a bare prefix"
+        );
+        let exit = COMMANDS.iter().find(|c| c.kind == SlashKind::Exit).unwrap();
+        assert!(exit.summary.contains("end"), "the menu says /exit ends it");
     }
 
     #[test]

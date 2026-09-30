@@ -49,9 +49,14 @@ export function newAppKeyId(): string {
   return id;
 }
 
-/** Mint a new key. The caller stores `id` + `tokenHash` and shows `key` once. */
-export function mintAppKey(): MintedAppKey {
-  const id = newAppKeyId();
+/**
+ * Mint a new key. The caller stores `id` + `tokenHash` and shows `key` once.
+ *
+ * Pass `id` to mint a fresh SECRET for an existing row (key rotation, P-015): the id is the row's
+ * primary key and the principal slug, so keeping it keeps the key's scopes, caps and audit trail.
+ */
+export function mintAppKey(id: string = newAppKeyId()): MintedAppKey {
+  if (!ID_RE.test(id)) throw new Error('mintAppKey: id must be 16 characters of [A-Za-z0-9]');
   const secret = randomBytes(APP_KEY_SECRET_BYTES).toString('base64url');
   const key = `${APP_KEY_PREFIX}${id}_${secret}`;
   return { id, key, tokenHash: hashAppKey(key) };

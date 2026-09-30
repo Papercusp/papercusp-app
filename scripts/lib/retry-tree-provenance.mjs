@@ -79,15 +79,44 @@ function modeOf(stat) {
 }
 
 /**
- * Fingerprint one changed working-tree path. Directories are walked only for
- * a dirty submodule root; ordinary untracked directories are expanded by git's
- * `--untracked-files=all` status output before this function is called.
+ * True when `path` is the root of a git repository — a submodule (whose `.git`
+ * is a gitdir FILE) or an embedded repository (whose `.git` is a directory).
+ * Git status reports such a path as ONE entry, so it reaches the fingerprint
+ * as a directory.
  *
  * @param {string} path
- * @param {Set<string>} [stack]
+ * @returns {boolean}
+ */
+function isRepositoryRoot(path) {
+  try {
+    lstatSync(resolve(path, '.git'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fingerprint one changed working-tree path.
+ *
+ * A dirty submodule or embedded repository is fingerprinted through its OWN
+ * git state: its HEAD plus a recursive `snapshotRetryTree` of its own status.
+ * That applies the same rule as the superproject — clean content is
+ * represented by HEAD and ignored content is not part of the candidate — and
+ * never walks the directory. Walking it (EI-24662228809776827) hashed every
+ * ignored build artifact under the submodule: 24,911 files / 13 GB for
+ * `papercusp-desktop` on the shared tree, 81 s per snapshot, which timed out
+ * both the real-repository snapshot test and every `test:affected` start.
+ *
+ * Only a non-repository directory is still walked. Git's
+ * `--untracked-files=all` output expands ordinary untracked directories into
+ * files before this function is called, so that fallback is rare.
+ *
+ * @param {string} path
+ * @param {{ git: (root:string,args:string[]) => Buffer|string|null, stack?: Set<string> }} options
  * @returns {string|null}
  */
-function fingerprintPath(path, stack = new Set()) {
+function fingerprintPath(path, { git, stack = new Set() }) {
   let stat;
   try {
     stat = lstatSync(path);
@@ -112,6 +141,18 @@ function fingerprintPath(path, stack = new Set()) {
   }
   if (!stat.isDirectory()) return `other:${modeOf(stat)}:${stat.size}`;
   if (stack.has(path)) return null;
+  if (isRepositoryRoot(path)) {
+    stack.add(path);
+    try {
+      const nested = snapshotRetryTree(path, { git, stack });
+      // Fail closed: an unreadable nested repository makes the whole snapshot
+      // unknown rather than silently dropping its content from the digest.
+      if (!nested.known) return null;
+      return `repository:${modeOf(stat)}:${nested.head}:${nested.digest}`;
+    } finally {
+      stack.delete(path);
+    }
+  }
   stack.add(path);
   try {
     const children = readdirSync(path, { withFileTypes: true, encoding: 'utf8' })
@@ -121,7 +162,7 @@ function fingerprintPath(path, stack = new Set()) {
     digest.update(`directory:${modeOf(stat)}\0`);
     for (const child of children) {
       const childPath = resolve(path, child.name);
-      const childFingerprint = fingerprintPath(childPath, stack);
+      const childFingerprint = fingerprintPath(childPath, { git, stack });
       if (childFingerprint == null) return null;
       digest.update(child.name);
       digest.update('\0');
@@ -158,9 +199,11 @@ function unknownSnapshot(reason, head = null) {
  * Capture the candidate tree relevant to retry provenance.
  *
  * @param {string} root repository root
- * @param {{ git?: (root:string,args:string[]) => Buffer|string|null }} [options]
+ * @param {{ git?: (root:string,args:string[]) => Buffer|string|null, stack?: Set<string> }} [options]
+ *   `stack` is internal: the repository roots already being snapshotted, so a
+ *   nested-repository recursion cannot cycle.
  */
-export function snapshotRetryTree(root, { git = gitBytes } = {}) {
+export function snapshotRetryTree(root, { git = gitBytes, stack = new Set() } = {}) {
   const headBytes = git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']);
   const head = asBuffer(headBytes)?.toString('utf8').trim() || null;
   if (!head) return unknownSnapshot('head-unreadable');
@@ -185,7 +228,7 @@ export function snapshotRetryTree(root, { git = gitBytes } = {}) {
   )) {
     const path = pathInsideRoot(root, entry.path);
     if (!path) return unknownSnapshot('status-path-unreadable', head);
-    const fingerprint = fingerprintPath(path);
+    const fingerprint = fingerprintPath(path, { git, stack });
     if (fingerprint == null) return unknownSnapshot('working-tree-unreadable', head);
     fingerprints.push({ status: entry.status, path: entry.path, fingerprint });
     digest.update(`${entry.status}\0${entry.path}\0${fingerprint}\0`);

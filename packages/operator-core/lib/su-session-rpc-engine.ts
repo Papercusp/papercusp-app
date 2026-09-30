@@ -2,7 +2,7 @@
  * owns an RPC session. Bootstrap/configuration, adapters, durable commands and
  * tracked process teardown are the same seams used by other SU launches. */
 import { homedir } from 'node:os';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { SuSessionJsonValue } from '@papercusp/chat-protocol';
 import {
@@ -18,6 +18,8 @@ import { resolveSpawnHostOperatorBaseUrl } from './mcp-base-url';
 import type { CodexNativeSessionHandle, OmpNativeSessionHandle } from './native-session-handles';
 import { createCodexSuSessionAdapter, type CodexSuSessionAdapter } from './su-session-codex-adapter';
 import { createOmpSuSessionAdapter, type OmpSuSessionAdapter } from './su-session-omp-adapter';
+import { makeCodingAssistantCodexHome } from './role-codex-home';
+import type { ClaudeEngineIdentity } from './su-session-claude-engine';
 import { persistSuSessionDescriptor } from './su-session-persistence';
 import { findCodexRolloutPathByUuid } from './session-transcript-resolvers';
 import { SuSessionStartupTimeoutError, type SuSessionEventInput, type SuSessionHost, type SuSessionServedAccountReader } from './su-session-host';
@@ -44,6 +46,30 @@ export interface SuRpcEngineOptions {
   deliveryTimeoutMs?: number;
   peerFactory?: typeof startSuStdioPeer;
   onExit?: () => Promise<void>;
+  /** P-016: 'coding-assistant' runs the backend's own identity, with no SU
+   * playbook, Papercusp hooks or papercusp-su MCP (default 'su'). */
+  identity?: ClaudeEngineIdentity;
+}
+
+/** The user's own OMP MCP servers, minus papercusp-su (P-016). */
+function ompUserMcpJsonWithoutSu(home: string): string {
+  try {
+    const parsed = JSON.parse(readFileSync(join(home, '.omp', 'agent', 'mcp.json'), 'utf8')) as { mcpServers?: Record<string, unknown> };
+    const servers = { ...(parsed.mcpServers ?? {}) };
+    for (const name of Object.keys(servers)) if (/^papercusp(?:[-_]su)?$/i.test(name)) delete servers[name];
+    return JSON.stringify({ ...parsed, mcpServers: servers }, null, 2);
+  } catch {
+    return JSON.stringify({ mcpServers: {} });
+  }
+}
+
+/** OMP launch flags for its own identity: suLaunchArgs minus the SU system
+ * prompt, and without the native-LSP strip (stock OMP keeps its LSP tool). */
+export function ompCodingAssistantArgs(promptFile: string): string[] {
+  const args = [...suLaunchArgs('omp', { promptFile, allowNativeLsp: true }).args];
+  const at = args.indexOf('--system-prompt');
+  if (at >= 0) args.splice(at, 2);
+  return args;
 }
 export interface SuRpcEngine {
   adapter: CodexSuSessionAdapter | OmpSuSessionAdapter;
@@ -72,6 +98,7 @@ export function startSuRpcEngine(
   }
   if (options.nativeSession && options.nativeSession.backend !== backend) throw new Error('Resume handle has a different backend');
   assertLaunchPersona(boot.promptFile);
+  const su = (options.identity ?? 'su') === 'su';
   const env = { ...sanitizeInheritedEnv(process.env), ...boot.envelopeEnv };
   delete env.PAPERCUSP_TTY;
   env.PAPERCUSP_OPERATOR_URL = resolveSpawnHostOperatorBaseUrl();
@@ -81,7 +108,8 @@ export function startSuRpcEngine(
   let nativePath: string | null = null;
   if (backend === 'codex') {
     if (!env.CODEX_HOME) throw new Error('Codex SU bootstrap did not supply CODEX_HOME');
-    native = options.nativeSession ?? { backend, source: 'adv_sessions', ownerId: binding.ownerId,
+    if (!su) makeCodingAssistantCodexHome(env.CODEX_HOME, env.HOME || homedir());
+    native =options.nativeSession ?? { backend, source: 'adv_sessions', ownerId: binding.ownerId,
       codexHome: env.CODEX_HOME, rolloutId: '', exactResumeSupported: false, missingReason: 'Codex is initializing' };
     // App-server accepts config overrides rather than the TUI's -m flag.
     const modelArgs = modelArgsFor('codex', selectedModel) as string[];
@@ -94,9 +122,11 @@ export function startSuRpcEngine(
     selectedModel = resolveOmpSessionModel(env.PAPERCUSP_OMP_MODEL_SELECTOR || selectedModel, options.accountRoute);
     const configDir = options.nativeSession?.backend === 'omp' && options.nativeSession.agentHome
       ? null : writeOmpSessionConfigDir(binding.advSessionId, {
-        discoveryOff: true, toolsAllowlist: ompCoreToolNames(env), model: selectedModel,
+        discoveryOff: su, toolsAllowlist: su ? ompCoreToolNames(env) : null, model: selectedModel,
         modelsYml: env.PAPERCUSP_OMP_MODELS_YML || null, clientId: binding.ownerId,
         operatorUrl: env.PAPERCUSP_OPERATOR_URL, interactive: false,
+        // P-016: an explicit server map is used verbatim: the user's own servers only.
+        ...(su ? {} : { mcpJsonContents: ompUserMcpJsonWithoutSu(env.HOME || homedir()) }),
       });
     const agentHome = options.nativeSession?.backend === 'omp' ? options.nativeSession.agentHome
       : configDir ? join(homedir(), configDir, 'agent') : null;
@@ -106,8 +136,9 @@ export function startSuRpcEngine(
     Object.assign(env, ompResponsesCompatibilityEnv('omp', selectedModel, env));
     native = options.nativeSession ?? { backend, source: 'adv_sessions', ownerId: binding.ownerId,
       agentHome, ompThreadId: '', exactResumeSupported: false, missingReason: 'OMP is initializing' };
-    args = [...suLaunchArgs('omp', { promptFile: boot.promptFile, coordExtPath: boot.coordExtPath,
-      injectHookPath: resolveOmpInjectHookPath('omp'), allowNativeLsp: env.PAPERCUSP_OMP_NATIVE_LSP === '1' }).args,
+    args = [...su ? suLaunchArgs('omp', { promptFile: boot.promptFile, coordExtPath: boot.coordExtPath,
+      injectHookPath: resolveOmpInjectHookPath('omp'), allowNativeLsp: env.PAPERCUSP_OMP_NATIVE_LSP === '1' }).args
+      : ompCodingAssistantArgs(boot.promptFile),
       // rpc-ui keeps structured stdio and installs OMP's native question
       // callbacks. Plain rpc deliberately omits that interactive capability.
       ...modelArgsFor('omp', selectedModel), '--mode', 'rpc-ui'];
@@ -386,9 +417,11 @@ export function startSuRpcEngine(
       await (adapter as CodexSuSessionAdapter).materializeRuntime({ nativeSession: { ...native, rolloutId: id }, rolloutPath: nativePath });
       for (const frame of initializingFrames.splice(0)) onMessage(frame);
       initializingFrameBytes = 0;
-      const servers = await peer.request({ method: 'mcpServerStatus/list', params: {} });
-      const su = (Array.isArray(servers.data) ? servers.data : []).map(object).find((server) => server.name === 'papercusp-su');
-      if (!su || !Object.keys(object(su.tools)).length) throw new Error('Codex SU tools are not connected');
+      if (su) {
+        const servers = await peer.request({ method: 'mcpServerStatus/list', params: {} });
+        const suServer = (Array.isArray(servers.data) ? servers.data : []).map(object).find((server) => server.name === 'papercusp-su');
+        if (!suServer || !Object.keys(object(suServer.tools)).length) throw new Error('Codex SU tools are not connected');
+      }
       actualModel = string(result.model);
     } else {
       let state: RpcFrame;
@@ -421,7 +454,8 @@ export function startSuRpcEngine(
           .flatMap((part) => part.split(/^## MCP Server Instructions\r?$/m).slice(1))
           .flatMap((section) => [...section.split(/^#{1,2} /m, 1)[0].matchAll(/^### ([^\r\n]+)\r?$/gm)]
             .map((match) => match[1]));
-        if (!toolNames.some((name) => /papercusp/i.test(name)) && !suRoute && !connectedServers.includes('papercusp-su')) {
+        // P-016: a coding-assistant session has no SU server to wait for.
+        if (su && !toolNames.some((name) => /papercusp/i.test(name)) && !suRoute && !connectedServers.includes('papercusp-su')) {
           ompReadinessFailure = `OMP SU tools are not connected (available: ${toolNames.slice(0, 30).join(', ') || 'none'}; mounted: ${mountedRoutes.slice(0, 8).join(', ') || 'none'})`;
           await new Promise<void>((resolve) => setTimeout(resolve, readinessDelayMs));
           readinessDelayMs = Math.min(readinessDelayMs * 2, 1_000);

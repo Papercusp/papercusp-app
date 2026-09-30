@@ -904,6 +904,12 @@ export const CC_HOOK_FILES = [
   // one injection and then silence. This asks per tool dispatch, epoch-deduped
   // through the same ledger (port 'mid-turn'), at ~1/10th the budget.
   'posttoolbatch-midturn-context.sh',
+  // portable-identity-packages-2026-09-26 P-011 (D-023 §2): a worn identity's
+  // synchronous rules at the three sinks the two ports above do not reach — the
+  // pre-tool GUARD (deny-only), stop, and a fresh context after compaction.
+  'pretooluse-identity-guard.sh',
+  'stop-identity-context.sh',
+  'sessionstart-identity-context.sh',
   // deterministic-context-carry-2026-07-14 P-012: per-turn journal collection —
   // pings journal:record-turn at each Stop; the server extracts the agent's
   // ⟦journal⟧ line (mechanical first-line fallback, flagged).
@@ -3127,6 +3133,25 @@ export function mergeClaudeHookSettings(
   if (has('posttoolbatch-midturn-context.sh'))
     hooks.PostToolBatch = replaceOurHookEntries(ev('PostToolBatch'), ours('posttoolbatch-midturn-context.sh'), {
       hooks: cmd('posttoolbatch-midturn-context.sh'),
+    });
+  // merge_identity_hooks — portable-identity-packages-2026-09-26 P-011 (D-023 §2).
+  // PreToolUse has NO matcher: a worn guard can name any tool, and which ones is
+  // the operator's business, not the install's. It renders ONLY a deny for the one
+  // pending call (never allow), so it cannot become a blanket auto-approver (D-027).
+  // SessionStart matches the sources that can mean a fresh context; a resume
+  // replays a transcript that already holds what the compaction rules said.
+  if (has('pretooluse-identity-guard.sh'))
+    hooks.PreToolUse = replaceOurHookEntries(ev('PreToolUse'), ours('pretooluse-identity-guard.sh'), {
+      hooks: cmd('pretooluse-identity-guard.sh'),
+    });
+  if (has('stop-identity-context.sh'))
+    hooks.Stop = replaceOurHookEntries(ev('Stop'), ours('stop-identity-context.sh'), {
+      hooks: cmd('stop-identity-context.sh'),
+    });
+  if (has('sessionstart-identity-context.sh'))
+    hooks.SessionStart = replaceOurHookEntries(ev('SessionStart'), ours('sessionstart-identity-context.sh'), {
+      matcher: 'startup|clear|compact',
+      hooks: cmd('sessionstart-identity-context.sh'),
     });
   // merge_turn_journal_hook — Stop, no matcher (fires at each turn end).
   // deterministic-context-carry-2026-07-14 P-012: per-turn journal collection.

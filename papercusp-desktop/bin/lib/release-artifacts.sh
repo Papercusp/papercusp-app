@@ -845,16 +845,22 @@ release_artifacts_linux_vm_smoke() {
   shift 2 2>/dev/null || return 2
   local vmctl vm reset endpoint port key host baseline="" base_gui="" base_server=""
   local rc=0 booted=0 lock_fd lock_file start_out
-  vmctl="$(release_artifacts_linux_vmctl)"
   vm="${PAPERCUSP_LINUX_SMOKE_VM:-clean}"
   reset="${PAPERCUSP_LINUX_SMOKE_RESET:-1}"
   [[ "$vm" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "release-artifacts: unsafe PAPERCUSP_LINUX_SMOKE_VM '$vm'." >&2; return 2; }
+  # Resolve and judge each reading where it is taken (WI-40549 discarded-measurement
+  # guard): nothing may return between a measurement and its verdict.
+  vmctl="$(release_artifacts_linux_vmctl)"
   [[ -f "$vmctl" ]] || { echo "release-artifacts: Linux test VM controller missing: $vmctl" >&2; return 1; }
 
   if [[ "$reset" == 1 ]]; then
     baseline="$(release_artifacts_linux_smoke_baseline "$version")" || return 1
     base_gui="$(printf '%s\n' "$baseline" | sed -n '1p')"
     base_server="$(printf '%s\n' "$baseline" | sed -n '2p')"
+    [[ -n "$base_gui" && -n "$base_server" ]] || {
+      echo "release-artifacts: baseline for $version did not resolve both packages (gui='$base_gui' server='$base_server')" >&2
+      return 1
+    }
   fi
 
   endpoint="$(bash "$vmctl" endpoint "$vm" 2>&1)" || {

@@ -77,6 +77,10 @@ pub enum Event {
     Resize(u16, u16),
     /// Idle tick (emitted when no input arrives within the poll window).
     Tick,
+    /// A signal asked pui to stop: SIGHUP when its terminal closes, SIGTERM,
+    /// or SIGINT (pui-chat-first-ux P-009). It quits exactly like `/exit`, so
+    /// the attached conversation's engine ends with it.
+    Terminate,
     /// Fresh plans list from the backend poller.
     Plans(Vec<PlanSummary>),
     /// Fresh goals list from the backend poller (the Plans-tab spine, P-032).
@@ -481,6 +485,10 @@ pub enum Event {
     /// usable, but the error remains explicit instead of silently falling back
     /// to an untyped provider path.
     SuSessionError(String),
+    /// launch-su answered and refused to start the engine (WI-10004158). The
+    /// operator was reached, so this is not a lost connection; `message` is
+    /// the operator's reason, which the default chat shows.
+    SuSessionRefused { code: String, message: String },
     /// A stream-scoped failure.  The chat id lets the reducer discard a late
     /// EOF/error from a session that the owner has already switched away from.
     SuSessionStreamError { chat_id: String, message: String },

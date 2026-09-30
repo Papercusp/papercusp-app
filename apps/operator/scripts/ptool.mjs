@@ -2881,6 +2881,36 @@ export function stdoutDeliveryError() {
   return null;
 }
 
+/** Exit status when the call was delivered but the tool ANSWERED ok:false — a
+ *  refused write, a missing id, a partially-failed batch. Distinct from 1 (the
+ *  call failed or produced nothing usable) so a script can tell "refused" from
+ *  "unreachable". Before this, an ok:false answer exited 0, so every
+ *  `ptool … || fail` guard silently passed a refused write
+ *  (EI-24654733539966460: a physical drill waited its full 900s bound on a
+ *  work_items:create the operator had rejected). */
+export const PTOOL_TOOL_NOT_OK_EXIT = 5;
+
+/** Why a delivered tool result reports failure, or null when it does not.
+ *  A result fails when its top-level `ok` is false or any entry of a
+ *  `results` batch has `ok: false`. Only an explicit `false` counts: a body
+ *  with no `ok` (a projection that picked other fields, an output envelope,
+ *  prose) is not a refusal.
+ * @param {string} text
+ * @returns {string | null}
+ */
+export function toolNotOkReason(text) {
+  const parsed = tryParseJsonObject(text);
+  if (!parsed) return null;
+  const results = Array.isArray(parsed.results) ? parsed.results : [];
+  const failed = results.filter((r) => r && typeof r === 'object' && r.ok === false);
+  if (parsed.ok !== false && failed.length === 0) return null;
+  const first = failed[0] ?? {};
+  const detail = [parsed.reason, parsed.error, parsed.code, first.error, first.reason, first.code]
+    .find((v) => typeof v === 'string' && v.trim()) ?? 'no reason given';
+  const reason = failed.length > 0 ? `${failed.length} of ${results.length} result(s) ok:false; first: ${detail}` : detail;
+  return reason.length > 300 ? `${reason.slice(0, 297)}...` : reason;
+}
+
 /** Print the result of a tools/call, or its error. Returns the exit code.
  * WI-39692: the @param types are LOAD-BEARING — ptool.d.mts is generated from
  * this JSDoc, and without them tsc infers the options shape from the defaults
@@ -2924,6 +2954,13 @@ export async function printResult(result, { raw, deliveryProbe = stdoutDeliveryE
       `ptool: result was produced but stdout delivery FAILED (${delivery.code || delivery.message}) — the consumer of stdout went away, so the caller saw nothing. Treat this invocation as failed and re-run. (EI-21250765620092599)`,
     );
     return 1;
+  }
+  const notOk = toolNotOkReason(safeText);
+  if (notOk !== null) {
+    console.error(
+      `ptool: the tool answered ok:false (${notOk}). The result above is complete; exiting ${PTOOL_TOOL_NOT_OK_EXIT} so a \`|| fail\` guard sees the refusal. (EI-24654733539966460)`,
+    );
+    return PTOOL_TOOL_NOT_OK_EXIT;
   }
   return 0;
 }
@@ -2983,6 +3020,13 @@ Flags:
   --raw                           print the raw result text (no JSON pretty-print)
   --url=<http://host:port>        operator URL (default current PAPERCUSP_HONO_PORT host, then $PAPERCUSP_OPERATOR_URL or :3070)
   -h, --help                      this help
+
+Exit status:
+  0  the tool answered and its result is ok (or carries no ok field)
+  1  the call failed or produced no usable result (tool error, empty or
+     truncated result, stdout lost)
+  5  the call was delivered but the tool answered ok:false (a refusal, a
+     missing id, a failed batch entry); the complete result is still on stdout
 `;
 
 async function pickService(grouped) {

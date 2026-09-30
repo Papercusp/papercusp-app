@@ -37,6 +37,7 @@ import { emitAwaitedEvent } from './engine';
 import { listCellsUnchecked, canReadCell } from '../../cell-registry';
 import { assertLifecycleBinding, withLifecycleBindingProvenance } from './store';
 import type { LifecycleBinding } from './types';
+import { getServingHostIdentity, type ServingHostIdentity } from '../../serving-host-identity';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -67,6 +68,14 @@ export interface PredicateBaseline {
   value: unknown;
 }
 
+/** One evaluator's own previous observation of a row (WI-10004125). */
+export interface EvaluatorBaseline {
+  eval: boolean;
+  value: unknown;
+  /** ISO time of the observation — the pruning order. */
+  at: string;
+}
+
 export interface PredicateWatchRow {
   id: string;
   workspaceId: string;
@@ -81,8 +90,13 @@ export interface PredicateWatchRow {
   value: unknown;
   intervalSec: number;
   once: boolean;
+  /** The LATEST observation by any evaluator — what a joiner and first_eval report.
+   *  NOT the comparison baseline; that is `evaluatorBaselines` (WI-10004125). */
   lastEval: boolean | null;
   lastValue: unknown;
+  /** Per-evaluator baselines keyed by `predicateEvaluatorKey()`. Edge and `changed`
+   *  detection compare a poll only against the SAME evaluator's previous observation. */
+  evaluatorBaselines: Record<string, EvaluatorBaseline>;
   lastPolledAt: string | null;
   lastError: string | null;
   consecutiveErrors: number;
@@ -147,6 +161,7 @@ function mapRow(r: any): PredicateWatchRow {
     once: Boolean(r.once),
     lastEval: r.last_eval == null ? null : Boolean(r.last_eval),
     lastValue: parseJsonb(r.last_value),
+    evaluatorBaselines: parseJsonb<Record<string, EvaluatorBaseline>>(r.evaluator_baselines) ?? {},
     lastPolledAt: r.last_polled_at ? new Date(r.last_polled_at).toISOString() : null,
     lastError: r.last_error ?? null,
     consecutiveErrors: Number(r.consecutive_errors ?? 0),
@@ -157,6 +172,48 @@ function mapRow(r: any): PredicateWatchRow {
 }
 
 /* ── Pure helpers (unit-tested) ────────────────────────────────────────────── */
+
+/** How many evaluators' baselines a row keeps. :3170 republishes ~200×/day and each
+ *  build is a new evaluator, so the map is bounded by recency, not by age. */
+export const MAX_EVALUATOR_BASELINES = 8;
+
+/**
+ * WHICH evaluator is polling (WI-10004125): the service plus the code it loaded.
+ *
+ * Several hosts run this poller and split the due rows between them, so successive
+ * polls of one row land on different hosts — which routinely run different builds
+ * (main lags staging by design). A tool result derived BY CODE can differ between
+ * them at the same instant, so comparing one host's answer with another's reports the
+ * build skew as a change. Measured: a `changed` watch on gate.greenCheckpoint.verdict
+ * fired twice in minutes while the repair queue was byte-identical, because :3070
+ * answered 'inconclusive' and :3170 'repair-head-red' for the same state.
+ *
+ * The build is part of the key, so an evaluator restarting onto new code starts a
+ * fresh baseline: a code change is not a state change. When the build is unprovable
+ * the process id stands in, for the same reason.
+ */
+export function predicateEvaluatorKey(
+  identity: Pick<ServingHostIdentity, 'host' | 'processId' | 'buildSha'> = getServingHostIdentity(),
+): string {
+  return `${identity.host}@${identity.buildSha ?? identity.processId ?? 'unknown'}`;
+}
+
+/** The row's baseline map after `key` records `entry`, keeping the most recent
+ *  `MAX_EVALUATOR_BASELINES` evaluators by observation time. */
+export function nextEvaluatorBaselines(
+  prev: Record<string, EvaluatorBaseline>,
+  key: string,
+  entry: EvaluatorBaseline,
+  cap: number = MAX_EVALUATOR_BASELINES,
+): Record<string, EvaluatorBaseline> {
+  const merged = { ...prev, [key]: entry };
+  const kept = Object.entries(merged)
+    .sort(([, a], [, b]) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
+    .slice(0, cap);
+  // The writer's own entry always survives, even against clock-skewed peers.
+  if (!kept.some(([k]) => k === key)) kept[kept.length - 1] = [key, entry];
+  return Object.fromEntries(kept);
+}
 
 /** Dot-path extraction: `counts.open`, `rows.0.status`. Array indices are plain
  *  numeric segments. Missing anywhere along the path ⇒ undefined. */
@@ -482,13 +539,19 @@ export async function gcOrphanedPredicateWatches(): Promise<number> {
 
 async function recordPredicateEval(
   id: string,
-  input: { lastEval: boolean; lastValue: unknown; deactivate: boolean },
+  input: {
+    lastEval: boolean;
+    lastValue: unknown;
+    deactivate: boolean;
+    evaluatorBaselines: Record<string, EvaluatorBaseline>;
+  },
 ): Promise<void> {
   const { sql } = getOrgPg();
   await sql`
     UPDATE harness_shared.predicate_watches
        SET last_eval = ${input.lastEval},
            last_value = ${input.lastValue === undefined ? null : JSON.stringify(input.lastValue)}::text::jsonb,
+           evaluator_baselines = ${JSON.stringify(input.evaluatorBaselines)}::text::jsonb,
            last_polled_at = now(),
            last_error = NULL,
            consecutive_errors = 0,
@@ -966,14 +1029,21 @@ export async function evalPredicateWatch(
     const shaShapeMismatch =
       row.op !== 'exists' && row.op !== 'changed' ? predicateShaShapeMismatch(observed, row.value) : null;
     if (shaShapeMismatch) throw new Error(predicateShaShapeMismatchMessage(shaShapeMismatch));
-    // `lastEval !== null` is the ONLY honest "has this row ever been evaluated"
-    // signal — `lastValue` is null for both a never-polled row and one that
-    // observed null. See PredicateBaseline.
+    // WI-10004125: compare against THIS evaluator's own previous observation, never
+    // another host's — hosts on different builds can answer differently for the same
+    // state. An evaluator with no entry yet is unestablished (the presence of an entry
+    // is the honest "has it evaluated this row" signal; see PredicateBaseline), so
+    // `changed` records a baseline instead of firing on the first cross-host poll.
+    const evaluator = predicateEvaluatorKey();
+    const own = row.evaluatorBaselines[evaluator];
     const matched = comparePredicate(observed, row.op, row.value, {
-      established: row.lastEval !== null,
-      value: row.lastValue,
+      established: own !== undefined,
+      value: own?.value,
     });
-    const edge = matched && row.lastEval !== true;
+    // A new evaluator inherits the row's latest verdict for the EDGE only, so a
+    // standing watch whose condition already holds does not re-fire every time a
+    // host restarts onto a new build.
+    const edge = matched && (own ? own.eval : row.lastEval) !== true;
     const deactivate = edge && row.once;
     if (edge) {
       const reread = deriveCellReread(row);
@@ -991,7 +1061,7 @@ export async function evalPredicateWatch(
               tool: row.tool,
               path: row.path,
               op: row.op,
-              ...(isChanged ? { changedFrom: row.lastValue } : { value: row.value }),
+              ...(isChanged ? { changedFrom: own?.value } : { value: row.value }),
             },
             // P-001: `observed` is FIRE-TIME and goes stale across the fire→delivery
             // lag (a parked session boots, a respawn queues). The handle re-answers it
@@ -1003,7 +1073,7 @@ export async function evalPredicateWatch(
         ),
         summary: `predicate matched: ${row.tool} ${row.path} ${row.op}${
           isChanged
-            ? ` from ${String(JSON.stringify(row.lastValue)).slice(0, 200)}`
+            ? ` from ${String(JSON.stringify(own?.value)).slice(0, 200)}`
             : row.value === undefined
               ? ''
               : ` ${JSON.stringify(row.value)}`
@@ -1011,7 +1081,16 @@ export async function evalPredicateWatch(
         source: `predicate-watch:${row.ownerId}`,
       });
     }
-    await recordPredicateEval(row.id, { lastEval: matched, lastValue: observed, deactivate });
+    await recordPredicateEval(row.id, {
+      lastEval: matched,
+      lastValue: observed,
+      deactivate,
+      evaluatorBaselines: nextEvaluatorBaselines(row.evaluatorBaselines, evaluator, {
+        eval: matched,
+        value: observed === undefined ? null : observed,
+        at: new Date().toISOString(),
+      }),
+    });
     return { fired: edge, matched, observed, deactivated: deactivate };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

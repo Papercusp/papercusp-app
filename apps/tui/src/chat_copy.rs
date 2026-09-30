@@ -573,7 +573,11 @@ fn prev_run_is_auth_keyword(prev: Option<&str>) -> bool {
 pub fn plain_transcript(messages: &[ChatMessage]) -> Option<String> {
     let mut out = String::new();
     for m in messages {
-        let body = if m.streaming { "" } else { m.content.trim_end() };
+        let body = if m.streaming {
+            ""
+        } else {
+            m.content.trim_end()
+        };
         if body.trim().is_empty() && m.tools.is_empty() && !m.streaming {
             continue;
         }

@@ -51,6 +51,7 @@ import { getOrgPg } from '@papercusp/db-org';
 import { pinModuleState } from '@papercusp/module-singleton';
 import { splitMarkdown, type MarkdownSplitOptions } from '@papercusp/search';
 import { cooperativeYield } from '../event-loop-lag-monitor';
+import type { HarnessRegistry } from '../harness-registry';
 
 /** Per-ROW text cap — mirrors the 2k-char embed-input convention
  *  (session_turns / work_items bodySql `left(…, 2000)`). A section longer than
@@ -100,6 +101,9 @@ export interface DocSyncStats {
   sections: number;
   pruned: number;
   errors: number;
+  /** The first page failure of this pass (`<slug>: <message>`), so a failing
+   *  source is diagnosable from its stats and log line, not just countable. */
+  firstError?: string;
 }
 
 export function pageSha(title: string, body: string): string {
@@ -277,10 +281,18 @@ export async function syncDocSourceSections(
         stats.sections += written;
         stats.changed += 1;
       }
-    } catch {
+    } catch (err) {
+      // Counted AND named: a page that never renders is a page docs:search can
+      // never find, so its first failure is kept for the pass's log line.
       stats.errors += 1;
+      stats.firstError ??= `${page.slug}: ${(err as Error)?.message ?? String(err)}`;
     }
     yieldedPages = await cooperativeYield(yieldedPages);
+  }
+  if (stats.errors > 0) {
+    console.warn(
+      `[doc-embed-sync] ${source.name}: ${stats.errors}/${stats.pages} page(s) failed to render or write; first: ${stats.firstError}`,
+    );
   }
 
   if (opts.prune !== false && pages.length > 0) {
@@ -396,26 +408,283 @@ export async function runDocSectionsSyncOnce(): Promise<DocSyncStats[] | { skipp
   }
 }
 
+// ── Harness docs (EI-24580496022910673, generic-rag-chunking P-013) ─────────
+//
+// docs:search's semantic leg reads doc_sections rows under source_key
+// `harness:<slug>`. Before P-013 those rows were written ONLY by the write-time
+// queue below, and its failures were swallowed by a bare `catch {}` — so
+// doc_sections held zero harness rows while nothing reported it. The periodic
+// sweep now backfills every registered harness, prunes the rows of harnesses
+// that left the registry, and both paths count and log their failures.
+
+/** Source key docs:search's harness leg filters by — the read leg and both
+ *  write paths MUST agree on it, so it is built in exactly one place. */
+export function harnessDocSourceKey(slug: string): string {
+  return `harness:${slug}`;
+}
+
+type HarnessRegistryShape = Pick<HarnessRegistry, 'projects'>;
+type HarnessFsAdapterFactory = (root: string, opts: { name: string }) => DocSource;
+/** harness-registry's resolveHarnessContentPath, passed in so this module keeps
+ *  harness-registry (like docs-engine) out of its static import graph. */
+type ContentPathResolver = (reg: HarnessRegistryShape, slug: string) => string | undefined;
+
+/** The DocSource docs:search reads for one harness (same root resolution as its
+ *  handler), or null when the slug is not registered. */
+export function harnessDocSource(
+  reg: HarnessRegistryShape,
+  slug: string,
+  harnessFsAdapter: HarnessFsAdapterFactory,
+  resolveContentPath: ContentPathResolver,
+): DocSource | null {
+  const project = reg.projects.find((p) => p.slug === slug);
+  if (!project) return null;
+  return harnessFsAdapter(resolveContentPath(reg, slug) ?? project.path, { name: harnessDocSourceKey(slug) });
+}
+
+/** Per-harness mutual exclusion shared by the write-time queue and the sweep:
+ *  one sync per harness at a time; a request that arrives mid-sync is folded
+ *  into one catch-up pass by whichever path holds the slot. */
+export interface HarnessDocSlot {
+  acquire(slug: string): boolean;
+  /** Clears and reports a resync requested while the slot was held. */
+  takePending(slug: string): boolean;
+  release(slug: string): void;
+}
+
+function stateSlot(): HarnessDocSlot {
+  const entry = (slug: string) => {
+    let st = __docSyncState.harness.get(slug);
+    if (!st) {
+      st = { running: false, pending: false };
+      __docSyncState.harness.set(slug, st);
+    }
+    return st;
+  };
+  return {
+    acquire(slug) {
+      const st = entry(slug);
+      if (st.running) {
+        st.pending = true;
+        return false;
+      }
+      st.running = true;
+      st.pending = false;
+      return true;
+    },
+    takePending(slug) {
+      const st = entry(slug);
+      const p = st.pending;
+      st.pending = false;
+      return p;
+    },
+    release(slug) {
+      entry(slug).running = false;
+    },
+  };
+}
+
+export interface HarnessDocSweepResult {
+  /** Registered harnesses the sweep considered. */
+  harnesses: number;
+  /** Harnesses whose source was listed and synced this pass. */
+  synced: number;
+  /** Harnesses skipped because a write-time resync held their slot (it syncs them). */
+  skippedBusy: number;
+  /** Harnesses whose adapter, listing or sync threw. */
+  failed: number;
+  pages: number;
+  changed: number;
+  sections: number;
+  pageErrors: number;
+  /** doc_sections rows of `harness:*` sources no longer in the registry. */
+  prunedUnregistered: number;
+  firstError?: string;
+}
+
+/**
+ * Sync every listed harness's docs into doc_sections, then prune the rows of
+ * harnesses no longer registered. Pure over its inputs (sql, slugs, source
+ * factory, slot) so it is testable with a fake Sql; `runHarnessDocSectionsSweep`
+ * is the live wrapper. The prune runs only when `slugs` is non-empty: an empty
+ * registry read is far likelier to be a load failure than a real state, and
+ * pruning on it would delete every harness row.
+ */
+export async function syncHarnessDocSections(
+  sql: Sql,
+  slugs: readonly string[],
+  sourceFor: (slug: string) => DocSource | null | Promise<DocSource | null>,
+  opts: { slot?: HarnessDocSlot } = {},
+): Promise<HarnessDocSweepResult> {
+  const res: HarnessDocSweepResult = {
+    harnesses: slugs.length,
+    synced: 0,
+    skippedBusy: 0,
+    failed: 0,
+    pages: 0,
+    changed: 0,
+    sections: 0,
+    pageErrors: 0,
+    prunedUnregistered: 0,
+  };
+  const slot = opts.slot;
+  for (const slug of slugs) {
+    if (slot && !slot.acquire(slug)) {
+      res.skippedBusy += 1;
+      continue;
+    }
+    try {
+      do {
+        const source = await sourceFor(slug);
+        if (!source) break;
+        const s = await syncDocSourceSections(sql, source);
+        res.pages += s.pages;
+        res.changed += s.changed;
+        res.sections += s.sections;
+        res.pageErrors += s.errors;
+        if (s.firstError) res.firstError ??= `${slug}/${s.firstError}`;
+      } while (slot?.takePending(slug));
+      res.synced += 1;
+    } catch (err) {
+      res.failed += 1;
+      res.firstError ??= `${slug}: ${(err as Error)?.message ?? String(err)}`;
+    } finally {
+      slot?.release(slug);
+    }
+  }
+  if (slugs.length > 0) {
+    const rows = await sql.unsafe<Array<{ n: number }>>(
+      `WITH d AS (
+         DELETE FROM harness_shared.doc_sections
+          WHERE source_key LIKE 'harness:%' AND NOT (source_key = ANY($1::text[]))
+         RETURNING 1
+       ) SELECT count(*)::int AS n FROM d`,
+      [slugs.map(harnessDocSourceKey)],
+    );
+    res.prunedUnregistered = rows[0]?.n ?? 0;
+  }
+  return res;
+}
+
+/** How often the embed-backfill tick re-sweeps harness docs. A pass re-reads
+ *  every page (measured 2026-09-30: 20 harnesses with docs, 269 pages, ~0.5s)
+ *  and rewrites only changed ones, so this bounds the read cost, not freshness
+ *  of recorded docs — those still sync at write time. */
+export const HARNESS_DOC_SWEEP_INTERVAL_MS = 15 * 60_000;
+
+/** Health of the harness-doc write paths, readable without a DB round trip. */
+export interface HarnessDocSyncHealth {
+  sweeps: number;
+  sweepFailures: number;
+  lastSweepAt: string | null;
+  lastSweepMs: number | null;
+  lastSweep: HarnessDocSweepResult | null;
+  lastSweepError: string | null;
+  queuedSyncs: number;
+  queuedSyncFailures: number;
+  lastQueuedSyncError: string | null;
+}
+
+interface HarnessSweepState {
+  running: boolean;
+  lastStartedMs: number | null;
+  health: HarnessDocSyncHealth;
+}
+const __harnessSweepState = pinModuleState<HarnessSweepState>(
+  '@papercusp/operator-core.harnessDocSweepState',
+  () => ({
+    running: false,
+    lastStartedMs: null,
+    health: {
+      sweeps: 0,
+      sweepFailures: 0,
+      lastSweepAt: null,
+      lastSweepMs: null,
+      lastSweep: null,
+      lastSweepError: null,
+      queuedSyncs: 0,
+      queuedSyncFailures: 0,
+      lastQueuedSyncError: null,
+    },
+  }),
+);
+
+export function harnessDocSyncHealth(): HarnessDocSyncHealth {
+  const h = __harnessSweepState.health;
+  return { ...h, lastSweep: h.lastSweep ? { ...h.lastSweep } : null };
+}
+
+/**
+ * Periodic backfill of every registered harness's docs into doc_sections —
+ * called from the embed-backfill tick after runDocSectionsSyncOnce, throttled to
+ * HARNESS_DOC_SWEEP_INTERVAL_MS (`force` skips the throttle). Unlike the
+ * once-per-process engineering sync this repeats: harness docs change on disk
+ * mid-process. Fail-open (the tick must keep its sweep) but never silent: a
+ * failure is logged and counted in harnessDocSyncHealth(). VITEST-inert.
+ */
+export async function runHarnessDocSectionsSweep(
+  opts: { force?: boolean } = {},
+): Promise<HarnessDocSweepResult | { skipped: string }> {
+  if (process.env.VITEST) return { skipped: 'vitest' };
+  const st = __harnessSweepState;
+  if (st.running) return { skipped: 'already_running' };
+  const now = Date.now();
+  if (!opts.force && st.lastStartedMs !== null && now - st.lastStartedMs < HARNESS_DOC_SWEEP_INTERVAL_MS) {
+    return { skipped: 'throttled' };
+  }
+  st.running = true;
+  st.lastStartedMs = now;
+  try {
+    const { sql } = getOrgPg();
+    if (!(await docSectionsTableExists(sql))) return { skipped: 'migration_552_absent' };
+    const { loadHarnessRegistry, resolveHarnessContentPath } = await import('../harness-registry');
+    const { harnessFsAdapter } = await import('@papercusp/docs-engine');
+    const reg = await loadHarnessRegistry();
+    const res = await syncHarnessDocSections(
+      sql,
+      reg.projects.map((p) => p.slug),
+      (slug) => harnessDocSource(reg, slug, harnessFsAdapter, resolveHarnessContentPath),
+      { slot: stateSlot() },
+    );
+    const h = st.health;
+    h.sweeps += 1;
+    h.lastSweepAt = new Date().toISOString();
+    h.lastSweepMs = Date.now() - now;
+    h.lastSweep = res;
+    if (res.changed > 0 || res.failed > 0 || res.pageErrors > 0 || res.prunedUnregistered > 0) {
+      const line =
+        `[doc-embed-sync] harness sweep: ${res.synced}/${res.harnesses} harnesses, ${res.changed}/${res.pages} pages changed, ` +
+        `${res.sections} sections, ${res.failed} failed, ${res.pageErrors} page errors, ${res.prunedUnregistered} unregistered rows pruned` +
+        (res.firstError ? `; first error: ${res.firstError}` : '');
+      if (res.failed > 0 || res.pageErrors > 0) console.warn(line);
+      else console.log(line);
+    }
+    return res;
+  } catch (err) {
+    st.health.sweepFailures += 1;
+    st.health.lastSweepError = (err as Error)?.message ?? String(err);
+    console.warn('[doc-embed-sync] harness sweep failed:', st.health.lastSweepError);
+    return { skipped: 'error' };
+  } finally {
+    st.running = false;
+  }
+}
+
 /**
  * Fire-and-forget resync of ONE harness's docs surface — called after
  * harness_docs:record / harness_docs:ingest land files. Coalesced per harness
- * (a bulk record of 200 docs triggers one resync, plus one catch-up pass if
- * more arrived mid-sync). A fresh adapter per pass ensures fresh reads (the
- * harness surface is the one whose files change mid-process). Strictly
- * fail-open — never surfaces an error to the writer. VITEST-inert.
+ * through the slot the sweep also uses (a bulk record of 200 docs triggers one
+ * resync, plus one catch-up pass if more arrived mid-sync). A fresh adapter per
+ * pass ensures fresh reads. Fail-open toward the writer — a broken registry or
+ * adapter never breaks the doc write — but logged and counted in
+ * harnessDocSyncHealth(). VITEST-inert.
  */
 export function queueHarnessDocSectionSync(harnessSlug: string): void {
   if (process.env.VITEST) return;
-  let st = __docSyncState.harness.get(harnessSlug);
-  if (!st) {
-    st = { running: false, pending: false };
-    __docSyncState.harness.set(harnessSlug, st);
-  }
-  if (st.running) {
-    st.pending = true;
-    return;
-  }
-  st.running = true;
+  const slot = stateSlot();
+  if (!slot.acquire(harnessSlug)) return;
+  const health = __harnessSweepState.health;
+  health.queuedSyncs += 1;
   void (async () => {
     try {
       const { sql } = getOrgPg();
@@ -423,21 +692,21 @@ export function queueHarnessDocSectionSync(harnessSlug: string): void {
       const { loadHarnessRegistry, resolveHarnessContentPath } = await import('../harness-registry');
       const { harnessFsAdapter } = await import('@papercusp/docs-engine');
       do {
-        st.pending = false;
-        const reg = await loadHarnessRegistry();
-        const project = reg.projects.find((p) => p.slug === harnessSlug);
-        if (!project) return;
-        // Same source name the docs:search handler resolves for this harness —
-        // the read leg filters source_key by adapter.name, so these MUST match.
-        const adapter = harnessFsAdapter(resolveHarnessContentPath(reg, harnessSlug) ?? project.path, {
-          name: `harness:${harnessSlug}`,
-        });
-        await syncDocSourceSections(sql, adapter);
-      } while (st.pending);
-    } catch {
-      // fail-open: a broken registry/adapter must never break the doc write.
+        const source = harnessDocSource(
+          await loadHarnessRegistry(),
+          harnessSlug,
+          harnessFsAdapter,
+          resolveHarnessContentPath,
+        );
+        if (!source) return;
+        await syncDocSourceSections(sql, source);
+      } while (slot.takePending(harnessSlug));
+    } catch (err) {
+      health.queuedSyncFailures += 1;
+      health.lastQueuedSyncError = `${harnessSlug}: ${(err as Error)?.message ?? String(err)}`;
+      console.warn('[doc-embed-sync] harness resync failed:', health.lastQueuedSyncError);
     } finally {
-      st.running = false;
+      slot.release(harnessSlug);
     }
   })();
 }

@@ -18,6 +18,7 @@ import type { NativeSessionHandle } from './native-session-handles';
 import { activeWorkspaceId } from './workspace-registry';
 import { prepareStructuredSuResume } from './su-session-resume';
 import { resolveCodexModelSelection } from './model-context-budget.mjs';
+import { grantSuClientLease, suClientLeaseConfig, superviseSuClientLease } from './su-session-client-lease';
 import { normalizeModelSpecForAgent } from '../../../apps/operator/scripts/psu-launcher.mjs';
 
 const state = pinModuleState('@papercusp/operator-core.su-attached-launch', () => ({
@@ -55,6 +56,27 @@ export function _simulateLaunchingProcessLossForTest(input: {
   return engine;
 }
 
+/** Why an engine ended with nobody watching it (P-009). Shown on the chat. */
+export const UNATTENDED_END_REASON =
+  'Ended because no client was attached. Resume the conversation to continue it; /detach keeps a session running without a client.';
+
+/**
+ * pui-chat-first-ux-2026-09-28 P-009: an attached engine lives only while a
+ * client is watching it or its owner detached it. Grants the first-attach lease
+ * and ends the engine once the durable client lease lapses. Returns the release
+ * to call when this engine exits on its own.
+ */
+function superviseAttendance(advSessionId: number, engine: ClaudeSuEngine | SuRpcEngine): () => void {
+  void grantSuClientLease(advSessionId, suClientLeaseConfig().initialMs);
+  return superviseSuClientLease(advSessionId, async () => {
+    const host = engine.adapter.host;
+    try {
+      if (!host.snapshot().terminal) host.transition('ended', UNATTENDED_END_REASON);
+    } catch { /* a disposed host has nothing left to tell */ }
+    await engine.close();
+  });
+}
+
 /** Exact-resume attempts per reconnect: the original plus one automatic retry
  * after a startup-deadline timeout (P-028). A second timeout is reported. */
 export const RESUME_STARTUP_ATTEMPTS = 2;
@@ -79,7 +101,7 @@ export function claudeEngineIdentityForCwd(cwd: string, checkoutRoots: readonly 
 /** Recomputed from the same inputs on launch and on resume, so a resumed chat
  * keeps its identity without persisted state. An unreadable registry keeps the
  * SU identity: dropping the rails is the choice that needs positive evidence. */
-async function claudeEngineIdentityForLaunch(workspaceId: string, cwd: string | null | undefined): Promise<ClaudeEngineIdentity> {
+async function engineIdentityForLaunch(workspaceId: string, cwd: string | null | undefined): Promise<ClaudeEngineIdentity> {
   if (!cwd) return 'su';
   try {
     const registry = await loadHarnessRegistry(workspaceId);
@@ -218,9 +240,10 @@ export async function launchAttachedSuSession(request: Request, input: AttachedS
               ? startClaudeSuEngine(resume.boot, resume.binding as PuiSuSessionBinding & { backend: 'claude' },
                 { nativeSession: resume.nativeSession as ClaudeSuRuntimeBinding['nativeSession'], transcriptPath: null },
                 { ...options, host: restored as SuSessionHost<'claude'>, resume: resume.exact,
-                  identity: await claudeEngineIdentityForLaunch(workspaceId, resume.boot.cwd) })
+                  identity: await engineIdentityForLaunch(workspaceId, resume.boot.cwd) })
               : startSuRpcEngine(resume.boot, resume.binding as PuiSuSessionBinding & { backend: 'codex' | 'omp' },
-                { ...options, nativeSession: resume.nativeSession as Extract<NativeSessionHandle, { backend: 'codex' | 'omp' }> });
+                { ...options, nativeSession: resume.nativeSession as Extract<NativeSessionHandle, { backend: 'codex' | 'omp' }>,
+                  identity: await engineIdentityForLaunch(workspaceId, resume.boot.cwd) });
             state.engines.set(key, active);
             await persistSuSessionDescriptor(record.advSessionId, active.adapter.host.descriptor());
           } catch (error) { await active?.close(); await resume.release(); throw error; }
@@ -233,6 +256,7 @@ export async function launchAttachedSuSession(request: Request, input: AttachedS
         // missing transcript), which a repeat cannot fix.
         const supervise = async (current: Awaited<ReturnType<typeof startResumedEngine>>, attempt: number): Promise<void> => {
           const { engine, resume } = current;
+          const unsupervise = superviseAttendance(previous.advSessionId, engine);
           let retryable: unknown = null;
           try {
             try { await engine.ready; } catch (error) { if (isStartupTimeout(error)) retryable = error; throw error; }
@@ -242,6 +266,7 @@ export async function launchAttachedSuSession(request: Request, input: AttachedS
             await engine.close();
             await resume.release();
           } finally {
+            unsupervise();
             // Keep the slot reserved across a retry so a concurrent reconnect
             // waits on it instead of racing a second resume for the lease.
             if (state.engines.get(key) === engine && !(retryable && attempt < RESUME_STARTUP_ATTEMPTS)) state.engines.delete(key);
@@ -346,9 +371,11 @@ export async function launchAttachedSuSession(request: Request, input: AttachedS
       engine = result.agent === 'claude'
         ? startClaudeSuEngine(result, binding as PuiSuSessionBinding & { backend: 'claude' },
           { nativeSession: nativeSession as ClaudeSuRuntimeBinding['nativeSession'], transcriptPath: null },
-          { ...options, identity: await claudeEngineIdentityForLaunch(workspaceId, result.cwd) })
-        : startSuRpcEngine(result, binding as PuiSuSessionBinding & { backend: 'codex' | 'omp' }, options);
+          { ...options, identity: await engineIdentityForLaunch(workspaceId, result.cwd) })
+        : startSuRpcEngine(result, binding as PuiSuSessionBinding & { backend: 'codex' | 'omp' },
+          { ...options, identity: await engineIdentityForLaunch(workspaceId, result.cwd) });
       state.engines.set(key, engine);
+      const unsupervise = superviseAttendance(result.sessionId, engine);
       trace?.stage('persist-descriptor');
       await persistSuSessionDescriptor(result.sessionId, engine.adapter.host.descriptor());
       const active = engine;
@@ -370,6 +397,7 @@ export async function launchAttachedSuSession(request: Request, input: AttachedS
           await active.close();
           await markAdvSessionEnded(result.sessionId!, null, 'cleanup', { throwOnError: true });
         } finally {
+          unsupervise();
           if (state.engines.get(key) === active) state.engines.delete(key);
         }
       })().catch((error: unknown) => console.warn('[su-session] engine exit bookkeeping failed', error)));

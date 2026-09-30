@@ -2012,6 +2012,9 @@ impl OpenFilePicker {
 
 pub struct App {
     pub should_quit: bool,
+    /// `/detach` (pui-chat-first-ux P-009): quit but keep the conversation's
+    /// engine running. Without it, quitting ends the engine.
+    pub su_detach_on_exit: bool,
     pub status: String,
     /// The terminal's last known geometry (cols, rows), from startup and every
     /// `Event::Resize`. Below `ui::MIN_COLS`×`ui::MIN_ROWS` the screen is the
@@ -2581,6 +2584,14 @@ pub struct App {
     pub su_open_in_flight: bool,
     pub su_active_command_id: Option<String>,
     su_rendered_owner_turns: BTreeSet<String>,
+    /// P-014: open question cards, correlation id → the prompt they show. A
+    /// card event carries no tool-call id, so the prompt is what joins a card
+    /// to the question tool that asked it (`question_tool_prompts`).
+    su_card_prompts: std::collections::BTreeMap<String, String>,
+    /// Question prompts whose card the user skipped (Esc/Decline) or answered,
+    /// consumed when the asking tool call completes.
+    su_skipped_prompts: BTreeSet<String>,
+    su_answered_prompts: BTreeSet<String>,
     pub conversation_id: Option<String>,
     /// The agent-chat id backing this pane's SU-session transcript. Distinct
     /// from `conversation_id`, the legacy operator-converse lane used by voice.
@@ -2620,6 +2631,9 @@ pub struct App {
     /// A failed connection can precede the binding. Keep its diagnostic with
     /// the selected conversation until reconnect succeeds or selection changes.
     pub su_connection_error: Option<String>,
+    /// The operator's reason when launch-su answered and refused to start the
+    /// engine (WI-10004158); cleared with `su_connection_error`.
+    pub su_launch_refusal: Option<String>,
     /// All durable SU sessions discovered for the active harness.  This
     /// inventory is kept independently of the selected stream so ended and
     /// archived sessions remain available for inspection after a restart.
@@ -2766,6 +2780,7 @@ impl App {
     pub fn new() -> Self {
         Self {
             should_quit: false,
+            su_detach_on_exit: false,
             status: "pui".to_string(),
             // Unknown until main reads the terminal; never "too small" before then.
             viewport: (u16::MAX, u16::MAX),
@@ -2983,6 +2998,9 @@ impl App {
             su_open_in_flight: false,
             su_active_command_id: None,
             su_rendered_owner_turns: BTreeSet::new(),
+            su_card_prompts: std::collections::BTreeMap::new(),
+            su_skipped_prompts: BTreeSet::new(),
+            su_answered_prompts: BTreeSet::new(),
             conversation_id: None,
             agent_chat_id: None,
             agent_chat_role: "operator".to_string(),
@@ -2995,6 +3013,7 @@ impl App {
             su_last_dispatch: None,
             su_session: None,
             su_connection_error: None,
+            su_launch_refusal: None,
             su_session_inventory: Vec::new(),
             agent_chats_loaded_for: None,
             launch_cwd: crate::su_session::launch_cwd(),
@@ -3152,10 +3171,12 @@ impl App {
     /// written a new message, so the whole composer is returned.
     fn text_beyond_pending_draft(&self, composer: &str) -> String {
         match self.su_pending_turn.as_ref() {
-            Some(pending) if !pending.draft.is_empty() && self.pending_draft_in_composer() => composer
-                .strip_prefix(pending.draft.as_str())
-                .unwrap_or(composer)
-                .to_owned(),
+            Some(pending) if !pending.draft.is_empty() && self.pending_draft_in_composer() => {
+                composer
+                    .strip_prefix(pending.draft.as_str())
+                    .unwrap_or(composer)
+                    .to_owned()
+            }
             _ => composer.to_owned(),
         }
     }
@@ -3650,7 +3671,11 @@ impl App {
         self.agent_chat_usage = crate::agent_chats::AgentChatUsage::default();
         self.su_session = None;
         self.su_connection_error = None;
+        self.su_launch_refusal = None;
         self.su_rendered_owner_turns.clear();
+        self.su_card_prompts.clear();
+        self.su_skipped_prompts.clear();
+        self.su_answered_prompts.clear();
         // The previous conversation's dispatch policy must not outlive its
         // binding: leaving it set would let the NEXT conversation's first turn be
         // routed by the LAST one's recorded home (P-011).
@@ -3692,6 +3717,7 @@ impl App {
     /// the host snapshot/stream remains authoritative for lifecycle state.
     pub fn set_su_session_binding(&mut self, binding: crate::su_session::SuSessionBinding) {
         self.su_connection_error = None;
+        self.su_launch_refusal = None;
         self.su_backend = Some(binding.backend);
         self.su_session = Some(crate::su_session::SuSessionState::from_binding(binding));
     }
@@ -4049,10 +4075,28 @@ impl App {
                             .find(|tool| tool.id.as_deref() == Some(call_id.as_str()))
                         {
                             tool.result = output;
-                            tool.outcome = if is_error {
-                                ToolOutcome::Failed("SU-session tool failed".into())
-                            } else {
+                            // P-014: a question tool the user skipped ends in
+                            // an error result (the engine denies the call), but
+                            // skipping is a choice, not a failure. The MCP-
+                            // wrapped question reports even an ANSWERED card as
+                            // a denied wrapper call, which is not a failure either.
+                            let prompts = question_tool_prompts(&tool.name, tool.input.as_ref());
+                            let skipped =
+                                prompts.iter().any(|p| self.su_skipped_prompts.contains(p));
+                            let answered = !prompts.is_empty()
+                                && prompts.iter().all(|p| self.su_answered_prompts.contains(p));
+                            for prompt in &prompts {
+                                self.su_skipped_prompts.remove(prompt);
+                                self.su_answered_prompts.remove(prompt);
+                            }
+                            tool.outcome = if !is_error {
                                 ToolOutcome::Ok
+                            } else if skipped {
+                                ToolOutcome::Skipped
+                            } else if answered {
+                                ToolOutcome::Ok
+                            } else {
+                                ToolOutcome::Failed("SU-session tool failed".into())
                             };
                             break;
                         }
@@ -4160,8 +4204,40 @@ impl App {
                 turn_id,
                 card,
                 correlation_id,
+                resolution,
                 ..
             } => {
+                // P-014: remember which prompt each card shows, so its
+                // resolution can reach the question tool row that asked it.
+                if phase == "opened" {
+                    let card_ref = card.as_ref();
+                    let id = card_ref
+                        .and_then(|c| c.get("correlationId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| correlation_id.clone());
+                    let prompt = card_ref
+                        .and_then(|c| c.get("prompt"))
+                        .and_then(Value::as_str);
+                    if let (Some(id), Some(prompt)) = (id, prompt) {
+                        self.su_card_prompts.insert(id, prompt.to_owned());
+                    }
+                } else if phase == "closed" {
+                    if let Some(prompt) = correlation_id
+                        .as_deref()
+                        .and_then(|id| self.su_card_prompts.remove(id))
+                    {
+                        match resolution.as_deref() {
+                            Some("submitted") => {
+                                self.su_answered_prompts.insert(prompt);
+                            }
+                            Some("declined") | Some("cancelled") => {
+                                self.su_skipped_prompts.insert(prompt);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 // Reuse the existing CardSpec renderer/state channel.  The
                 // SU-session card event carries the same OpenCardSnapshot
                 // payload; wrapping it in a local VersionedSnapshot keeps one
@@ -4290,6 +4366,51 @@ impl App {
             chat_id,
             command,
         }
+    }
+
+    /// Whether a running conversation is attached: one whose engine this client
+    /// could end or detach on the way out.
+    fn su_session_running(&self) -> bool {
+        self.agent_chat_id.is_some()
+            && self
+                .su_session
+                .as_ref()
+                .is_some_and(|state| state.is_live() && state.identity.is_some())
+    }
+
+    /// What quitting now does to the attached conversation's engine
+    /// (pui-chat-first-ux P-009). `None` when nothing is running, or when the
+    /// backend cannot end a session on command; the host's attendance lease
+    /// then ends it once this client stops renewing.
+    pub fn su_session_exit(&self) -> Option<crate::su_session::SuSessionExit> {
+        use crate::su_session::{SuSessionControl, SuSessionExit, CLIENT_EXIT_REASON};
+        if !self.su_session_running() {
+            return None;
+        }
+        let chat_id = self.agent_chat_id.clone()?;
+        let harness = self.harness.clone();
+        if self.su_detach_on_exit {
+            return Some(SuSessionExit::Detach { harness, chat_id });
+        }
+        let state = self.su_session.as_ref()?;
+        let identity = state.identity.as_ref()?;
+        let control = SuSessionControl::End {
+            reason: Some(CLIENT_EXIT_REASON.into()),
+        };
+        let unsupported = state
+            .descriptor
+            .as_ref()
+            .and_then(|descriptor| descriptor.capabilities.commands.get(control.command_type()))
+            .is_some_and(|capability| capability.state == "unsupported");
+        if unsupported {
+            return None;
+        }
+        let command_id = format!("pui-{}-end-on-exit", identity.adv_session_id);
+        Some(SuSessionExit::End {
+            harness,
+            chat_id,
+            command: control.command_json(identity, &command_id, "pui"),
+        })
     }
 
     /// Clear a decided HITL request: drop it from the pending set and stop its
@@ -4512,6 +4633,19 @@ impl App {
                 Action::FetchSessionSwitcher {
                     query: String::new(),
                 }
+            }
+            SlashKind::Detach => {
+                if !self.su_session_running() {
+                    self.chat_toast(
+                        "info",
+                        "No conversation is running, so there is nothing to keep. Use /exit to quit."
+                            .into(),
+                    );
+                    return Action::Render;
+                }
+                self.su_detach_on_exit = true;
+                self.should_quit = true;
+                Action::Quit
             }
             SlashKind::Exit => {
                 self.should_quit = true;
@@ -5028,6 +5162,31 @@ impl App {
     ///   - text/date: type · Backspace · Enter submits · Esc declines/cancels
     ///   - slider:   ←/→ h/l (and j/k) nudge · Enter submits · Esc declines/cancels
     fn card_key(&mut self, code: KeyCode) -> Action {
+        // P-015: an answered card takes no input until the server closes it, and
+        // a repeat of the key that answered it must not answer the NEXT card.
+        if self.card_state.swallow_key(code, std::time::Instant::now()) {
+            return Action::Render;
+        }
+        let action = self.card_key_inner(code);
+        if let Action::CardRespond {
+            correlation_id,
+            action: verb,
+            payload,
+            ..
+        } = &action
+        {
+            let summary = self
+                .card_state
+                .focused()
+                .filter(|card| &card.correlation_id == correlation_id)
+                .map(|card| crate::card_view::answer_summary(card, verb, payload.as_ref()))
+                .unwrap_or_else(|| "Answered".to_string());
+            self.card_state.mark_answered(correlation_id, summary, code);
+        }
+        action
+    }
+
+    fn card_key_inner(&mut self, code: KeyCode) -> Action {
         use crate::card_view::CardPresentation;
         // Snapshot the focused card's shape (clone the small bits we branch on)
         // so we don't hold an immutable borrow across the mutable card_state ops.
@@ -5113,8 +5272,10 @@ impl App {
         }
     }
 
-    /// Freeze the conversation and card identity for the POST. Keep the card
-    /// visible until the server closes it, including after a failed POST.
+    /// Freeze the conversation and card identity for the POST. The card stays in
+    /// the queue until the server closes it; `card_key` collapses it to its
+    /// answered row meanwhile (P-015), and a failed POST
+    /// (`Event::CardRespondFailed`) makes it answerable again.
     fn card_respond_action(
         &mut self,
         action: String,
@@ -5902,57 +6063,70 @@ impl App {
                     launch_cwd,
                 )
         };
-        options.extend(self.agent_chat_summaries.iter().filter(in_scope).map(|chat| {
-            let title = chat
-                .title
-                .as_deref()
-                .filter(|t| !t.is_empty())
-                .unwrap_or("untitled");
-            let active = self.agent_chat_id.as_deref() == Some(chat.id.as_str());
-            let inventory = self
-                .su_session_inventory
+        options.extend(
+            self.agent_chat_summaries
                 .iter()
-                .find(|entry| entry.agent_chat_id == chat.id);
-            let status = inventory
-                .map(|entry| format!(" · {} · {}", entry.backend.label(), entry.lifecycle))
-                .unwrap_or_default();
-            let reconciliation = inventory
-                .map(|entry| entry.reconciliation.to_string())
-                .unwrap_or_else(|| "legacy chat".to_string());
-            let turns = format!(
-                "{} turn{}",
-                chat.turn_count,
-                if chat.turn_count == 1 { "" } else { "s" }
-            );
-            if self.chat_first {
-                // pui-chat-first-ux P-010: the default chat's /resume list reads
-                // like Claude Code's — which conversation and when — with no
-                // role, backend lifecycle, chat id or reconciliation jargon.
-                return PickerOption {
-                    id: format!("chat:{}", chat.id),
-                    label: format!("{}{} · {}", if active { "● " } else { "" }, title, turns),
-                    hint: Some(format!("updated {}", Self::human_timestamp(&chat.updated_at))),
-                    disabled: false,
-                };
-            }
-            PickerOption {
-                id: format!("chat:{}", chat.id),
-                label: format!(
-                    "{}{} · {}{} · {} turn{}",
-                    if active { "● " } else { "" },
-                    chat.role,
-                    title,
-                    status,
-                    chat.turn_count,
-                    if chat.turn_count == 1 { "" } else { "s" }
-                ),
-                hint: Some(format!(
-                    "{} · updated {} · {}",
-                    chat.id, chat.updated_at, reconciliation
-                )),
-                disabled: false,
-            }
-        }));
+                .filter(in_scope)
+                .map(|chat| {
+                    let title = chat
+                        .title
+                        .as_deref()
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or("untitled");
+                    let active = self.agent_chat_id.as_deref() == Some(chat.id.as_str());
+                    let inventory = self
+                        .su_session_inventory
+                        .iter()
+                        .find(|entry| entry.agent_chat_id == chat.id);
+                    let status = inventory
+                        .map(|entry| format!(" · {} · {}", entry.backend.label(), entry.lifecycle))
+                        .unwrap_or_default();
+                    let reconciliation = inventory
+                        .map(|entry| entry.reconciliation.to_string())
+                        .unwrap_or_else(|| "legacy chat".to_string());
+                    let turns = format!(
+                        "{} turn{}",
+                        chat.turn_count,
+                        if chat.turn_count == 1 { "" } else { "s" }
+                    );
+                    if self.chat_first {
+                        // pui-chat-first-ux P-010: the default chat's /resume list reads
+                        // like Claude Code's — which conversation and when — with no
+                        // role, backend lifecycle, chat id or reconciliation jargon.
+                        return PickerOption {
+                            id: format!("chat:{}", chat.id),
+                            label: format!(
+                                "{}{} · {}",
+                                if active { "● " } else { "" },
+                                title,
+                                turns
+                            ),
+                            hint: Some(format!(
+                                "updated {}",
+                                Self::human_timestamp(&chat.updated_at)
+                            )),
+                            disabled: false,
+                        };
+                    }
+                    PickerOption {
+                        id: format!("chat:{}", chat.id),
+                        label: format!(
+                            "{}{} · {}{} · {} turn{}",
+                            if active { "● " } else { "" },
+                            chat.role,
+                            title,
+                            status,
+                            chat.turn_count,
+                            if chat.turn_count == 1 { "" } else { "s" }
+                        ),
+                        hint: Some(format!(
+                            "{} · updated {} · {}",
+                            chat.id, chat.updated_at, reconciliation
+                        )),
+                        disabled: false,
+                    }
+                }),
+        );
         if self.chat_first && options.is_empty() {
             // Until this pot's chat list has arrived an empty list means
             // "not loaded yet", never "none exist". The picker refreshes in
@@ -6136,14 +6310,12 @@ impl App {
             seat: self.su_launch_seat.clone(),
             model: self.chat_model.clone(),
             effort: self.chat_effort.clone(),
-            // launch-su must always receive an account value: psu without
-            // --account opens an interactive picker, which a PUI-spawned host
-            // cannot answer. The platform launch default is the system account.
-            account: Some(
-                self.chat_account
-                    .clone()
-                    .unwrap_or_else(|| "default".to_string()),
-            ),
+            // Only an account the owner CHOSE is sent. launch-su resolves an
+            // omitted one (D-014: never an argv without --account), and it can
+            // pick the route the engine's model needs: an OMP gateway model
+            // runs on `auto`, where `default` would refuse it (WI-10004158,
+            // plan pui-chat-first-ux-2026-09-28 D-011).
+            account: self.chat_account.clone(),
             mode: self.chat_mode.clone(),
             kickoff: None,
             kickoff_prompt: None,
@@ -6382,6 +6554,7 @@ impl App {
         let mode = self.chat_mode.as_deref().unwrap_or("manual");
         let selected_backend = self
             .su_backend
+            .or(self.configured_su_backend())
             .unwrap_or(crate::su_session::PUI_DEFAULT_SU_BACKEND)
             .label();
         let backend = self
@@ -6451,6 +6624,7 @@ impl App {
             .as_ref()
             .map(|session| session.backend())
             .or(self.su_backend)
+            .or(self.configured_su_backend())
             .unwrap_or(crate::su_session::PUI_DEFAULT_SU_BACKEND)
             .label()
     }
@@ -6526,6 +6700,12 @@ impl App {
             || raw.contains("401")
         {
             format!("{engine} is not signed in; sign in to {engine}, then {retry}.")
+        } else if let Some(reason) = self.su_launch_refusal.as_deref() {
+            // The operator answered and refused to start the engine
+            // (WI-10004158): not a lost connection, and its reason names the
+            // owner's next step (an account or model to choose).
+            let reason = reason.trim().trim_end_matches('.');
+            format!("{engine} could not start: {reason}. Then {retry}.")
         } else if self.su_connection_error.is_some()
             || raw.contains("connection refused")
             || raw.contains("error sending request")
@@ -6577,7 +6757,22 @@ impl App {
                 .map(|session| session.backend()),
             picked_backend: self.su_backend,
             loaded_class: self.pui_runtime_class,
+            configured_backend: self.configured_su_backend(),
         })
+    }
+
+    /// The operator's configured agent engine (`GET /api/agent-config`
+    /// `effectiveBackend`): what a conversation with no pick runs on, and what
+    /// the status line names before the first send (P-016). `None` until the
+    /// read lands, or for a value this client does not map.
+    pub fn configured_su_backend(&self) -> Option<crate::su_session::SuSessionBackend> {
+        let config = self.operator_config.agent.as_ref()?;
+        match config.effective_backend.as_str() {
+            "codex" => Some(crate::su_session::SuSessionBackend::Codex),
+            "omp" => Some(crate::su_session::SuSessionBackend::Omp),
+            "claude-code" | "claude" => Some(crate::su_session::SuSessionBackend::Claude),
+            _ => None,
+        }
     }
 
     /// Record a launched pane into the crew roster (P12b) if it's a `psu` agent
@@ -7415,12 +7610,8 @@ impl App {
             .map(|identity| identity.endpoint.clone())
             .unwrap_or_else(crate::client::selected_endpoint_label);
         let mut setup = crate::session_config::SessionSetup::new(endpoint, self.chat_input.clone());
-        if let Some(config) = self.operator_config.agent.as_ref() {
-            setup.backend = match config.effective_backend.as_str() {
-                "codex" => crate::su_session::SuSessionBackend::Codex,
-                "omp" => crate::su_session::SuSessionBackend::Omp,
-                _ => crate::su_session::SuSessionBackend::Claude,
-            };
+        if let Some(backend) = self.configured_su_backend() {
+            setup.backend = backend;
         }
         if self.agent_chat_id.is_none() && self.su_session.is_none() {
             setup.backend = self.su_backend.unwrap_or(setup.backend);
@@ -10163,6 +10354,12 @@ impl App {
                 action
             }
             Event::Tick => self.on_tick(),
+            // A signal is a quit (P-009): the run loop's teardown then ends the
+            // attached conversation's engine, exactly as /exit does.
+            Event::Terminate => {
+                self.should_quit = true;
+                Action::Quit
+            }
             // Repaint at the new geometry immediately (see Event::Resize).
             Event::Resize(cols, rows) => {
                 self.viewport = (cols, rows);
@@ -10427,6 +10624,7 @@ impl App {
                 ));
                 let backend = self
                     .su_backend
+                    .or(self.configured_su_backend())
                     .unwrap_or(crate::su_session::PUI_DEFAULT_SU_BACKEND);
                 self.su_open_in_flight = true;
                 Action::OpenContinuedSuSession {
@@ -11419,6 +11617,11 @@ impl App {
                 self.fail_su_turn(&format!("SU-session: {error}"), false);
                 Action::Render
             }
+            Event::SuSessionRefused { code, message } => {
+                let action = self.update(Event::SuSessionError(format!("{code}: {message}")));
+                self.su_launch_refusal = Some(message);
+                action
+            }
             Event::SuSessionStreamError { chat_id, message } => {
                 // A late EOF from a previously selected chat must not poison
                 // the newly selected session.  Stream errors carry their chat
@@ -11556,10 +11759,17 @@ impl App {
                 //    live pane is never displaced;
                 //  - only for the chat the inventory frame is about, which the
                 //    guard above already pinned to `self.agent_chat_id`;
-                //  - only for `Attached` non-terminal rows. `EndedArchived` /
+                //  - only for `Attached` non-terminal rows, plus (below) an
+                //    `EndedArchived` row that can resume from its transcript.
                 //    `FailedOrphaned` rows are preserved for inspection but
                 //    must NOT be respawned, and `RuntimeReplaced` is handled by
                 //    the rebind path above rather than by a fresh attach;
+                //  - pui-chat-first-ux P-009 / D-008: quitting a PUI now ends
+                //    its engine, so a restored chat's session is normally
+                //    `EndedArchived`. Reopening the workbench on that chat is
+                //    the owner coming back to it — exactly what picking it in
+                //    Sessions does — so it resumes from its native transcript
+                //    (a row with no native session id has nothing to resume);
                 //  - at most once per advSessionId (see `su_adopted_sessions`);
                 //  - never while this pane's own open is in flight, since the
                 //    row it would adopt is the session that open is creating.
@@ -11569,9 +11779,15 @@ impl App {
                         .iter()
                         .find(|entry| {
                             Some(entry.agent_chat_id.as_str()) == self.agent_chat_id.as_deref()
-                                && entry.reconciliation
-                                    == crate::su_session::SuSessionReconciliation::Attached
-                                && !entry.terminal
+                                && match entry.reconciliation {
+                                    crate::su_session::SuSessionReconciliation::Attached => {
+                                        !entry.terminal
+                                    }
+                                    crate::su_session::SuSessionReconciliation::EndedArchived => {
+                                        !entry.native_session_id.is_empty()
+                                    }
+                                    _ => false,
+                                }
                         })
                         .map(|entry| {
                             (
@@ -11704,6 +11920,18 @@ impl App {
                 Action::Render
             }
             // --- Inline cards (sentinel-tui-shared-backend-and-cards Phase 2a) ---
+            Event::CardRespondFailed {
+                correlation_id,
+                error,
+            } => {
+                // P-015: the answer never reached the agent, which is still
+                // waiting on this card. Reopen the card; the turn is not failed.
+                self.card_state.restore_answer(&correlation_id);
+                self.last_error = Some(format!(
+                    "Your answer didn't reach the agent ({error}). Answer the card again to retry."
+                ));
+                Action::Render
+            }
             Event::CardSnapshot(env) => {
                 self.card_state.apply_snapshot(env);
                 Action::Render
@@ -12921,17 +13149,14 @@ impl App {
             // kitty keyboard protocol, main.rs) are the explicit multiline
             // affordances; plain Enter remains send, even when the cursor sits
             // in a middle logical line.
-            if (code == KeyCode::Enter
-                && mods.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT))
+            if (code == KeyCode::Enter && mods.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT))
                 || (code == KeyCode::Char('j') && mods.contains(KeyModifiers::CONTROL))
             {
                 return self.chat_insert_text("\n");
             }
             // The `/` command menu (pui-chat-first-ux P-004): Up/Down pick,
             // Tab completes, Enter runs, Esc dismisses. Typing falls through.
-            if let Some(prefix) =
-                crate::chat_commands::query(&self.chat_input).map(str::to_owned)
-            {
+            if let Some(prefix) = crate::chat_commands::query(&self.chat_input).map(str::to_owned) {
                 let hits = crate::chat_commands::matching(&prefix).len();
                 match code {
                     KeyCode::Up if hits > 0 => {
@@ -14747,6 +14972,35 @@ impl Default for App {
 }
 
 /// Shorten an owner id for a pane title: "su-8b77dde5-…" → "su-8b77d".
+/// The question prompts a tool call puts to the user, when it is a question
+/// tool: Claude's native `AskUserQuestion`, or the same request carried by the
+/// papercusp MCP `tools_invoke` wrapper (`{ name: "AskUserQuestion", args }`).
+/// Each prompt becomes one PUI question card showing exactly that text, which
+/// is how a card's resolution is joined back to its tool row (P-014). Empty
+/// for every other tool. Pure — unit-tested.
+fn question_tool_prompts(name: &str, input: Option<&Value>) -> Vec<String> {
+    let questions = if name == "AskUserQuestion" {
+        input.and_then(|v| v.get("questions"))
+    } else if name.ends_with("tools_invoke")
+        && input.and_then(|v| v.get("name")).and_then(Value::as_str) == Some("AskUserQuestion")
+    {
+        input
+            .and_then(|v| v.get("args"))
+            .and_then(|a| a.get("questions"))
+    } else {
+        None
+    };
+    questions
+        .and_then(Value::as_array)
+        .map(|qs| {
+            qs.iter()
+                .filter_map(|q| q.get("question").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Flip a wake mode for the P-008 toggle: `manual`→`auto`, anything else
 /// (auto / unset) → `manual`. Pure — unit-tested.
 fn next_wake_mode(current: Option<&str>) -> &'static str {
@@ -14977,7 +15231,27 @@ mod tests {
         );
         assert!(
             app.card_state.has_card(),
-            "a failed POST must leave the question answerable"
+            "the card stays queued until the server's authoritative close"
+        );
+        assert_eq!(
+            app.card_state
+                .focused_answered()
+                .map(|a| a.summary.as_str()),
+            Some("Answered: Change"),
+            "P-015: the answered card collapses at once"
+        );
+        // A failed POST reopens exactly that card (and is not a turn failure).
+        app.update(Event::CardRespondFailed {
+            correlation_id: "question".into(),
+            error: "operator unreachable".into(),
+        });
+        assert!(app.card_state.focused_answered().is_none());
+        assert!(
+            app.last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("Answer the card again")),
+            "{:?}",
+            app.last_error
         );
         app.agent_chat_id = None;
         assert!(matches!(
@@ -14987,6 +15261,148 @@ mod tests {
         assert!(
             app.card_state.has_card(),
             "a missing conversation must not hide the question"
+        );
+    }
+
+    fn open_approval_card(app: &mut App, sequence: u64, id: &str, command: &str) {
+        let mut event = su_event_base("card", sequence);
+        event["turnId"] = json!("turn-1");
+        event["phase"] = json!("opened");
+        event["card"] = json!({"correlationId":id,"prompt":format!("Allow Bash?\n$ {command}"),
+            "createdAt":sequence,"presentation":{"kind":"radio","options":[
+                {"id":"0","label":"Approve"},{"id":"1","label":"Decline"}]}});
+        app.apply_su_session_event(su_event(event));
+    }
+
+    fn close_card(app: &mut App, sequence: u64, id: &str) {
+        let mut closed = su_event_base("card", sequence);
+        closed["turnId"] = json!("turn-1");
+        closed["phase"] = json!("closed");
+        closed["correlationId"] = json!(id);
+        closed["resolution"] = json!("answered");
+        app.apply_su_session_event(su_event(closed));
+    }
+
+    fn answered_id(action: &Action) -> Option<String> {
+        match action {
+            Action::CardRespond { correlation_id, .. } => Some(correlation_id.clone()),
+            _ => None,
+        }
+    }
+
+    /// P-015: Approve collapses the card to one "Approved" row at once, and
+    /// neither a repeat while it is in flight nor a repeat just after the
+    /// server closes it can answer the next card. A DIFFERENT key answers the
+    /// next card immediately (the user has read it and chosen).
+    #[test]
+    fn su_approval_card_collapses_at_once_and_a_repeat_cannot_answer_the_next_card() {
+        let mut app = App::new();
+        app.tab = Tab::Operator;
+        app.agent_chat_id = Some("chat-1".into());
+        app.set_su_session_binding(su_binding());
+        open_approval_card(&mut app, 1, "alpha", "echo ALPHA");
+        open_approval_card(&mut app, 2, "beta", "echo BETA");
+
+        let first = app.on_key(KeyCode::Char('1'), KeyModifiers::NONE);
+        assert_eq!(answered_id(&first).as_deref(), Some("alpha"));
+        let answered = app.card_state.focused_answered().cloned();
+        assert_eq!(
+            answered.map(|a| (a.correlation_id, a.summary)),
+            Some(("alpha".to_string(), "Approved".to_string())),
+            "the answered card is replaced by its one-line row within the same frame"
+        );
+
+        // Repeats while ALPHA is in flight — the P-005 harness's second press.
+        for key in [
+            KeyCode::Char('1'),
+            KeyCode::Enter,
+            KeyCode::Char('2'),
+            KeyCode::Esc,
+        ] {
+            let action = app.on_key(key, KeyModifiers::NONE);
+            assert_eq!(
+                answered_id(&action),
+                None,
+                "{key:?} answered a card while ALPHA was in flight"
+            );
+        }
+
+        // The server closes ALPHA; BETA is focused, and an immediate repeat of the
+        // answering key still belongs to ALPHA.
+        close_card(&mut app, 3, "alpha");
+        assert_eq!(
+            app.card_state.focused_correlation_id().as_deref(),
+            Some("beta")
+        );
+        assert!(app.card_state.focused_answered().is_none());
+        let repeat = app.on_key(KeyCode::Char('1'), KeyModifiers::NONE);
+        assert_eq!(
+            answered_id(&repeat),
+            None,
+            "a repeated Approve answered BETA"
+        );
+        assert_eq!(
+            app.card_state.focused_correlation_id().as_deref(),
+            Some("beta")
+        );
+
+        // A different key is a deliberate choice about BETA.
+        let decline = app.on_key(KeyCode::Char('2'), KeyModifiers::NONE);
+        assert_eq!(answered_id(&decline).as_deref(), Some("beta"));
+        assert_eq!(
+            app.card_state
+                .focused_answered()
+                .map(|a| a.summary.as_str()),
+            Some("Declined")
+        );
+    }
+
+    /// P-015: once the repeat window lapses, the same key is a fresh answer —
+    /// the guard only swallows REPEATS, never a later deliberate press.
+    #[test]
+    fn su_approval_card_same_key_answers_the_next_card_after_the_repeat_window() {
+        let mut app = App::new();
+        app.tab = Tab::Operator;
+        app.agent_chat_id = Some("chat-1".into());
+        app.set_su_session_binding(su_binding());
+        open_approval_card(&mut app, 1, "alpha", "echo ALPHA");
+        open_approval_card(&mut app, 2, "beta", "echo BETA");
+        assert_eq!(
+            answered_id(&app.on_key(KeyCode::Char('1'), KeyModifiers::NONE)).as_deref(),
+            Some("alpha")
+        );
+        close_card(&mut app, 3, "alpha");
+        app.card_state.expire_repeat_guard();
+        assert_eq!(
+            answered_id(&app.on_key(KeyCode::Char('1'), KeyModifiers::NONE)).as_deref(),
+            Some("beta")
+        );
+    }
+
+    /// P-015: a failed card POST is not a turn failure — the agent is still
+    /// waiting on the card, so the streaming turn must stay live.
+    #[test]
+    fn a_failed_card_answer_reopens_the_card_without_failing_the_turn() {
+        let mut app = App::new();
+        app.tab = Tab::Operator;
+        app.agent_chat_id = Some("chat-1".into());
+        app.set_su_session_binding(su_binding());
+        open_approval_card(&mut app, 1, "alpha", "echo ALPHA");
+        app.chat_streaming = true;
+        assert_eq!(
+            answered_id(&app.on_key(KeyCode::Char('1'), KeyModifiers::NONE)).as_deref(),
+            Some("alpha")
+        );
+        app.update(Event::CardRespondFailed {
+            correlation_id: "alpha".into(),
+            error: "HTTP 502".into(),
+        });
+        assert!(app.chat_streaming, "a card POST failure ended the turn");
+        assert!(app.card_state.focused_answered().is_none());
+        // Retrying with the same key is not a "repeat": the first answer never landed.
+        assert_eq!(
+            answered_id(&app.on_key(KeyCode::Char('1'), KeyModifiers::NONE)).as_deref(),
+            Some("alpha")
         );
     }
 
@@ -15015,7 +15431,10 @@ mod tests {
         ready["state"] = json!("ready");
         ready["runtimeGeneration"] = json!(1);
         app.apply_su_session_event(su_event(ready.clone()));
-        assert!(app.chat_streaming, "the pending first turn is still sending");
+        assert!(
+            app.chat_streaming,
+            "the pending first turn is still sending"
+        );
         assert!(app.su_pending_turn.is_some());
 
         // Calibration: once the turn has failed, ready settles the pane.
@@ -15087,6 +15506,147 @@ mod tests {
         );
     }
 
+    /// pui-chat-first-ux-2026-09-28 P-014: Esc on an agent's question card is a
+    /// skip. The engine reports the question tool as an error, but the row must
+    /// read "skipped", while a question tool that genuinely errored stays failed.
+    #[test]
+    fn su_session_skipped_question_card_renders_skipped_not_failed() {
+        let mut app = App::new();
+        app.agent_chat_id = Some("chat-1".into());
+        app.set_su_session_binding(su_binding());
+        let mut seq = 0u64;
+        let mut next = |kind: &str| {
+            seq += 1;
+            let mut e = su_event_base(kind, seq);
+            e["turnId"] = json!("turn-1");
+            e
+        };
+        let question =
+            |prompt: &str| json!({"questions":[{"question":prompt,"options":[{"label":"Tests"}]}]});
+        // (call id, tool name, input, card resolution or None, isError, expected)
+        let cases: Vec<(&str, &str, Value, Option<&str>, bool, ToolOutcome)> = vec![
+            (
+                "skip",
+                "AskUserQuestion",
+                question("What should we work on?"),
+                Some("declined"),
+                true,
+                ToolOutcome::Skipped,
+            ),
+            (
+                "interrupt",
+                "AskUserQuestion",
+                question("Still there?"),
+                Some("cancelled"),
+                true,
+                ToolOutcome::Skipped,
+            ),
+            (
+                "wrapped-answer",
+                "mcp__papercusp-su__tools_invoke",
+                json!({"name":"AskUserQuestion","args":question("Keep or change?")}),
+                Some("submitted"),
+                true,
+                ToolOutcome::Ok,
+            ),
+            (
+                "wrapped-skip",
+                "mcp__papercusp-su__tools_invoke",
+                json!({"name":"AskUserQuestion","args":question("Which file?")}),
+                Some("declined"),
+                true,
+                ToolOutcome::Skipped,
+            ),
+            (
+                "broken",
+                "AskUserQuestion",
+                question("Bad schema?"),
+                None,
+                true,
+                ToolOutcome::Failed("SU-session tool failed".into()),
+            ),
+            (
+                "bash-declined",
+                "Bash",
+                json!({"command":"ls"}),
+                Some("declined"),
+                true,
+                ToolOutcome::Failed("SU-session tool failed".into()),
+            ),
+        ];
+        for (call, name, input, resolution, is_error, expected) in cases {
+            let mut started = next("tool");
+            started["phase"] = json!("started");
+            started["callId"] = json!(call);
+            started["name"] = json!(name);
+            started["input"] = input.clone();
+            app.apply_su_session_event(su_event(started));
+            if let Some(resolution) = resolution {
+                let prompt = question_tool_prompts(name, Some(&input))
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Allow Bash?".into());
+                let card_id = format!("card-{call}");
+                let mut opened = next("card");
+                opened["phase"] = json!("opened");
+                opened["card"] = json!({"correlationId":card_id,"prompt":prompt,"createdAt":1,
+                    "presentation":{"kind":"radio","options":[{"id":"0","label":"Tests"}]}});
+                app.apply_su_session_event(su_event(opened));
+                let mut closed = next("card");
+                closed["phase"] = json!("closed");
+                closed["correlationId"] = json!(card_id);
+                closed["resolution"] = json!(resolution);
+                app.apply_su_session_event(su_event(closed));
+            }
+            let mut done = next("tool");
+            done["phase"] = json!("completed");
+            done["callId"] = json!(call);
+            done["name"] = json!(name);
+            done["output"] = json!("The user skipped this question without answering.");
+            done["isError"] = json!(is_error);
+            app.apply_su_session_event(su_event(done));
+            let outcome = app
+                .chat_messages
+                .iter()
+                .flat_map(|m| m.tools.iter())
+                .find(|t| t.id.as_deref() == Some(call))
+                .map(|t| t.outcome.clone());
+            assert_eq!(outcome, Some(expected), "call {call}");
+        }
+        // Every question's resolution was consumed by the call that asked it, so
+        // a later question reusing a prompt starts clean. (An approval card's
+        // prompt has no question tool to consume it; it is dropped with the
+        // conversation.)
+        for prompt in [
+            "What should we work on?",
+            "Still there?",
+            "Keep or change?",
+            "Which file?",
+        ] {
+            assert!(!app.su_skipped_prompts.contains(prompt), "{prompt}");
+            assert!(!app.su_answered_prompts.contains(prompt), "{prompt}");
+        }
+        assert!(app.su_card_prompts.is_empty());
+    }
+
+    #[test]
+    fn question_tool_prompts_reads_native_and_wrapped_questions_only() {
+        let q = json!({"questions":[{"question":"A?"},{"question":"B?"}]});
+        assert_eq!(
+            question_tool_prompts("AskUserQuestion", Some(&q)),
+            vec!["A?", "B?"]
+        );
+        let wrapped = json!({"name":"AskUserQuestion","args":q});
+        assert_eq!(
+            question_tool_prompts("mcp__papercusp-su__tools_invoke", Some(&wrapped)),
+            vec!["A?", "B?"]
+        );
+        let other = json!({"name":"work_items:list","args":q});
+        assert!(question_tool_prompts("mcp__papercusp-su__tools_invoke", Some(&other)).is_empty());
+        assert!(question_tool_prompts("Bash", Some(&q)).is_empty());
+        assert!(question_tool_prompts("AskUserQuestion", None).is_empty());
+    }
+
     /// pui-chat-first-ux-2026-09-28 P-013: text an engine writes AFTER a tool
     /// call is the answer that call produced, so it must land in a block below
     /// the call — never appended to the block that renders the call's row
@@ -15138,7 +15698,12 @@ mod tests {
         let blocks: Vec<(String, Vec<String>)> = app
             .chat_messages
             .iter()
-            .map(|m| (m.content.clone(), m.tools.iter().map(|t| t.name.clone()).collect()))
+            .map(|m| {
+                (
+                    m.content.clone(),
+                    m.tools.iter().map(|t| t.name.clone()).collect(),
+                )
+            })
             .collect();
         assert_eq!(
             blocks,
@@ -15155,7 +15720,10 @@ mod tests {
             app.chat_history_for_send(),
             vec![
                 ("assistant".to_string(), "Let me look.".to_string()),
-                ("assistant".to_string(), "calc.js adds two numbers.".to_string()),
+                (
+                    "assistant".to_string(),
+                    "calc.js adds two numbers.".to_string()
+                ),
             ]
         );
     }
@@ -15167,7 +15735,9 @@ mod tests {
         let mut a = App::new();
         a.begin_user_send("hi");
         a.update(Event::ChatDelta("thinking aloud ".into()));
-        a.update(Event::ChatToolCall(ChatToolCall::plain("harness:list".into())));
+        a.update(Event::ChatToolCall(ChatToolCall::plain(
+            "harness:list".into(),
+        )));
         a.update(Event::ChatDelta("<say>done</say>".into()));
         a.update(Event::ChatDone);
         assert_eq!(a.chat_messages.len(), 2);
@@ -16383,8 +16953,14 @@ mod tests {
         a.su_session_inventory = vec![earlier];
         let opened = a.run_slash_command("resume");
         assert_eq!(opened, Action::Render);
-        assert!(a.session_switcher.is_none(), "the fleet switcher must not open");
-        let picker = a.session_picker.as_ref().expect("conversation picker opens");
+        assert!(
+            a.session_switcher.is_none(),
+            "the fleet switcher must not open"
+        );
+        let picker = a
+            .session_picker
+            .as_ref()
+            .expect("conversation picker opens");
         assert_eq!(picker.axis, crate::session_config::PickerAxis::Conversation);
         let row = picker
             .options
@@ -16562,7 +17138,10 @@ mod tests {
             selected_chat_id: None,
             entries: vec![row],
         });
-        assert_eq!(a.session_picker.as_ref().unwrap().options[0].id, "chat:earlier");
+        assert_eq!(
+            a.session_picker.as_ref().unwrap().options[0].id,
+            "chat:earlier"
+        );
     }
 
     /// The workbench keeps /resume on the fleet switcher (panes and windows).
@@ -16571,17 +17150,26 @@ mod tests {
         let mut a = App::new();
         a.chat_first = false;
         let action = a.run_slash_command("resume");
-        assert!(matches!(action, Action::FetchSessionSwitcher { .. }), "{action:?}");
+        assert!(
+            matches!(action, Action::FetchSessionSwitcher { .. }),
+            "{action:?}"
+        );
         assert!(a.session_switcher.is_some());
         assert!(a.session_picker.is_none());
     }
 
     #[test]
     fn human_timestamp_formats_iso_instants_and_passes_other_text_through() {
-        assert_eq!(App::human_timestamp("2026-09-29T16:47:13.228Z"), "2026-09-29 16:47 UTC");
+        assert_eq!(
+            App::human_timestamp("2026-09-29T16:47:13.228Z"),
+            "2026-09-29 16:47 UTC"
+        );
         assert_eq!(App::human_timestamp("2026-08-29"), "2026-08-29");
         assert_eq!(App::human_timestamp("yesterday"), "yesterday");
-        assert_eq!(App::human_timestamp("2026-09-29T16:47ééé"), "2026-09-29T16:47ééé");
+        assert_eq!(
+            App::human_timestamp("2026-09-29T16:47ééé"),
+            "2026-09-29T16:47ééé"
+        );
     }
 
     #[test]
@@ -16829,6 +17417,33 @@ mod tests {
     }
 
     #[test]
+    fn a_configured_codex_or_omp_backend_names_and_opens_a_new_chat() {
+        use crate::su_session::{SuDispatchTarget, SuSessionBackend};
+        for (configured, expected) in [
+            ("codex", SuSessionBackend::Codex),
+            ("omp", SuSessionBackend::Omp),
+        ] {
+            let mut a = setup_app();
+            a.operator_config.agent =
+                Some(serde_json::from_value(json!({ "effectiveBackend": configured })).unwrap());
+            assert_eq!(a.configured_su_backend(), Some(expected));
+            // The status line names the engine the first message will run on.
+            assert_eq!(a.chat_engine_label(), expected.label());
+            assert_eq!(
+                a.su_dispatch_decision().target,
+                SuDispatchTarget::OpenSuSession(expected)
+            );
+            // An explicit owner pick still outranks the configuration.
+            a.su_backend = Some(SuSessionBackend::Claude);
+            assert_eq!(
+                a.su_dispatch_decision().target,
+                SuDispatchTarget::OpenSuSession(SuSessionBackend::Claude)
+            );
+            assert_eq!(a.chat_engine_label(), SuSessionBackend::Claude.label());
+        }
+    }
+
+    #[test]
     fn session_setup_first_send_requires_review_and_preserves_exact_initial_turn() {
         let mut a = setup_app();
         a.tab = Tab::Operator;
@@ -16886,7 +17501,10 @@ mod tests {
         assert!(a.session_setup.is_none(), "no form stays open");
         assert!(a.session_setup_accepted);
         assert!(!a.chat_first_autostart);
-        assert_eq!(a.su_pending_turn.as_ref().unwrap().content, "  first λ 雪  ");
+        assert_eq!(
+            a.su_pending_turn.as_ref().unwrap().content,
+            "  first λ 雪  "
+        );
         assert_eq!(a.chat_account.as_deref(), Some("default"));
     }
 
@@ -16900,7 +17518,10 @@ mod tests {
         a.chat_input = "hi there".into();
         a.chat_cursor = a.chat_input.len();
         let action = a.on_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(matches!(action, Action::OpenSuSession { .. }), "got {action:?}");
+        assert!(
+            matches!(action, Action::OpenSuSession { .. }),
+            "got {action:?}"
+        );
         assert!(a.chat_input.is_empty(), "the sent line leaves the composer");
         assert_eq!(a.chat_cursor, 0);
         assert_eq!(a.pending_owner_echo(), Some("hi there"));
@@ -16951,7 +17572,10 @@ mod tests {
         assert!(a.chat_messages.iter().all(|m| m.role != "user"));
 
         a.chat_cursor = a.chat_input.len();
-        assert!(!matches!(a.on_key(KeyCode::Enter, KeyModifiers::NONE), Action::Render));
+        assert!(!matches!(
+            a.on_key(KeyCode::Enter, KeyModifiers::NONE),
+            Action::Render
+        ));
         assert!(a.chat_input.is_empty(), "the retry leaves the composer too");
         assert_eq!(a.pending_owner_echo(), Some("hi"));
     }
@@ -17003,19 +17627,33 @@ mod tests {
         a.harnesses.clear();
         a.harnesses_loaded = false;
         a.chat_input = "hello".into();
-        assert_eq!(a.on_key(KeyCode::Enter, KeyModifiers::NONE), Action::CheckSessionSetup);
-        assert_eq!(a.chat_first_quiet_wait().as_deref(), Some("Starting Claude…"));
+        assert_eq!(
+            a.on_key(KeyCode::Enter, KeyModifiers::NONE),
+            Action::CheckSessionSetup
+        );
+        assert_eq!(
+            a.chat_first_quiet_wait().as_deref(),
+            Some("Starting Claude…")
+        );
         assert_eq!(a.pending_owner_echo(), Some("hello"));
 
-        assert_eq!(a.on_key(KeyCode::Char('x'), KeyModifiers::NONE), Action::Render);
-        assert!(a.chat_first_autostart, "a stray key must not cancel the start");
+        assert_eq!(
+            a.on_key(KeyCode::Char('x'), KeyModifiers::NONE),
+            Action::Render
+        );
+        assert!(
+            a.chat_first_autostart,
+            "a stray key must not cancel the start"
+        );
         assert_eq!(a.session_setup.as_ref().unwrap().message, "hello");
 
         a.set_harnesses(vec![HarnessRef {
             slug: "chosen-project".into(),
             path: None,
         }]);
-        let action = a.try_chat_first_autostart().expect("launches once the list lands");
+        let action = a
+            .try_chat_first_autostart()
+            .expect("launches once the list lands");
         assert!(
             matches!(
                 action,
@@ -17037,7 +17675,11 @@ mod tests {
         a.chat_input = "hello".into();
         a.on_key(KeyCode::Enter, KeyModifiers::NONE);
         assert!(a.chat_first_autostart);
-        assert_eq!(a.chat_first_quiet_wait(), None, "missing project needs the owner");
+        assert_eq!(
+            a.chat_first_quiet_wait(),
+            None,
+            "missing project needs the owner"
+        );
 
         let mut b = chat_first_app();
         b.harnesses.clear();
@@ -17045,15 +17687,21 @@ mod tests {
         b.chat_input = "hello".into();
         b.on_key(KeyCode::Enter, KeyModifiers::NONE);
         assert!(b.chat_first_quiet_wait().is_some());
-        b.chat_first_autostart_since =
-            std::time::Instant::now().checked_sub(CHAT_FIRST_QUIET_WAIT);
-        assert_eq!(b.chat_first_quiet_wait(), None, "a long wait opens the form");
+        b.chat_first_autostart_since = std::time::Instant::now().checked_sub(CHAT_FIRST_QUIET_WAIT);
+        assert_eq!(
+            b.chat_first_quiet_wait(),
+            None,
+            "a long wait opens the form"
+        );
 
         let mut c = chat_first_app();
         c.backend_identity = None;
         c.chat_input = "hello".into();
         c.on_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(c.chat_first_quiet_wait().is_some(), "identity not answered yet");
+        assert!(
+            c.chat_first_quiet_wait().is_some(),
+            "identity not answered yet"
+        );
         c.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(c.session_setup.is_none());
         assert!(!c.chat_first_autostart);
@@ -17083,9 +17731,18 @@ mod tests {
         let mut a = chat_first_app();
         a.chat_input = "/e".into();
         a.chat_cursor = 2;
-        assert!(matches!(a.on_key(KeyCode::Down, KeyModifiers::NONE), Action::Render));
-        assert_eq!(a.chat_slash_selected, 1, "Down highlights the second match (/exit)");
-        assert!(matches!(a.on_key(KeyCode::Up, KeyModifiers::NONE), Action::Render));
+        assert!(matches!(
+            a.on_key(KeyCode::Down, KeyModifiers::NONE),
+            Action::Render
+        ));
+        assert_eq!(
+            a.chat_slash_selected, 1,
+            "Down highlights the second match (/exit)"
+        );
+        assert!(matches!(
+            a.on_key(KeyCode::Up, KeyModifiers::NONE),
+            Action::Render
+        ));
         assert_eq!(a.chat_slash_selected, 0, "Up moves back to /expand");
         let action = a.on_key(KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(action, Action::Render), "got {action:?}");
@@ -17095,7 +17752,10 @@ mod tests {
 
         a.chat_input = "/exit".into();
         a.chat_cursor = 5;
-        assert!(matches!(a.on_key(KeyCode::Enter, KeyModifiers::NONE), Action::Quit));
+        assert!(matches!(
+            a.on_key(KeyCode::Enter, KeyModifiers::NONE),
+            Action::Quit
+        ));
         assert!(a.should_quit);
     }
 
@@ -17106,15 +17766,27 @@ mod tests {
         a.chat_cursor = 5;
         let action = a.on_key(KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(action, Action::Render), "got {action:?}");
-        assert!(a.su_pending_turn.is_none(), "an unknown command is not sent");
+        assert!(
+            a.su_pending_turn.is_none(),
+            "an unknown command is not sent"
+        );
         assert_eq!(a.chat_input, "/nope", "the text stays for editing");
-        assert!(a.toast.as_ref().is_some_and(|t| t.message.contains("/nope")));
-        assert!(matches!(a.on_key(KeyCode::Esc, KeyModifiers::NONE), Action::Render));
+        assert!(a
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.message.contains("/nope")));
+        assert!(matches!(
+            a.on_key(KeyCode::Esc, KeyModifiers::NONE),
+            Action::Render
+        ));
         assert!(a.chat_input.is_empty(), "Esc dismisses the command");
         // Text with a space is a message, not a command.
         a.chat_input = "/tmp is full".into();
         a.chat_cursor = a.chat_input.len();
-        assert!(!matches!(a.on_key(KeyCode::Enter, KeyModifiers::NONE), Action::Render));
+        assert!(!matches!(
+            a.on_key(KeyCode::Enter, KeyModifiers::NONE),
+            Action::Render
+        ));
         assert_eq!(a.su_pending_turn.as_ref().unwrap().content, "/tmp is full");
     }
 
@@ -17123,10 +17795,16 @@ mod tests {
         let mut a = chat_first_app();
         a.chat_input = "line one\\".into();
         a.chat_cursor = a.chat_input.len();
-        assert!(matches!(a.on_key(KeyCode::Enter, KeyModifiers::NONE), Action::Render));
+        assert!(matches!(
+            a.on_key(KeyCode::Enter, KeyModifiers::NONE),
+            Action::Render
+        ));
         assert_eq!(a.chat_input, "line one\n");
         a.on_key(KeyCode::Char('x'), KeyModifiers::NONE);
-        assert!(matches!(a.on_key(KeyCode::Enter, KeyModifiers::SHIFT), Action::Render));
+        assert!(matches!(
+            a.on_key(KeyCode::Enter, KeyModifiers::SHIFT),
+            Action::Render
+        ));
         assert_eq!(a.chat_input, "line one\nx\n");
         assert!(a.su_pending_turn.is_none(), "neither key sends");
     }
@@ -17167,7 +17845,13 @@ mod tests {
         );
         let action = a.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(
-            matches!(action, Action::ResolveAgentChatApproval { approved: false, .. }),
+            matches!(
+                action,
+                Action::ResolveAgentChatApproval {
+                    approved: false,
+                    ..
+                }
+            ),
             "Esc denies, got {action:?}"
         );
         a.chat_input = "typing".into();
@@ -17182,7 +17866,10 @@ mod tests {
     fn chat_first_ctrl_o_toggles_details_without_touching_the_draft() {
         let mut a = chat_first_app();
         a.chat_input = "half-typed".into();
-        assert!(!a.chat_details_visible(), "chat-first hides details by default");
+        assert!(
+            !a.chat_details_visible(),
+            "chat-first hides details by default"
+        );
         let action = a.on_key(KeyCode::Char('o'), KeyModifiers::CONTROL);
         assert!(matches!(action, Action::Render), "got {action:?}");
         assert!(a.chat_details_visible());
@@ -17214,6 +17901,42 @@ mod tests {
         assert!(a
             .chat_raw_failure()
             .is_some_and(|raw| raw.contains("event stream closed unexpectedly")));
+    }
+
+    /// WI-10004158: a launch the operator answered and refused is not a lost
+    /// connection. The owner sees the operator's reason, which names the fix;
+    /// a transport failure still reads as a lost connection.
+    #[test]
+    fn chat_first_refused_launch_shows_the_operators_reason() {
+        let reason = "OMP default account cannot use gateway model 'papercusp-gateway/x'; choose auto or a named gateway account, or choose a direct-provider model.";
+        let mut a = chat_first_app();
+        a.chat_input = "hello".into();
+        a.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        a.update(Event::SuSessionRefused {
+            code: "attached_engine_start_failed".into(),
+            message: reason.into(),
+        });
+        assert_eq!(
+            a.chat_failure_sentence().as_deref(),
+            Some("Claude could not start: OMP default account cannot use gateway model 'papercusp-gateway/x'; choose auto or a named gateway account, or choose a direct-provider model. Then press Enter to send your message again.")
+        );
+        assert!(a
+            .chat_raw_failure()
+            .is_some_and(|raw| raw.contains("attached_engine_start_failed")));
+
+        let mut b = chat_first_app();
+        b.chat_input = "hello".into();
+        b.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        b.update(Event::SuSessionError(
+            "open SU session: error sending request".into(),
+        ));
+        assert_eq!(
+            b.chat_failure_sentence().as_deref(),
+            Some("PUI lost its connection to Claude; press Enter to send your message again.")
+        );
+        // A later successful open clears the refusal with the connection error.
+        a.update(Event::SuSessionOpened(su_binding()));
+        assert!(a.su_launch_refusal.is_none());
     }
 
     /// A message typed before the operator answered waits on the form (which
@@ -17538,6 +18261,93 @@ mod tests {
             Action::Render
         );
         assert!(a.session_note.as_deref().unwrap().contains("unsupported"));
+    }
+
+    /// A chat with a running SU engine bound, as P-009's quit paths see it.
+    fn app_with_running_su_session() -> App {
+        let mut a = App::new();
+        a.agent_chat_id = Some("chat-1".into());
+        a.set_su_session_binding(su_binding());
+        a.su_session.as_mut().unwrap().identity = Some(serde_json::from_value(json!({
+            "agentChatId":"chat-1", "advSessionId":7, "backend":"claude",
+            "nativeSessionId":"native-1", "ownerId":"su-1", "workspaceId":"ws-1", "harnessSlug":"papercup"
+        })).unwrap());
+        a
+    }
+
+    #[test]
+    fn quitting_ends_the_running_engine_as_the_client_leaves() {
+        let a = app_with_running_su_session();
+        match a.su_session_exit() {
+            Some(crate::su_session::SuSessionExit::End {
+                chat_id, command, ..
+            }) => {
+                assert_eq!(chat_id, "chat-1");
+                assert_eq!(command["type"], "end");
+                assert_eq!(command["reason"], crate::su_session::CLIENT_EXIT_REASON);
+                assert_eq!(command["target"]["advSessionId"], 7);
+            }
+            other => panic!("quitting must end the engine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detach_quits_and_keeps_the_engine_running() {
+        let mut a = app_with_running_su_session();
+        assert_eq!(a.run_slash_command("detach"), Action::Quit);
+        assert!(a.should_quit);
+        assert_eq!(
+            a.su_session_exit(),
+            Some(crate::su_session::SuSessionExit::Detach {
+                harness: a.harness.clone(),
+                chat_id: "chat-1".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn detach_with_nothing_running_says_so_and_does_not_quit() {
+        let mut a = App::new();
+        assert_eq!(a.run_slash_command("detach"), Action::Render);
+        assert!(!a.should_quit);
+        assert!(a
+            .toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("nothing to keep"));
+        assert_eq!(a.su_session_exit(), None);
+    }
+
+    #[test]
+    fn an_ended_engine_or_one_that_cannot_be_ended_is_left_to_the_lease() {
+        let mut ended = app_with_running_su_session();
+        ended.su_session.as_mut().unwrap().lifecycle =
+            crate::su_session::SuSessionLifecycleState::Ended;
+        assert_eq!(ended.su_session_exit(), None, "nothing left to end");
+
+        let mut unsupported = app_with_running_su_session();
+        unsupported.su_session.as_mut().unwrap().descriptor = Some(serde_json::from_value(json!({
+            "identity": {"agentChatId":"chat-1", "advSessionId":7, "backend":"claude", "nativeSessionId":"native-1", "ownerId":"su-1", "workspaceId":"ws-1", "harnessSlug":"papercup"},
+            "lifecycle":"ready", "runtimeGeneration":1, "role":"su", "carry":"warm", "modes":[],
+            "capabilities": {"commands": {"end":{"state":"unsupported","reason":"no end"}}, "features": {}},
+            "backendExtension": {"backend":"claude", "configDir":null, "configDirSource":null}
+        })).unwrap());
+        assert_eq!(unsupported.su_session_exit(), None);
+    }
+
+    #[test]
+    fn a_quit_signal_quits_like_exit() {
+        let mut a = app_with_running_su_session();
+        assert_eq!(a.update(Event::Terminate), Action::Quit);
+        assert!(a.should_quit);
+        assert!(
+            matches!(
+                a.su_session_exit(),
+                Some(crate::su_session::SuSessionExit::End { .. })
+            ),
+            "a closed terminal ends the engine, it does not detach it"
+        );
     }
 
     /// Build an archived-session snapshot: ended lifecycle, terminal, and the
@@ -18193,12 +19003,21 @@ mod tests {
                 "restart {restart}: Codex must adopt on 102, never re-adopt 101"
             );
 
-            // (3) the ended OMP session is preserved for inspection and never
-            // respawned — selecting it must emit no attach at all.
+            // (3) the ended OMP session kept its saved native conversation, so
+            // selecting it resumes it on its OWN id and backend (P-009 D-008:
+            // after P-009 every normal quit ends the engine, so "ended" is no
+            // longer "abandoned"). Rows with no native id, FailedOrphaned,
+            // Pending and RuntimeReplaced still never adopt
+            // (su_inventory_never_adopts_non_attached_or_terminal_rows).
             assert_eq!(
                 adopt(&mut app, "chat-omp"),
-                Action::Render,
-                "restart {restart}: an ended session must be preserved, not respawned"
+                Action::AttachSuSession {
+                    harness: "papercup".into(),
+                    chat_id: "chat-omp".into(),
+                    adv_session_id: 103,
+                    backend: B::Omp,
+                },
+                "restart {restart}: an ended session with a saved conversation resumes on 103"
             );
             assert!(app
                 .su_session_inventory
@@ -18214,8 +19033,8 @@ mod tests {
             );
             assert_eq!(
                 app.su_adopted_sessions.iter().copied().collect::<Vec<_>>(),
-                vec![101, 102],
-                "restart {restart}: exactly the two live backends were adopted, each once"
+                vec![101, 102, 103],
+                "restart {restart}: each backend's session was adopted exactly once"
             );
         }
     }
@@ -18381,13 +19200,69 @@ mod tests {
         assert_eq!(second, Action::Render, "adoption must not re-fire");
     }
 
-    /// P-010: ended/failed rows are "preserved for inspection" and converged to
-    /// an explicit state — they must never be respawned. Only `Attached`
-    /// asserts a still-present runtime.
+    /// pui-chat-first-ux P-009 / D-008: quitting a PUI ends its engine, so the
+    /// restored chat's row is normally `EndedArchived`. Reopening the workbench
+    /// resumes it from its transcript, like picking it in Sessions. A row with
+    /// no native session id has nothing to resume and stays unadopted.
+    #[test]
+    fn su_inventory_resumes_the_restored_chat_after_its_engine_ended() {
+        let mut ended = inventory_row_for(
+            "chat-1",
+            crate::su_session::SuSessionReconciliation::EndedArchived,
+        );
+        ended.lifecycle = crate::su_session::SuSessionLifecycleState::Ended;
+        ended.terminal = true;
+        let mut app = App::new();
+        app.agent_chat_id = Some("chat-1".into());
+        let action = app.update(Event::SuSessionInventory {
+            harness: app.harness.clone(),
+            selected_chat_id: Some("chat-1".into()),
+            entries: vec![ended.clone()],
+        });
+        assert_eq!(
+            action,
+            Action::AttachSuSession {
+                harness: "papercup".into(),
+                chat_id: "chat-1".into(),
+                adv_session_id: 42,
+                backend: crate::su_session::SuSessionBackend::Codex,
+            }
+        );
+        // Only the restored chat resumes; another chat's ended row does not.
+        let mut app = App::new();
+        app.agent_chat_id = Some("chat-2".into());
+        let action = app.update(Event::SuSessionInventory {
+            harness: app.harness.clone(),
+            selected_chat_id: Some("chat-2".into()),
+            entries: vec![ended.clone()],
+        });
+        assert_eq!(
+            action,
+            Action::Render,
+            "another chat's ended row must not adopt"
+        );
+        // Nothing native to resume from.
+        let mut app = App::new();
+        app.agent_chat_id = Some("chat-1".into());
+        ended.native_session_id.clear();
+        let action = app.update(Event::SuSessionInventory {
+            harness: app.harness.clone(),
+            selected_chat_id: Some("chat-1".into()),
+            entries: vec![ended],
+        });
+        assert_eq!(
+            action,
+            Action::Render,
+            "an ended row with no native id must not adopt"
+        );
+    }
+
+    /// P-010: failed rows are "preserved for inspection" and converged to an
+    /// explicit state — they must never be respawned. `Attached` asserts a
+    /// still-present runtime; an ended row resumes only as above (P-009).
     #[test]
     fn su_inventory_never_adopts_non_attached_or_terminal_rows() {
         for reconciliation in [
-            crate::su_session::SuSessionReconciliation::EndedArchived,
             crate::su_session::SuSessionReconciliation::FailedOrphaned,
             crate::su_session::SuSessionReconciliation::Pending,
             crate::su_session::SuSessionReconciliation::RuntimeReplaced,
@@ -21828,10 +22703,12 @@ mod tests {
                 backend, launch, ..
             } => {
                 assert_eq!(backend, crate::su_session::PUI_DEFAULT_SU_BACKEND);
+                // WI-10004158 / D-011: an unchosen account is omitted; launch-su
+                // resolves it (D-014, pinned by launch-su.test.ts 'an omitted OMP
+                // account follows model'), so psu never waits on its picker.
                 assert_eq!(
-                    launch.account.as_deref(),
-                    Some("default"),
-                    "fresh launches must never leave psu waiting on its account picker"
+                    launch.account, None,
+                    "an account the owner never chose must not be sent as an explicit choice"
                 );
             }
             other => panic!("a new conversation must default to the SU host, got {other:?}"),
@@ -22614,6 +23491,26 @@ mod tests {
             ambiguous.su_session_launch_options().plan_slug,
             None,
             "a multi-plan list filter is not launch authority"
+        );
+    }
+
+    /// WI-10004158 / D-011: an account the owner never chose is not sent as
+    /// `default`, so launch-su can route an OMP gateway model to `auto`. A
+    /// chosen account, `default` included, is sent exactly as chosen.
+    #[test]
+    fn an_unchosen_account_is_omitted_and_a_chosen_one_is_sent() {
+        let mut a = composing("hello");
+        assert_eq!(a.chat_account, None);
+        assert_eq!(a.su_session_launch_options().account, None);
+        a.chat_account = Some("default".into());
+        assert_eq!(
+            a.su_session_launch_options().account.as_deref(),
+            Some("default")
+        );
+        a.chat_account = Some("auto".into());
+        assert_eq!(
+            a.su_session_launch_options().account.as_deref(),
+            Some("auto")
         );
     }
 

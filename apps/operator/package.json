@@ -36,6 +36,7 @@
     "release:workspace-host-publication-manifest": "tsx lib/release/workspace-host-publication-manifest-cli.ts",
     "release:clean-room-acceptance": "tsx lib/release/workspace-host-clean-room-acceptance-cli.ts",
     "release:p2p-candidate-manifest": "tsx lib/release/run-p2p-candidate-manifest.ts",
+    "release:precut-containment": "tsx lib/release/precut-containment-cli.ts",
     "lint:el-tools": "node scripts/el-tools-check.mjs",
     "lint:plans": "tsx scripts/lint-plans.ts",
     "lint:plans-pg": "node scripts/check-plans-pg-canonical.mjs",

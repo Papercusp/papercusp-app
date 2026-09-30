@@ -5321,7 +5321,7 @@
   cursor: pointer;
 }
 .pc-plan-prov__chip--owner,
-.pc-plan-prov__chip--covered { border-color: var(--accent); color: var(--accent-strong); background: var(--accent-soft); }
+.pc-plan-prov__chip--covered { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
 .pc-plan-prov__chip--unresolved,
 .pc-plan-prov__chip--rejected,
 .pc-plan-prov__chip--open { border-color: var(--warn); color: var(--warn); }

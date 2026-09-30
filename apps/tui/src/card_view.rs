@@ -48,7 +48,11 @@ pub struct AnsweredCard {
 /// chose, in words, from the `/card-response` action and payload about to be
 /// sent. Approval cards read "Approved" / "Declined"; other choices name the
 /// picked option labels; Esc reads "Skipped" (P-014: a skip is not a failure).
-pub fn answer_summary(card: &OpenCard, action: &str, payload: Option<&serde_json::Value>) -> String {
+pub fn answer_summary(
+    card: &OpenCard,
+    action: &str,
+    payload: Option<&serde_json::Value>,
+) -> String {
     match action {
         "decline" => return "Skipped".to_string(),
         "cancel" => return "Cancelled".to_string(),
@@ -935,5 +939,131 @@ mod tests {
         );
         // missing snapshot
         assert!(SnapshotEnvelope::from_json(r#"{"runId":"r","version":1}"#).is_none());
+    }
+
+    fn approval_card(cid: &str) -> OpenCard {
+        OpenCard {
+            correlation_id: cid.into(),
+            run_id: "r".into(),
+            workspace_id: None,
+            prompt: "Allow Bash?".into(),
+            presentation: CardPresentation::Radio {
+                options: ["Approve", "Decline", "Always allow echo"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, label)| CardOption {
+                        id: i.to_string(),
+                        label: label.to_string(),
+                        hint: None,
+                        style: None,
+                    })
+                    .collect(),
+            },
+            fallback_text: None,
+            details: None,
+            allow_decline: true,
+            report: None,
+            created_at: 1.0,
+        }
+    }
+
+    #[test]
+    fn answer_summary_names_the_choice_in_words() {
+        let card = approval_card("c");
+        let picks = |id: &str| serde_json::json!({ "picks": [id] });
+        assert_eq!(
+            answer_summary(&card, "submit", Some(&picks("0"))),
+            "Approved"
+        );
+        assert_eq!(
+            answer_summary(&card, "submit", Some(&picks("1"))),
+            "Declined"
+        );
+        assert_eq!(
+            answer_summary(&card, "submit", Some(&picks("2"))),
+            "Answered: Always allow echo"
+        );
+        assert_eq!(answer_summary(&card, "decline", None), "Skipped");
+        assert_eq!(answer_summary(&card, "cancel", None), "Cancelled");
+        assert_eq!(
+            answer_summary(
+                &card,
+                "submit",
+                Some(&serde_json::json!({ "value": "main" }))
+            ),
+            "Answered: main"
+        );
+    }
+
+    #[test]
+    fn an_answered_card_swallows_every_key_until_the_server_closes_it() {
+        let mut s = CardState::new();
+        s.apply_snapshot(radio_snapshot("r1", "c1", 1));
+        s.apply_snapshot(radio_snapshot("r2", "c2", 1));
+        let now = Instant::now();
+        assert!(!s.swallow_key(KeyCode::Char('1'), now));
+        s.mark_answered("c1", "Answered: Alpha".into(), KeyCode::Char('1'));
+        assert_eq!(s.focused_correlation_id().as_deref(), Some("c1"));
+        assert!(s.focused_answered().is_some());
+        for key in [
+            KeyCode::Char('1'),
+            KeyCode::Char('2'),
+            KeyCode::Enter,
+            KeyCode::Esc,
+        ] {
+            assert!(s.swallow_key(key, now), "{key:?} reached an answered card");
+        }
+        // Close c1: c2 takes focus and is not itself answered.
+        s.apply_snapshot(SnapshotEnvelope {
+            run_id: "r1".into(),
+            workspace_id: None,
+            version: 2,
+            cards: vec![],
+        });
+        assert_eq!(s.focused_correlation_id().as_deref(), Some("c2"));
+        assert!(s.focused_answered().is_none());
+        // A repeat of the answering key is swallowed and extends the window;
+        // a different key ends the guard and is delivered.
+        assert!(s.swallow_key(KeyCode::Char('1'), Instant::now()));
+        assert!(s.swallow_key(KeyCode::Char('1'), Instant::now()));
+        assert!(!s.swallow_key(KeyCode::Char('2'), Instant::now()));
+        assert!(
+            !s.swallow_key(KeyCode::Char('1'), Instant::now()),
+            "guard outlived a different key"
+        );
+    }
+
+    #[test]
+    fn a_repeat_after_the_window_is_a_fresh_press() {
+        let mut s = CardState::new();
+        s.apply_snapshot(radio_snapshot("r1", "c1", 1));
+        s.apply_snapshot(radio_snapshot("r2", "c2", 1));
+        s.mark_answered("c1", "Answered: Alpha".into(), KeyCode::Enter);
+        s.apply_snapshot(SnapshotEnvelope {
+            run_id: "r1".into(),
+            workspace_id: None,
+            version: 2,
+            cards: vec![],
+        });
+        let later = Instant::now() + CARD_REPEAT_WINDOW + Duration::from_millis(50);
+        assert!(!s.swallow_key(KeyCode::Enter, later));
+    }
+
+    #[test]
+    fn restore_answer_reopens_only_the_named_card() {
+        let mut s = CardState::new();
+        s.apply_snapshot(radio_snapshot("r1", "c1", 1));
+        s.mark_answered("c1", "Answered: Alpha".into(), KeyCode::Char('1'));
+        s.restore_answer("other");
+        assert!(
+            s.focused_answered().is_some(),
+            "a failure for another card reopened this one"
+        );
+        s.restore_answer("c1");
+        assert!(s.focused_answered().is_none());
+        assert!(
+            !s.swallow_key(KeyCode::Char('1'), Instant::now()),
+            "a retry is not a repeat"
+        );
     }
 }

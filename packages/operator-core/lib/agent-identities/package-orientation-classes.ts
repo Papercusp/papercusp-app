@@ -101,7 +101,10 @@ export function packageOrientationClasses(
   fence: PackageRenderFence,
 ): PackageOrientationClass[] {
   if (!result || !isSinkResultCurrent(result, fence)) return [];
-  const key = (identityId: string, contributionId: string) => `${identityId}\u0000${contributionId}`;
+  // Hook context sinks (P-011) deliver their own text, never orientation rows.
+  const sink = result.invocation.sink;
+  if (sink !== 'turn-start' && sink !== 'agent-orders') return [];
+  const key =(identityId: string, contributionId: string) => `${identityId}\u0000${contributionId}`;
   const rank = new Map(result.allocation.map((slot, index) => [key(slot.identityId, slot.contributionId), index] as const));
   type Entry = { identityId: string; contributionId: string; priority: number; lines: string[] };
   const entries: Entry[] = [
@@ -129,7 +132,7 @@ export function packageOrientationClasses(
       id: packageOrientationClassId(entry.identityId, entry.contributionId),
       identityId: entry.identityId,
       contributionId: entry.contributionId,
-      applicableSinks: [result.invocation.sink],
+      applicableSinks: [sink],
       order: PACKAGE_ORIENTATION_ORDER_BASE + index * 10,
       rowCeiling: { maxRows: PACKAGE_ORIENTATION_MAX_ROWS, recoveryVerb },
       render: () => [...lines],

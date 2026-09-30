@@ -185,7 +185,21 @@ export function renderReport(report: PrecutReport): string {
   return lines.join('\n');
 }
 
-export function main(argv: string[] = process.argv.slice(2), root: string = process.cwd()): number {
+/**
+ * The superproject root, wherever the CLI is launched from. The package script
+ * (`npm --prefix apps/operator run release:precut-containment`) starts it in apps/operator,
+ * where no submodule is registered, so every papercusp-desktop path read ABSENT.
+ */
+export function superprojectRoot(cwd: string): string {
+  const revParse = (flag: string) =>
+    (spawnSync('git', ['-C', cwd, 'rev-parse', flag], { encoding: 'utf8' }).stdout ?? '').trim();
+  return revParse('--show-superproject-working-tree') || revParse('--show-toplevel') || cwd;
+}
+
+export function main(
+  argv: string[] = process.argv.slice(2),
+  root: string = superprojectRoot(process.cwd()),
+): number {
   const arg = (name: string) => {
     const i = argv.indexOf(name);
     return i >= 0 ? argv[i + 1] : undefined;
@@ -197,7 +211,8 @@ export function main(argv: string[] = process.argv.slice(2), root: string = proc
   }
   let report: PrecutReport;
   try {
-    const set = JSON.parse(readFileSync(resolve(root, setPath), 'utf8')) as PrecutSet;
+    // --set is typed relative to where the caller stands, not the superproject root.
+    const set = JSON.parse(readFileSync(resolve(process.cwd(), setPath), 'utf8')) as PrecutSet;
     report = judgePrecutSet(set, root, arg('--main') ?? 'main', realPrecutDeps);
   } catch (err) {
     console.error(`precut-containment: ${(err as Error).message}`);

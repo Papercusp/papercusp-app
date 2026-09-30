@@ -49,6 +49,17 @@ export function jevKeyDraftProblem(draft: string): string | null {
 export const JEV_EGRESS_NOTICE =
   'Log only and On send the current turn and the candidate memory text to TypeSafe (api.typesafe.ai) on each memory lookup. Off sends nothing.';
 
+/**
+ * The measured result, shown next to the mode control whatever the mode, so the
+ * choice is made against evidence (plan jev-decision-model-integration-2026-09-29,
+ * D-013, which superseded D-012's "not recommended"). It describes exactly one
+ * operating point (JEV_MEMORY_ENCODING / JEV_MEMORY_ADMIT_THRESHOLD in
+ * jev-memory-gate.ts) on one model version: change either, or bump the model,
+ * and this text is stale until P-004 and P-005 are re-run.
+ */
+export const JEV_MEASURED_VERDICT =
+  'Measured 2026-09-30 on jev-1.13.0: with On, off-topic test questions received an irrelevant memory 0 to 1 times in 30, against 8 in 30 with the current system, and relevant memories were kept as often as before. The test set is small, so the improvement is real but borderline. Off stays the default.';
+
 export interface JevView {
   /** The stored choice, for the mode select. */
   choice: JevMode;

@@ -931,6 +931,9 @@ export const GATE_CODE_OWNERSHIP: Record<PlanAcceptanceGateCode, PlanAcceptanceG
   acceptance_rubric_vetted_after_grading: 'author',
   acceptance_not_recorded: 'author',
   acceptance_rejected: 'author',
+  // WI-10004135: the author's own pending-delivery verdict blocks; the author re-records
+  // 'accept' once the delivery evidence is banked.
+  acceptance_pending_delivery: 'author',
   acceptance_unaudited: 'author',
   audit_coverage_stale: 'author',
   audit_citations_unresolved: 'author',

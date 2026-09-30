@@ -20,6 +20,7 @@ import {
   type KernelEnforcementRequest,
   type KernelEnforcementResult,
 } from '@papercusp/agent-mcp';
+import { resolveConcreteHarnessSlug } from '../agent-tools/_harness-scope';
 import { APP_PRINCIPAL_SLUG_PREFIX } from './principal';
 import { appScopeToolOf, evaluateAppScope, type AppScopeRow, type AppScopeTool } from './scope-policy';
 import { loadAppScopeRow } from './store';
@@ -132,7 +133,9 @@ export async function enforceAppKeyScope(
         // The workspace the transport dispatched under; the key's own workspace only when the
         // transport named none (the principal's workspace IS the key's, so that half is inert).
         workspaceId: request.ctx.workspaceId ?? principal?.workspaceId ?? null,
-        harnessSlug: request.ctx.harnessSlug ?? null,
+        // The CONCRETE transport harness only: operator scope's '*' / 'all' sentinel names
+        // no harness, so it must not be matched against the key's harness allowlist.
+        harnessSlug: resolveConcreteHarnessSlug(null, request.ctx),
         now: deps.now?.(),
       },
       row,

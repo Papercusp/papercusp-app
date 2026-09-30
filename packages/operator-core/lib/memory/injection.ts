@@ -44,6 +44,7 @@ import { alreadySurfacedIds, currentSessionEpoch, stampSurfaced } from './sessio
 import { hiveScopeKey, potSlugFromScope, resolvePotSlugsForHarnesses } from './hive-scope';
 import { lexicalQueryText, retrievalQueryText, toRecallQuery, type RecallQueryInput } from './recall-query';
 import { memoryTierOf } from './two-tier';
+import { runJevMemoryGate } from './jev-memory-gate';
 import { annotateSupersededMemory } from './temporal-render';
 import { systemDistinctId } from '../flag-distinct-id';
 import {
@@ -1068,7 +1069,7 @@ async function buildBlockInner(
             returned: 0,
             admitted: 0,
             truncated: false,
-            dropped: { pack: 0, feedback: 0, workspace: 0, dedup: 0, nearDuplicate: 0, budget: 0 },
+            dropped: { pack: 0, feedback: 0, workspace: 0, dedup: 0, jev: 0, nearDuplicate: 0, budget: 0 },
             byLeg: { cosineOnly: 0, lexicalOnly: 0, both: 0 },
           },
         });
@@ -1381,7 +1382,7 @@ async function buildBlockInner(
         returned: 0,
         admitted: 0,
         truncated: false,
-        dropped: { pack: 0, feedback: 0, workspace: 0, dedup: 0, nearDuplicate: 0, budget: 0 },
+        dropped: { pack: 0, feedback: 0, workspace: 0, dedup: 0, jev: 0, nearDuplicate: 0, budget: 0 },
         byLeg: { cosineOnly: 0, lexicalOnly: 0, both: 0 },
       },
     );
@@ -1432,7 +1433,7 @@ async function buildBlockInner(
     returned: userResults.length + harnessHits.length + hiveHits.length,
     admitted: 0,
     truncated: false,
-    dropped: { pack: 0, feedback: 0, workspace: 0, dedup: 0, nearDuplicate: 0, budget: 0 },
+    dropped: { pack: 0, feedback: 0, workspace: 0, dedup: 0, jev: 0, nearDuplicate: 0, budget: 0 },
     byLeg: { cosineOnly: 0, lexicalOnly: 0, both: 0 },
   };
   /** Live count across the three pools — the funnel's per-stage deltas read off this. */
@@ -1576,6 +1577,45 @@ async function buildBlockInner(
         }
       } finally {
         mark('dedupMs', Date.now() - tDedup);
+      }
+    }
+    if (userResults.length + harnessHits.length + hiveHits.length === 0) return null;
+
+    // Jev, the owner's opt-in filter (plan jev-decision-model-integration-2026-09-29;
+    // the switch is jev-settings.ts, D-008; the operating point is D-013). Effective
+    // Off (the default, and whenever no key is stored) makes zero Jev calls, so this
+    // block is byte-identical to the pre-Jev system (D-009). Log only fires one
+    // request and does not wait for it; the decision ledger records every P(yes).
+    // On waits under the client's hard bound and drops what Jev judges irrelevant;
+    // any inconclusive answer keeps every candidate (fail open, D-002). Jev only
+    // filters: it never reorders and never adds (D-001).
+    {
+      const tJev = Date.now();
+      try {
+        const pooled: MemoryEntry[] = [
+          ...userResults,
+          ...harnessHits.map(({ hit }) => hit),
+          ...hiveHits.map(({ hit }) => hit),
+        ];
+        const verdict = await runJevMemoryGate({
+          workspaceId: input.workspaceId,
+          message: queryText,
+          candidates: pooled.map((hit) => ({ id: hit.id, text: hit.text })),
+        });
+        if (verdict.effective === 'on' && verdict.outcome === 'answered') {
+          const drop = new Set(pooled.filter((_, i) => verdict.keep[i] === false));
+          if (drop.size > 0) {
+            const before = surviving();
+            userResults = userResults.filter((h) => !drop.has(h));
+            harnessHits = harnessHits.filter(({ hit }) => !drop.has(hit));
+            hiveHits = hiveHits.filter(({ hit }) => !drop.has(hit));
+            funnel.dropped.jev = before - surviving();
+          }
+        }
+      } catch {
+        /* never load-bearing: a Jev fault injects exactly today's set */
+      } finally {
+        mark('jevMs', Date.now() - tJev);
       }
     }
     if (userResults.length + harnessHits.length + hiveHits.length === 0) return null;

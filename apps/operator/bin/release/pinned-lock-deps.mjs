@@ -179,5 +179,6 @@ if (isDirectCliInvocation()) {
   }
   const result = reconcile(opts);
   for (const line of result.lines) console.log(line);
-  process.exit(result.code);
+  // End naturally so a piped stdout drains before exit (undrained-stdout-exit-guard).
+  process.exitCode = result.code;
 }

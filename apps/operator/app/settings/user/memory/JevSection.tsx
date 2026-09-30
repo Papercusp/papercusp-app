@@ -17,6 +17,7 @@ import { toast } from 'sonner';
 import { Select } from '@/app/harness/Select';
 import {
   JEV_EGRESS_NOTICE,
+  JEV_MEASURED_VERDICT,
   JEV_MODE_OPTIONS,
   jevKeyDraftProblem,
   jevModeName,
@@ -153,6 +154,9 @@ export function JevSection(): React.ReactElement {
               triggerStyle={{ padding: '4px 8px', fontSize: 13 }}
               options={[...JEV_MODE_OPTIONS]}
             />
+          </div>
+          <div data-testid="jev-measured-verdict" style={muted}>
+            {JEV_MEASURED_VERDICT}
           </div>
 
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>

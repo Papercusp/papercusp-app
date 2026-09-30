@@ -124,9 +124,11 @@ export type PhysicalDrillPreflightDeps = {
   readCanaryMode?: () => Promise<{ mode: string; source: string }>;
   /** Gathers the drill-source observation (pinned or unpinned; D-086). */
   observeDrillSource?: () => Promise<DrillSourceObservation>;
-  probeVm?: () => Promise<VmPayloadProbe>;
+  /** Receives the VM owner port the run targets. */
+  probeVm?: (vmOwnerPort: number) => Promise<VmPayloadProbe>;
   readTowerStamp?: () => Promise<TowerComposedStamp | null>;
-  towerHealthStatus?: () => Promise<number>;
+  /** Receives the tower owner port the run targets. */
+  towerHealthStatus?: (towerPort: number) => Promise<number>;
   nowMs?: () => number;
 };
 
@@ -135,6 +137,14 @@ export type PhysicalDrillPreflightOptions = {
   /** The VM device's GitHub user. Unknown ⇒ every trust row is held to the VM rule (conservative). */
   vmGithubUserId?: number | null;
   expectedCanaryMode?: string;
+  /**
+   * The owner ports hosts-answering (and the VM probe's health read) target. The physical rig
+   * runs both owners on DRILL_OWNER_PORT; the same-box rig (plan physical-drill-iteration-speed
+   * D-003) runs two throwaway owners on this box, so rig-profile.sh passes their ports — without
+   * them the check would read the LIVE operator on :3070 and report a rig that is down as up.
+   */
+  towerPort?: number;
+  vmOwnerPort?: number;
 };
 
 // ── pure evaluations (one per check; null = satisfied) ──────────────────────
@@ -280,10 +290,16 @@ export function vmPayloadViolation(vm: VmPayloadProbe, tower: TowerComposedStamp
   return null;
 }
 
-export function hostsViolation(towerStatus: number, vmOwnerStatus: string): string | null {
+export function hostsViolation(
+  towerStatus: number,
+  vmOwnerStatus: string,
+  ports: { towerPort?: number; vmOwnerPort?: number } = {},
+): string | null {
+  const towerPort = ports.towerPort ?? DRILL_OWNER_PORT;
+  const vmOwnerPort = ports.vmOwnerPort ?? DRILL_OWNER_PORT;
   const down: string[] = [];
-  if (towerStatus !== 200) down.push(`tower :${DRILL_OWNER_PORT}/api/health answered ${towerStatus || 'nothing'}`);
-  if (vmOwnerStatus !== '200') down.push(`VM owner :${DRILL_OWNER_PORT}/api/health answered ${vmOwnerStatus || 'nothing'}`);
+  if (towerStatus !== 200) down.push(`tower :${towerPort}/api/health answered ${towerStatus || 'nothing'}`);
+  if (vmOwnerStatus !== '200') down.push(`VM owner :${vmOwnerPort}/api/health answered ${vmOwnerStatus || 'nothing'}`);
   return down.length > 0 ? `${down.join('; ')} — start the owner before a run` : null;
 }
 
@@ -364,13 +380,16 @@ export async function observeDrillSource(env: NodeJS.ProcessEnv = process.env): 
 }
 
 /** One ssh, read-only: the VM payload's stamp, its actual hashes, and the owner's health status. */
-export function vmPayloadProbeCommand(payloadDir?: string): string {
+export function vmPayloadProbeCommand(payloadDir?: string, vmOwnerPort: number = DRILL_OWNER_PORT): string {
   const d = payloadDir ? `'${payloadDir.replace(/'/g, `'\\''`)}'` : DRILL_VM_PAYLOAD_DIR_DEFAULT;
+  if (!Number.isInteger(vmOwnerPort) || vmOwnerPort < 1 || vmOwnerPort > 65535) {
+    throw new Error(`vmPayloadProbeCommand: VM owner port ${vmOwnerPort} is not a TCP port`);
+  }
   return [
     `grep -E '^(serveSha256|harnessSuSha256)=' ${d}/BUILD-STAMP.txt 2>/dev/null | sed 's/^/stamp./'`,
     `printf 'serve=%s\\n' "$(shasum -a 256 ${d}/serve.mjs 2>/dev/null | awk '{print $1}')"`,
     `printf 'harness=%s\\n' "$(shasum -a 256 ${d}/${HARNESS_SU_REL} 2>/dev/null | awk '{print $1}')"`,
-    `printf 'health=%s\\n' "$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:${DRILL_OWNER_PORT}/api/health)"`,
+    `printf 'health=%s\\n' "$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:${vmOwnerPort}/api/health)"`,
   ].join('; ');
 }
 
@@ -389,13 +408,22 @@ export function parseVmPayloadProbe(stdout: string): VmPayloadProbe {
   };
 }
 
-async function defaultProbeVm(): Promise<VmPayloadProbe> {
+async function defaultProbeVm(vmOwnerPort: number): Promise<VmPayloadProbe> {
   const vm = process.env[DRILL_VM_SSH_ENV];
   if (!vm) throw new Error(`${DRILL_VM_SSH_ENV} is unset; the probe passes the VM ssh target`);
   const payloadDir = process.env.PCUSP_RIG_SIDECAR_DIR || undefined;
   const { stdout } = await execFileAsync(
     'ssh',
-    ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=no', vm, vmPayloadProbeCommand(payloadDir)],
+    [
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'ConnectTimeout=10',
+      '-o',
+      'StrictHostKeyChecking=no',
+      vm,
+      vmPayloadProbeCommand(payloadDir, vmOwnerPort),
+    ],
     { timeout: 30_000, maxBuffer: 1024 * 1024 },
   );
   return parseVmPayloadProbe(stdout);
@@ -421,9 +449,9 @@ async function defaultReadTowerStamp(): Promise<TowerComposedStamp | null> {
   }
 }
 
-async function defaultTowerHealthStatus(): Promise<number> {
+async function defaultTowerHealthStatus(towerPort: number): Promise<number> {
   try {
-    const response = await fetch(`http://127.0.0.1:${DRILL_OWNER_PORT}/api/health`, { signal: AbortSignal.timeout(5_000) });
+    const response = await fetch(`http://127.0.0.1:${towerPort}/api/health`, { signal: AbortSignal.timeout(5_000) });
     return response.status;
   } catch {
     return 0;
@@ -441,9 +469,11 @@ export async function runPhysicalDrillPreflight(
   const checks = options.checks && options.checks.length > 0 ? [...options.checks] : [...PHYSICAL_DRILL_PREFLIGHT_CHECKS];
   const vmGithubUserId = options.vmGithubUserId ?? null;
   const expectedMode = options.expectedCanaryMode ?? DRILL_CANARY_BASELINE_MODE;
+  const towerPort = options.towerPort ?? DRILL_OWNER_PORT;
+  const vmOwnerPort = options.vmOwnerPort ?? DRILL_OWNER_PORT;
   // vm-payload-current and hosts-answering share ONE ssh round-trip.
   let vmProbe: Promise<VmPayloadProbe> | null = null;
-  const probeVm = () => (vmProbe ??= (deps.probeVm ?? defaultProbeVm)());
+  const probeVm = () => (vmProbe ??= (deps.probeVm ?? defaultProbeVm)(vmOwnerPort));
 
   const evaluate: Record<PhysicalDrillPreflightCheckId, () => Promise<string | null>> = {
     'drill-source-committed': async () =>
@@ -456,10 +486,10 @@ export async function runPhysicalDrillPreflight(
       vmPayloadViolation(await probeVm(), await (deps.readTowerStamp ?? defaultReadTowerStamp)()),
     'hosts-answering': async () => {
       const [tower, vm] = await Promise.all([
-        (deps.towerHealthStatus ?? defaultTowerHealthStatus)(),
+        (deps.towerHealthStatus ?? defaultTowerHealthStatus)(towerPort),
         probeVm().then((probe) => probe.ownerHealthStatus),
       ]);
-      return hostsViolation(tower, vm);
+      return hostsViolation(tower, vm, { towerPort, vmOwnerPort });
     },
   };
 
@@ -488,22 +518,34 @@ export async function runPhysicalDrillPreflight(
 
 export const PHYSICAL_DRILL_PREFLIGHT_USAGE =
   `usage: physical-drill-producer rig-preflight [--check <${PHYSICAL_DRILL_PREFLIGHT_CHECKS.join('|')}>]... ` +
-  '[--vm-github-user-id <n>]';
+  '[--vm-github-user-id <n>] [--tower-port <port>] [--vm-port <port>]';
+
+function parsePort(value: string | undefined): number | null {
+  if (!/^[1-9][0-9]{0,4}$/.test(value ?? '')) return null;
+  const port = Number(value);
+  return port <= 65535 ? port : null;
+}
 
 export function parsePhysicalDrillPreflightArgs(args: readonly string[]): PhysicalDrillPreflightOptions {
   const checks: PhysicalDrillPreflightCheckId[] = [];
   let vmGithubUserId: number | null = null;
+  const ports: { towerPort?: number; vmOwnerPort?: number } = {};
   for (let i = 0; i < args.length; i += 2) {
     const [flag, value] = [args[i], args[i + 1]];
+    const port = parsePort(value);
     if (flag === '--check' && (PHYSICAL_DRILL_PREFLIGHT_CHECKS as readonly string[]).includes(value ?? '')) {
       checks.push(value as PhysicalDrillPreflightCheckId);
     } else if (flag === '--vm-github-user-id' && /^[1-9][0-9]{0,11}$/.test(value ?? '')) {
       vmGithubUserId = Number(value);
+    } else if (flag === '--tower-port' && port !== null) {
+      ports.towerPort = port;
+    } else if (flag === '--vm-port' && port !== null) {
+      ports.vmOwnerPort = port;
     } else {
       throw new Error(PHYSICAL_DRILL_PREFLIGHT_USAGE);
     }
   }
-  return { checks, vmGithubUserId };
+  return { checks, vmGithubUserId, ...ports };
 }
 
 /**

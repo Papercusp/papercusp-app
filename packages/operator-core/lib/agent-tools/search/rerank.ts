@@ -335,7 +335,13 @@ async function localRerankEnabled(): Promise<boolean> {
   }
 }
 
-async function resolveProseRerankEngine(): Promise<ResolvedRerankEngine | null> {
+/**
+ * The engine prose search reranks with on THIS host: ZeroEntropy when a key is
+ * stored, else the local scorer when LOCAL_RERANK is on, else null. Exported so
+ * the memory bench's rerank control arm (jev-admission-cli arm D) measures the
+ * engine production actually runs rather than assuming a hosted key exists.
+ */
+export async function resolveProseRerankEngine(): Promise<ResolvedRerankEngine | null> {
   const apiKey = await rerankApiKey();
   if (apiKey) return { engine: 'zeroentropy', apiKey };
   if (!(await localRerankEnabled())) return null;

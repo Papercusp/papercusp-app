@@ -484,8 +484,13 @@ export async function requestMcpProxyHotPathRestart(latestCommitHash, deps = {})
     stdin: JSON.stringify(args),
     timeout: HOT_PATH_PTOOL_TIMEOUT_MS,
   });
-  if (run.err) return { ok: false, restarted: false, coalesced: false, code: 'ptool_failed', error: run.err.message };
+  // ptool exits non-zero on an ok:false answer (EI-24654733539966460), so a
+  // refused restart arrives WITH run.err. Its body still names the refusal —
+  // judge it before collapsing the error to a reasonless 'ptool_failed'.
   const body = parsePtoolJson(run.stdout);
+  if (run.err && body?.ok !== false) {
+    return { ok: false, restarted: false, coalesced: false, code: 'ptool_failed', error: run.err.message };
+  }
   if (!body || body.ok !== true) {
     return { ok: false, restarted: false, coalesced: false, code: body?.reason ?? 'ptool_result_unknown', body };
   }

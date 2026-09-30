@@ -58,6 +58,7 @@ import {
   evaluateSinkInvocation,
   type SinkContributionRequest,
   type SinkHostLimits,
+  type SinkInjectionRequest,
   type SinkInvocationResult,
 } from './sink-evaluator';
 import { packageOrientationClasses, type PackageOrientationClass } from './package-orientation-classes';
@@ -81,7 +82,7 @@ export interface DueContextContribution {
   /** `class@major` (D-013). */
   readonly ref: string;
   readonly verb: string;
-  readonly injection: InjectionPoint;
+  readonly injection: SinkInjectionRequest;
 }
 
 export interface ProduceContextInput {
@@ -99,6 +100,16 @@ export interface TurnStartPackageSinkDeps {
   readonly readDueContributions: (identityId: string) => Promise<readonly DueContextContribution[]>;
   /** The provider's validated, provenance-enveloped text. Throws to omit. */
   readonly produceContext: (input: ProduceContextInput) => Promise<string>;
+  /**
+   * P-011: the worn sync context rules due at turn start, produced through
+   * `produceContext`. Throws to omit the rule half only.
+   */
+  readonly readRuleRequests: (input: {
+    ownerId: string;
+    workspaceId: string;
+    wearer: PackageSinkWearer;
+    produceContext: (input: ProduceContextInput) => Promise<string>;
+  }) => Promise<readonly SinkContributionRequest[]>;
   readonly limits?: SinkHostLimits;
 }
 
@@ -109,6 +120,8 @@ export interface TurnStartPackageSink {
   readonly classes: PackageOrientationClass[];
   /** Set when discovery itself failed (no package half this turn). */
   readonly error?: string;
+  /** Set when the worn sync rules could not be read (no rule half this turn). */
+  readonly rulesError?: string;
 }
 
 /** A contribution the turn-start sink evaluates every turn. */
@@ -168,7 +181,17 @@ export async function evaluateTurnStartPackageSink(input: {
   } catch (error) {
     return { result: null, classes: [], error: error instanceof Error ? error.message : String(error) };
   }
-  if (requests.length === 0) return { result: null, classes: [] };
+  // Worn sync rules join the SAME invocation, so both halves share one budget.
+  let rulesError: string | undefined;
+  try {
+    requests.push(...await deps.readRuleRequests({
+      ownerId: input.ownerId, workspaceId: input.workspaceId, wearer, produceContext: deps.produceContext,
+    }));
+  } catch (error) {
+    rulesError = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+  }
+  const rulesNote = rulesError ? { rulesError } : {};
+  if (requests.length === 0) return { result: null, classes: [], ...rulesNote };
   const invocationRevision = wearer.attachmentRevision;
   // The evaluator's per-result check reads the revision this host last
   // observed; the authoritative re-read below is what the consumer fences to.
@@ -194,6 +217,7 @@ export async function evaluateTurnStartPackageSink(input: {
     classes: packageOrientationClasses(result, {
       sessionId: input.ownerId, turnId: input.turnId, attachmentRevision: observedRevision,
     }),
+    ...rulesNote,
   };
 }
 
@@ -205,10 +229,12 @@ export async function evaluateTurnStartPackageSink(input: {
 export function packageSinkReceipt(sink: TurnStartPackageSink): Record<string, unknown> | null {
   if (sink.error) return { version: 1, status: 'unavailable', error: sink.error.slice(0, 200) };
   const result = sink.result;
-  if (!result) return null;
+  const rulesNote = sink.rulesError ? { rulesError: sink.rulesError } : {};
+  if (!result) return sink.rulesError ? { version: 1, status: 'rules-unavailable', ...rulesNote } : null;
   return {
     version: 1,
     status: sink.classes.length > 0 ? 'rendered' : 'fenced',
+    ...rulesNote,
     invocationId: result.invocation.invocationId,
     turnId: result.invocation.turnId,
     attachmentRevision: result.invocation.attachmentRevision,
@@ -300,5 +326,7 @@ export function defaultTurnStartPackageSinkDeps(): TurnStartPackageSinkDeps {
       if (checked.status === 'omitted') throw new Error(`capability-output:${checked.reason}`);
       return checked.text;
     },
+    // Loaded on call: sync-hook-rules imports this module for its own defaults.
+    readRuleRequests: async (call) => (await import('./sync-hook-rules')).turnStartSyncRuleRequests(call),
   };
 }

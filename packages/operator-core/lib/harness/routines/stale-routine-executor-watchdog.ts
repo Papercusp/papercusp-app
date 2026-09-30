@@ -378,8 +378,11 @@ export async function restartStaleBgHostExecutor(
       stdin: JSON.stringify(args),
       timeout: STALE_EXECUTOR_PTOOL_TIMEOUT_MS,
     });
-    if (result.error) return { ...skipped('ptool_failed'), attempted: true, error: result.error };
+    // ptool exits non-zero on an ok:false answer (EI-24654733539966460), so a
+    // refused restart arrives WITH result.error. Its body still names the
+    // refusal — judge it before collapsing the error to 'ptool_failed'.
     const body = parsePtoolJson(result.stdout);
+    if (result.error && body?.ok !== false) return { ...skipped('ptool_failed'), attempted: true, error: result.error };
     if (!body || body.ok !== true) {
       return { ...skipped(typeof body?.reason === 'string' ? body.reason : 'ptool_result_unknown'), attempted: true };
     }

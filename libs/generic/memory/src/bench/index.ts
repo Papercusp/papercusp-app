@@ -35,8 +35,8 @@ export {
   reciprocalRank,
 } from './metrics';
 
-export { seedCorpus, unseedCorpus, type SeedOptions } from './seed';
-export { rankedCorpusKeys, runGoldSet, toCandidateHit, type RetrievalOptions } from './retrieval';
+export { seedCorpus, seedFailureReason, unseedCorpus, type SeedOptions } from './seed';
+export { rankedCorpusKeys, runGoldSet, searchFailureReason, toCandidateHit, type RetrievalOptions } from './retrieval';
 export {
   queryLevelPRF,
   runFloorSweep,

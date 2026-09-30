@@ -187,6 +187,9 @@ async fn read_su_launch_result(
             .filter(|value| value.is_object())
             .ok_or_else(|| anyhow!("SU launch result omitted its response"))?;
         if !(200..300).contains(&status) {
+            if let Some(refused) = SuLaunchRefused::from_body(body) {
+                return Err(refused.into());
+            }
             anyhow::bail!("SU launch -> {status}: {body}");
         }
         return Ok(body.clone());
@@ -195,6 +198,40 @@ async fn read_su_launch_result(
         "SU launch stream closed before its result; draft retained for the same conversation"
     )
 }
+
+/// launch-su answered and refused the session (WI-10004158). The operator was
+/// reached, so this is not a lost connection, and its message is the reason
+/// the owner needs (for example which account or model to choose).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuLaunchRefused {
+    pub code: String,
+    pub message: String,
+}
+
+impl SuLaunchRefused {
+    fn from_body(body: &serde_json::Value) -> Option<Self> {
+        let message = body.get("error").and_then(|v| v.as_str())?.trim();
+        if message.is_empty() {
+            return None;
+        }
+        let code = body
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("launch_failed");
+        Some(Self {
+            code: code.to_owned(),
+            message: message.to_owned(),
+        })
+    }
+}
+
+impl std::fmt::Display for SuLaunchRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for SuLaunchRefused {}
 
 /// Thin typed client over the operator API, transport-agnostic (D-009).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1196,15 +1233,11 @@ impl OperatorClient {
             .await
             .context("open SU session")?;
         if value.get("status").and_then(|v| v.as_str()) != Some("ok") {
-            let code = value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("launch_failed");
-            let message = value
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("launch-su refused the SU session");
-            anyhow::bail!("{code}: {message}");
+            let refused = SuLaunchRefused::from_body(&value).unwrap_or_else(|| SuLaunchRefused {
+                code: "launch_failed".into(),
+                message: "launch-su refused the SU session".into(),
+            });
+            return Err(refused.into());
         }
         let operation = match request {
             SuSessionOpenRequest::Create(_) => "created",
@@ -1302,6 +1335,25 @@ impl OperatorClient {
                 su_segment(chat_id)
             ),
             command,
+        )
+        .await
+    }
+
+    /// Ask the host to keep this chat's engine running after pui quits
+    /// (pui-chat-first-ux P-009 `/detach`). Without it the engine ends once no
+    /// client has been attached for the host's attendance lease.
+    pub async fn detach_su_session(
+        &self,
+        harness: &str,
+        chat_id: &str,
+    ) -> Result<serde_json::Value> {
+        self.post_json(
+            &format!(
+                "/api/harness/{}/agent-chats/{}/su-session/detach",
+                su_segment(harness),
+                su_segment(chat_id)
+            ),
+            serde_json::json!({}),
         )
         .await
     }
@@ -3701,6 +3753,41 @@ mod tests {
         );
     }
 
+    /// WI-10004158: an answered refusal is typed, so PUI can show its reason
+    /// instead of calling it a lost connection; an unparseable 5xx is not.
+    #[tokio::test]
+    async fn a_refused_su_launch_is_a_typed_refusal_not_a_transport_error() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(SseFrame {
+            event: "launch-result".into(),
+            data: serde_json::json!({ "httpStatus": 503, "body": {
+                "status": "error", "code": "attached_engine_start_failed",
+                "error": "OMP default account cannot use gateway model 'x'." } })
+            .to_string(),
+        })
+        .unwrap();
+        drop(tx);
+        let error = read_su_launch_result(rx).await.unwrap_err();
+        let refused = error
+            .downcast_ref::<SuLaunchRefused>()
+            .expect("an answered refusal must stay typed");
+        assert_eq!(refused.code, "attached_engine_start_failed");
+        assert_eq!(
+            refused.message,
+            "OMP default account cannot use gateway model 'x'."
+        );
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(SseFrame {
+            event: "launch-result".into(),
+            data: serde_json::json!({ "httpStatus": 502, "body": {} }).to_string(),
+        })
+        .unwrap();
+        drop(tx);
+        let error = read_su_launch_result(rx).await.unwrap_err();
+        assert!(error.downcast_ref::<SuLaunchRefused>().is_none());
+    }
+
     #[tokio::test]
     async fn su_launch_stream_waits_for_the_final_binding_after_progress() {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -3739,8 +3826,13 @@ mod tests {
             .to_string(),
         })
         .unwrap();
-        let error = read_su_launch_result(rx).await.unwrap_err().to_string();
-        assert!(error.contains("429") && error.contains("fixture admission refusal"));
+        // An answered refusal stays typed with its reason (WI-10004158).
+        let error = read_su_launch_result(rx).await.unwrap_err();
+        let refused = error
+            .downcast_ref::<SuLaunchRefused>()
+            .expect("typed refusal");
+        assert_eq!(refused.message, "fixture admission refusal");
+        assert!(error.to_string().contains("fixture admission refusal"));
         let (tx, rx) = mpsc::unbounded_channel();
         tx.send(SseFrame {
             event: "launch-starting".into(),

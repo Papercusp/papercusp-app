@@ -403,13 +403,23 @@ mod tests {
             turn("user", "read calc.js", "2026-09-30T01:10:20.5Z"),
             turn("assistant", "Hi!", "2026-09-30T01:10:09.100Z"),
             turn("assistant", "calc.js defines…", "2026-09-30T01:10:26.000Z"),
-            turn("assistant", "same second, later", "2026-09-30T01:10:20.600Z"),
+            turn(
+                "assistant",
+                "same second, later",
+                "2026-09-30T01:10:20.600Z",
+            ),
         ];
         in_time_order(&mut turns);
         let order: Vec<&str> = turns.iter().map(|t| t.content.as_str()).collect();
         assert_eq!(
             order,
-            vec!["hi", "Hi!", "read calc.js", "same second, later", "calc.js defines…"]
+            vec![
+                "hi",
+                "Hi!",
+                "read calc.js",
+                "same second, later",
+                "calc.js defines…"
+            ]
         );
 
         // An unreadable timestamp keeps the stored order untouched.

@@ -13,11 +13,22 @@ import { validatePhysicalDrillEvidence } from './physical-drill-evidence';
 import { physicalDrillPreflightMode } from './physical-drill-preflight';
 import {
   capturePhysicalPhaseARepo,
+  physicalDrillTarget,
   quarantineAndObservePhysicalPhaseAAbsence,
   quarantinePhysicalPhaseARepo,
   validatePhysicalPhaseA,
   type PhysicalPhaseAInput,
 } from './physical-drill-phase-a';
+
+/** A same-box rehearsal is diagnostic (D-003 (4)): it never signs or finalizes evidence. */
+export function refuseDiagnosticEvidence(mode: 'sign' | 'finalize'): void {
+  const target = physicalDrillTarget();
+  if (target.diagnostic) {
+    throw new Error(
+      `physical-drill-producer: ${mode} refused — the same-box target ${target.potHome}/${target.repoKey} is diagnostic and can never be release evidence`,
+    );
+  }
+}
 import {
   capturePhysicalPhaseBRepo,
   createPhysicalPhaseBCommit,
@@ -50,7 +61,9 @@ import {
   type PhysicalPhaseDInput,
   type PhysicalPhaseDMutationKind,
   type PhysicalPhaseDObservationStage,
+  PHASE_D_WORKSPACE,
 } from './physical-drill-phase-d';
+import { getPotGitMode, setPotGitMode } from '../../harness/git-sync/hive-git-mode';
 import {
   capturePhysicalPhaseEObservation,
   createPhysicalPhaseEDivergence,
@@ -143,16 +156,32 @@ export function samePhysicalDrillPath(
   }
 }
 
-function assertDistinctHosts(identities: PhysicalDrillHostIdentity[]): void {
+/**
+ * Two hosts must be distinct owners (hostId, deviceKey) AND, for release evidence, distinct
+ * machines (machineFingerprint). A same-box rehearsal runs both owners on ONE machine by
+ * construction, so it can only ever meet the owner half. That relaxation is safe solely
+ * because a diagnostic target can never sign or finalize (refuseDiagnosticEvidence): the
+ * finalize path always calls this with distinct machines required.
+ */
+function assertDistinctHosts(
+  identities: PhysicalDrillHostIdentity[],
+  opts: { requireDistinctMachines: boolean } = { requireDistinctMachines: true },
+): void {
   if (identities.length !== 2) throw new Error('physical-drill-producer: exactly two host identities required');
-  for (const field of ['hostId', 'deviceKey', 'machineFingerprint'] as const) {
+  const fields = opts.requireDistinctMachines
+    ? (['hostId', 'deviceKey', 'machineFingerprint'] as const)
+    : (['hostId', 'deviceKey'] as const);
+  for (const field of fields) {
     if (new Set(identities.map((identity) => identity[field])).size !== 2) {
       throw new Error(`physical-drill-producer: two physical hosts must have distinct ${field} values`);
     }
   }
 }
 
-export function preflightPhysicalDrillHosts(rawIdentities: unknown[]): PhysicalDrillHostIdentity[] {
+export function preflightPhysicalDrillHosts(
+  rawIdentities: unknown[],
+  opts: { diagnostic?: boolean } = {},
+): PhysicalDrillHostIdentity[] {
   const identities = rawIdentities.map((raw, index) => {
     const identity = record(raw);
     if (!identity || identity.schemaVersion !== 'hive-git-physical-host-identity/v1') {
@@ -160,7 +189,7 @@ export function preflightPhysicalDrillHosts(rawIdentities: unknown[]): PhysicalD
     }
     return identity as unknown as PhysicalDrillHostIdentity;
   });
-  assertDistinctHosts(identities);
+  assertDistinctHosts(identities, { requireDistinctMachines: opts.diagnostic !== true });
   return identities;
 }
 
@@ -261,10 +290,14 @@ async function cli(argv: string[]): Promise<unknown> {
     }
     return {
       ok: true,
-      hosts: preflightPhysicalDrillHosts([readJson(towerIdentityPath), readJson(vmIdentityPath)]),
+      hosts: preflightPhysicalDrillHosts([readJson(towerIdentityPath), readJson(vmIdentityPath)], {
+        // Same-box (D-005): both owners share one machine; the evidence stays unsignable.
+        diagnostic: physicalDrillTarget().diagnostic,
+      }),
     };
   }
   if (mode === 'sign') {
+    refuseDiagnosticEvidence('sign');
     const [evidencePath, hostId, cachePath] = args;
     if (!evidencePath || !hostId || !cachePath) {
       throw new Error('usage: physical-drill-producer sign <unsigned-evidence.json> <host-id> <absolute-cache-path>');
@@ -572,6 +605,19 @@ async function cli(argv: string[]): Promise<unknown> {
     if (args.length !== 0) throw new Error('usage: physical-drill-producer phase-e-mode-read');
     return readPhysicalPhaseEMode();
   }
+  if (mode === 'same-box-pot-mode') {
+    // Rig setup for the same-box rehearsal only: put the throwaway pot in the canary's steady
+    // mode (bridged) so git-sync creates the pot-git stores the phases observe. Refused on the
+    // physical rig, whose canary mode belongs to its hive (phase E restores it).
+    const [nextMode] = args;
+    if ((nextMode !== 'legacy' && nextMode !== 'bridged' && nextMode !== 'p2p-only') || args.length !== 1) {
+      throw new Error('usage: physical-drill-producer same-box-pot-mode <legacy|bridged|p2p-only>');
+    }
+    const target = physicalDrillTarget();
+    if (!target.diagnostic) throw new Error('physical-drill-producer: same-box-pot-mode is refused on the physical rig');
+    await setPotGitMode(PHASE_D_WORKSPACE, target.potHome, nextMode);
+    return { ok: true, potHome: target.potHome, mode: await getPotGitMode(PHASE_D_WORKSPACE, target.potHome) };
+  }
   if (mode === 'phase-e-mode-ensure') {
     const [nextMode, runId] = args;
     if ((nextMode !== 'legacy' && nextMode !== 'bridged') || !runId || args.length !== 2) {
@@ -807,6 +853,7 @@ async function cli(argv: string[]): Promise<unknown> {
     return { ok: true, hive, samplesPath, count: samples.length, sample };
   }
   if (mode === 'finalize') {
+    refuseDiagnosticEvidence('finalize');
     const [unsignedEvidencePath, towerReceiptPath, vmReceiptPath, evidencePath, trustPath] = args;
     if (!unsignedEvidencePath || !towerReceiptPath || !vmReceiptPath || !evidencePath || !trustPath) {
       throw new Error(
@@ -821,7 +868,7 @@ async function cli(argv: string[]): Promise<unknown> {
     return { ok: true, runId: artifacts.evidence.runId, evidencePath, trustPath };
   }
   throw new Error(
-    'physical-drill-producer: mode must be identity, preflight, phase-a-observe, phase-a-quarantine, phase-a-quarantine-observe, phase-a-verify, phase-b-observe, phase-b-commit, phase-b-verify, phase-c-run, phase-c-verify, phase-d-commit, phase-d-dirty, phase-d-reset, phase-d-tier-hold, phase-d-tier-restore, phase-d-request, phase-d-ratify, phase-d-event, phase-d-observe, phase-d-verify, phase-e-preflight, phase-e-mode, phase-e-mode-read, phase-e-mode-ensure, phase-e-await-mode, phase-e-observe, phase-e-ingress, phase-e-diverge, phase-e-recover, phase-e-watchdog, phase-e-verify, phase-f-run, phase-f-verify, phase-g-run, phase-g-verify, phase-h-observe, phase-h-attempt, phase-h-verify, phase-i-owner, phase-i-attempt, phase-i-verify, phase-j-fault, phase-j-write, phase-j-observe, phase-j-verify, post-go-canary-observe, post-go-canary-verify, sign, or finalize',
+    'physical-drill-producer: mode must be identity, preflight, phase-a-observe, phase-a-quarantine, phase-a-quarantine-observe, phase-a-verify, phase-b-observe, phase-b-commit, phase-b-verify, phase-c-run, phase-c-verify, phase-d-commit, phase-d-dirty, phase-d-reset, phase-d-tier-hold, phase-d-tier-restore, phase-d-request, phase-d-ratify, phase-d-event, phase-d-observe, phase-d-verify, phase-e-preflight, phase-e-mode, phase-e-mode-read, phase-e-mode-ensure, phase-e-await-mode, phase-e-observe, phase-e-ingress, phase-e-diverge, phase-e-recover, phase-e-watchdog, phase-e-verify, phase-f-run, phase-f-verify, phase-g-run, phase-g-verify, phase-h-observe, phase-h-attempt, phase-h-verify, phase-i-owner, phase-i-attempt, phase-i-verify, phase-j-fault, phase-j-write, phase-j-observe, phase-j-verify, post-go-canary-observe, post-go-canary-verify, same-box-pot-mode, sign, or finalize',
   );
 }
 

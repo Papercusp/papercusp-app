@@ -17,10 +17,13 @@ export function parseRetryTreeStatus(raw: Buffer | string | null): Array<{
  * Capture the candidate tree relevant to retry provenance.
  *
  * @param {string} root repository root
- * @param {{ git?: (root:string,args:string[]) => Buffer|string|null }} [options]
+ * @param {{ git?: (root:string,args:string[]) => Buffer|string|null, stack?: Set<string> }} [options]
+ *   `stack` is internal: the repository roots already being snapshotted, so a
+ *   nested-repository recursion cannot cycle.
  */
-export function snapshotRetryTree(root: string, { git }?: {
+export function snapshotRetryTree(root: string, { git, stack }?: {
     git?: (root: string, args: string[]) => Buffer | string | null;
+    stack?: Set<string>;
 }): {
     known: boolean;
     head: null;

@@ -28,7 +28,7 @@
  */
 import { createHash } from 'node:crypto';
 import type postgres from 'postgres';
-import { PHASE_A_POT_HOME, type PhysicalDrillHost } from './physical-drill-phase-a';
+import { physicalDrillTarget, type PhysicalDrillHost } from './physical-drill-phase-a';
 
 export const PHASE_J_OBSERVATION_SCHEMA = 'hive-git-physical-phase-j-observation/v1' as const;
 export const PHASE_J_FAULT_SCHEMA = 'hive-git-physical-phase-j-fault/v1' as const;
@@ -314,7 +314,7 @@ export async function observePhysicalPhaseJ(
       SELECT harness_slug, log_keyhex, position::text AS position, peer_device_pubkey, updated_at, apply_failure
         FROM harness_shared.substrate_merge_cursor
        WHERE workspace_id = ${PHASE_J_WORKSPACE_ID}
-         AND (harness_slug = ${PHASE_A_POT_HOME} OR apply_failure::text LIKE ANY(${named}::text[]))
+         AND (harness_slug = ${physicalDrillTarget().potHome} OR apply_failure::text LIKE ANY(${named}::text[]))
        ORDER BY harness_slug, log_keyhex`;
     cursors = cursorRows.map((c) => ({
       harnessSlug: c.harness_slug,
@@ -538,7 +538,8 @@ export function validatePhysicalPhaseJ(input: PhysicalPhaseJInput): PhysicalPhas
     if (row.title !== phaseJWriteTitle(runId, write) || row.summary !== phaseJWriteSummary(runId, write)) {
       errors.push(`authored: write ${write} does not carry the run's deterministic content`);
     }
-    if (row.harnessSlug !== PHASE_A_POT_HOME) errors.push(`authored: write ${write} is not in the test hive ${PHASE_A_POT_HOME}`);
+    const testHive = physicalDrillTarget().potHome;
+    if (row.harnessSlug !== testHive) errors.push(`authored: write ${write} is not in the test hive ${testHive}`);
     if (!SHA256.test(row.contentSha256) || row.contentSha256 !== phaseJContentSha256(row)) errors.push(`authored: write ${write} content digest is wrong`);
     towerRows[write] = row;
   }

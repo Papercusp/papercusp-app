@@ -41,6 +41,9 @@ export interface StandaloneRuleInput {
   fire: string;
   args?: Record<string, unknown>;
   onlyOnSuccess?: boolean;
+  /** A reaction is `async` delivery. A `sync` rule runs inline at a hook sink
+   * (P-011, D-023) and is refused here, never registered as a reaction. */
+  delivery?: 'async';
 }
 
 export type RegisterStandaloneRuleResult =
@@ -63,6 +66,11 @@ export async function registerStandaloneReactionRule(
 ): Promise<RegisterStandaloneRuleResult> {
   const id = String(input.id ?? '').trim();
   if (!id) return { ok: false, error: 'standalone rule needs a non-empty id' };
+  // Untyped callers hand this JSON, so the delivery is checked at runtime too.
+  const delivery: unknown = (input as { delivery?: unknown }).delivery;
+  if (delivery !== undefined && delivery !== 'async') {
+    return { ok: false, error: `standalone rule "${id}" is ${String(delivery)} delivery; only async rules register as reactions` };
+  }
   const on = String(input.on ?? '').trim();
   if (!on) return { ok: false, error: `standalone rule "${id}" needs a non-empty \`on\` trigger` };
 

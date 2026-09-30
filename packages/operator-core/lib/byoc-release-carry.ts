@@ -12,7 +12,7 @@ export const BYOC_RELEASE_MILESTONES = [
   { key: 'root-bootstrap', label: 'root bootstrap', stages: ['workspace.root-bootstrap', 'root.bootstrap'] },
   { key: 'fixed-agent-initialization', label: 'fixed-agent initialization', stages: ['workspace.fixed-agent-initialization', 'fixed-agent.initialization'] },
   { key: 'customer-acceptance', label: 'DesktopSession/customer acceptance', stages: ['desktop-session.customer-acceptance', 'customer.acceptance'] },
-  { key: 'soak-24h', label: '24-hour soak', stages: ['acceptance.soak-24h', 'release.soak-24h'] },
+  { key: 'soak', label: 'soak', stages: ['acceptance.soak', 'acceptance.soak-24h', 'release.soak-24h'] },
   { key: 'resource-census', label: 'teardown/eight-kind resource census', stages: ['teardown.resource-census'] },
   { key: 'billing-closure', label: 'billing closure', stages: ['billing.closure'] },
   { key: 'cleanup', label: 'cleanup', stages: ['release.cleanup'] },

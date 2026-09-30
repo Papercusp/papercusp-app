@@ -15,15 +15,19 @@
  * reader classifies, not one of them.
  */
 import type { Sql } from 'postgres';
+import { FLAGS } from '@papercusp/flags';
+import { getFlag } from '@papercusp/flags/server';
 import { LEARNING_SINGLETONS } from './seed-learning-singletons';
 import { operatorHomeHarnessSlug } from '../harness/operator-home-harness';
 import { DEFAULT_SCOUT_CYCLE_TIMEOUT_MS } from '../scout/scheduler';
+import { PRECISION_BENCH_WORKER_TIMEOUT_MS } from '../memory/bench/precision-read';
 import {
   computeLearningLoopHealth,
   singletonRoutineName,
   SINGLETON_HOST_SLUG,
   type LearningLoopHealth,
   type LearningRoutineRow,
+  type LoopActivity,
 } from './learning-loop-health';
 
 /**
@@ -46,10 +50,45 @@ import {
  */
 const SCOUT_ACTIVITY_LAG_GRACE_MS = DEFAULT_SCOUT_CYCLE_TIMEOUT_MS + 10 * 60_000;
 
+/**
+ * WI-10004117: the weekly memory-precision monitor fired with no bench row recorded,
+ * and nothing noticed, because only the FIRE was checked. Its activity ledger is
+ * `memory_precision_bench.ran_at`, judged in `since-fire` mode: a weekly loop's previous
+ * row is legitimately ~7 days old, so Scout's lag test would page it between runs. A
+ * fire is unproven once it is older than one worker run (the monitor kills the worker
+ * past PRECISION_BENCH_WORKER_TIMEOUT_MS) plus seeding/recording headroom.
+ */
+export const PRECISION_ACTIVITY_GRACE_MS = PRECISION_BENCH_WORKER_TIMEOUT_MS + 30 * 60_000;
+
 export interface ReadLearningLoopHealthOpts {
   /** An active loop that has not fired within this many days is "stale" (default 3). */
   staleAfterDays?: number;
   nowMs?: number;
+}
+
+/**
+ * The precision monitor's activity, or undefined when it must not be judged on activity:
+ * with MEMORY_PRECISION_BENCH off the op returns `flag-off` WITHOUT a row by design, so
+ * a missing row then is not a wedge. A read failure also degrades to fire-only judging
+ * rather than failing the whole health read.
+ */
+async function readPrecisionActivity(sql: Sql, workspaceId: string): Promise<LoopActivity | undefined> {
+  try {
+    if (!(await getFlag(FLAGS.MEMORY_PRECISION_BENCH, `routine:${SINGLETON_HOST_SLUG}`))) return undefined;
+    const rows = (await sql`
+      SELECT max(ran_at) AS last_ran_at
+        FROM harness_shared.memory_precision_bench
+       WHERE workspace_id = ${workspaceId}`) as { last_ran_at: Date | string | null }[];
+    const last = rows[0]?.last_ran_at ?? null;
+    return {
+      lastActivityAt: last == null ? null : new Date(last).toISOString(),
+      source: 'memory_precision_bench',
+      mode: 'since-fire',
+      graceMs: PRECISION_ACTIVITY_GRACE_MS,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -115,6 +154,7 @@ export async function readLearningLoopHealth(
   // have one.
   const { platformImprovementLoopsEnabled, isPlatformImprovementLoop } = await import('./materialize-triggers');
   const platformLoopsOn = await platformImprovementLoopsEnabled();
+  const precisionActivity = await readPrecisionActivity(sql, workspaceId);
 
   return computeLearningLoopHealth(LEARNING_SINGLETONS, routines, {
     nowMs: opts.nowMs ?? Date.now(),
@@ -127,6 +167,7 @@ export async function readLearningLoopHealth(
         lastActivityAt: lastScoutTickAt == null ? null : new Date(lastScoutTickAt).toISOString(),
         source: 'scout_ticks',
       },
+      ...(precisionActivity ? { 'memory-precision': precisionActivity } : {}),
     },
   });
 }

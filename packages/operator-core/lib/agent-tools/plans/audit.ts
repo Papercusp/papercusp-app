@@ -309,7 +309,7 @@ export default defineTool({
   guidance: {
     when: "Before ready/active, read the COMPLETE source conversation; map every requirement, boundary, constraint, correction, rejection, decision, dependency, sequence, acceptance condition, open question, and follow-up; repair omissions. Author `## Requirements` with exact `**R-N — Title.** outcome` records (or a fenced `requirement` JSON block), map each R-N in Design's Bar-to-work table (`tree|deployed|live`); ordinary bullet lists do not satisfy the BAR parser. Use `activation`; before shipped use `completion` against ACTUAL CODE.",
     returns:
-      "Activation returns auditSeq, auditedPlanRevision, mappings, sourceRefsResolved, itemProvenance { enforced, counts, unresolved }, BAR status, and readiness. An item no owner-typed turn backs, and not declared in itemProvenance, refuses item_provenance_missing; a bad declaration refuses item_provenance_invalid; both name each item and record nothing. A plan whose earlier audits predate provenance records enforced:false instead, until every item resolves. Pending amendment/repair preserves the audit and requires rubrics:amend. Completion returns auditSeq, counts, coverage, and uncoveredItems; mixed errors return partial/problems/rejectedItemIds; batch-wide errors record nothing.",
+      "Activation returns { auditSeq, auditedPlanRevision, mappings, sourceRefsResolved, itemProvenance { enforced, counts, unresolved }, barSeed, activationReadiness }. An item no owner-typed turn backs, and not declared in itemProvenance, refuses item_provenance_missing; a bad declaration refuses item_provenance_invalid; both name each item and record nothing. A plan whose earlier audits predate provenance records enforced:false instead, until every item resolves. Pending amendment/repair preserves the audit and requires rubrics:amend. Completion returns auditSeq, counts, coverage, and uncoveredItems; mixed errors return partial/problems/rejectedItemIds; batch-wide errors record nothing.",
     notWhen: "Not mid-implementation; grade rubrics with scorecards:emit, decisions with plans:add-decision, and repair open activation mappings first.",
     chaining:
       `Activation: sessions:search/read → repair omissions → audit → ready. Later edits preserve audit and return audited/current revision id/seq/contentHash. Re-audit after ${ACTIVATION_REAUDIT_MATERIAL_CHANGES.join(', ')}; ${ACTIVATION_REAUDIT_COSMETIC_CHANGES.join(', ')} need no re-audit. Completion: audit → rubric/scorecard → shipped.`,
@@ -345,6 +345,13 @@ export default defineTool({
       barSeedPendingAmendment: z.unknown().optional(),
       barSeedPendingRepair: z.unknown().optional(),
       activationReadiness: z.object({ consult: z.unknown() }).optional(),
+      // Activation's owner-provenance check (itemProvenanceResult below); null
+      // when no current plan was read. `returns` names this nested shape.
+      itemProvenance: z
+        .object({ enforced: z.boolean(), counts: z.unknown(), unresolved: z.array(z.string()) })
+        .passthrough()
+        .nullable()
+        .optional(),
       sourceRefsResolved: z.number().int().nonnegative().optional(),
       slug: z.string().optional(),
       itemsAuditedThisPass: z.number().int().nonnegative().optional(),

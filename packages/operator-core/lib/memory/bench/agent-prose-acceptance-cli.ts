@@ -48,7 +48,7 @@ import {
   type ArmPair,
   type ProseLeg,
 } from './agent-prose-arms';
-import { benchPgClient, dropBenchSchema, ensureBenchSchema, setupBenchMemoryHost } from './bench-host';
+import { benchPgClient, releaseBenchSchema, ensureBenchSchema, setupBenchMemoryHost } from './bench-host';
 import { loadCorpusFixture } from './corpus';
 import { loadGoldSetFixture } from './gold-set';
 import { ALL_ANSWERABLE, classesDisagree, compareLegs, type PerQueryRow } from './paired-leg-report';
@@ -422,7 +422,7 @@ async function main(): Promise<void> {
     fs.writeFileSync(outPath, md, 'utf8');
     console.log('\n' + md + '\nwrote ' + outPath);
   } finally {
-    await dropBenchSchema(pg);
+    await releaseBenchSchema(pg);
     await pg.end();
   }
 }

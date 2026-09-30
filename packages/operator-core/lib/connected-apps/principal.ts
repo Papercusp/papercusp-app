@@ -48,7 +48,12 @@ export function presentsAppKey(headers: Headers): boolean {
   return isAppKeyShaped(bearerTokenOf(headers));
 }
 
-/** The Principal an app key row authenticates as. */
+/**
+ * The Principal an app or service key row authenticates as. It names the KEY, never the person who
+ * created it (`user_email` is not read): a service key belongs to the workspace and must keep
+ * working after its creator leaves the organization (P-015, D-007), so no downstream check may be
+ * able to tie the principal back to that person.
+ */
 export function principalForAppKey(app: AppKeyRow): Principal {
   return {
     kind: 'service',
@@ -57,7 +62,7 @@ export function principalForAppKey(app: AppKeyRow): Principal {
     authMethod: 'bearer-token',
     trust: 'verified',
     capabilities: new Set(app.scopes?.capabilities ?? []),
-    label: app.label ?? `app ${app.id}`,
+    label: app.label ?? `${app.kind === 'service' ? 'service key' : 'app'} ${app.id}`,
   };
 }
 

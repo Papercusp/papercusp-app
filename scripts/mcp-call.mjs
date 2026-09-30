@@ -29,6 +29,13 @@
  * `tools/call` reaches every tool. Reads the bearer from ~/.papercusp/superuser-token.
  * For an unknown-outcome retry, pass the same `--idempotency-key` value; it is
  * sent as transport metadata (`_meta.idempotencyKey`), not as a tool argument.
+ *
+ * Exit status: 0 the tool answered and did not report failure; 1 JSON-RPC or
+ * tool error (isError), or no usable response; 2 usage or bad JSON arguments;
+ * 3 no superuser token; 4 no operator endpoint reachable; 5 the tool ANSWERED
+ * ok:false (top-level, or any `results[]` entry). The result is still printed
+ * in full on stdout, so a caller that judges the answer itself can accept 5.
+ * `--raw` prints the transport body unjudged and never exits 5.
  */
 import { readFileSync, realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -38,6 +45,39 @@ import { fileURLToPath } from 'node:url';
 
 /** The JSON-RPC id we send; parseSse selects the frame that answers it. */
 const REQUEST_ID = 1;
+
+/**
+ * Exit status when the call was delivered and the tool ANSWERED ok:false: a
+ * refused write, a missing id, or a partially failed batch. The result is still
+ * printed in full on stdout. This matches ptool's PTOOL_TOOL_NOT_OK_EXIT, so a
+ * script can tell "refused" (5) from "failed or unreachable" (1-4) with either
+ * driver. Before this, an ok:false answer exited 0, and every
+ * `mcp-call … || fail` guard silently passed a refused write
+ * (EI-24654733539966460).
+ */
+export const MCP_CALL_TOOL_NOT_OK_EXIT = 5;
+
+/**
+ * Why a parsed tool result reports failure, or null when it does not. It fails
+ * when its top-level `ok` is false or any entry of a `results` batch has
+ * `ok: false`. Only an explicit `false` counts: a body with no `ok` field (a
+ * projection that picked other fields, prose, an array) is not a refusal. This
+ * is the same rule as ptool's toolNotOkReason, applied to the value mcp-call
+ * already parsed.
+ * @param {unknown} result
+ * @returns {string | null}
+ */
+export function toolResultNotOkReason(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const results = Array.isArray(result.results) ? result.results : [];
+  const failed = results.filter((r) => r && typeof r === 'object' && r.ok === false);
+  if (result.ok !== false && failed.length === 0) return null;
+  const first = failed[0] ?? {};
+  const detail = [result.reason, result.error, result.code, first.error, first.reason, first.code]
+    .find((v) => typeof v === 'string' && v.trim()) ?? 'no reason given';
+  const reason = failed.length > 0 ? `${failed.length} of ${results.length} result(s) ok:false; first: ${detail}` : detail;
+  return reason.length > 300 ? `${reason.slice(0, 297)}...` : reason;
+}
 
 /**
  * A managed staging restart can leave the explicitly pinned port refused while
@@ -594,6 +634,15 @@ async function main() {
     process.exit(1);
   }
   console.log(typeof out.result === 'string' ? out.result : JSON.stringify(out.result, null, 2));
+  const notOk = toolResultNotOkReason(out.result);
+  if (notOk !== null) {
+    console.error(
+      `mcp-call: the tool answered ok:false (${notOk}). The result above is complete; exiting ${MCP_CALL_TOOL_NOT_OK_EXIT} so a \`|| fail\` guard sees the refusal. (EI-24654733539966460)`,
+    );
+    // exitCode, never process.exit(): exiting here can cut off a large stdout
+    // result that is still draining into a pipe.
+    process.exitCode = MCP_CALL_TOOL_NOT_OK_EXIT;
+  }
 }
 
 // Run ONLY when invoked as a script. `parseSse` is exported for tests, and a

@@ -11058,6 +11058,43 @@ function ensureCcMidTurnContextHookEnrollment(env) {
   });
 }
 
+/** portable-identity-packages-2026-09-26 P-011 (D-023 §2): the three identity
+ *  hook sinks turn-start and mid-turn do not reach. Same drift class again, and
+ *  the guard half is the one that matters most: an unenrolled PreToolUse guard
+ *  lets through every call a worn identity's deny rule exists to refuse, and
+ *  looks exactly like an identity that simply has no guards. */
+const CC_IDENTITY_HOOKS = [
+  {
+    event: "PreToolUse",
+    hookName: "pretooluse-identity-guard.sh",
+    degradedNote:
+      "A WORN IDENTITY'S DENY RULES WILL NOT BE ENFORCED — every tool call they would refuse runs",
+  },
+  {
+    event: "Stop",
+    hookName: "stop-identity-context.sh",
+    degradedNote:
+      "A WORN IDENTITY'S STOP RULES WILL NEVER FIRE — the turn ends without the context they add",
+  },
+  {
+    event: "SessionStart",
+    hookName: "sessionstart-identity-context.sh",
+    degradedNote:
+      "A WORN IDENTITY'S COMPACTION RULES WILL NEVER FIRE — a fresh context starts without what they re-seed",
+  },
+];
+
+function ensureCcIdentityHookEnrollment(env) {
+  for (const { event, hookName, degradedNote } of CC_IDENTITY_HOOKS) {
+    ensureCcHookEnrollment(env, {
+      event,
+      hookName,
+      label: `IDENTITY ${event.toUpperCase()} HOOK`,
+      degradedNote,
+    });
+  }
+}
+
 /** Terminate a plain-launch process group, retaining a direct-child fallback.
  * `spawnInherit` uses `detached:true`, making the wrapper the leader of its own
  * process group on POSIX. The wrapper can leave a native backend descendant
@@ -11417,6 +11454,8 @@ export function runWrapper(options) {
   ensureCcTurnStartMemoryHookEnrollment(env);
   // P-015: and the mid-turn boundary the turn-start hook structurally cannot reach.
   ensureCcMidTurnContextHookEnrollment(env);
+  // P-011: and the identity hook sinks (pre-tool guard, stop, compaction).
+  ensureCcIdentityHookEnrollment(env);
   // turn-lifecycle-control Phase 3: when enabled + interactive, host the agent
   // through a managed pty + owner-only control socket so the operator can inject
   // a wake (or, Phase 4, an interrupt) into the LIVE session rather than parking

@@ -539,15 +539,23 @@ export default defineTool({
       };
       const raw = r.rankerScores?.embeddings;
       const similarity = raw === undefined ? undefined : Math.round(raw * 1000) / 1000;
+      // The section the semantic leg matched. Gated on `similarity`, not on the
+      // hydration entry alone: the ranker's sink records an anchor for every
+      // row it returns, BEFORE the engine's similarity floor runs, so an
+      // anchor whose vector hit was floored away names a section that did not
+      // earn this result.
+      const anchor = similarity !== undefined && entry?.anchor ? { anchor: entry.anchor } : {};
       // Only mark semantic:true (the "this wasn't a lexical match" signal
       // downstream callers key on) when the page has NO lexical hit of its
       // own — a page found by both legs keeps its real lexical excerpt and
-      // just also carries the similarity that helped rank it.
+      // also carries the similarity that helped rank it AND the section that
+      // matched (generic-rag-chunking P-013: dropping the anchor there meant a
+      // harness doc matched by both legs never returned its section).
       if (isVectorOnly(r)) {
         semanticHitCount += 1;
-        return { ...base, semantic: true as const, similarity, ...(entry?.anchor ? { anchor: entry.anchor } : {}) };
+        return { ...base, semantic: true as const, similarity, ...anchor };
       }
-      return similarity !== undefined ? { ...base, similarity } : base;
+      return similarity !== undefined ? { ...base, similarity, ...anchor } : base;
     });
     const finalHits = rankRetirementAuthorityHits(args.query, fusedHits);
 

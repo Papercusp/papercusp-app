@@ -57,6 +57,12 @@ import { activeWorkspaceId } from '../../workspace-registry';
 import { runGovernedOperation } from '../../resource-governor/execution';
 import { loadHarnessRegistry, type HarnessRegistry } from '../../harness-registry';
 import {
+  executeCutReclaim,
+  gatherCutReclaimPlan,
+  renderReclaimPlan,
+  type ReleaseRecord,
+} from '../../release-cut-reclaim';
+import {
   launchDetachedCut,
   readCutStatus,
   collectHandoff,
@@ -565,6 +571,22 @@ const json = (payload: unknown) => ({ content: [{ type: 'text' as const, text: J
 
 /** Append a forensic audit row. An exceptional migration-smoke bypass requires a
  * successful write BEFORE launch; ordinary cut telemetry preserves best effort. */
+/** harness_shared.releases — the registry record-release-cli writes; published_at marks
+ *  a published release. Read for op:reclaim's "latest published" protection. */
+async function loadReleaseRecords(): Promise<ReleaseRecord[]> {
+  const { sql } = getOrgPg();
+  const rows = (await sql.unsafe(
+    `SELECT version, git_sha, cut_at, published_at FROM harness_shared.releases WHERE workspace_id = $1`,
+    [activeWorkspaceId()],
+  )) as unknown as Array<{ version: string; git_sha: string | null; cut_at: Date | string; published_at: Date | string | null }>;
+  return rows.map((r) => ({
+    version: r.version,
+    gitSha: r.git_sha,
+    cutAtMs: new Date(r.cut_at).getTime(),
+    publishedAtMs: r.published_at === null ? null : new Date(r.published_at).getTime(),
+  }));
+}
+
 async function recordCutAudit(op: string, actor: string, details: Record<string, unknown>, required = false): Promise<string | null> {
   try {
     const { sql } = getOrgPg();
@@ -612,7 +634,7 @@ export default defineTool({
   name: 'release:cut',
   profile: 'engineer',
   description:
-    'CUT a LOCAL Papercusp desktop release — build+sign installer(s) for the owner to upload (⛔ artifacts stay LOCAL; never create a GitHub Release). Every run/run-leg requires sourceSha, the exact 40-char superproject commit; drift refuses before writes. op:prepare-tag is the separate, explicit remote-ref write required before a brand-new version: create-only force-with-lease, dry-run unless confirm:true, never overwrites a mismatched tag. Wraps bin/release-local.sh. op:preflight (go/no-go). op:run (fire the WHOLE cut detached; dry-run unless confirm:true; operator role). op:run-leg (WI-4233: fire ONE platform leg — linux/mac/windows/arm64 — on its own unit, for a fleet-split cut; same gate). op:abort-leg (stop one leg). op:status (poll; optional `platform` for a per-leg poll). op:gate-status (read/establish the shared BUILD_SHA gate for version+channel so split legs cannot drift onto different shas). op:handoff (collect signed artifacts+sha256 — leg-agnostic).',
+    'CUT a LOCAL Papercusp desktop release — build+sign installer(s) for the owner to upload (⛔ artifacts stay LOCAL; never create a GitHub Release). Every run/run-leg requires sourceSha, the exact 40-char superproject commit; drift refuses before writes. op:prepare-tag is the separate, explicit remote-ref write required before a brand-new version: create-only force-with-lease, dry-run unless confirm:true, never overwrites a mismatched tag. op:preflight (go/no-go). op:run (fire the WHOLE cut detached; dry-run unless confirm:true; operator role). op:run-leg (fire ONE platform leg on its own unit, for a fleet-split cut; same gate). op:abort-leg (stop one leg). op:status (poll; `platform` = one leg). op:gate-status (read/establish the shared BUILD_SHA gate for version+channel so split legs cannot drift onto different shas). op:handoff (collect signed artifacts+sha256 — leg-agnostic). op:reclaim (list/remove stale cut worktrees; dry-run unless confirm+targets).',
   guidance: {
     when:
       'Cutting a desktop release. Brand-new version: preflight → prepare-tag{sourceSha,confirm:true} → run{sourceSha,confirm:true} → poll status → verify → handoff. Fleet-split (one agent per leg): prepare the tag once, then each agent gate-status first (agree on ONE buildSha) → run-leg{platform,confirm:true} → poll status{platform} → once every leg is done, handoff (collects across all legs).',
@@ -721,8 +743,59 @@ export default defineTool({
       channel: z.enum(['stable', 'beta', 'alpha']).describe('Release channel.'),
       root: cutRootArg.optional(),
     }),
+    z.object({
+      op: z.literal('reclaim'),
+      targets: z
+        .array(z.string().min(1))
+        .max(50)
+        .optional()
+        .describe('confirm:true only: registered worktree paths from the dry-run list to remove.'),
+      confirm: z.boolean().optional().describe('false/absent ⇒ DRY RUN (list verdicts). true ⇒ remove the named targets.'),
+      minIdleHours: z.number().min(0).max(24 * 60).optional().describe('HEAD must not have moved within this window (default 24).'),
+    }),
   ]),
   async handler(args, ctx) {
+    // ── reclaim: list (dry-run) or remove stale cut worktrees (EI-23968726111761920) ──
+    if (args.op === 'reclaim') {
+      if (args.confirm && !isOperatorConfigWriteRole(ctx.role)) {
+        return json({
+          ok: false,
+          op: 'reclaim',
+          refused: true,
+          reason: `role_forbidden — release:cut{op:reclaim,confirm:true} deletes worktrees and requires an operator-config write role (you are role:${ctx.role ?? 'unknown'}).`,
+        });
+      }
+      if (args.confirm && !args.targets?.length) {
+        return json({
+          ok: false,
+          op: 'reclaim',
+          refused: true,
+          reason: 'targets_required — confirm:true removes only paths named from a dry-run list; run without confirm first.',
+        });
+      }
+      const plan = await gatherCutReclaimPlan({
+        repoPath: integrationRoot(),
+        isAutoManaged: isAutoManagedCutWorktree,
+        releaseVersionPaths: RELEASE_RESUME_VERSION_PATHS,
+        loadReleases: loadReleaseRecords,
+        ...(args.minIdleHours !== undefined ? { minIdleHours: args.minIdleHours } : {}),
+      });
+      if (!args.confirm) {
+        return json({
+          ok: true,
+          op: 'reclaim',
+          dryRun: true,
+          ...renderReclaimPlan(plan),
+          note: 'DRY RUN — nothing removed. reclaimable = lease-identified cut, unprotected; namedOnly = no cut record, removed only if named. confirm:true + targets removes (diffs archived first).',
+        });
+      }
+      const { ownerLabel } = readIdentity(ctx);
+      const actor = `${ownerLabel} (role:${ctx.role ?? 'unknown'})`;
+      await recordCutAudit('reclaim', actor, { phase: 'intent', targets: args.targets }, true);
+      const result = await executeCutReclaim(plan, args.targets ?? []);
+      await recordCutAudit('reclaim', actor, { phase: 'result', targets: args.targets, result });
+      return json({ op: 'reclaim', dryRun: false, ...result });
+    }
     // ── preflight: read-only go/no-go ──
     if (args.op === 'preflight') {
       const selected = await resolveCutRoot(args.root);

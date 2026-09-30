@@ -44,7 +44,7 @@ import { reciprocalRank, runGoldSet, seedCorpus } from '@papercusp/memory/bench'
 import type { CorpusEntry, GoldQuery, QueryOutcome, RetrievalRunResult } from '@papercusp/memory/bench';
 
 import { MEMORY_INJECTION_COSINE_FLOOR, MEMORY_INJECTION_LEX_FLOOR } from '../injection';
-import { benchPgClient, dropBenchSchema, ensureBenchSchema, setupBenchMemoryHost } from './bench-host';
+import { benchPgClient, releaseBenchSchema, ensureBenchSchema, setupBenchMemoryHost } from './bench-host';
 import { loadCorpusFixture } from './corpus';
 import { loadGoldSetFixture } from './gold-set';
 import {
@@ -334,7 +334,7 @@ async function main(): Promise<void> {
     fs.writeFileSync(outPath, md, 'utf8');
     console.log('\n' + md + '\nwrote ' + outPath);
   } finally {
-    await dropBenchSchema(pg);
+    await releaseBenchSchema(pg);
     await pg.end();
   }
 }

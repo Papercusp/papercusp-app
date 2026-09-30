@@ -108,6 +108,14 @@ export interface GateCandidateFailingFile {
   comparison: string;
   candidateBlob: string | null;
   repairHeadBlob: string | null;
+  /**
+   * EI-24654779657165409: the gate's OWN measurement of this file AT repairHead — its latest
+   * decisive (pass/fail/error) clean `source='ci'` row for that exact sha — or `null` when the
+   * gate has not run it there or `test_runs` could not be read. When present it OUTRANKS the
+   * blob compare: a pass means the fix rode a non-test carrier (or the candidate red was
+   * environmental), and a fail means the file is still red whatever its bytes say.
+   */
+  atRepairHead: { status: string; runId: number } | null;
   /** Plain-language reading of the row, so the tri-state cannot be mis-skimmed. */
   reading: string;
 }
@@ -123,18 +131,27 @@ export interface GateCandidateFailures {
   /** Files whose LATEST attempt on the candidate is fail/error. */
   distinctFailingFiles: GateCandidateFailingFile[];
   failingFileCount: number;
-  /** Of the failing files, how many already have their fix in repairHead. */
+  /**
+   * Of the failing files NOT yet run at repairHead, how many already have their fix there
+   * (a changed blob) — fixed, awaiting re-verification.
+   */
   alreadyFixedCount: number;
   /**
-   * Of the failing files, how many have an UNCHANGED blob at repairHead. This is a fact
-   * about those files' bytes — read `stillBrokenNeedsRunCount` before calling it a queue.
+   * Of the failing files, how many the gate's own clean ci run at repairHead PASSED
+   * (`atRepairHead.status === 'pass'`). Verified, not presumed: none of these is work.
+   */
+  passedAtRepairHeadCount: number;
+  /**
+   * Of the failing files, how many are still red: measured failing at repairHead, or not
+   * run there and carrying an UNCHANGED blob. The second half is a fact about bytes — read
+   * `stillBrokenNeedsRunCount` before calling it a queue.
    */
   stillBrokenCount: number;
   /**
-   * Of `stillBrokenCount`, how many are only PRESUMED broken: the test file is unchanged
-   * but other files moved between the two refs, so the fix may sit in a non-test carrier
-   * this test exercises. Each of these needs a run at repairHead before it counts as work.
-   * When this equals `stillBrokenCount`, NOTHING here is confirmed to be real work yet.
+   * Of `stillBrokenCount`, how many are only PRESUMED broken: not run at repairHead, the
+   * test file is unchanged, but other files moved between the two refs, so the fix may sit
+   * in a non-test carrier this test exercises. Each needs a run at repairHead before it
+   * counts as work. When this equals `stillBrokenCount`, NOTHING here is confirmed work yet.
    */
   stillBrokenNeedsRunCount: number;
   /**
@@ -384,6 +401,7 @@ function unavailable(
     distinctFailingFiles: [],
     failingFileCount: 0,
     alreadyFixedCount: 0,
+    passedAtRepairHeadCount: 0,
     stillBrokenCount: 0,
     stillBrokenNeedsRunCount: 0,
     changedBetweenRefs: null,
@@ -868,6 +886,63 @@ async function compareOne(
 }
 
 /**
+ * EI-24654779657165409 — the gate's own verdict on each failing file AT repairHead.
+ *
+ * Verifying the queue re-runs the affected radius at repairHead, so the direct answer to
+ * "is this file still red" is usually already in `test_runs`. Without it the blob compare can
+ * only hedge ("RUN THIS FILE AT repairHead"). Measured 2026-09-30 on candidate 5ec99902 /
+ * repairHead d8b65f92, the cell reported 20 still-broken files. repairHead's own verification
+ * had run all of them clean (7,032 ci passes), and the real red was one lint leg.
+ *
+ * Same single population as the candidate query (ci, clean tree, this exact sha). Only a
+ * DECISIVE row counts: a skip or cancelled run says nothing about red or green.
+ */
+async function runsAtRepairHead(
+  sql: ReturnType<typeof getOrgPg>['sql'],
+  repairHeadSha: string,
+  paths: readonly string[],
+): Promise<Map<string, { status: string; runId: number }>> {
+  const out = new Map<string, { status: string; runId: number }>();
+  if (paths.length === 0) return out;
+  const rows = await sql<Array<{ file_path: string; status: string; id: string | number }>>`
+    WITH repair_head_runs AS (
+      SELECT file_path, status, finished_at, id
+        FROM harness_shared.test_runs
+       WHERE source = 'ci'
+         AND worktree_dirty = false
+         AND commit_sha = ${repairHeadSha}
+         AND file_path = ANY(${paths as string[]}::text[])
+         AND status IN ('pass', 'fail', 'error')
+    )
+    SELECT DISTINCT ON (file_path) file_path, status, id
+      FROM repair_head_runs
+     ORDER BY file_path, finished_at DESC NULLS LAST, id DESC`;
+  for (const r of rows) out.set(r.file_path, { status: r.status, runId: Number(r.id) });
+  return out;
+}
+
+function atRepairHeadReading(
+  m: { status: string; runId: number },
+  repairHeadSha: string,
+  fixInRepairHead: boolean | null,
+): string {
+  const where = `the gate's own clean ci run #${m.runId} at repairHead ${repairHeadSha.slice(0, 12)}`;
+  if (m.status === 'pass') {
+    return (
+      `PASSED AT repairHead — ${where} passed this file, so it is NOT repair work. ` +
+      (fixInRepairHead === false
+        ? 'Its bytes are unchanged, so the fix rode a non-test file it exercises, or the candidate red was environmental.'
+        : 'Do NOT re-fix it.')
+    );
+  }
+  return (
+    `STILL FAILING AT repairHead — ${where} recorded ${m.status}` +
+    (fixInRepairHead === true ? ', even though the file changed after the cut, so the landed change did not fix it.' : '.') +
+    ' This one is real work.'
+  );
+}
+
+/**
  * Read the failing-files-on-the-frozen-candidate answer.
  *
  * Fail-soft in every direction: an unreachable database, an unresolvable ref, or a
@@ -964,6 +1039,22 @@ export async function readGateCandidateFailures(
   const truncated = failing.length > MAX_FAILING_FILES;
   const rows = failing.slice(0, MAX_FAILING_FILES);
 
+  // A repairHead that has not advanced IS the candidate, so its rows are the ones above.
+  // Fail-soft: an unreadable read leaves every row on the blob reading it had before, which
+  // hedges toward "run it at repairHead" rather than toward a verdict.
+  let atHead = new Map<string, { status: string; runId: number }>();
+  if (repairHeadSha && repairHeadSha !== candidateSha && rows.length > 0) {
+    try {
+      atHead = await runsAtRepairHead(
+        opts.sql ?? getOrgPg().sql,
+        repairHeadSha,
+        rows.map((r) => r.file_path),
+      );
+    } catch {
+      atHead = new Map();
+    }
+  }
+
   // Read ONCE for the whole result, not per row: it is the same two refs every time.
   const moves: ElsewhereMoves = repairHeadSha
     ? await movesBetween(git, opts.root, candidateSha, repairHeadSha)
@@ -985,7 +1076,7 @@ export async function readGateCandidateFailures(
         ]).then(([candidate, repairHead]) => ({ candidate, repairHead }))
       : undefined;
 
-  const files: GateCandidateFailingFile[] = [];
+  const compared: Array<Omit<GateCandidateFailingFile, 'atRepairHead'>> = [];
   for (const [i, r] of rows.entries()) {
     const base = {
       path: r.file_path,
@@ -993,7 +1084,7 @@ export async function readGateCandidateFailures(
       status: r.status,
     };
     if (!repairHeadSha) {
-      files.push({
+      compared.push({
         ...base,
         fixInRepairHead: null,
         comparison: 'not compared — no repairHead sha is open for this candidate',
@@ -1004,7 +1095,7 @@ export async function readGateCandidateFailures(
       continue;
     }
     if (i >= MAX_BLOB_COMPARES) {
-      files.push({
+      compared.push({
         ...base,
         fixInRepairHead: null,
         comparison: `not compared — past the ${MAX_BLOB_COMPARES}-file blob-compare cap`,
@@ -1014,20 +1105,30 @@ export async function readGateCandidateFailures(
       });
       continue;
     }
-    files.push({
+    compared.push({
       ...base,
       ...(await compareOne(git, opts.root, r.file_path, candidateSha, repairHeadSha, subs, moves, batchedBlobs)),
     });
   }
 
-  const alreadyFixedCount = files.filter((f) => f.fixInRepairHead === true).length;
-  const stillBrokenCount = files.filter((f) => f.fixInRepairHead === false).length;
-  // Of the still-broken rows, how many are only PRESUMED so — the test blob is unchanged
-  // but other files moved, so a non-test carrier may hold the fix. These need a run at
-  // repairHead before they are work. Split out rather than folded into stillBrokenCount:
-  // the count is a blob fact and stays one, and a reader who wants the queue it can act
-  // on without further measurement subtracts this.
-  const stillBrokenNeedsRunCount = files.filter(
+  // The gate's own run at repairHead outranks the blob compare, in both directions.
+  const files: GateCandidateFailingFile[] = compared.map((f) => {
+    const m = atHead.get(f.path) ?? null;
+    return m && repairHeadSha
+      ? { ...f, atRepairHead: m, reading: atRepairHeadReading(m, repairHeadSha, f.fixInRepairHead) }
+      : { ...f, atRepairHead: null };
+  });
+  const notRunAtHead = files.filter((f) => f.atRepairHead === null);
+  const alreadyFixedCount = notRunAtHead.filter((f) => f.fixInRepairHead === true).length;
+  const passedAtRepairHeadCount = files.filter((f) => f.atRepairHead?.status === 'pass').length;
+  const stillBrokenCount = files.filter((f) =>
+    f.atRepairHead ? f.atRepairHead.status !== 'pass' : f.fixInRepairHead === false,
+  ).length;
+  // Of the still-broken rows NOT run at repairHead, how many are only PRESUMED so — the test
+  // blob is unchanged but other files moved, so a non-test carrier may hold the fix. These
+  // need a run at repairHead before they are work. A row the gate already ran there is a
+  // measurement, never a presumption, so it is never counted here.
+  const stillBrokenNeedsRunCount = notRunAtHead.filter(
     (f) => f.fixInRepairHead === false && moves.kind !== 'none' && !(moves.kind === 'some' && moves.paths.filter((p) => p !== f.path).length === 0),
   ).length;
 
@@ -1038,6 +1139,7 @@ export async function readGateCandidateFailures(
     distinctFailingFiles: files,
     failingFileCount: failing.length,
     alreadyFixedCount,
+    passedAtRepairHeadCount,
     stillBrokenCount,
     stillBrokenNeedsRunCount,
     changedBetweenRefs:
@@ -1065,6 +1167,7 @@ export async function readGateCandidateFailures(
       fileCount: files.length,
       stillBrokenCount,
       alreadyFixedCount,
+      passedAtRepairHeadCount,
       outstandingLegs: nonTestLegs.outstanding.length,
       fixedLegs: nonTestLegs.perLeg.filter((l) => l.lifecycle === 'fixed' && !nonTestLegs.outstanding.includes(l.id)).length,
     }),
@@ -1079,6 +1182,7 @@ export function assessCandidateFailures(c: {
   fileCount: number;
   stillBrokenCount: number;
   alreadyFixedCount: number;
+  passedAtRepairHeadCount: number;
   outstandingLegs: number;
   fixedLegs: number;
 }): GateCandidateFailuresCode {
@@ -1089,7 +1193,8 @@ export function assessCandidateFailures(c: {
   if (c.outstandingLegs > 0) return 'non-test-leg-failing';
   // Rows exist but some could not be compared: an unmeasured state wearing a green coat,
   // reported as unmeasured rather than as either verdict.
-  if (c.fileCount > 0 && c.alreadyFixedCount !== c.fileCount) return 'unmeasured';
+  // A file the gate already PASSED at repairHead is resolved, not unmeasured.
+  if (c.fileCount > 0 && c.alreadyFixedCount + c.passedAtRepairHeadCount !== c.fileCount) return 'unmeasured';
   // Everything that was red — files, legs, or both — has a fix at repairHead awaiting
   // re-verification. This is freeze-and-converge working as designed.
   if (c.fileCount > 0 || c.fixedLegs > 0) return 'all-fixes-contained';

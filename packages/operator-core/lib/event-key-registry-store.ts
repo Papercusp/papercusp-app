@@ -256,6 +256,40 @@ export async function registerEventKey(
   sql: postgres.Sql,
   input: RegisterEventKeyInput,
 ): Promise<EventKeyRow> {
+  const rows = await upsertEventKey(sql, input, false);
+  return mapRow(rows[0]);
+}
+
+export type ClaimEventKeyResult =
+  | { claimed: true; row: EventKeyRow }
+  | { claimed: false; holder: string | null };
+
+/**
+ * Register a key on behalf of a DISTRIBUTED package (portable-identity-packages
+ * D-026): insert it, or refresh it only when the existing row names the same
+ * contributor. A row registered by anyone else — core, a plugin, another Cupboard
+ * listing, or a legacy row with no contributor — is left untouched and reported.
+ *
+ * The contributor comparison sits in the upsert's own `DO UPDATE ... WHERE`, so the
+ * check and the write are one statement and cannot race. `registerEventKey` keeps
+ * overwrite semantics: re-curating a key is the local pot's authority, not a claim.
+ */
+export async function claimEventKey(
+  sql: postgres.Sql,
+  input: RegisterEventKeyInput & { contributor: string },
+): Promise<ClaimEventKeyResult> {
+  if (!input.contributor?.trim()) throw new Error('claimEventKey requires a contributor');
+  const rows = await upsertEventKey(sql, input, true);
+  if (rows.length > 0) return { claimed: true, row: mapRow(rows[0]) };
+  const holder = await getEventKey(sql, input.workspaceId, input.eventKey);
+  return { claimed: false, holder: holder?.contributor ?? null };
+}
+
+async function upsertEventKey(
+  sql: postgres.Sql,
+  input: RegisterEventKeyInput,
+  sameContributorOnly: boolean,
+): Promise<EventKeyDbRow[]> {
   const eventKey = normalizeEventKey(input.eventKey);
   const status = input.status ?? 'active';
   if (!EVENT_KEY_STATUSES.includes(status)) {
@@ -265,7 +299,7 @@ export async function registerEventKey(
   const payloadSchema = normalizePayloadSchema(input.payloadSchema);
   const embedding = input.embedding ? JSON.stringify(input.embedding) : null;
 
-  const rows = await sql<EventKeyDbRow[]>`
+  return sql<EventKeyDbRow[]>`
     INSERT INTO harness_shared.event_key_registry (
       workspace_id, event_key, title, description, key_pattern,
       contributor, status, tags, payload_schema, embedding, created_by
@@ -287,9 +321,11 @@ export async function registerEventKey(
       payload_schema = EXCLUDED.payload_schema,
       embedding   = COALESCE(EXCLUDED.embedding, harness_shared.event_key_registry.embedding),
       updated_at  = now()
+    ${sameContributorOnly
+      ? sql`WHERE harness_shared.event_key_registry.contributor IS NOT DISTINCT FROM EXCLUDED.contributor`
+      : sql``}
     RETURNING *
   `;
-  return mapRow(rows[0]);
 }
 
 export async function getEventKey(

@@ -138,6 +138,15 @@ export type OperatorHttpRouteDecision =
  * resolve to a different route than the one the allowlist approved.
  */
 export function decideOperatorHttpRoute(method: unknown, path: unknown): OperatorHttpRouteDecision {
+  return decideRelayRoute(method, path, OPERATOR_HTTP_ROUTE_ALLOWLIST);
+}
+
+/** {@link decideOperatorHttpRoute} against any allowlist — the `app-http` plane uses its own. */
+export function decideRelayRoute(
+  method: unknown,
+  path: unknown,
+  allowlist: ReadonlyArray<OperatorHttpRoute>,
+): OperatorHttpRouteDecision {
   if (typeof method !== 'string' || typeof path !== 'string' || path.length > 4096) {
     return { ok: false, code: 'invalid_path' };
   }
@@ -148,7 +157,7 @@ export function decideOperatorHttpRoute(method: unknown, path: unknown): Operato
     return { ok: false, code: 'invalid_path' };
   }
   const upper = method.toUpperCase();
-  const route = OPERATOR_HTTP_ROUTE_ALLOWLIST.find((entry) => entry.method === upper && entry.pattern.test(pathname));
+  const route = allowlist.find((entry) => entry.method === upper && entry.pattern.test(pathname));
   return route
     ? { ok: true, method: upper, path, surface: route.surface, awaitsRouteBudget: route.awaitsRouteBudget === true }
     : { ok: false, code: 'route_not_relayed' };
@@ -189,26 +198,47 @@ export type OperatorHttpAudit = (action: string, detail: string) => void;
 export type OperatorHttpFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 export interface OperatorHttpChannelOptions {
-  principal: { userId: string; hostedSessionId: string };
+  /**
+   * The ticket principal stamped on every forwarded request. Required unless
+   * `requestHeaders` supplies the whole header policy: the `app-http` plane has no
+   * ticket user, because the app's own key is the credential (hosted-app-relay.ts).
+   */
+  principal?: { userId: string; hostedSessionId: string };
   send: OperatorHttpSend;
   audit: OperatorHttpAudit;
   origin?: string;
   fetch?: OperatorHttpFetch;
   headerTimeoutMs?: number;
+  /** Route policy. Defaults to the operator-http allowlist. */
+  decideRoute?: (method: unknown, path: unknown) => OperatorHttpRouteDecision;
+  /** Header policy. Defaults to the operator-http allowlist plus the principal stamp. */
+  requestHeaders?: (input: unknown) => Record<string, string>;
+  /** Response headers relayed back. Defaults to the operator-http set. */
+  responseHeaders?: ReadonlySet<string>;
 }
 
-/** One `operator-http` channel's in-flight requests. */
+/** One relay channel's in-flight requests (`operator-http`, or `app-http` with its own policy). */
 export class OperatorHttpChannel {
   private readonly inflight = new Map<string, AbortController>();
   private readonly origin: string;
   private readonly fetchImpl: OperatorHttpFetch;
   private readonly headerTimeoutMs: number;
+  private readonly decideRoute: (method: unknown, path: unknown) => OperatorHttpRouteDecision;
+  private readonly requestHeaders: (input: unknown) => Record<string, string>;
+  private readonly responseHeaders: ReadonlySet<string>;
   private closed = false;
 
   constructor(private readonly options: OperatorHttpChannelOptions) {
     this.origin = options.origin ?? localOperatorOrigin();
     this.fetchImpl = options.fetch ?? ((url, init) => fetch(url, init));
     this.headerTimeoutMs = options.headerTimeoutMs ?? HOSTED_OPERATOR_HTTP_HEADER_TIMEOUT_MS;
+    this.decideRoute = options.decideRoute ?? decideOperatorHttpRoute;
+    const principal = options.principal;
+    if (!options.requestHeaders && !principal) {
+      throw new TypeError('OperatorHttpChannel needs a principal or a requestHeaders policy');
+    }
+    this.requestHeaders = options.requestHeaders ?? ((input) => operatorHttpRequestHeaders(input, principal!));
+    this.responseHeaders = options.responseHeaders ?? RELAYED_RESPONSE_HEADERS;
   }
 
   get inflightCount(): number {
@@ -248,7 +278,7 @@ export class OperatorHttpChannel {
     if (this.inflight.has(requestId)) return fail('request_id_in_use');
     if (this.inflight.size >= HOSTED_OPERATOR_HTTP_MAX_INFLIGHT) return fail('too_many_requests', 429);
 
-    const decision = decideOperatorHttpRoute(payload.method, payload.path);
+    const decision = this.decideRoute(payload.method, payload.path);
     if (!decision.ok) {
       this.options.audit('operator_http_denied', `${String(payload.method).slice(0, 8)} ${String(payload.path).slice(0, 200)} ${decision.code}`);
       return fail(decision.code, decision.code === 'route_not_relayed' ? 403 : 400);
@@ -270,7 +300,7 @@ export class OperatorHttpChannel {
     try {
       const response = await this.fetchImpl(`${this.origin}${decision.path}`, {
         method: decision.method,
-        headers: operatorHttpRequestHeaders(payload.headers, this.options.principal),
+        headers: this.requestHeaders(payload.headers),
         ...(body ? { body: new Uint8Array(body) } : {}),
         redirect: 'manual',
         signal: controller.signal,
@@ -278,7 +308,7 @@ export class OperatorHttpChannel {
       clearTimeout(timer);
       const headers: Record<string, string> = {};
       response.headers.forEach((value, name) => {
-        if (RELAYED_RESPONSE_HEADERS.has(name.toLowerCase())) headers[name.toLowerCase()] = value;
+        if (this.responseHeaders.has(name.toLowerCase())) headers[name.toLowerCase()] = value;
       });
       this.options.send({ type: 'http.response', requestId, status: response.status, headers });
       headersSent = true;

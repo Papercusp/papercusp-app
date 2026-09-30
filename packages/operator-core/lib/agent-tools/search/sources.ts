@@ -30,6 +30,7 @@ import type { SearchSource, SearchSourceParams, Listing } from '@papercusp/searc
 // engine's `candidateLimit = limit * 3` asked for — measured 40 rows for a
 // 600-row request on the live 302k-row corpus.
 import { withIterativeScan, chunkAwareVectorLegSql, type ChunkAwareVectorLegOptions } from '@papercusp/search';
+import { SESSION_TURN_CHUNK_SURFACE } from '../../search/turn-chunk-sync';
 import { OWNER_CANDIDATE_TURN_VERDICTS } from '../../turn-provenance/turn-ref';
 import {
   proseProfilePredicateSql,
@@ -871,27 +872,15 @@ const sessionTurnFilterSql = (p: SearchSourceParams) => {
 
 /**
  * generic-rag-chunking P-006: the session-turn vector leg runs through the
- * shared chunkAwareVectorLeg. session_turns is not a CHUNK_SURFACES entry; its
- * chunks live in the legacy per-surface table (migration 749), keyed by the
- * same four columns as the parent, with no anchor column. So the descriptor is
- * local. Margin 0 keeps the pooling identical to the pre-move MAX-of-legs
- * query (pinned by session-turn-leg-parity.integration.test.ts).
+ * shared chunkAwareVectorLeg. Since P-007 it reads the session-turn registry
+ * entry itself (search/turn-chunk-sync.ts SESSION_TURN_CHUNK_SURFACE): its
+ * parent vector columns, margin 0 (pooling identical to the pre-move
+ * MAX-of-legs query, pinned by session-turn-leg-parity.integration.test.ts),
+ * and its store's chunk table (the per-surface session_turn_chunks, keyed by
+ * the parent's four columns, no anchor column).
  */
-const SESSION_TURN_VECTOR_LEG: Pick<ChunkAwareVectorLegOptions, 'surface' | 'chunks' | 'parentAlias'> = {
-  surface: {
-    surface: 'session_turns',
-    parent: {
-      table: 'harness_shared.session_turns',
-      key: ['workspace_id', 'source_kind', 'session_id', 'turn_idx'],
-    },
-    parentVector: {
-      column: 'text_embedding',
-      profileColumn: 'text_embedding_profile',
-      modeColumn: 'text_embedding_mode',
-    },
-    chunkMargin: 0,
-  },
-  chunks: { table: 'harness_shared.session_turn_chunks', keying: 'typed', anchorColumn: null },
+const SESSION_TURN_VECTOR_LEG: Pick<ChunkAwareVectorLegOptions, 'surface' | 'parentAlias'> = {
+  surface: SESSION_TURN_CHUNK_SURFACE,
   parentAlias: 'st',
 };
 

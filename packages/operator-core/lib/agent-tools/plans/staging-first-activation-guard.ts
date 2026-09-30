@@ -65,8 +65,10 @@ const LIVE_GATE_OPERATION_RE =
   /(?:green[- ]checkpoint|greenCheckpoint|gate[- ]red|re-?green|tested[/ -]deployed\s+parity|restore(?:d)?\s+(?:the\s+)?(?:tested[/ -]deployed|release)\s+parity)/i;
 // A single blocked status cannot distinguish source work from final deployment
 // verification. Require separate items when the title still promises source work.
+// `build` is source work only as a verb: "whichever build", "the current build"
+// and "a green build" name the artifact a final check runs on.
 const NON_FINAL_TITLE_RE =
-  /(?:\b(?:implement|build|add|write)\b|\b(?:run|prove)\b.{0,140}\b(?:source|unit|integration|regression)\b)/i;
+  /(?:\b(?:implement|add|write)\b|(?<!\b(?:a|an|the|this|that|which|whichever|each|every|any|same|new|latest|current|staging|green|release|released|deployed)[- ])\bbuild\b|\b(?:run|prove)\b.{0,140}\b(?:source|unit|integration|regression)\b)/i;
 
 function hasNonFinalWorkInTitle(text: string): boolean {
   return NON_FINAL_TITLE_RE.test(text.split(/\n|\s+—\s+note:/i, 1)[0] ?? '');

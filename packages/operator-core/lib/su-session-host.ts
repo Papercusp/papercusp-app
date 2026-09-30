@@ -30,6 +30,7 @@ import {
   type RuntimeReconciliation,
 } from './su-session-persistence';
 import { pgSuSessionCommandStore, type SuSessionCommandStore } from './su-session-commands';
+import { trackSuClientStream } from './su-session-client-lease';
 
 /**
  * Is `pid` a live OS process? Signal 0 = existence check; EPERM = alive-not-ours.
@@ -883,6 +884,8 @@ export function createSuSessionEventResponse(
   options: {
     heartbeatMs?: number;
     backpressureTimeoutMs?: number;
+    /** Renew the session's client lease while this stream is open (P-009). */
+    trackClient?: boolean;
   } = {},
 ): Response {
   const lastEventId = parseLastEventId(request) ?? 0;
@@ -890,6 +893,13 @@ export function createSuSessionEventResponse(
   const replay = [...host.recentSince(lastEventId)];
   const replayCeiling = replay.at(-1)?.id ?? lastEventId;
   const snapshot = host.snapshot();
+  // P-009: an open stream is the evidence that a client is watching this
+  // session. Any worker serving one renews the durable lease, so the worker
+  // that owns the engine can tell an attended session from an abandoned one.
+  const releaseClient = options.trackClient === false || snapshot.terminal
+    ? () => undefined
+    : trackSuClientStream(host.descriptor().identity.advSessionId);
+  request.signal.addEventListener('abort', releaseClient, { once: true });
 
   return sseResponse<SuSessionSseEvents>({
     signal: request.signal,
@@ -912,6 +922,7 @@ export function createSuSessionEventResponse(
     setup: async (sink) => {
       const iterator = source[Symbol.asyncIterator]();
       sink.onClose(() => {
+        releaseClient();
         void iterator.return?.();
       });
       if (host.snapshot().terminal) {

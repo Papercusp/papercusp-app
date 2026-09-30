@@ -1,9 +1,14 @@
 /**
- * INJECTION PORT REGISTRY — the two context-injection boundaries, and the
+ * INJECTION PORT REGISTRY — the context-injection boundaries, and the
  * transport contract each one carries.
  *
  * Plan: codex-context-injection-parity-2026-08-09, D-001 (FROZEN, shared
  * verbatim with omp-context-injection-parity-2026-08-09).
+ *
+ * The three identity hook ports (pre-tool, stop, compaction) were added by
+ * portable-identity-packages-2026-09-26 P-011 (D-023 §2). They carry a worn
+ * identity's synchronous rules and nothing else; turn start and post-tool
+ * rules ride the two original ports.
  *
  * A "port" is a MOMENT in a turn at which the operator is allowed to push
  * context into the model, not a client event. Client events map ONTO ports
@@ -19,7 +24,7 @@
  */
 
 /**
- * @typedef {'turn-start' | 'mid-turn'} InjectionPort
+ * @typedef {'turn-start' | 'mid-turn' | 'pre-tool' | 'stop' | 'compaction'} InjectionPort
  */
 
 /**
@@ -59,6 +64,7 @@
  * @property {number} [promptClamp]       turn-start: max chars of prompt shipped.
  * @property {number} [maxCalls]          mid-turn: max tool calls shipped.
  * @property {number} [fieldClamp]        mid-turn: max chars per call field.
+ * @property {number} [guardInputMaxBytes] pre-tool: tool input shipped whole up to this, else not at all.
  */
 
 /** @type {Record<InjectionPort, PortSpec>} */
@@ -77,6 +83,33 @@ export const PORTS = {
     killSwitchMode: 'suppress',
     maxCalls: 12,
     fieldClamp: 400,
+  },
+  // ⚠ pre-tool is a GUARD port, not a context port. Its response text is a
+  // refusal reason: non-empty means deny this one call, empty means no verdict.
+  // Adapters render it ONLY as a deny — never allow, never updatedInput, never
+  // additionalContext — so a context hook can still never vote (D-027). A slow
+  // or down operator costs no verdict, and the client's own permission flow
+  // decides; evaluation failures fail closed server-side, where a rule is named.
+  'pre-tool': {
+    endpoint: '/api/agent-mcp/tool-guard',
+    timeoutMs: 1500,
+    killSwitchEnv: 'PAPERCUSP_IDENTITY_HOOKS',
+    killSwitchMode: 'suppress',
+    // Must equal SYNC_HOOK_GUARD_INPUT_MAX_BYTES (sync-hook-rules.ts). Never a
+    // lossy prefix: a cut input could hide exactly the tail a deny would match.
+    guardInputMaxBytes: 64 * 1024,
+  },
+  stop: {
+    endpoint: '/api/agent-mcp/stop-context',
+    timeoutMs: 2500,
+    killSwitchEnv: 'PAPERCUSP_IDENTITY_HOOKS',
+    killSwitchMode: 'suppress',
+  },
+  compaction: {
+    endpoint: '/api/agent-mcp/compaction-context',
+    timeoutMs: 2500,
+    killSwitchEnv: 'PAPERCUSP_IDENTITY_HOOKS',
+    killSwitchMode: 'suppress',
   },
 };
 

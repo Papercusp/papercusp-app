@@ -55,6 +55,29 @@ export interface LearningRoutineRow {
   pauseReviewBy?: string | null;
 }
 
+/**
+ * A loop's domain activity ledger: the proof its body ran, beyond the scheduler's
+ * `last_fired_at` (which is stamped at CLAIM time, before the body runs).
+ *
+ * `mode` picks how activity is judged against fires:
+ *   - `lag` (default; Scout): stale when activity is older than the stale window, or
+ *     when the last fire is newer than activity by more than the lag grace. Right for
+ *     a frequent loop whose previous activity is always recent.
+ *   - `since-fire`: stale only when the last fire produced NO activity by the time it
+ *     should have finished (activity older than the fire, and the fire older than
+ *     `graceMs`). Right for a long-cadence loop (the weekly precision monitor), whose
+ *     previous activity is legitimately days old: `lag` would page it between runs and
+ *     during every in-flight run. WI-10004117: that monitor fired with no row recorded
+ *     and nothing noticed, because only the fire was checked.
+ */
+export interface LoopActivity {
+  lastActivityAt: string | null;
+  source: string;
+  mode?: 'lag' | 'since-fire';
+  /** `since-fire` only: how long a fire may run before missing activity is a wedge. */
+  graceMs?: number;
+}
+
 /** A learning loop's identity: its blueprint id + the legacy `papercup`-slug routine name. */
 export interface LearningLoopSpec {
   blueprintId: string;
@@ -135,7 +158,7 @@ export function computeLearningLoopHealth(
      * scout_ticks; routine.last_fired_at can move when DBOS claimed the cron row
      * but the held dedup prevented the Scout body from recording a tick.
      */
-    activityByBlueprintId?: Record<string, { lastActivityAt: string | null; source: string }>;
+    activityByBlueprintId?: Record<string, LoopActivity>;
     /**
      * If routine.last_fired_at is newer than domain activity by more than this,
      * the scheduler claimed a fire that the loop body did not prove. Default 5m.
@@ -193,7 +216,13 @@ export function computeLearningLoopHealth(
     } else if (opts.nowMs - firedMs > staleMs) status = 'stale';
     else status = 'firing';
 
-    if (active && activity) {
+    if (active && activity && activity.mode === 'since-fire') {
+      // Judge only the LAST fire: did it produce activity by the time it should have?
+      // A never-fired loop is left to the routine verdict above (pending / stale).
+      const grace = activity.graceMs ?? DEFAULT_ACTIVITY_LAG_GRACE_MS;
+      const unproven = !Number.isNaN(firedMs) && (Number.isNaN(activityMs) || activityMs < firedMs);
+      if (unproven && opts.nowMs - firedMs > grace) status = 'stale';
+    } else if (active && activity) {
       if (Number.isNaN(activityMs) || opts.nowMs - activityMs > staleMs) status = 'stale';
       else if (!Number.isNaN(firedMs) && firedMs - activityMs > (opts.activityLagGraceMs ?? DEFAULT_ACTIVITY_LAG_GRACE_MS)) {
         status = 'stale';

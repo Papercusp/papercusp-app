@@ -61,7 +61,9 @@ fn effective<'a>(name: &'a str, input: Option<&'a Value>) -> (&'a str, Option<&'
 /// A path shown relative to the directory the chat was started in, the way
 /// Claude Code shows `calc.js` rather than `/tmp/…/calc.js`.
 fn display_path(path: &str, cwd: Option<&str>) -> String {
-    let trimmed = cwd.map(|c| c.trim_end_matches('/')).filter(|c| !c.is_empty());
+    let trimmed = cwd
+        .map(|c| c.trim_end_matches('/'))
+        .filter(|c| !c.is_empty());
     if let Some(cwd) = trimmed {
         if let Some(rel) = path.strip_prefix(cwd).and_then(|r| r.strip_prefix('/')) {
             if !rel.is_empty() {
@@ -141,7 +143,10 @@ pub(crate) fn tool_display(name: &str, input: Option<&Value>, cwd: Option<&str>)
                 summary: str_arg(input, "path").map(|p| format!("in {}", display_path(p, cwd))),
             }
         }
-        "WebFetch" => target("Fetch", str_arg(input, "url").map(|u| clip(u, TARGET_CHARS))),
+        "WebFetch" => target(
+            "Fetch",
+            str_arg(input, "url").map(|u| clip(u, TARGET_CHARS)),
+        ),
         "WebSearch" => target(
             "Web Search",
             str_arg(input, "query").map(|q| clip(q, TARGET_CHARS)),
@@ -212,7 +217,11 @@ mod tests {
 
     #[test]
     fn native_tools_read_like_claude_code_with_paths_relative_to_the_chat() {
-        let read = tool_display("Read", Some(&json!({"file_path": "/tmp/proj/calc.js"})), CWD);
+        let read = tool_display(
+            "Read",
+            Some(&json!({"file_path": "/tmp/proj/calc.js"})),
+            CWD,
+        );
         assert_eq!(read.title, "Read(calc.js)");
         assert_eq!(read.summary, None);
 
@@ -243,7 +252,11 @@ mod tests {
         let codex = tool_display("shell", Some(&json!({"command": ["npm", "test"]})), CWD);
         assert_eq!(codex.title, "Bash(npm test)");
 
-        let search = tool_display("Grep", Some(&json!({"pattern": "fn add", "path": "/tmp/proj/src"})), CWD);
+        let search = tool_display(
+            "Grep",
+            Some(&json!({"pattern": "fn add", "path": "/tmp/proj/src"})),
+            CWD,
+        );
         assert_eq!(search.title, "Search(fn add)");
         assert_eq!(search.summary.as_deref(), Some("in src"));
     }
@@ -252,12 +265,17 @@ mod tests {
     fn mcp_tools_get_a_readable_name_and_no_raw_json() {
         let call = tool_display(
             "mcp__papercusp-su__work_items_claimable",
-            Some(&json!({"harness": "papercusp", "limit": 5, "kinds": ["bug", "task"], "full": true})),
+            Some(
+                &json!({"harness": "papercusp", "limit": 5, "kinds": ["bug", "task"], "full": true}),
+            ),
             CWD,
         );
         assert_eq!(call.title, "papercusp-su · work items claimable (MCP)");
         let summary = call.summary.unwrap();
-        assert!(!summary.contains('{') && !summary.contains('"'), "{summary}");
+        assert!(
+            !summary.contains('{') && !summary.contains('"'),
+            "{summary}"
+        );
         assert!(summary.contains("harness: papercusp"), "{summary}");
         assert!(summary.contains("kinds: 2 items"), "{summary}");
         assert!(summary.contains("full: yes"), "{summary}");
@@ -272,7 +290,10 @@ mod tests {
         assert_eq!(wrapped.summary.as_deref(), Some("slug: p"));
 
         for raw in ["mcp__papercusp-su__coord_orient", "mcp__x__y"] {
-            assert!(!tool_display(raw, None, CWD).title.contains("mcp__"), "{raw}");
+            assert!(
+                !tool_display(raw, None, CWD).title.contains("mcp__"),
+                "{raw}"
+            );
         }
     }
 
@@ -282,7 +303,10 @@ mod tests {
         assert_eq!(human_args(&json!({}), 40), None);
         assert_eq!(human_args(&json!([]), 40), None);
         assert_eq!(human_args(&json!({"a": 1}), 0), None);
-        assert_eq!(human_args(&json!({"command": "ls"}), 40).as_deref(), Some("command: ls"));
+        assert_eq!(
+            human_args(&json!({"command": "ls"}), 40).as_deref(),
+            Some("command: ls")
+        );
         let long = human_args(&json!({"command": "x".repeat(200)}), 30).unwrap();
         assert!(long.chars().count() <= 30 && long.ends_with('…'), "{long}");
         let multi = human_args(&json!({"body": "one\ntwo"}), 80).unwrap();

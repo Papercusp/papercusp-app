@@ -43,7 +43,7 @@ import {
 import { notifySyncInvalidate } from '../../../sync-sse';
 import { checkInteractiveSafetyFloor } from '../../../interactive-safety-floor';
 import { composeLaunchModelSpec, isLaunchAccountValue } from '../../../agent-config-constants';
-import { defaultLaunchAccount } from '../../../agent-launch-core';
+import { defaultLaunchAccount, defaultLaunchAccountFor } from '../../../agent-launch-core';
 import { isLaunchableMode, LAUNCHABLE_MODE_IDS } from '../../../modes/registry';
 import { activeWorkspaceId } from '../../../workspace-registry';
 import { HARNESS_SLUG_RE } from '../../../harness-slug';
@@ -260,7 +260,18 @@ async function handleLaunchSu(req: Request): Promise<Response> {
   // after DEFAULT_MAX_QUEUE_WAIT_MS on admission timeout. `defaultLaunchAccount()`
   // is the same resolver the scripted path (agent-launch-core) already applies, so
   // the GUI/PUI create and the scripted launch now compose an identical argv.
-  const account = body.account?.trim() || defaultLaunchAccount();
+  // WI-10004158 / D-011: an omitted account follows an OMP gateway model to
+  // `auto`; the default account would refuse that model at engine start.
+  let account = body.account?.trim() || '';
+  if (!account) {
+    if (agent === 'omp') {
+      const { ompDefaultModel } = await import('../../../../../../apps/operator/scripts/psu-launcher.mjs');
+      account = defaultLaunchAccountFor({ agent, model,
+        ompSelector: process.env.PAPERCUSP_OMP_MODEL_SELECTOR ?? null, ompNativeDefault: () => ompDefaultModel() });
+    } else {
+      account = defaultLaunchAccount();
+    }
+  }
   if (!isLaunchAccountValue(account)) {
     return json({ status: 'error', error: 'invalid account' }, 400);
   }

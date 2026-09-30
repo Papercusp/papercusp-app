@@ -26,7 +26,7 @@ import type { Embedder, Listing, SearchSourceParams } from '@papercusp/search';
 
 // The prose column width contract — ONE source, not a restated `384` (D-005 §5).
 import { fitsProseColumns, resolveProseProfileIdSelection } from '../../search/prose-vector-dims';
-import { sectionAnchorBase } from '@papercusp/search';
+import { sectionAnchorBase, withIterativeScan } from '@papercusp/search';
 
 /** Over-fetch factor: several sections of one page can crowd the top-k; fetch
  *  extra rows so page-level dedupe still fills `limit` distinct pages. */
@@ -70,7 +70,16 @@ async function querySectionsReal(
   if (!selection) return [];
   const { sql } = getOrgPg();
   const vecLit = `[${vec.join(',')}]`;
-  const rows = await sql<
+  // ITERATIVE SCAN (WI-37603's fix, which this leg missed). doc_sections holds
+  // every docs surface in one table, so this query is a FILTERED nearest-
+  // neighbour read. When the planner picks the HNSW index (the profile OR-branch
+  // below lowers the estimated selectivity enough that it does, e.g. at the
+  // engine's limit*OVERFETCH = 72), a non-iterative scan stops after
+  // hnsw.ef_search (40) whole-table candidates and filters AFTERWARDS, so a
+  // small surface next to a big one gets 0-1 rows back. Measured 2026-09-30 on
+  // harness:papercusp (1,425 of ~18.7K rows): LIMIT 72 returned 1 row off vs 72
+  // with relaxed_order, and 6 of 10 long harness docs lost their section.
+  const rows = await withIterativeScan(sql, (sql) => sql<
     Array<{ slug: string; anchor: string; title: string; url: string; excerpt: string; similarity: number }>
   >`
     SELECT slug, anchor, title, url, left(content, 240) AS excerpt,
@@ -83,7 +92,7 @@ async function querySectionsReal(
                 AND embedding_profile IS NULL
                 AND embedding_mode = ${selection.legacyMode ?? mode}))
      ORDER BY embedding <=> ${vecLit}::vector
-     LIMIT ${limit}`;
+     LIMIT ${limit}`);
   return rows.map((r) => ({
     ...r,
     // A continuation chunk is a STORAGE row; the caller gets the heading it

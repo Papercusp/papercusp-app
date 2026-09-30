@@ -63,10 +63,12 @@
 #                        after health, never one read (plan D-088: the offline
 #                        self-admit runs after the join attempt gives up, so a
 #                        read 1s after health measures nothing — run 7). The
-#                        bootstrap's '[papercusp-hive]' journal lines (pre-join
-#                        seed restore, offline self-admit) are recorded as
-#                        DIAGNOSTICS (restore.seedRestore / restore.bootstrapLast)
-#                        and never gate the leg.
+#                        bootstrap's '[papercusp-hive]' lines (pre-join seed
+#                        restore, offline self-admit) — read from the sidecar's
+#                        ~/.papercusp/logs/serve.log, the unit journal only as a
+#                        fallback (restore.hiveLogSource names which) — are
+#                        recorded as DIAGNOSTICS (restore.seedRestore /
+#                        restore.bootstrapLast) and never gate the leg.
 #   restart-reresolve    restart; a NEW pid serves, re-resolved to the same bytes.
 #   join-runtime-match   (plan D-083) this row needs no live peer join only when
 #                        the runtime artifact sha256 (the witness) is the one the
@@ -474,8 +476,11 @@ GUI="$REMOTE_DIR/gui.deb"; SRV="$REMOTE_DIR/server.deb"
 # Declared Depends + Recommends of BOTH .debs, from their control fields. An entry
 # naming a Papercusp package (alternatives included) is dropped: this step must
 # never install Papercusp itself.
-decl=""
+decl=""; unreadable=""
 for d in "$SRV" "$GUI"; do
+  # An empty Depends read is only "declares nothing" once the control file itself
+  # was readable; a failed read must never pass as an empty declaration.
+  dpkg-deb -f "$d" Package >/dev/null 2>&1 || unreadable="$unreadable $(basename "$d")"
   for f in Depends Recommends; do
     v=$(dpkg-deb -f "$d" "$f" 2>/dev/null | tr '\n' ' ')
     echo "PCOIJ declared.$(basename "$d" .deb).$f=$v"
@@ -485,8 +490,18 @@ done
 keep=$(printf '%s' "$decl" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | grep -v 'papercusp' | paste -sd, - | sed 's/,/, /g')
 echo "PCOIJ satisfy=$keep"
 dpkg-query -W -f='${Package}=${Version}\n' 2>/dev/null | LC_ALL=C sort > "$REMOTE_DIR/dpkg-before.txt"
+if [ -n "$unreadable" ]; then
+  # One unreadable .deb FAILS the leg even when the other declares dependencies:
+  # its own were never provisioned, so "both .debs" would be a false claim (WI-10004154).
+  echo "PCOIJ satisfyRefused=control fields unreadable:$unreadable"
+  exit 1
+fi
 if [ -z "$keep" ]; then
-  echo "PCOIJ satisfyExit=0"
+  # Never "nothing to provision": the real GUI .deb declares its webkit/gtk/indicator
+  # runtime, so an empty list from READABLE control files means the packaging lost its
+  # declared dependencies. This leg then measured nothing, so it FAILS (WI-10004154).
+  echo "PCOIJ satisfyRefused=neither .deb declares a non-Papercusp Depends/Recommends"
+  exit 1
 else
   sudo -n apt-get update > "$REMOTE_DIR/apt-update.log" 2>&1; echo "PCOIJ aptUpdateExit=$?"
   sudo -n env DEBIAN_FRONTEND=noninteractive apt-get satisfy --yes "$keep" > "$REMOTE_DIR/apt-satisfy.log" 2>&1
@@ -607,20 +622,44 @@ echo "PCOIJ potListAttempts=$n"; echo "PCOIJ potListElapsedSec=$(( $(date +%s) -
 head -c 1500 "$REMOTE_DIR/pot-list.out" | tr '\n' ' ' | sed 's/^/PCOIJ-LOG /'; echo
 # DIAGNOSTICS only (never gate): the bootstrap's own '[papercusp-hive]' lines —
 # the pre-join seed restore outcome and the offline self-admit / join outcome.
+# SOURCE (WI-10004100): they are console.log lines of the node sidecar, whose
+# stdout+stderr the host routes to <home>/.papercusp/logs/serve.log in release
+# builds (main.rs spawn_serve -> rotating_log_stdio) — on BOTH platforms, for the
+# headless Server unit and the GUI alike. journald never sees them, so reading
+# the unit journal alone recorded "no line" on every packaged install (run 8).
+# The journal stays a SECONDARY source (a build that logs to stdout); the source
+# actually read is named, and a missing log reads 'absent', never an invented line.
+HIVE_LOG="$(dirname "$OPJSON")/logs/serve.log"; HIVE_OUT="$REMOTE_DIR/hive.out"; src=""
+: > "$HIVE_OUT"
+if [ -r "$HIVE_LOG" ] && grep -aq '\[papercusp-hive\]' "$HIVE_LOG"; then
+  grep -a '\[papercusp-hive\]' "$HIVE_LOG" > "$HIVE_OUT"; src="$HIVE_LOG"
+fi
 if [ "$PLATFORM" = linux ]; then
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
   journalctl --user -u papercusp-server.service --no-pager -o cat > "$REMOTE_DIR/journal.out" 2> "$REMOTE_DIR/journal.err"
   echo "PCOIJ journalExit=$?"
-  grep -a '\[papercusp-hive\]' "$REMOTE_DIR/journal.out" | head -40 | sed 's/^/PCOIJ-HIVE /'
-  # The evidence is built from TSV rows: a tab in a journal line must not split one.
-  seed=$(grep -a '\[papercusp-hive\] seed restore' "$REMOTE_DIR/journal.out" | tail -1 | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
-  last=$(grep -a '\[papercusp-hive\]' "$REMOTE_DIR/journal.out" | tail -1 | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
-  echo "PCOIJ seedRestore=${seed:-no seed-restore line in the server journal}"
-  echo "PCOIJ bootstrapLast=${last:-no [papercusp-hive] line in the server journal}"
+  if [ -z "$src" ] && grep -aq '\[papercusp-hive\]' "$REMOTE_DIR/journal.out"; then
+    grep -a '\[papercusp-hive\]' "$REMOTE_DIR/journal.out" > "$HIVE_OUT"; src="journal:papercusp-server.service"
+  fi
 else
   echo "PCOIJ journalExit=unavailable"
-  echo "PCOIJ seedRestore=unmeasured: no server journal on $PLATFORM"
-  echo "PCOIJ bootstrapLast=unmeasured: no server journal on $PLATFORM"
+fi
+if [ -n "$src" ]; then
+  echo "PCOIJ hiveLogSource=$src"
+  head -40 "$HIVE_OUT" | sed 's/^/PCOIJ-HIVE /'
+  # The evidence is built from TSV rows: a tab in a log line must not split one.
+  seed=$(grep -a '\[papercusp-hive\] seed restore' "$HIVE_OUT" | tail -1 | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
+  last=$(tail -1 "$HIVE_OUT" | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
+  echo "PCOIJ seedRestore=${seed:-no seed-restore line in $src}"
+  echo "PCOIJ bootstrapLast=$last"
+elif [ -r "$HIVE_LOG" ]; then
+  echo "PCOIJ hiveLogSource=$HIVE_LOG"
+  echo "PCOIJ seedRestore=no seed-restore line in $HIVE_LOG"
+  echo "PCOIJ bootstrapLast=no [papercusp-hive] line in $HIVE_LOG"
+else
+  echo "PCOIJ hiveLogSource=absent"
+  echo "PCOIJ seedRestore=absent: $HIVE_LOG missing or unreadable"
+  echo "PCOIJ bootstrapLast=absent: $HIVE_LOG missing or unreadable"
 fi
 SH
 read -r -d '' RESTART <<'SH'
@@ -678,7 +717,10 @@ else
         ident osPrerequisites "$k" "$(kv "$k" "$PR")"
       done
       ident osPrerequisites satisfyExit "$(kv satisfyExit "$PR")"
+      ident osPrerequisites satisfyRefused "$(kv satisfyRefused "$PR")"
       if [[ "$rc" == 124 ]]; then leg os-prerequisites fail "provisioning exceeded ${INSTALL_TIMEOUT}s" "$PR"
+      elif [[ -n "$(kv satisfyRefused "$PR")" ]]; then
+        leg os-prerequisites fail "provisioning refused: $(kv satisfyRefused "$PR")" "$PR"
       elif [[ -z "$(kv satisfyExit "$PR")" ]]; then
         leg os-prerequisites void "provisioning script returned no satisfyExit (ssh rc=$rc) — not a measurement" "$PR"
       elif [[ "$(kv satisfyExit "$PR")" != 0 ]]; then
@@ -783,7 +825,7 @@ else
       # ── Leg 9: the seeded hive restored while offline ──────────────────
       rc=$(remote offline-restore "$RESTORE" $((RESTORE_TIMEOUT + 120))); RS="$LOG_DIR/offline-restore.log"
       ident restore expectPot "$EXPECT_POT"; ident restore timeoutSec "$RESTORE_TIMEOUT"
-      for k in potListExit potListAttempts potListElapsedSec journalExit seedRestore bootstrapLast; do
+      for k in potListExit potListAttempts potListElapsedSec journalExit hiveLogSource seedRestore bootstrapLast; do
         ident restore "$k" "$(kv "$k" "$RS")"
       done
       polled="after $(kv potListElapsedSec "$RS")s / $(kv potListAttempts "$RS") pot:list reads"
@@ -872,17 +914,35 @@ doc = {
     'runDir': run_dir,
     'scopeNote': 'No live peer join here (plan D-083): the Discovery/join row proves joining; this row proves the full installers lay down and serve, offline, the same runtime bytes that row joined with (join-runtime-match).',
 }
-# An absolute /home/<user>/ path trips git-sync's identity-leak content-lint, which
-# then SILENTLY leaves the evidence untracked (runs 3-8 of WI-10003962 never
-# committed). Redact the operator's home dir to '~' in every string, and say so.
+# git-sync's identity-leak content-lint matches the operator's USERNAME literal, and
+# then SILENTLY quarantines the evidence (runs 3-8 of WI-10003962 never committed).
+# The username reaches the evidence in more than one spelling: '/home/<user>/', and
+# the client's dash-encoded scratch dir '/tmp/pcv/…/-home-<user>-…' (a TMPDIR-rooted
+# --ledger-json path), which a '/home/<user>/' replace misses. So redact the home dir
+# to '~', then the username itself as a delimited token, from every source that can
+# name it (HOME's basename, the env login, and the uid's passwd entry, which no env
+# override can hide).
+import getpass, pwd, re
 home = os.path.expanduser('~').rstrip('/')
+users = {os.path.basename(home)}
+try: users.add(getpass.getuser())
+except Exception: pass
+try: users.add(pwd.getpwuid(os.getuid()).pw_name)
+except Exception: pass
+users = sorted((u for u in users if u and len(u) >= 3), key=len, reverse=True)
+user_re = re.compile(r'(?<![A-Za-z0-9_.])(?:' + '|'.join(map(re.escape, users)) + r')(?![A-Za-z0-9_.])') if users else None
+def redact_str(s):
+    if home and home != '/':
+        s = s.replace(home + '/', '~/').replace(home.replace('/', '-') + '-', '-~-')
+    return user_re.sub('<user>', s) if user_re else s
 def redact(v):
-    if isinstance(v, str): return v.replace(home + '/', '~/') if home and home != '/' else v
+    if isinstance(v, str): return redact_str(v)
     if isinstance(v, list): return [redact(x) for x in v]
     if isinstance(v, dict): return {k: redact(x) for k, x in v.items()}
     return v
 doc = redact(doc)
-doc['redactions'] = ["the operator's home directory is written as '~' (identity-leak content-lint)"]
+doc['redactions'] = ["the operator's home directory is written as '~' (identity-leak content-lint)",
+                     "the operator's username is written as '<user>' in every spelling, incl. dash-encoded paths"]
 json.dump(doc, open(out, 'w'), indent=2, sort_keys=False)
 print(verdict)
 PY

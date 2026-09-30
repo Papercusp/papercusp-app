@@ -5,6 +5,11 @@ import type {
   HostedConnectorBinding,
   HostedConnectorTicketBinding,
 } from './hosted-workspace-connector';
+import type {
+  AppRelayChannel,
+  AppRelayConnector,
+  AppRelayPort,
+} from '../workspace-host/hosted-app-relay';
 
 export const HOSTED_WORKSPACE_SESSION_PROTOCOL = 'papercusp-hosted-workspace.v1';
 export const HOSTED_WORKSPACE_MAX_MESSAGE_BYTES = 1024 * 1024;
@@ -64,6 +69,8 @@ export interface HostedWorkspaceSessionBrokerOptions {
   onConnectorLiveness?: (binding: HostedConnectorBinding, alive: boolean) => void;
   /** Ping cadence; `0` arms no timer (callers then drive `sweepLiveness()` themselves). */
   pingIntervalMs?: number;
+  /** Clock for connector last-seen stamps (the app relay's offline check). */
+  now?: () => number;
 }
 
 type LivenessEntry = { awaitingPong: boolean; connector: HostedConnectorBinding | null };
@@ -75,7 +82,7 @@ type LivenessEntry = { awaitingPong: boolean; connector: HostedConnectorBinding 
  * traffic to the workspace machine's OWN loopback operator. Its client is the
  * portal backend acting for the ticket's user; nothing ever dials a VM address.
  */
-export type HostedWorkspaceChannelKind = 'pty' | 'desktop' | 'operator-http';
+export type HostedWorkspaceChannelKind = 'pty' | 'desktop' | 'operator-http' | 'app-http';
 
 /**
  * Client→host frames an `operator-http` channel may carry; everything else is refused.
@@ -109,7 +116,8 @@ export interface HostedWorkspaceAttachRequest {
 
 type BrowserSession = {
   channelId: string;
-  binding: HostedConnectorTicketBinding;
+  /** A ticket binding for a browser; the connector's own binding for an `app-http` channel. */
+  binding: HostedConnectorTicketBinding | HostedConnectorBinding;
   socket: HostedWorkspaceRelaySocket;
   role: HostedWorkspaceTabRole;
   kind: HostedWorkspaceChannelKind;
@@ -184,8 +192,11 @@ const CONTROLLER_ONLY = new Set([
  * workspace host remains outbound-only: browsers never dial a VM address and
  * connector credentials never enter the browser principal chain.
  */
-export class HostedWorkspaceSessionBroker {
+export class HostedWorkspaceSessionBroker implements AppRelayPort {
   private readonly connectors = new Map<string, HostedWorkspaceRelaySocket>();
+  /** The binding and last proof of life of each attached connector (app relay, P-007). */
+  private readonly connectorState = new Map<string, { binding: HostedConnectorBinding; lastSeenAt: number }>();
+  private readonly now: () => number;
   private readonly sessions = new Map<string, BrowserSession>();
   private readonly controllers = new Map<string, string>();
   private readonly idleMs: number;
@@ -202,6 +213,7 @@ export class HostedWorkspaceSessionBroker {
     this.randomId = options.randomId ?? randomUUID;
     this.onAudit = options.onAudit ?? (() => {});
     this.onConnectorLiveness = options.onConnectorLiveness ?? (() => {});
+    this.now = options.now ?? Date.now;
     const pingIntervalMs = options.pingIntervalMs ?? HOSTED_WORKSPACE_PING_INTERVAL_MS;
     this.pingTimer = pingIntervalMs > 0
       ? managedSetInterval('hosted-relay-liveness', pingIntervalMs, () => this.sweepLiveness(), {
@@ -265,12 +277,17 @@ export class HostedWorkspaceSessionBroker {
     const previous = this.connectors.get(key);
     if (previous && previous !== socket) previous.close(4002, 'connector_replaced');
     this.connectors.set(key, socket);
+    const state = { binding, lastSeenAt: this.now() };
+    this.connectorState.set(key, state);
+    const seen = () => { if (this.connectorState.get(key) === state) state.lastSeenAt = this.now(); };
+    socket.on('pong', seen);
     sendJson(socket, { type: 'bound', role: 'connector', protocol: HOSTED_WORKSPACE_SESSION_PROTOCOL, binding });
     this.audit(binding, 'connector_attached');
     this.watchLiveness(socket, binding);
     this.onConnectorLiveness(binding, true);
 
     const onMessage = (data: unknown, isBinary: boolean) => {
+      seen();
       if (isBinary || byteLength(data) > this.maxMessageBytes) {
         socket.close(4400, 'invalid_connector_message');
         return;
@@ -293,6 +310,7 @@ export class HostedWorkspaceSessionBroker {
     const onClose = () => {
       if (this.connectors.get(key) !== socket) return;
       this.connectors.delete(key);
+      if (this.connectorState.get(key) === state) this.connectorState.delete(key);
       for (const session of [...this.sessions.values()]) {
         if (session.connectorKey === key) this.closeSession(session, 4412, 'connector_disconnected', false);
       }
@@ -303,6 +321,82 @@ export class HostedWorkspaceSessionBroker {
     socket.on('close', onClose);
     socket.on('error', onClose);
     return onClose;
+  }
+
+  /**
+   * The app relay's view of a workspace's connector (P-007): the attached one with
+   * the most recent proof of life, or null. Staleness is the caller's call, through
+   * the one reachability predicate (`isHostedConnectorLive`).
+   */
+  appConnector(customerWorkspaceId: string): AppRelayConnector | null {
+    let best: { binding: HostedConnectorBinding; lastSeenAt: number } | null = null;
+    for (const [key, state] of this.connectorState) {
+      const socket = this.connectors.get(key);
+      if (state.binding.customerWorkspaceId !== customerWorkspaceId || !socket || !open(socket)) continue;
+      if (!best || state.lastSeenAt > best.lastSeenAt) best = state;
+    }
+    return best ? { binding: best.binding, lastSeenAt: new Date(best.lastSeenAt) } : null;
+  }
+
+  /**
+   * Open a one-request `app-http` channel to a connector (P-007). There is no browser
+   * socket: the portal's own handler is the client, so its frames are delivered to
+   * `handlers` in-process. The channel carries only `http.request` / `http.abort`, and
+   * the machine opens it with no ticket user — the app's key is the credential.
+   */
+  openAppChannel(
+    connector: AppRelayConnector,
+    handlers: { onFrame: (payload: Record<string, unknown>) => void; onClose: (reason: string) => void },
+  ): AppRelayChannel | null {
+    const key = connectorKey(connector.binding);
+    const connectorSocket = this.connectors.get(key);
+    const state = this.connectorState.get(key);
+    if (!connectorSocket || !open(connectorSocket) || !state) return null;
+    const channelId = this.randomId();
+    let closed = false;
+    const socket: HostedWorkspaceRelaySocket = {
+      OPEN: 1,
+      get readyState() { return closed ? 3 : 1; },
+      send(data) {
+        const raw = text(data);
+        if (!raw) return;
+        let payload: unknown;
+        try { payload = JSON.parse(raw); } catch { return; }
+        if (payload && typeof payload === 'object' && !Array.isArray(payload)) handlers.onFrame(payload as Record<string, unknown>);
+      },
+      close(_code, reason) {
+        if (closed) return;
+        closed = true;
+        handlers.onClose(reason ?? 'closed');
+      },
+      on() { return undefined; },
+    };
+    const session: BrowserSession = {
+      channelId,
+      binding: state.binding,
+      socket,
+      role: 'controller',
+      kind: 'app-http',
+      connectorKey: key,
+      controllerKey: `${key}\u0000app:${channelId}`,
+      idleTimer: null,
+      closed: false,
+    };
+    this.sessions.set(channelId, session);
+    this.touch(session);
+    sendJson(connectorSocket, { type: 'relay.open', channelId, kind: 'app-http', audience: 'app', role: 'controller' });
+    this.audit(state.binding, 'app_relay_opened', channelId);
+    return {
+      send: (payload) => {
+        const type = payloadType(payload);
+        if (session.closed || !type || !OPERATOR_HTTP_CLIENT_TYPES.has(type)) return false;
+        const live = this.connectors.get(key);
+        if (!live) return false;
+        this.touch(session);
+        return sendJson(live, { type: 'relay', channelId, payload });
+      },
+      close: (reason) => this.closeSession(session, 1000, reason, true),
+    };
   }
 
   attachBrowser(

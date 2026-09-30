@@ -116,6 +116,8 @@ export type PlanAcceptanceGateCode =
   | 'acceptance_bar_contract_not_ready'
   | 'acceptance_not_recorded'
   | 'acceptance_rejected'
+  // WI-10004135 — 'accept-pending-delivery' on a plan outside the acceptance-BAR contract.
+  | 'acceptance_pending_delivery'
   // plan-completion-audit-and-acceptance-verdict-2026-08-13 — the code-truth family.
   | 'plan_items_unfinished'
   | 'acceptance_unaudited'
@@ -231,6 +233,12 @@ export interface PlanAcceptanceGateVerdict {
    * process-gate decision, but it is not evidence that the criterion was verified.
    */
   unknownRatedCriteria?: string[];
+  /**
+   * WI-10004135 — on an `acceptance_pending_delivery` refusal, the rubric criteria whose
+   * `evidencePlane` is deployed/live and whose independent rating is not pass-equivalent:
+   * the delivery evidence the author's pending-delivery verdict is still waiting on.
+   */
+  pendingDeliveryCriteria?: string[];
   /**
    * EI-22181490624100467 — the DEPLOYMENT POSITION of the code/test citations this
    * plan's code-truth audit rests on. Present only when `probeCitationDeployment`
@@ -509,6 +517,11 @@ async function evaluatePlanAcceptanceGateWithoutBuildProvenance(
   const rubricGate = await getFlag(FLAGS.ACCEPTANCE_RUBRIC_COMPLETION_GATE, 'system').catch(() => true);
   const forcedChecks: PlanAcceptanceGateWaivedCheck[] = [];
   let deferredBarShipRefusal: PlanAcceptanceGateVerdictWithoutBuildProvenance | undefined;
+  // WI-10004135: whether the acceptance-BAR contract governs this plan's ship. Only
+  // then do deployed/live BARs block on their own codes; outside that contract an
+  // author's 'accept-pending-delivery' verdict is the ONLY record that delivery is
+  // outstanding, so the verdict itself must block (see acceptance_pending_delivery).
+  let barContractApplicable = false;
   // A BAR can already have a complete grading that belongs to an older rubric
   // revision.  That is still a grader gap, but the ordinary rubric-family read
   // includes scorecard history.  Remember the stale reading so the recruitment
@@ -620,6 +633,7 @@ async function evaluatePlanAcceptanceGateWithoutBuildProvenance(
         ...(opts.current ? { current: opts.current } : {}),
       });
       nonCodeItemProofs = barLifecycle.nonCodeItemProofs ?? [];
+      barContractApplicable = barLifecycle.applicable;
       if (expectedApplicable && !barLifecycle.applicable) {
         return {
           satisfied: false, code: 'acceptance_bar_contract_not_ready',
@@ -1598,6 +1612,47 @@ async function evaluatePlanAcceptanceGateWithoutBuildProvenance(
         `scorecards:emit; the latest implementer verdict is authoritative.`,
     };
   }
+  // WI-10004135 — 'accept-pending-delivery' promises that the delivery-plane evidence
+  // "keeps blocking on its own code". Inside the acceptance-BAR contract it does: the
+  // snapshot's deployed/live BARs refuse above. A plan OUTSIDE that contract has no such
+  // code, so this gate shipped straight past the author's own declaration that delivery
+  // was outstanding (measured on p2p-work-distribution-2026-07-02: satisfied:true while
+  // its live criterion was rated unknown). There the verdict itself blocks, until the
+  // author re-records 'accept' once the delivery evidence exists.
+  if (
+    verdictFollowsLatestIndependent &&
+    latestVerdict?.acceptance?.verdict === 'accept-pending-delivery' &&
+    !barContractApplicable
+  ) {
+    const pendingDeliveryCriteria = rubric.criteria
+      .filter((criterion) => {
+        const plane = (criterion as typeof criterion & { evidencePlane?: string | null }).evidencePlane;
+        if (plane !== 'deployed' && plane !== 'live') return false;
+        const rating = independent.ratings[criterion.key]?.rating?.trim() ?? null;
+        return rating == null || ratingVerdict(rating) !== 'pass';
+      })
+      .map((criterion) => criterion.key);
+    return {
+      satisfied: false,
+      code: 'acceptance_pending_delivery',
+      rubricId: rubric.rubricId,
+      gradingRef: independent.issueId,
+      gradedBy: independent.createdBy ?? null,
+      gradedVia: independentVia,
+      ...(unknownRatedCriteria.length > 0 ? { unknownRatedCriteria } : {}),
+      ...(pendingDeliveryCriteria.length > 0 ? { pendingDeliveryCriteria } : {}),
+      message:
+        `plan '${planSlug}' cannot be marked shipped: implementer '${implementer}' recorded ` +
+        `'accept-pending-delivery' — delivery-plane evidence is still outstanding` +
+        (pendingDeliveryCriteria.length > 0
+          ? ` (deployed/live criteria not passing in the independent grading: ${pendingDeliveryCriteria.join(', ')})`
+          : '') +
+        `. This plan is outside the acceptance-BAR contract, so no BAR blocks on that evidence; the verdict ` +
+        `itself does. Bank the delivery evidence, then record a newer acceptance verdict with scorecards:emit ` +
+        `{ rubricRef:'${rubric.rubricId}', acceptanceOf:'${independent.issueId}', acceptance:{ verdict:'accept', ` +
+        `reasoning:'<the delivery evidence>' } } — or have the grading refreshed first if it rated that evidence unknown.`,
+    };
+  }
   if (deferredBarShipRefusal) return deferredBarShipRefusal;
 
   // EI-22181490624100467 — the ship is going to happen; record WHAT the graded
@@ -1665,7 +1720,11 @@ export function planAcceptanceRepairAction(
       instruction: 'Retry plans:set-plan-status: each call re-runs the idempotent grader recruiter. Read its acceptanceGrader result for the dispatch state; acceptanceGrader.recovery is present when stalled gradings are NOT recovered automatically and names the manual route. Do not self-grade or launch a parallel reviewer.',
     };
   }
-  if (verdict.code === 'acceptance_not_recorded' || verdict.code === 'acceptance_rejected') {
+  if (
+    verdict.code === 'acceptance_not_recorded' ||
+    verdict.code === 'acceptance_rejected' ||
+    verdict.code === 'acceptance_pending_delivery'
+  ) {
     return {
       kind: 'author-verdict',
       nextVerb: verdict.gradingRef ? { name: 'scorecards:get', args: { issueId: verdict.gradingRef } } : diagnostic,

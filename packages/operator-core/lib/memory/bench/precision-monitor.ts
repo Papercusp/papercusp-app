@@ -25,29 +25,70 @@ import { fileURLToPath } from 'node:url';
 
 import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
-import { runGoldSet, seedCorpus, type SeedManifest } from '@papercusp/memory/bench';
+import {
+  aggregateByClass,
+  latencyStats,
+  runGoldSet,
+  seedCorpus,
+  seedFailureReason,
+  type QueryOutcome,
+  type SeedManifest,
+} from '@papercusp/memory/bench';
 
 import { collectChildOutput } from '../../child-output';
 import { pushSearchFloors } from '../injection';
+import {
+  JEV_MEMORY_ADMIT_THRESHOLD,
+  JEV_MEMORY_ENCODING,
+  runJevMemoryGate,
+  type JevMemoryGateInput,
+  type JevMemoryGateResult,
+} from '../jev-memory-gate';
+import { ensureJevDecisionClient, resolveJevMemoryInjection } from '../jev-settings';
+import { withCandidates } from './jev-admission';
 import { loadCorpusFixture } from './corpus';
 import { loadGoldSetFixture } from './gold-set';
 import { BENCH_SCOPE, makeBackendCtx } from './run-bench';
-import { recordMemoryPrecisionRun, readMemoryPrecision, type MemoryPrecisionMetrics } from './precision-read';
+import {
+  recordMemoryPrecisionRun,
+  readMemoryPrecision,
+  PRECISION_BENCH_WORKER_TIMEOUT_MS,
+  type MemoryPrecisionMetrics,
+} from './precision-read';
 import { evaluateRecallDrop, BASELINE_HISTORY_WINDOW, type PriorRun, type RecallDropEvaluation } from './precision-alert';
 import { fileRecallDropEi, resolveRecallDropEi } from './precision-alert-ei';
 import { tsxBin } from '../../harness-paths';
 
 const PRECISION_BENCH_WORKER_PATH = fileURLToPath(new URL('./precision-bench-worker.ts', import.meta.url));
 export const PRECISION_BENCH_RESULT_MARKER = 'PAPERCUSP_MEMORY_PRECISION_BENCH_RESULT:';
-const DEFAULT_WORKER_TIMEOUT_MS = 30 * 60 * 1_000;
+/** Parent → worker: `1` when the workspace's Jev switch is effectively On (P-008). */
+export const PRECISION_BENCH_JEV_GATE_ENV = 'PAPERCUSP_PRECISION_BENCH_JEV_GATE';
+/** Ledger label for the monitor's Jev calls, so they never count as live injection traffic. */
+export const PRECISION_BENCH_JEV_CONSUMER = 'memory-bench';
+const DEFAULT_WORKER_TIMEOUT_MS = PRECISION_BENCH_WORKER_TIMEOUT_MS;
+
+/** How one bench run is asked to measure. */
+export interface PrecisionBenchRunOptions {
+  /**
+   * Measure the Jev-GATED push path, i.e. what the injector does when the
+   * workspace's Jev switch is effectively On. False measures the floor alone,
+   * which is what production injects in Off and Log only.
+   */
+  readonly jevGate: boolean;
+}
 
 /** Test/seam injection — swap the bench, the DB write, the flag, the invalidation. */
 export interface MemoryPrecisionBenchDeps {
   flag?: (installSlug: string) => Promise<boolean>;
+  /**
+   * The workspace's EFFECTIVE Jev mode (Off unless a key is stored). Tests inject
+   * it; the default reads jev-settings. A read failure measures the floor alone.
+   */
+  jevEffective?: (workspaceId: string) => Promise<'off' | 'shadow' | 'on'>;
   /** Override the actual bench run (tests inject fixed metrics — no embedder, no PG). */
-  runBench?: () => Promise<MemoryPrecisionMetrics>;
+  runBench?: (opts: PrecisionBenchRunOptions) => Promise<MemoryPrecisionMetrics>;
   /** Override the isolated worker path (tests prove the monitor's default route without PG). */
-  runBenchWorker?: () => Promise<MemoryPrecisionMetrics>;
+  runBenchWorker?: (opts: PrecisionBenchRunOptions) => Promise<MemoryPrecisionMetrics>;
   /** Override the DB write (tests capture without a live pool). */
   record?: (workspaceId: string, m: MemoryPrecisionMetrics) => Promise<number>;
   /** Override the sync invalidation (tests assert it fired). */
@@ -98,6 +139,7 @@ export function parsePrecisionBenchWorkerOutput(stdout: string): MemoryPrecision
 export async function runBenchInWorker(opts: {
   spawnProcess?: typeof spawn;
   timeoutMs?: number;
+  jevGate?: boolean;
 } = {}): Promise<MemoryPrecisionMetrics> {
   const spawnProcess = opts.spawnProcess ?? spawn;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS;
@@ -105,7 +147,8 @@ export async function runBenchInWorker(opts: {
   try {
     child = spawnProcess(process.execPath, [tsxBin(), PRECISION_BENCH_WORKER_PATH], {
       cwd: process.cwd(),
-      env: { ...process.env },
+      // Set explicitly either way, so an inherited value can never gate a floor-only run.
+      env: { ...process.env, [PRECISION_BENCH_JEV_GATE_ENV]: opts.jevGate ? '1' : '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (error) {
@@ -187,22 +230,131 @@ export async function runBenchInWorker(opts: {
  * quietly measures a different corpus than the one it reports is not usable.
  */
 export function assertCorpusSeeded(manifest: SeedManifest, expected: number): void {
-  const seeded = Object.keys(manifest.ids).length;
-  if (seeded === expected && manifest.failed.length === 0) return;
-  const sample = manifest.failed.slice(0, 3).join(', ');
+  // Shared with every bench; it quotes the first remember() error, not just the
+  // count ("114 failed" alone hid a NOT NULL schema fault for four weeks, WI-10004107).
+  const reason = seedFailureReason(manifest, expected);
+  if (reason === null) return;
   throw new Error(
-    `corpus seed incomplete: ${seeded}/${expected} seeded, ${manifest.failed.length} failed` +
-      (sample ? ` (e.g. ${sample})` : '') +
+    reason +
       ` — refusing to record a run. An unseeded corpus scores 0 for INFRASTRUCTURE reasons, not recall ` +
       `reasons; recording it would false-alarm the recall canary and poison its baseline (EI-10793).`,
   );
 }
 
+/** What the Jev leg of a gated replay did; stored under `by_class._jev`. */
+export interface JevGateReplayStats {
+  /** Answering model id(s), sorted and `+`-joined; null when nothing answered. */
+  readonly model: string | null;
+  readonly threshold: number;
+  readonly encoding: string;
+  /** Queries with at least one floor-admitted candidate, i.e. calls made. */
+  readonly judged: number;
+  readonly answered: number;
+  /** Fail-open outcomes: the query kept today's set, exactly as production does. */
+  readonly inconclusive: number;
+  readonly reasons: Readonly<Record<string, number>>;
+  /** Candidates removed across answered queries. */
+  readonly dropped: number;
+  readonly gateLatencyP50Ms: number | null;
+}
+
+export type JevGateFn = (input: JevMemoryGateInput) => Promise<JevMemoryGateResult>;
+
+/** The production gate, forced On: the parent already resolved the switch for this run. */
+const productionGate: JevGateFn = (input) =>
+  runJevMemoryGate(input, { resolve: async () => ({ effective: 'on' }), client: ensureJevDecisionClient });
+
+/**
+ * The admission-shape tag for a gated row. The model is part of the shape: a
+ * different model is a different admission function, so the recall canary must
+ * not judge one against the other's baseline, and a served-model change shows
+ * up as a new label on the Learning tab. Parsed back by `parseJevGateShape`.
+ */
+export function jevGatedShape(fusionMode: string, model: string): string {
+  return `fusionMode:${fusionMode};jev:${model}/${JEV_MEMORY_ENCODING}@${JEV_MEMORY_ADMIT_THRESHOLD}`;
+}
+
+/**
+ * Apply the Jev gate to a floor replay, query by query, the way the injector
+ * does (plan jev-decision-model-integration-2026-09-29, P-008): the floor-admitted
+ * candidates go to the REAL `runJevMemoryGate`, an answered verdict keeps the
+ * candidates with `keep[i]`, and anything inconclusive keeps today's set (fail
+ * open, D-002). A query the floor admitted nothing for makes no call.
+ */
+export async function gateReplayWithJev(
+  outcomes: readonly QueryOutcome[],
+  queryText: ReadonlyMap<string, string>,
+  gate: JevGateFn = productionGate,
+  concurrency = 4,
+): Promise<{ outcomes: QueryOutcome[]; stats: JevGateReplayStats }> {
+  const gated: QueryOutcome[] = [...outcomes];
+  const models = new Set<string>();
+  const reasons: Record<string, number> = {};
+  const latencies: number[] = [];
+  let judged = 0;
+  let answered = 0;
+  let dropped = 0;
+
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < outcomes.length) {
+      const i = next++;
+      const o = outcomes[i];
+      const candidates = o.candidates;
+      if (!candidates) throw new Error(`gateReplayWithJev: query ${o.queryId} was replayed without captureCandidates`);
+      if (candidates.length === 0) continue;
+      const message = queryText.get(o.queryId);
+      if (message === undefined) throw new Error(`gateReplayWithJev: no query text for ${o.queryId}`);
+      judged += 1;
+      const started = Date.now();
+      const verdict = await gate({
+        message,
+        candidates: candidates.map((c) => ({ id: c.id, text: c.text })),
+        consumer: PRECISION_BENCH_JEV_CONSUMER,
+      });
+      latencies.push(Date.now() - started);
+      if (verdict.effective === 'on' && verdict.outcome === 'answered') {
+        if (verdict.keep.length !== candidates.length) {
+          throw new Error(`gateReplayWithJev: ${verdict.keep.length} verdicts for ${candidates.length} candidates on ${o.queryId}`);
+        }
+        answered += 1;
+        models.add(verdict.model);
+        const kept = candidates.filter((_, j) => verdict.keep[j]);
+        dropped += candidates.length - kept.length;
+        gated[i] = withCandidates(o, kept);
+      } else {
+        const reason = verdict.effective === 'on' && verdict.outcome === 'inconclusive' ? verdict.reason : `effective-${verdict.effective}`;
+        reasons[reason] = (reasons[reason] ?? 0) + 1;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, outcomes.length)) }, worker));
+
+  return {
+    outcomes: gated,
+    stats: {
+      model: models.size > 0 ? [...models].sort().join('+') : null,
+      threshold: JEV_MEMORY_ADMIT_THRESHOLD,
+      encoding: JEV_MEMORY_ENCODING,
+      judged,
+      answered,
+      inconclusive: judged - answered,
+      reasons,
+      dropped,
+      gateLatencyP50Ms: latencies.length > 0 ? latencyStats(latencies).p50 : null,
+    },
+  };
+}
+
 /**
  * Run the floored hybrid gold-set ONCE and return the metrics (no DB write).
  * Exported for a CLI / one-off seeding run and for the isolated worker's core.
+ * With `jevGate`, the replay then goes through the Jev gate (P-008) and the
+ * metrics describe the gated set.
  */
-export async function benchMemoryPrecision(): Promise<MemoryPrecisionMetrics> {
+export async function benchMemoryPrecision(
+  opts: { jevGate?: boolean; gate?: JevGateFn } = {},
+): Promise<MemoryPrecisionMetrics> {
   const corpus = loadCorpusFixture('v1');
   const gold = loadGoldSetFixture('v1');
   const ctx = await makeBackendCtx('hybrid', false);
@@ -229,8 +381,30 @@ export async function benchMemoryPrecision(): Promise<MemoryPrecisionMetrics> {
       minScore: f.minScore,
       minLexScore: f.minLexScore,
       fusionMode: f.fusionMode,
+      // The gate needs exactly the set the floor let through (P-008).
+      ...(opts.jevGate ? { captureCandidates: true } : {}),
     });
-    const hardNeg = retrieval.byClass['hard-negative'];
+
+    // P-008: when the workspace's Jev switch is On, the injector filters the
+    // floor-admitted set through Jev, so the monitor measures that set. A run in
+    // which Jev answered NOTHING measured the floor alone (production failed open
+    // on every turn too), so it is recorded under the floor-only shape: a gated
+    // label on an ungated measurement would corrupt the gated baseline.
+    let byClass = retrieval.byClass;
+    let overall = retrieval.overall;
+    let shape = `fusionMode:${f.fusionMode}`;
+    let jevStats: JevGateReplayStats | null = null;
+    if (opts.jevGate) {
+      const queryText = new Map(gold.queries.map((q) => [q.id, q.query] as const));
+      const gated = await gateReplayWithJev(retrieval.perQuery, queryText, opts.gate);
+      jevStats = gated.stats;
+      if (gated.stats.answered > 0 && gated.stats.model !== null) {
+        ({ byClass, overall } = aggregateByClass(gated.outcomes));
+        shape = jevGatedShape(f.fusionMode, gated.stats.model);
+      }
+    }
+
+    const hardNeg = byClass['hard-negative'];
     return {
       backend: ctx.backend.name,
       corpusVersion: 'v1',
@@ -240,12 +414,13 @@ export async function benchMemoryPrecision(): Promise<MemoryPrecisionMetrics> {
       floorCosine: f.minScore ?? 0,
       floorLex: f.minLexScore ?? 0,
       fpAt5: hardNeg?.fpAt5 ?? null,
-      rAt10: retrieval.overall.r10,
-      pAt5: retrieval.overall.p5,
-      mrr: retrieval.overall.mrr,
-      medianTopScore: retrieval.overall.medianTopScore ?? null,
+      rAt10: overall.r10,
+      pAt5: overall.p5,
+      mrr: overall.mrr,
+      medianTopScore: overall.medianTopScore ?? null,
+      // Retrieval latency only; the gate's own p50 is in by_class._jev.
       latencyP50Ms: retrieval.latency.p50,
-      byClass: retrieval.byClass as Record<string, unknown>,
+      byClass: { ...byClass, ...(jevStats ? { _jev: jevStats } : {}) } as Record<string, unknown>,
       // Embedding cost is not separately metered here (small, no LLM); left null.
       costUsd: null,
       // WI-7179: tag the admission shape onto the row (no schema migration —
@@ -254,7 +429,8 @@ export async function benchMemoryPrecision(): Promise<MemoryPrecisionMetrics> {
       // canary's next reader) comparing across this boundary should expect a
       // real one-time step-change here, not a regression — see WI-7179's
       // completion note for why the pre-fix history isn't a valid baseline.
-      notes: `fusionMode:${f.fusionMode}`,
+      // P-008 extends the tag with the Jev operating point on a gated run.
+      notes: shape,
     };
   } finally {
     // A cleanup failure (e.g. a held pooled connection) must never lose the run;
@@ -287,9 +463,22 @@ export async function runMemoryPrecisionMonitor(
   const flag = deps.flag ?? ((slug: string) => getFlag(FLAGS.MEMORY_PRECISION_BENCH, `routine:${slug}`));
   if (!(await flag(input.installSlug))) return { ran: false, skipReason: 'flag-off' };
 
+  // P-008: measure what the injector does. Only an EFFECTIVE On (mode on AND a
+  // key stored) gates the push path; Off and Log only inject the floor's set.
+  let jevGate = false;
+  try {
+    const effective = deps.jevEffective
+      ? await deps.jevEffective(input.workspaceId)
+      : (await resolveJevMemoryInjection(input.workspaceId)).effective;
+    jevGate = effective === 'on';
+  } catch (e) {
+    log(`Jev setting read failed (measuring the floor alone): ${e instanceof Error ? e.message : e}`);
+  }
+
   let metrics: MemoryPrecisionMetrics;
   try {
-    metrics = await (deps.runBench ?? deps.runBenchWorker ?? runBenchInWorker)();
+    const run = deps.runBench ?? deps.runBenchWorker ?? ((o: PrecisionBenchRunOptions) => runBenchInWorker({ jevGate: o.jevGate }));
+    metrics = await run({ jevGate });
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     log(`bench failed (non-fatal): ${error}`);
@@ -359,6 +548,7 @@ export async function runMemoryPrecisionMonitor(
   log(
     `recorded run #${rowId}: fp@5=${fmt(metrics.fpAt5)} r@10=${fmt(metrics.rAt10)} ` +
       `p@5=${fmt(metrics.pAt5)} mrr=${fmt(metrics.mrr)} (floor ${metrics.floorCosine}/${metrics.floorLex}) ` +
+      `shape=${metrics.notes ?? 'untagged'} ` +
       `recall-canary=${evaluation.reason}${evaluation.alert ? ' ALERT' : ''}`,
   );
   return { ran: true, metrics, rowId };

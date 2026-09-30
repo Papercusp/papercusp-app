@@ -44,7 +44,7 @@ const BAR_MILESTONES: Record<ByocAcceptanceBar, readonly ByocReleaseMilestoneKey
   'R-4': ['build', 'publication'],
   'R-5': ['root-bootstrap', 'fixed-agent-initialization', 'customer-acceptance'],
   // Shipment consumes acceptance; it cannot be a prerequisite for grading it.
-  'R-6': ['soak-24h', 'resource-census', 'billing-closure', 'cleanup'],
+  'R-6': ['soak', 'resource-census', 'billing-closure', 'cleanup'],
 };
 
 /**

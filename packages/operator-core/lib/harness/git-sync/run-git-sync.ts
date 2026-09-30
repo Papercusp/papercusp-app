@@ -1275,6 +1275,26 @@ export function expandAtomicLiveLockExclusions(
   return { paths: [...paths].sort(), groups: outputGroups };
 }
 
+const FETCH_FAILURE_REASON_MAX_CHARS = 300;
+
+/**
+ * WI-10004103: the one line of a failed fetch's stderr worth putting in a status message.
+ * A disk-headroom refusal from `withGitFetchHeadroom` wins, because it is the actionable
+ * cause and git's own output around it is noise; otherwise the last non-empty line
+ * (git prints its fatal error last). Whitespace is collapsed and the result capped.
+ */
+export function summarizeFetchFailure(stderr: string | null | undefined): string {
+  const lines = String(stderr ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (lines.length === 0) return '';
+  const chosen = lines.find((line) => /disk headroom/i.test(line)) ?? lines[lines.length - 1]!;
+  return chosen.length > FETCH_FAILURE_REASON_MAX_CHARS
+    ? `${chosen.slice(0, FETCH_FAILURE_REASON_MAX_CHARS - 1)}…`
+    : chosen;
+}
+
 const NPM_MANIFEST_BASENAMES = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.json']);
 
 /** True for an npm manifest or lockfile this repository tracks (never one inside node_modules). */
@@ -4459,9 +4479,15 @@ async function reconcileAndPushOneRepo(
       const rl = await runGit(['rev-list', '--count', `${remote}/${branch}..HEAD`], repoPath);
       const aheadCount = rl.code === 0 ? Number.parseInt(rl.stdout.trim(), 10) || 0 : 1; // ref missing → assume unpushed
       if (committedLocal || aheadCount > 0) {
+        // WI-10004103: carry WHY the fetch failed. Without it a disk-headroom refusal
+        // (withGitFetchHeadroom), a corrupt object store and a real network error all read
+        // as the same "cannot reconcile", and the stall gets filed as a credentials bug.
+        const reason = summarizeFetchFailure(fetch.stderr);
         return {
           status: 'error',
-          message: `fetch failed; HEAD has unpushed commits not on ${remote}/${branch} (cannot reconcile)${cleanupNote}`,
+          message:
+            `fetch failed; HEAD has unpushed commits not on ${remote}/${branch} (cannot reconcile)` +
+            `${reason ? `: ${reason}` : ''}${cleanupNote}`,
         };
       }
       return { status: 'nothing' };

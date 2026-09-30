@@ -788,13 +788,43 @@ export function clampToBudget(block: string, budget: number = MID_TURN_BUDGET_CH
 }
 
 /**
- * The failure intervention has its own bounded budget and must survive every
- * memory-recall early return. Keep composition here, at the shared delivery
- * seam, rather than teaching the memory pipeline about failure-loop state.
+ * The failure intervention and the worn post-tool rules each have their own
+ * bounded budget and must survive every memory-recall early return. Keep
+ * composition here, at the shared delivery seam, rather than teaching the
+ * memory pipeline about failure-loop state or identity rules.
  */
-export function composeMidTurnContextText(memoryBlock: string, failureHint: string): string {
-  const parts = [failureHint.trim(), clampToBudget(memoryBlock).trim()].filter(Boolean);
+export function composeMidTurnContextText(memoryBlock: string, failureHint: string, ruleContext: string): string {
+  const parts = [failureHint.trim(), ruleContext.trim(), clampToBudget(memoryBlock).trim()].filter(Boolean);
   return parts.join('\n\n');
+}
+
+/** The post-tool rule sink's share of the port's 1.5s hook wall. */
+const POST_TOOL_RULE_BUDGET_MS = 1000;
+
+/**
+ * The wearer's `post-tool` sync rules due for this batch (portable-identity-
+ * packages P-011, D-023): the one context sink whose client hook is this port.
+ * Their budget is the sink evaluator's aggregate one, charged to the durable
+ * hook turn, so it is not clamped again here. The wall covers the wearer and
+ * worn-rule reads as well as the evaluation, because `respond` waits on this and
+ * a slow read must not cost the batch its recall too. Never throws.
+ */
+async function postToolRuleContextText(ownerId: string, workspace: Promise<string>, tools: string[]): Promise<string> {
+  if (tools.length === 0) return '';
+  try {
+    const [{ evaluateHookContextSink }, { withBoundedTimeout }, workspaceId] = await Promise.all([
+      import('../../../agent-identities/sync-hook-rules'),
+      import('../../../bounded-timeout'),
+      workspace,
+    ]);
+    const bounded = await withBoundedTimeout(
+      (signal) => evaluateHookContextSink({ ownerId, workspaceId, sink: 'post-tool', tools, signal }),
+      { fallback: { text: '', result: null }, timeoutMs: POST_TOOL_RULE_BUDGET_MS, label: 'mid-turn:post-tool-rules' },
+    );
+    return bounded.value.text;
+  } catch {
+    return '';
+  }
 }
 
 async function resolveFailureLoopHintText(hint: FailureLoopHint): Promise<string> {
@@ -1018,11 +1048,30 @@ const midTurnContext = defineTool({
     const detectorSessionKey = (body.detectorSessionKey ?? owner).trim();
     const pendingFailureHint = takePendingFailureLoopHint(detectorSessionKey);
     const failureHintText = pendingFailureHint ? resolveFailureLoopHintText(pendingFailureHint) : Promise.resolve('');
-    const respond = async (memoryBlock = ''): Promise<Response> =>
-      Response.json({
+    // P-011: the worn post-tool rules start here too, for the same reason — no
+    // recall early return below may drop them.
+    const batchTools = (Array.isArray(body.toolCalls) && body.toolCalls.length
+      ? body.toolCalls.map((call) => call?.tool)
+      : [body.tool])
+      .map((tool) => (typeof tool === 'string' ? tool.trim() : ''))
+      .filter(Boolean);
+    // Resolved once, for the rules and the recall alike.
+    const workspaceIdResolved = (async () => {
+      const workspace = (body.workspace ?? '').trim();
+      if (workspace && workspace !== '*') return workspace;
+      const { activeWorkspaceId } = await import('../../../workspace-registry');
+      return activeWorkspaceId();
+    })();
+    // Awaited inside the try below; an early throw there must not leave it unhandled.
+    workspaceIdResolved.catch(() => undefined);
+    const ruleContextText = postToolRuleContextText(owner, workspaceIdResolved, batchTools);
+    const respond = async (memoryBlock = ''): Promise<Response> => {
+      const [failureHint, ruleContext] = await Promise.all([failureHintText, ruleContextText]);
+      return Response.json({
         ok: true,
-        text: composeMidTurnContextText(memoryBlock, await failureHintText),
+        text: composeMidTurnContextText(memoryBlock, failureHint, ruleContext),
       });
+    };
 
     try {
       // P-005 / D-005 §3b — derive DETAILED so a miss can leave a TRACE.
@@ -1039,9 +1088,7 @@ const midTurnContext = defineTool({
       // Resolved BEFORE the first coverage write, not at the recall site, so a
       // miss row and a recall row for the same session key on the same
       // workspace. Split keys would make per-workspace coverage unreadable.
-      const workspace = (body.workspace ?? '').trim();
-      const { activeWorkspaceId } = await import('../../../workspace-registry');
-      const workspaceId = workspace && workspace !== '*' ? workspace : activeWorkspaceId();
+      const workspaceId = await workspaceIdResolved;
 
       const coverage = {
         port: 'mid-turn' as const,

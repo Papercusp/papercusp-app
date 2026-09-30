@@ -299,8 +299,9 @@ export const PROSE_VECTOR_COLUMNS: ReadonlyArray<{ table: string; column: string
   { table: 'harness_shared.operator_turns', column: 'text_embedding' },
   { table: 'harness_shared.work_items', column: 'embedding' },
   { table: 'harness_shared.doc_sections', column: 'embedding' },
-  // Migration 781 adds canonical doc content and its in-row semantic index.
-  { table: 'harness_shared.harness_docs', column: 'embedding' },
+  // harness_docs.embedding (migration 781) was dropped by migration 1249: nothing
+  // read it. Harness docs are searched as doc_sections rows (generic-rag-chunking-
+  // 2026-09-29 P-013 / D-025).
   { table: 'harness_shared.harness_plans', column: 'embedding' },
   { table: 'harness_shared.harness_escalations', column: 'body_embedding' },
   { table: 'harness_shared.harness_brainstorm', column: 'content_embedding' },
@@ -327,11 +328,10 @@ export const PROSE_VECTOR_COLUMNS: ReadonlyArray<{ table: string; column: string
   // it never ran, because an integration test is not selected by a migration edit.
   { table: 'harness_shared.consult_state', column: 'query_embedding' },
   { table: 'harness_shared.interest_watches', column: 'embedding' },
-  // Migration 1097 (WI-2142144): coord thread discussion posts, one of the two
-  // continuity corpora that had neither an embedding nor a tsvector. Refilled by
-  // its TARGETS entry. (The other, carry_notes.note_embedding, was dropped by
-  // migration 1243: nothing read it, generic-rag-chunking-2026-09-29 D-020.)
-  { table: 'harness_shared.coord_thread_posts', column: 'body_embedding' },
+  // Migration 1097 (WI-2142144) gave the two continuity corpora vectors that no
+  // query ever read. Both are gone: carry_notes.note_embedding by migration 1243
+  // (D-020) and coord_thread_posts.body_embedding by migration 1249 (D-025) of
+  // generic-rag-chunking-2026-09-29. Their tsvectors remain.
 ];
 
 /**

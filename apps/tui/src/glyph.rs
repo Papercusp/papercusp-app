@@ -294,14 +294,19 @@ mod tests {
         use ratatui::{backend::TestBackend, widgets::Paragraph, Terminal};
         let mut term = Terminal::new(TestBackend::new(20, 1)).unwrap();
         let has_control = |buf: &ratatui::buffer::Buffer| {
-            buf.content.iter().any(|c| c.symbol().chars().any(char::is_control))
+            buf.content
+                .iter()
+                .any(|c| c.symbol().chars().any(char::is_control))
         };
         let raw = term
             .draw(|f| f.render_widget(Paragraph::new("1\tconst"), f.area()))
             .unwrap()
             .buffer
             .clone();
-        assert!(has_control(&raw), "ratatui passes the tab through; the scrub must exist");
+        assert!(
+            has_control(&raw),
+            "ratatui passes the tab through; the scrub must exist"
+        );
         let scrubbed = term
             .draw(|f| {
                 f.render_widget(Paragraph::new("1\tconst"), f.area());

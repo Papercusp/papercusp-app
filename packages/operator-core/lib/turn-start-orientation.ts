@@ -2236,6 +2236,150 @@ const TURN_START_LEADER_BRIEF_CARRY_AND_AGENT_ORDERS: readonly OrientationSink[]
 ];
 
 /**
+ * The ownerDirectives class's lines, split by whose they are.
+ *
+ * D-027 (goal-brief-to-claimed-plan-work-2026-09-23): the composer BREAKS on the
+ * first row that does not fit, so rendering other sessions' FYI groups at order 20
+ * spent the whole budget before a session's OWN work. Measured on a goal holder:
+ * three peer groups (~850 chars) filled the block and its plan-placement obligation
+ * (order 120) never rendered. Own directives keep order 20; peer groups render at
+ * order 185, after your own work classes, and stay recoverable via orders:list.
+ */
+function renderOwnerDirectiveLines(directives: OrientationOwnerDirective[]): { own: string[]; peers: string[] } {
+  if (directives.length === 0) return { own: [], peers: [] };
+  // A directive already settled by disposition renders in NO imperative
+  // bucket (P-006 / D-007). Dropping it here rather than at the reader is
+  // deliberate: the reader's job is to report the row, this class's job is
+  // to decide whether it is still ASKING for something.
+  const live = directives.filter((d) => !d.status || directiveNeedsAction(d.status));
+  if (live.length === 0) return { own: [], peers: [] };
+  // Your own directives first: they are the only ones that carry an obligation.
+  const ordered = [
+    ...live.filter((d) => d.addressedToMe === true),
+    ...live.filter((d) => d.addressedToMe !== true),
+  ];
+  const own: string[] = [];
+  const peers: string[] = [];
+  // directive-ownership-clarity-2026-09-23 P-003 / D-001: another session's
+  // directives render as ONE line per addressee — that agent, its state and
+  // current work, then its directives — so where a directive appears says
+  // whose it is. The flat list (a one-word YOURS/team label per row) is what
+  // an agent misread on 2026-09-23. Groups collect here and flush after the
+  // loop; the 5-directive cap is unchanged, and a group is never more lines.
+  const groups = new Map<string, { head: OrientationOwnerDirective; parts: string[]; routes: number[]; related: boolean }>();
+  for (const directive of ordered.slice(0, 5)) {
+    // DEFENSIVE, and load-bearing rather than belt-and-braces: this render
+    // runs on the turn-start hot path inside projectOrientationRows, which
+    // has NO per-segment error isolation — `for (const text of render(...))`
+    // propagates, so ONE throw here blanks the ENTIRE orientation banner
+    // (every class, every row) for that agent, on every turn. The blast
+    // radius of a malformed row is the whole block, not one line.
+    //
+    // A row with a missing/NULL recordedBy is REACHABLE, not hypothetical:
+    // WI-10002437 measured 41 damaged directive rows, and this very failure
+    // is how it surfaced — a coverage fixture written before P-007 added the
+    // required fields left recordedBy absent, and `.length` threw. So each
+    // field read here degrades to a labelled value instead of throwing.
+    const rawText = typeof directive.verbatimText === 'string' ? directive.verbatimText : '';
+    // D-004: full verbatim under the cap, the labelled agent summary over it,
+    // never a cut fragment of the owner's words.
+    const shown = rawText.trim()
+      ? directiveDisplayText({
+          id: directive.id,
+          verbatimText: rawText,
+          summaryText: directive.summaryText ?? null,
+          summaryBy: directive.summaryBy ?? null,
+        })
+      : '(no text recorded)';
+    // `unknown` is deliberately NOT a session id: it can never equal an
+    // ownerId, so an unattributable row can only ever render as NOT-mine.
+    const recordedBy =
+      typeof directive.recordedBy === 'string' && directive.recordedBy.length > 0
+        ? directive.recordedBy
+        : null;
+    const by = recordedBy === null ? 'unknown' : shortOwner(recordedBy);
+    // NOTE: a segment `render` receives only (state, committed) — no ownerId
+    // — so addressing is resolved in the READER, which does have it, and
+    // arrives here as a decided boolean. Undecided (`undefined`) must fall to
+    // the NOT-mine branch: the expensive error is claiming a foreign
+    // directive, never being over-cautious about your own.
+    const mine = directive.addressedToMe === true;
+    const claimedBy = directive.status?.kind === 'claimed' ? directive.status.claimedBy : undefined;
+    // `capturedByHook: false` means an AGENT asserted this, not the owner.
+    // Labelled, never silently promoted to owner speech.
+    const origin = directive.capturedByHook ? '' : ' [owner-candidate]';
+    // D-004(1): the same pasted text is open for other sessions too — say so,
+    // so the reader closes THIS id and never the look-alikes.
+    const sentTo = alsoSentToNote(directive.alsoSentTo);
+
+    if (mine) {
+      // OBLIGATION framing — only ever for the session the owner addressed
+      // (R-3). An over-cap directive without a summary asks for one: the
+      // summary is what every OTHER agent will see (D-004).
+      const summaryAsk =
+        rawText.trim() && directiveNeedsSummary({ verbatimText: rawText }) && !directive.summaryText
+          ? ` It is long: write what other agents will see first — orders:summarize { id: ${directive.id}, summary }.`
+          : '';
+      own.push(
+        `- 📌 YOURS · owner directive #${directive.id}${origin}: ${shown}${sentTo} — carry out, then orders:disposition { id: ${directive.id}, status, note }.${summaryAsk}`,
+      );
+      continue;
+    }
+    // AWARENESS framing for every other session's directive (D-003): the
+    // owner wants the whole team to know what everyone is working on, but
+    // a line here is never an obligation — acting on another session's
+    // directive without taking it is how rows got destroyed
+    // (WI-10002426 / WI-10002437).
+    const group = groups.get(by) ?? { head: directive, parts: [], routes: [], related: false };
+    group.related ||= directive.relatedToMe === true;
+    // A directive a peer already holds carries no route at all: offering
+    // work_items:create there is how in-flight work gets duplicated.
+    if (claimedBy) {
+      group.parts.push(
+        'owner directive #' +
+          directive.id +
+          origin +
+          ' (claimed by ' +
+          shortOwner(claimedBy) +
+          ' — awareness only, already taken; do not act on or resolve it.): ' +
+          shown +
+          sentTo,
+      );
+    } else {
+      group.parts.push('owner directive #' + directive.id + origin + ': ' + shown + sentTo);
+      group.routes.push(directive.id);
+    }
+    groups.set(by, group);
+  }
+  // Related-to-your-work groups first; otherwise first-appearance order.
+  const orderedGroups = [...groups.entries()].sort(([, a], [, b]) => Number(b.related) - Number(a.related));
+  for (const [by, group] of orderedGroups) {
+    const state = typeof group.head.addresseeState === 'string' && group.head.addresseeState ? group.head.addresseeState : null;
+    const rawIntent = typeof group.head.addresseeIntent === 'string' ? group.head.addresseeIntent.trim() : '';
+    const intent = rawIntent.length > 80 ? `${rawIntent.slice(0, 80)}…` : rawIntent;
+    const context = [state, intent ? `working on: ${intent}` : null].filter(Boolean).join('; ');
+    const related = group.related ? ' [related to your work]' : '';
+    const route =
+      group.routes.length === 0
+        ? ''
+        : ` — NOT yours to resolve; take one only via work_items:create { directiveRef: ${group.routes.length === 1 ? group.routes[0] : `<${group.routes.join('|')}>`} }.`;
+    peers.push(
+      '- 👥 ' +
+        by +
+        (context ? ' (' + context + ')' : '') +
+        related +
+        ' — THEIR open owner directives addressed to ' +
+        by +
+        ': ' +
+        group.parts.join(' · ') +
+        route,
+    );
+  }
+  if (ordered.length > 5) peers.push(`- 📌 +${ordered.length - 5} more open owner directives — orders:list { open: true }.`);
+  return { own, peers };
+}
+
+/**
  * THE SHARED CLASS REGISTRY (P-023; mechanism per D-015).
  *
  * Every orientation state category is declared here exactly once, and every
@@ -2290,138 +2434,13 @@ export const ORIENTATION_CLASS_REGISTRY: readonly RegisteredOrientationClass[] =
     segments: [
       {
         order: 20,
-        render: (directives) => {
-          if (directives.length === 0) return [];
-          // A directive already settled by disposition renders in NO imperative
-          // bucket (P-006 / D-007). Dropping it here rather than at the reader is
-          // deliberate: the reader's job is to report the row, this class's job is
-          // to decide whether it is still ASKING for something.
-          const live = directives.filter((d) => !d.status || directiveNeedsAction(d.status));
-          if (live.length === 0) return [];
-          // Your own directives first: they are the only ones that carry an obligation.
-          const ordered = [
-            ...live.filter((d) => d.addressedToMe === true),
-            ...live.filter((d) => d.addressedToMe !== true),
-          ];
-          const lines: string[] = [];
-          // directive-ownership-clarity-2026-09-23 P-003 / D-001: another session's
-          // directives render as ONE line per addressee — that agent, its state and
-          // current work, then its directives — so where a directive appears says
-          // whose it is. The flat list (a one-word YOURS/team label per row) is what
-          // an agent misread on 2026-09-23. Groups collect here and flush after the
-          // loop; the 5-directive cap is unchanged, and a group is never more lines.
-          const groups = new Map<string, { head: OrientationOwnerDirective; parts: string[]; routes: number[]; related: boolean }>();
-          for (const directive of ordered.slice(0, 5)) {
-            // DEFENSIVE, and load-bearing rather than belt-and-braces: this render
-            // runs on the turn-start hot path inside projectOrientationRows, which
-            // has NO per-segment error isolation — `for (const text of render(...))`
-            // propagates, so ONE throw here blanks the ENTIRE orientation banner
-            // (every class, every row) for that agent, on every turn. The blast
-            // radius of a malformed row is the whole block, not one line.
-            //
-            // A row with a missing/NULL recordedBy is REACHABLE, not hypothetical:
-            // WI-10002437 measured 41 damaged directive rows, and this very failure
-            // is how it surfaced — a coverage fixture written before P-007 added the
-            // required fields left recordedBy absent, and `.length` threw. So each
-            // field read here degrades to a labelled value instead of throwing.
-            const rawText = typeof directive.verbatimText === 'string' ? directive.verbatimText : '';
-            // D-004: full verbatim under the cap, the labelled agent summary over it,
-            // never a cut fragment of the owner's words.
-            const shown = rawText.trim()
-              ? directiveDisplayText({
-                  id: directive.id,
-                  verbatimText: rawText,
-                  summaryText: directive.summaryText ?? null,
-                  summaryBy: directive.summaryBy ?? null,
-                })
-              : '(no text recorded)';
-            // `unknown` is deliberately NOT a session id: it can never equal an
-            // ownerId, so an unattributable row can only ever render as NOT-mine.
-            const recordedBy =
-              typeof directive.recordedBy === 'string' && directive.recordedBy.length > 0
-                ? directive.recordedBy
-                : null;
-            const by = recordedBy === null ? 'unknown' : shortOwner(recordedBy);
-            // NOTE: a segment `render` receives only (state, committed) — no ownerId
-            // — so addressing is resolved in the READER, which does have it, and
-            // arrives here as a decided boolean. Undecided (`undefined`) must fall to
-            // the NOT-mine branch: the expensive error is claiming a foreign
-            // directive, never being over-cautious about your own.
-            const mine = directive.addressedToMe === true;
-            const claimedBy = directive.status?.kind === 'claimed' ? directive.status.claimedBy : undefined;
-            // `capturedByHook: false` means an AGENT asserted this, not the owner.
-            // Labelled, never silently promoted to owner speech.
-            const origin = directive.capturedByHook ? '' : ' [owner-candidate]';
-            // D-004(1): the same pasted text is open for other sessions too — say so,
-            // so the reader closes THIS id and never the look-alikes.
-            const sentTo = alsoSentToNote(directive.alsoSentTo);
-
-            if (mine) {
-              // OBLIGATION framing — only ever for the session the owner addressed
-              // (R-3). An over-cap directive without a summary asks for one: the
-              // summary is what every OTHER agent will see (D-004).
-              const summaryAsk =
-                rawText.trim() && directiveNeedsSummary({ verbatimText: rawText }) && !directive.summaryText
-                  ? ` It is long: write what other agents will see first — orders:summarize { id: ${directive.id}, summary }.`
-                  : '';
-              lines.push(
-                `- 📌 YOURS · owner directive #${directive.id}${origin}: ${shown}${sentTo} — carry out, then orders:disposition { id: ${directive.id}, status, note }.${summaryAsk}`,
-              );
-              continue;
-            }
-            // AWARENESS framing for every other session's directive (D-003): the
-            // owner wants the whole team to know what everyone is working on, but
-            // a line here is never an obligation — acting on another session's
-            // directive without taking it is how rows got destroyed
-            // (WI-10002426 / WI-10002437).
-            const group = groups.get(by) ?? { head: directive, parts: [], routes: [], related: false };
-            group.related ||= directive.relatedToMe === true;
-            // A directive a peer already holds carries no route at all: offering
-            // work_items:create there is how in-flight work gets duplicated.
-            if (claimedBy) {
-              group.parts.push(
-                'owner directive #' +
-                  directive.id +
-                  origin +
-                  ' (claimed by ' +
-                  shortOwner(claimedBy) +
-                  ' — awareness only, already taken; do not act on or resolve it.): ' +
-                  shown +
-                  sentTo,
-              );
-            } else {
-              group.parts.push('owner directive #' + directive.id + origin + ': ' + shown + sentTo);
-              group.routes.push(directive.id);
-            }
-            groups.set(by, group);
-          }
-          // Related-to-your-work groups first; otherwise first-appearance order.
-          const orderedGroups = [...groups.entries()].sort(([, a], [, b]) => Number(b.related) - Number(a.related));
-          for (const [by, group] of orderedGroups) {
-            const state = typeof group.head.addresseeState === 'string' && group.head.addresseeState ? group.head.addresseeState : null;
-            const rawIntent = typeof group.head.addresseeIntent === 'string' ? group.head.addresseeIntent.trim() : '';
-            const intent = rawIntent.length > 80 ? `${rawIntent.slice(0, 80)}…` : rawIntent;
-            const context = [state, intent ? `working on: ${intent}` : null].filter(Boolean).join('; ');
-            const related = group.related ? ' [related to your work]' : '';
-            const route =
-              group.routes.length === 0
-                ? ''
-                : ` — NOT yours to resolve; take one only via work_items:create { directiveRef: ${group.routes.length === 1 ? group.routes[0] : `<${group.routes.join('|')}>`} }.`;
-            lines.push(
-              '- 👥 ' +
-                by +
-                (context ? ' (' + context + ')' : '') +
-                related +
-                ' — THEIR open owner directives addressed to ' +
-                by +
-                ': ' +
-                group.parts.join(' · ') +
-                route,
-            );
-          }
-          if (ordered.length > 5) lines.push(`- 📌 +${ordered.length - 5} more open owner directives — orders:list { open: true }.`);
-          return lines;
-        },
+        render: (directives) => renderOwnerDirectiveLines(directives).own,
+      },
+      {
+        // D-027: other sessions' directives are awareness, not your work — they
+        // follow every class that is (see renderOwnerDirectiveLines).
+        order: 185,
+        render: (directives) => renderOwnerDirectiveLines(directives).peers,
       },
     ],
   }),
@@ -3247,12 +3266,33 @@ export function composeOrientationBlockWithRows(input: ComposeOrientationBlockIn
   const out: string[] = [header];
   const kept: OrientationRow[] = [];
   let used = header.length;
-  for (const row of projected) {
+  let next = 0;
+  for (; next < projected.length; next += 1) {
+    const row = projected[next]!;
     const cost = row.text.length + 1; // + the newline joining it
     if (used + cost > budget) break;
     out.push(row.text);
     kept.push(row);
     used += cost;
+  }
+  // D-027: the break above used to drop every remaining row with no trace, so an
+  // agent could not tell "nothing is owed" from "it did not fit". Say what was cut,
+  // evicting kept rows from the tail until the marker fits. The marker is not a
+  // class's row: it is never credited as delivery of anything it names.
+  if (next < projected.length) {
+    const omitted = projected.slice(next);
+    const marker = () => {
+      const classes = [...new Set(omitted.map((row) => row.classId))];
+      const named = classes.slice(0, 3).join(', ') + (classes.length > 3 ? `, +${classes.length - 3}` : '');
+      return `- +${omitted.length} orientation rows omitted (${named}) — coord:orient`;
+    };
+    while (kept.length > 0 && used + marker().length + 1 > budget) {
+      const row = kept.pop()!;
+      out.pop();
+      omitted.unshift(row);
+      used -= row.text.length + 1;
+    }
+    if (used + marker().length + 1 <= budget) out.push(marker());
   }
   // Header alone says nothing — emit only if at least one real line survived.
   // A header-only composition delivered NOTHING, so its rows are dropped too:

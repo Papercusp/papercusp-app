@@ -36,6 +36,25 @@ export type InjectionSink = (typeof INJECTION_SINKS)[number];
 export const PACKAGE_RENDERABLE_SINKS = ['turn-start', 'agent-orders'] as const satisfies readonly InjectionSink[];
 export type PackageRenderableSink = (typeof PACKAGE_RENDERABLE_SINKS)[number];
 
+/**
+ * The client hook points a `delivery:'sync'` rule package runs at (P-011; D-023).
+ * One client-neutral adapter maps each to the Claude and Codex hook event:
+ * `turn-start` → UserPromptSubmit, `pre-tool` → PreToolUse, `post-tool` → the
+ * mid-turn port (Claude PostToolBatch, Codex PostToolUse), `stop` → Stop,
+ * `compaction` → SessionStart with source `compact`.
+ */
+export const HOOK_SINKS = ['turn-start', 'pre-tool', 'post-tool', 'stop', 'compaction'] as const;
+export type HookSink = (typeof HOOK_SINKS)[number];
+
+/** The hook sinks that carry context. `pre-tool` carries only guard verdicts: a
+ * context hook never votes on a pending call. */
+export const HOOK_CONTEXT_SINKS = ['turn-start', 'post-tool', 'stop', 'compaction'] as const satisfies readonly HookSink[];
+export type HookContextSink = (typeof HOOK_CONTEXT_SINKS)[number];
+
+/** The hook sinks that fire per tool call, the only ones a `tools` filter applies to. */
+export const HOOK_TOOL_SINKS = ['pre-tool', 'post-tool'] as const satisfies readonly HookSink[];
+export type HookToolSink = (typeof HOOK_TOOL_SINKS)[number];
+
 /** Host clamps; a declaration outside them is refused at compile, not silently clamped. */
 export const INJECTION_TOKEN_BUDGET_MAX = 2_000;
 export const INJECTION_PRIORITY_MIN = 0;

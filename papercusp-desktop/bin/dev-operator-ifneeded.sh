@@ -165,6 +165,25 @@ printf -v DEV_OPERATOR_DIR_Q '%q' "$DEV_OPERATOR_DIR"
 # this host held 1.8 GB in 64 MiB arenas without it). boot-malloc-arena.ts
 # re-execs an uncapped host as a backstop; setting it here skips that exec.
 DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_BIND_OVERRIDE}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT $DEV_HOST_COMMAND"
+# hono-host ASSUMES a reachable database (env URL, embedded-pg.json, or native
+# :5432 harness_admin), which every developer box has and a fresh clone does
+# not. With none reachable, boot bin/serve.ts instead: it starts its own
+# embedded Postgres + migrations and serves the UI, as the public README says
+# (open-source-release-2026-09-29 R-18). A frozen verifier entry or an explicit
+# OPERATOR_DEV_CMD always wins; the probe only chooses the default.
+DEV_OPERATOR_MODE=external-pg
+if [ -z "$DEV_HOST_ENTRY" ] && [ -z "${OPERATOR_DEV_CMD:-}" ]; then
+  PROBE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+  if ! (cd "$DEV_OPERATOR_DIR" && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && node "$SCRIPT_DIR/dev-operator-pg-probe.mjs" --repo-root "${DEV_SOURCE_ROOT:-$PROBE_ROOT}"); then
+    DEV_OPERATOR_MODE=embedded-pg
+  fi
+fi
+if [ "$DEV_OPERATOR_MODE" = embedded-pg ]; then
+  echo "[tauri] no reachable developer database — booting bin/serve.ts with its own embedded Postgres"
+  # Same .env.local + malloc cap, but serve.ts owns its lifecycle (embedded PG,
+  # in-process background workers), so none of the hono-host dev pins apply.
+  DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_BIND_OVERRIDE}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_SERVE_UI=1 npx tsx bin/serve.ts --ui"
+fi
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.
 DEV_CMD="${OPERATOR_DEV_CMD:-$DEFAULT_DEV_CMD}"
@@ -258,6 +277,16 @@ if in_use; then
     exit 0
   fi
 fi
+
+# A fresh clone has no gitignored dist/ for workspaces whose runtime entry
+# points there (@papercusp/sse), so the operator would crash-loop on
+# "Cannot find module .../dist/index.js". Build exactly those, once; a no-op
+# on a warm tree (open-source-release-2026-09-29 R-18).
+RUNTIME_BUILD_ROOT="${DEV_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
+node "$SCRIPT_DIR/ensure-runtime-workspace-builds.mjs" "$RUNTIME_BUILD_ROOT" || {
+  echo "[tauri] FATAL: could not build runtime workspace outputs under $RUNTIME_BUILD_ROOT" >&2
+  exit 1
+}
 
 echo "[tauri] starting operator dev server on :$PORT"
 # New session + process group so the whole npm → node → tsx tree is a

@@ -184,6 +184,8 @@ export type AdmissionStage =
   | 'workspace'
   /** already surfaced this session-epoch (or inside the wall-clock window). */
   | 'dedup'
+  /** the owner's Jev filter (setting On) judged it irrelevant to the message (jev-memory-gate.ts). */
+  | 'jev'
   /** near-duplicate collapse — the same fact stored under several ids. */
   | 'nearDuplicate'
   /** did not fit the char budget. */
@@ -194,6 +196,7 @@ export const ADMISSION_STAGES: readonly AdmissionStage[] = [
   'feedback',
   'workspace',
   'dedup',
+  'jev',
   'nearDuplicate',
   'budget',
 ];
@@ -222,6 +225,7 @@ export const ADMISSION_STAGE_SHORT_WHY: Record<AdmissionStage, string> = {
   feedback: 'the user deleted this fact, so it is not re-surfaced',
   workspace: 'scoped to another workspace (a cross-workspace correctness boundary)',
   dedup: 'already surfaced in this session-epoch',
+  jev: 'judged irrelevant to the message by Jev (Settings: On)',
   nearDuplicate: 'the same fact under another id, collapsed after ranking',
   budget: 'did not fit the char budget, cut after ranking',
 };
@@ -260,6 +264,8 @@ export const ADMISSION_STAGE_DESIGN_INTENT: Record<AdmissionStage, string> = {
     'A correctness boundary, not a filter to relax: a `project` hit leaking from another workspace. Reducing this loss means leaking cross-workspace memory.',
   dedup:
     'Already surfaced in this session-epoch. THE ONE STAGE WHERE A HIGH VALUE IS GENUINELY DIAGNOSTIC — but of the EPOCH, not of the filter. Sustained ~60% means the epoch is not advancing (the P-022 cutover orphaned the bump for 6 days; D-072), not that dedup is too aggressive. Residual loss on a live epoch is genuine within-epoch repeats and is correct. Check `memory_session_epochs` for organic bumps before touching anything here.',
+  jev:
+    'Opt-in precision filter (plan jev-decision-model-integration-2026-09-29, D-013): nonzero ONLY where the owner set Jev to On and stored a key; zero everywhere else is the specification. It drops a floor-admitted memory Jev judges irrelevant to the message (P(yes) < 0.3) and fails OPEN on any timeout, error or malformed answer, so it can remove noise but never blocks a turn. The loss is the feature; judge it against the weekly precision monitor, not by its size.',
   nearDuplicate:
     'The same fact stored under several ids, collapsed after ranking. Correct dedup; the loss is the feature.',
   budget:

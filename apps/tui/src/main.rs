@@ -567,13 +567,160 @@ async fn main() -> Result<()> {
     )
     .ok();
     terminal.show_cursor().ok();
+    // pui-chat-first-ux P-009: end (or, after /detach, keep) the attached
+    // conversation's engine. This runs on every way out of `run`, including
+    // the error return a closed terminal causes, and before anything is
+    // printed: a write to a hung-up terminal must not be able to skip it.
+    let exit_note = finish_su_session_on_exit().await;
     // pui-chat-first-ux P-004 "clean scrollback": now that the alternate screen
     // is gone, print the conversation to the normal screen so it stays in the
     // terminal's own scrollback (set by `run` for the chat-first surface only).
-    if let Some(text) = EXIT_TRANSCRIPT.get() {
-        println!("{text}");
+    // `writeln!`, not `println!`: after SIGHUP stdout is gone and println panics.
+    {
+        use std::io::Write as _;
+        if let Some(text) = EXIT_TRANSCRIPT.get() {
+            let _ = writeln!(std::io::stdout(), "{text}");
+        }
+        if let Some(note) = exit_note {
+            let _ = writeln!(std::io::stderr(), "{note}");
+        }
     }
     result
+}
+
+/// pui-chat-first-ux P-009: what quitting does to the attached conversation's
+/// engine, handed from `run` (which owns the `App`) to `main`. Refreshed on
+/// every event instead of computed once at the end, because a closed terminal
+/// makes the next draw fail and `run` returns early with that error.
+static SU_SESSION_EXIT: std::sync::Mutex<Option<su_session::SuSessionExit>> =
+    std::sync::Mutex::new(None);
+
+/// How long quitting waits for the host to end (or detach) the engine. The
+/// host's attendance lease still ends an engine this call failed to reach.
+const SU_SESSION_EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// After a quit signal, pui exits within this long even if teardown hangs.
+const SIGNAL_QUIT_DEADLINE: Duration = Duration::from_secs(5);
+
+fn record_su_session_exit(app: &App) {
+    let plan = app.su_session_exit();
+    if let Ok(mut slot) = SU_SESSION_EXIT.lock() {
+        if *slot != plan {
+            *slot = plan;
+        }
+    }
+}
+
+/// Carry out the recorded quit plan and return the one line to tell the user.
+async fn finish_su_session_on_exit() -> Option<String> {
+    let plan = SU_SESSION_EXIT
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())?;
+    let detach = matches!(plan, su_session::SuSessionExit::Detach { .. });
+    let outcome = tokio::time::timeout(SU_SESSION_EXIT_TIMEOUT, async move {
+        let client = OperatorClient::from_discovery().await?;
+        match plan {
+            su_session::SuSessionExit::End {
+                harness,
+                chat_id,
+                command,
+            } => {
+                client
+                    .send_su_session_command(&harness, &chat_id, command)
+                    .await
+            }
+            su_session::SuSessionExit::Detach { harness, chat_id } => {
+                client.detach_su_session(&harness, &chat_id).await
+            }
+        }
+    })
+    .await;
+    Some(su_session_exit_note(detach, outcome.map_err(|_| ())))
+}
+
+/// The line pui prints after quitting a conversation (P-009).
+fn su_session_exit_note(
+    detach: bool,
+    outcome: std::result::Result<Result<serde_json::Value>, ()>,
+) -> String {
+    let failure = match outcome {
+        Ok(Ok(_)) => None,
+        Ok(Err(error)) => Some(format!("{error:#}")),
+        Err(()) => Some("the operator did not answer in time".to_string()),
+    };
+    match (detach, failure) {
+        (false, None) => {
+            "Conversation ended. Open pui and use /resume to continue it.".to_string()
+        }
+        (true, None) => {
+            "This conversation is still running. Open pui and use /resume to return to it."
+                .to_string()
+        }
+        (false, Some(why)) => format!(
+            "pui could not end this conversation ({why}); the operator ends it shortly because nothing is attached."
+        ),
+        (true, Some(why)) => format!(
+            "pui could not keep this conversation running ({why}); it ends shortly because nothing is attached."
+        ),
+    }
+}
+
+/// pui-chat-first-ux P-009: SIGHUP (the terminal closed), SIGTERM and SIGINT
+/// become an ordinary quit, so the attached conversation's engine ends as it
+/// does on /exit. Registering them replaces the default disposition, which
+/// killed pui with no teardown at all; so a watchdog bounds the quit, and a
+/// second signal exits at once.
+#[cfg(unix)]
+async fn terminate_signal_listener(tx: UnboundedSender<Event>) {
+    use tokio::signal::unix::{signal, SignalKind};
+    let (Ok(mut hangup), Ok(mut terminate), Ok(mut interrupt)) = (
+        signal(SignalKind::hangup()),
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        return;
+    };
+    let mut received = false;
+    loop {
+        // The exit code a shell expects for each signal: 128 + its number.
+        let code = tokio::select! {
+            _ = hangup.recv() => 129,
+            _ = terminate.recv() => 143,
+            _ = interrupt.recv() => 130,
+        };
+        if received {
+            std::process::exit(code);
+        }
+        received = true;
+        std::thread::spawn(move || {
+            std::thread::sleep(SIGNAL_QUIT_DEADLINE);
+            std::process::exit(code);
+        });
+        // A closed channel means the run loop already ended; main's teardown
+        // is running and the watchdog above bounds it.
+        let _ = tx.send(Event::Terminate);
+    }
+}
+
+#[cfg(not(unix))]
+async fn terminate_signal_listener(_tx: UnboundedSender<Event>) {}
+
+#[cfg(test)]
+mod su_session_exit_tests {
+    use super::su_session_exit_note;
+
+    #[test]
+    fn the_exit_note_says_what_happened_to_the_conversation() {
+        let ended = su_session_exit_note(false, Ok(Ok(serde_json::json!({"ok": true}))));
+        assert!(ended.contains("ended") && ended.contains("/resume"));
+        let kept = su_session_exit_note(true, Ok(Ok(serde_json::json!({"ok": true}))));
+        assert!(kept.contains("still running") && kept.contains("/resume"));
+        let failed = su_session_exit_note(true, Ok(Err(anyhow::anyhow!("409 session_terminal"))));
+        assert!(failed.contains("could not keep") && failed.contains("409"));
+        let late = su_session_exit_note(false, Err(()));
+        assert!(late.contains("could not end") && late.contains("in time"));
+    }
 }
 
 /// The chat-first conversation as plain text, handed from `run` (which owns the
@@ -1294,6 +1441,7 @@ async fn run<B: Backend>(
         app.set_setup_note(note);
     }
     spawn_input_listener(tx.clone());
+    tokio::spawn(terminate_signal_listener(tx.clone()));
     let sync_pane = PaneFetchScope {
         pinned,
         selected: Arc::new(Mutex::new(app.tab)),
@@ -1391,6 +1539,7 @@ async fn run<B: Backend>(
     let mut tutorial_persisted = !app.show_tutorial;
 
     'event_loop: while let Some(ev) = rx.recv().await {
+        record_su_session_exit(&app);
         let prior_tab = app.tab;
         let prior_harness = app.harness.clone();
         let prior_context_target = app.context_projection_target.clone();
@@ -2672,6 +2821,7 @@ async fn run<B: Backend>(
             }
         }
     }
+    record_su_session_exit(&app);
     // pui-chat-first-ux P-004 "clean scrollback": hand the chat-first transcript
     // to `main`, which prints it once the alternate screen is gone.
     if app.chat_first {
@@ -5291,40 +5441,62 @@ fn surface_agent_chat_approval_hydration_failure(
 
 /// Startup and pot switches must land in a writable conversation. Legacy and
 /// unclassified chats stay in the history picker, but are not the chat front
-/// door. A canonical live binding takes precedence over an old policy stamp;
-/// a known ended/failed runtime is history even if its chat is not archived.
+/// door. A canonical live binding takes precedence over an old policy stamp.
+///
+/// pui-chat-first-ux P-009 / D-008: quitting a PUI ends its engine, so the chat
+/// it left normally reads `EndedArchived`. When no live chat qualifies, the most
+/// recent ended chat that can resume from its native transcript is the default,
+/// and the inventory adoption arm resumes it. A live chat always outranks an
+/// ended one; a failed/orphaned runtime, or an ended one with no native session
+/// id, is history only.
 fn default_operator_chat<'a>(
     summaries: &'a [agent_chats::AgentChatSummary],
     inventory: &[crate::su_session::SuSessionInventoryEntry],
     launch_cwd: Option<&str>,
 ) -> Option<&'a agent_chats::AgentChatSummary> {
+    // 2 = live (or an SU chat with no inventory row), 1 = resumable ended.
+    let rank = |chat: &agent_chats::AgentChatSummary| -> Option<u8> {
+        if chat.role != "operator" || chat.feature_id.is_some() || chat.archived_at.is_some() {
+            return None;
+        }
+        if let Some(session) = inventory
+            .iter()
+            .find(|entry| entry.agent_chat_id == chat.id)
+        {
+            // pui-chat-first-ux P-010: never reattach a session that was
+            // started in ANOTHER directory — `pui` in project A must not
+            // pick up project B's running session. A session whose
+            // directory is unknown stays eligible (older operators).
+            if let (Some(launch), Some(session_cwd)) = (launch_cwd, session.cwd.as_deref()) {
+                if !crate::su_session::session_in_directory(Some(session_cwd), Some(launch)) {
+                    return None;
+                }
+            }
+            return match session.reconciliation {
+                crate::su_session::SuSessionReconciliation::Attached if !session.terminal => {
+                    Some(2)
+                }
+                crate::su_session::SuSessionReconciliation::EndedArchived
+                    if !session.native_session_id.is_empty() =>
+                {
+                    Some(1)
+                }
+                _ => None,
+            };
+        }
+        (crate::su_session::PuiRuntimeClass::parse(chat.su_runtime_class.as_deref())
+            == crate::su_session::PuiRuntimeClass::SuSession)
+            .then_some(2)
+    };
     summaries
         .iter()
-        .filter(|chat| {
-            if chat.role != "operator" || chat.feature_id.is_some() || chat.archived_at.is_some() {
-                return false;
-            }
-            if let Some(session) = inventory
-                .iter()
-                .find(|entry| entry.agent_chat_id == chat.id)
-            {
-                // pui-chat-first-ux P-010: never reattach a session that was
-                // started in ANOTHER directory — `pui` in project A must not
-                // pick up project B's running session. A session whose
-                // directory is unknown stays eligible (older operators).
-                if let (Some(launch), Some(session_cwd)) = (launch_cwd, session.cwd.as_deref()) {
-                    if !crate::su_session::session_in_directory(Some(session_cwd), Some(launch)) {
-                        return false;
-                    }
-                }
-                return !session.terminal
-                    && session.reconciliation
-                        == crate::su_session::SuSessionReconciliation::Attached;
-            }
-            crate::su_session::PuiRuntimeClass::parse(chat.su_runtime_class.as_deref())
-                == crate::su_session::PuiRuntimeClass::SuSession
+        .filter_map(|chat| rank(chat).map(|rank| (rank, chat)))
+        .max_by(|(rank_a, a), (rank_b, b)| {
+            rank_a
+                .cmp(rank_b)
+                .then_with(|| a.updated_at.cmp(&b.updated_at))
         })
-        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+        .map(|(_, chat)| chat)
 }
 
 async fn agent_chat_load(
@@ -5601,12 +5773,24 @@ async fn open_su_session_task(
     let binding = match client.open_su_session(&request).await {
         Ok(binding) => binding,
         Err(error) => {
-            let _ = tx.send(Event::SuSessionError(format!("{error:#}")));
+            let _ = tx.send(su_open_failure(&error));
             return;
         }
     };
     let _ = tx.send(Event::SuSessionOpened(binding.clone()));
     stream_su_session_events(client, harness, chat_id, binding, initial_turn, tx).await;
+}
+
+/// A refusal the operator answered with keeps its reason (WI-10004158); any
+/// other open failure is a transport or protocol error.
+fn su_open_failure(error: &anyhow::Error) -> Event {
+    match error.downcast_ref::<crate::client::SuLaunchRefused>() {
+        Some(refused) => Event::SuSessionRefused {
+            code: refused.code.clone(),
+            message: refused.message.clone(),
+        },
+        None => Event::SuSessionError(format!("{error:#}")),
+    }
 }
 
 async fn attach_su_session_task(
@@ -5634,7 +5818,7 @@ async fn attach_su_session_task(
     let binding = match client.open_su_session(&request).await {
         Ok(binding) => binding,
         Err(error) => {
-            let _ = tx.send(Event::SuSessionError(format!("{error:#}")));
+            let _ = tx.send(su_open_failure(&error));
             return;
         }
     };
@@ -6824,18 +7008,21 @@ async fn card_respond_send(
     payload: Option<serde_json::Value>,
     tx: UnboundedSender<Event>,
 ) {
+    // P-015: every failure names the card it belongs to, so the TUI reopens
+    // exactly that card. A card POST failure is not a turn failure — the agent
+    // is still waiting on the card — so it never travels as `ChatError`.
+    let failed = |error: String| {
+        let _ = tx.send(Event::CardRespondFailed {
+            correlation_id: correlation_id.clone(),
+            error,
+        });
+    };
     let client = match OperatorClient::from_discovery().await {
         Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(Event::ChatError(format!("card-response: {e}")));
-            return;
-        }
+        Err(e) => return failed(format!("operator unreachable: {e}")),
     };
     let Some(ws) = workspace_id.filter(|id| !id.trim().is_empty()) else {
-        let _ = tx.send(Event::ChatError(
-            "Reconnect this conversation to resolve the card's workspace".into(),
-        ));
-        return;
+        return failed("the card's workspace is unknown; reconnect this conversation".into());
     };
     if let Err(e) = client
         .card_respond(
@@ -6848,7 +7035,7 @@ async fn card_respond_send(
         )
         .await
     {
-        let _ = tx.send(Event::ChatError(format!("card-response: {e}")));
+        failed(e.to_string());
     }
 }
 
@@ -7637,7 +7824,10 @@ mod tests {
             reconciliation: SuSessionReconciliation::Attached,
             cwd: cwd.map(str::to_owned),
         };
-        let inventory = vec![row("here", Some("/work/a")), row("elsewhere", Some("/work/b"))];
+        let inventory = vec![
+            row("here", Some("/work/a")),
+            row("elsewhere", Some("/work/b")),
+        ];
         let pick = |launch: Option<&str>| {
             default_operator_chat(&chats, &inventory, launch).map(|chat| chat.id.clone())
         };
@@ -7649,6 +7839,61 @@ mod tests {
         assert_eq!(
             default_operator_chat(&chats, &unknown, Some("/work/c")).map(|chat| chat.id.as_str()),
             Some("elsewhere")
+        );
+    }
+
+    /// pui-chat-first-ux P-009 / D-008: quitting a PUI ends its engine, so the
+    /// chat it left reads `EndedArchived`. That chat stays the default (the
+    /// inventory adoption arm then resumes it) only while it has a native
+    /// transcript to resume; an orphaned row is never picked.
+    #[test]
+    fn default_operator_chat_keeps_an_ended_chat_that_can_resume() {
+        use crate::su_session::{
+            SuSessionBackend, SuSessionInventoryEntry, SuSessionLifecycleState,
+            SuSessionReconciliation,
+        };
+        let chats = vec![startup_chat(
+            "left",
+            Some("su-session"),
+            "2026-09-07T01:00:00Z",
+        )];
+        let row = |native: &str, reconciliation| SuSessionInventoryEntry {
+            agent_chat_id: "left".into(),
+            adv_session_id: 1,
+            backend: SuSessionBackend::Claude,
+            lifecycle: SuSessionLifecycleState::Ended,
+            runtime_generation: 1,
+            native_session_id: native.into(),
+            terminal: true,
+            reconciliation,
+            cwd: Some("/work/a".into()),
+        };
+        let pick = |entry| {
+            default_operator_chat(&chats, &[entry], Some("/work/a")).map(|chat| chat.id.clone())
+        };
+        assert_eq!(
+            pick(row("native-left", SuSessionReconciliation::EndedArchived)).as_deref(),
+            Some("left")
+        );
+        assert_eq!(pick(row("", SuSessionReconciliation::EndedArchived)), None);
+        assert_eq!(
+            pick(row("native-left", SuSessionReconciliation::FailedOrphaned)),
+            None
+        );
+        // A terminal row that still reads Attached is not live: never the default.
+        assert_eq!(
+            pick(row("native-left", SuSessionReconciliation::Attached)),
+            None
+        );
+        // The directory rule still applies to an ended chat.
+        assert_eq!(
+            default_operator_chat(
+                &chats,
+                &[row("native-left", SuSessionReconciliation::EndedArchived)],
+                Some("/work/b")
+            )
+            .map(|chat| chat.id.as_str()),
+            None
         );
     }
 
@@ -7674,7 +7919,10 @@ mod tests {
             task,
             other_role,
         ];
-        assert_eq!(default_operator_chat(&chats, &[], None).unwrap().id, "writable");
+        assert_eq!(
+            default_operator_chat(&chats, &[], None).unwrap().id,
+            "writable"
+        );
         // Historical selection is the regression control: recency alone lands
         // on a conversation that the actual dispatch policy cannot send to.
         let old_default = chats
@@ -7689,6 +7937,7 @@ mod tests {
                 attached: false,
                 ended_backend: None,
                 picked_backend: None,
+                configured_backend: None,
                 loaded_class: Some(crate::su_session::PuiRuntimeClass::parse(
                     old_default.su_runtime_class.as_deref()
                 )),
@@ -7728,6 +7977,7 @@ mod tests {
         ended.terminal = true;
         ended.reconciliation = SuSessionReconciliation::EndedArchived;
         let mut inventory = vec![live, ended];
+        // A live binding outranks a NEWER ended chat.
         assert_eq!(
             default_operator_chat(&chats, &inventory, None).unwrap().id,
             "bound-legacy"
@@ -7737,7 +7987,16 @@ mod tests {
             SuSessionReconciliation::Pending,
         ] {
             inventory[0].reconciliation = reconciliation;
-            assert!(default_operator_chat(&chats, &inventory, None).is_none());
+            // P-009 / D-008: with no live chat left, the ended chat that can
+            // resume from its native transcript is the default …
+            assert_eq!(
+                default_operator_chat(&chats, &inventory, None).unwrap().id,
+                "ended-su"
+            );
+            // … and one with nothing to resume is history only.
+            let mut orphaned = inventory.clone();
+            orphaned[1].native_session_id.clear();
+            assert!(default_operator_chat(&chats, &orphaned, None).is_none());
         }
     }
 

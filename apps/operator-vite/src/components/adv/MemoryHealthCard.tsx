@@ -123,7 +123,12 @@ export default function MemoryHealthCard({ memory }: { memory: MemoryHealth | nu
             `replayed against the production hybrid backend at the push floor (${memory.precision.latest.floorCosine}/${memory.precision.latest.floorLex}). ` +
             `FP@5 = the hard-negative false-positive rate (share of must-return-nothing queries that still surfaced a top-5 hit); ` +
             `lower is better — the solved floor sits ~17% (FP cannot reach 0; the hard negatives genuinely overlap real hits). ` +
-            `R@10 = recall@10 over the positive queries. ${memory.precision.runCount} bench run(s).`
+            `R@10 = recall@10 over the positive queries. ${memory.precision.runCount} bench run(s).` +
+            (memory.precision.latest.jevGate
+              ? ` This run was gated by Jev (${memory.precision.latest.jevGate.model}, keep when P(yes) ≥ ` +
+                `${memory.precision.latest.jevGate.threshold}), because the Jev switch is On: it measures what the ` +
+                `injector actually admits. The model is the one the provider says answered, so a model change shows here.`
+              : '')
           }
         >
           <Crosshair size={11} aria-hidden />
@@ -133,6 +138,9 @@ export default function MemoryHealthCard({ memory }: { memory: MemoryHealth | nu
             <>
               {' '}· R@10 <strong>{fmtPct(memory.precision.latest.rAt10)}</strong>
             </>
+          ) : null}
+          {memory.precision.latest.jevGate ? (
+            <em data-testid="memory-precision-jev-gate"> · Jev-gated · {memory.precision.latest.jevGate.model}</em>
           ) : null}
         </span>
       ) : null}

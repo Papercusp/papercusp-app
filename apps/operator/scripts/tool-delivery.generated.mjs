@@ -9,14 +9,14 @@
 // registry in apps/operator/lib/tool-delivery-floors.ts. Editing this file
 // changes nothing durable: the next generator run overwrites it.
 //
-// Catalog measured: 916 tools.
+// Catalog measured: 918 tools.
 
-/** claude: 1 full + 63 compact = 99982 B of 100000 B. */
+/** claude: 0 full + 64 compact = 99995 B of 100000 B. */
 export const CLAUDE_TOOL_DELIVERY = Object.freeze({
   budgetBytes: 100000,
-  spentBytes: 99982,
+  spentBytes: 99995,
   budgetOverrun: 0,
-  counts: Object.freeze({ full: 1, compact: 63, deferred: 852 }),
+  counts: Object.freeze({ full: 0, compact: 64, deferred: 854 }),
   /** name -> "full" | "compact". A name absent here is DEFERRED. */
   tiers: Object.freeze({
     "build:typecheck": "compact",
@@ -31,7 +31,6 @@ export const CLAUDE_TOOL_DELIVERY = Object.freeze({
     "coord:send": "compact",
     "coord:whoami": "compact",
     "db:migrations": "compact",
-    "dev:pg_health": "compact",
     "dev:pg_query": "compact",
     "dev:pipeline_position": "compact",
     "dev:restart": "compact",
@@ -42,6 +41,7 @@ export const CLAUDE_TOOL_DELIVERY = Object.freeze({
     "facts:list": "compact",
     "facts:retract": "compact",
     "fleet:launch-on-plan": "compact",
+    "host:memory_pressure": "compact",
     "improvements:capture": "compact",
     "issues:list": "compact",
     "locks:acquire": "compact",
@@ -70,7 +70,7 @@ export const CLAUDE_TOOL_DELIVERY = Object.freeze({
     "testing:run": "compact",
     "testing:runs": "compact",
     "tools:find": "compact",
-    "tools:invoke": "full",
+    "tools:invoke": "compact",
     "work_items:checkpoint": "compact",
     "work_items:claim": "compact",
     "work_items:claim_next": "compact",
@@ -98,7 +98,6 @@ export const CLAUDE_TOOL_DELIVERY = Object.freeze({
     "coord:send",
     "coord:whoami",
     "db:migrations",
-    "dev:pg_health",
     "dev:pg_query",
     "dev:pipeline_position",
     "dev:restart",
@@ -109,6 +108,7 @@ export const CLAUDE_TOOL_DELIVERY = Object.freeze({
     "facts:list",
     "facts:retract",
     "fleet:launch-on-plan",
+    "host:memory_pressure",
     "improvements:capture",
     "issues:list",
     "locks:acquire",
@@ -219,12 +219,12 @@ export const CLAUDE_TOOL_DELIVERY = Object.freeze({
   ]),
 });
 
-/** codex: 1 full + 63 compact = 99982 B of 100000 B. */
+/** codex: 0 full + 64 compact = 99995 B of 100000 B. */
 export const CODEX_TOOL_DELIVERY = Object.freeze({
   budgetBytes: 100000,
-  spentBytes: 99982,
+  spentBytes: 99995,
   budgetOverrun: 0,
-  counts: Object.freeze({ full: 1, compact: 63, deferred: 852 }),
+  counts: Object.freeze({ full: 0, compact: 64, deferred: 854 }),
   /** name -> "full" | "compact". A name absent here is DEFERRED. */
   tiers: Object.freeze({
     "build:typecheck": "compact",
@@ -239,7 +239,6 @@ export const CODEX_TOOL_DELIVERY = Object.freeze({
     "coord:send": "compact",
     "coord:whoami": "compact",
     "db:migrations": "compact",
-    "dev:pg_health": "compact",
     "dev:pg_query": "compact",
     "dev:pipeline_position": "compact",
     "dev:restart": "compact",
@@ -250,6 +249,7 @@ export const CODEX_TOOL_DELIVERY = Object.freeze({
     "facts:list": "compact",
     "facts:retract": "compact",
     "fleet:launch-on-plan": "compact",
+    "host:memory_pressure": "compact",
     "improvements:capture": "compact",
     "issues:list": "compact",
     "locks:acquire": "compact",
@@ -278,7 +278,7 @@ export const CODEX_TOOL_DELIVERY = Object.freeze({
     "testing:run": "compact",
     "testing:runs": "compact",
     "tools:find": "compact",
-    "tools:invoke": "full",
+    "tools:invoke": "compact",
     "work_items:checkpoint": "compact",
     "work_items:claim": "compact",
     "work_items:claim_next": "compact",
@@ -306,7 +306,6 @@ export const CODEX_TOOL_DELIVERY = Object.freeze({
     "coord:send",
     "coord:whoami",
     "db:migrations",
-    "dev:pg_health",
     "dev:pg_query",
     "dev:pipeline_position",
     "dev:restart",
@@ -317,6 +316,7 @@ export const CODEX_TOOL_DELIVERY = Object.freeze({
     "facts:list",
     "facts:retract",
     "fleet:launch-on-plan",
+    "host:memory_pressure",
     "improvements:capture",
     "issues:list",
     "locks:acquire",
@@ -427,12 +427,12 @@ export const CODEX_TOOL_DELIVERY = Object.freeze({
   ]),
 });
 
-/** omp: 1 full + 63 compact = 99982 B of 100000 B. */
+/** omp: 0 full + 64 compact = 99995 B of 100000 B. */
 export const OMP_TOOL_DELIVERY = Object.freeze({
   budgetBytes: 100000,
-  spentBytes: 99982,
+  spentBytes: 99995,
   budgetOverrun: 0,
-  counts: Object.freeze({ full: 1, compact: 63, deferred: 852 }),
+  counts: Object.freeze({ full: 0, compact: 64, deferred: 854 }),
   /** name -> "full" | "compact". A name absent here is DEFERRED. */
   tiers: Object.freeze({
     "build:typecheck": "compact",
@@ -447,7 +447,6 @@ export const OMP_TOOL_DELIVERY = Object.freeze({
     "coord:send": "compact",
     "coord:whoami": "compact",
     "db:migrations": "compact",
-    "dev:pg_health": "compact",
     "dev:pg_query": "compact",
     "dev:pipeline_position": "compact",
     "dev:restart": "compact",
@@ -458,6 +457,7 @@ export const OMP_TOOL_DELIVERY = Object.freeze({
     "facts:list": "compact",
     "facts:retract": "compact",
     "fleet:launch-on-plan": "compact",
+    "host:memory_pressure": "compact",
     "improvements:capture": "compact",
     "issues:list": "compact",
     "locks:acquire": "compact",
@@ -486,7 +486,7 @@ export const OMP_TOOL_DELIVERY = Object.freeze({
     "testing:run": "compact",
     "testing:runs": "compact",
     "tools:find": "compact",
-    "tools:invoke": "full",
+    "tools:invoke": "compact",
     "work_items:checkpoint": "compact",
     "work_items:claim": "compact",
     "work_items:claim_next": "compact",
@@ -514,7 +514,6 @@ export const OMP_TOOL_DELIVERY = Object.freeze({
     "coord:send",
     "coord:whoami",
     "db:migrations",
-    "dev:pg_health",
     "dev:pg_query",
     "dev:pipeline_position",
     "dev:restart",
@@ -525,6 +524,7 @@ export const OMP_TOOL_DELIVERY = Object.freeze({
     "facts:list",
     "facts:retract",
     "fleet:launch-on-plan",
+    "host:memory_pressure",
     "improvements:capture",
     "issues:list",
     "locks:acquire",

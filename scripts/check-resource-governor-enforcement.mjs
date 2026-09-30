@@ -491,6 +491,34 @@ export const P016_REVIEWED_DISPOSITIONS = Object.freeze([
       "P-016 reviewed bypass disposition for apps/operator/lib/release/desktop-perf-gate.ts: its starts are awaited git metadata reads (15s timeout each) that the post-suite desktop-perf gate issues once per green-checkpoint verdict: `readNewestCommitAtMs` (one `git log -n 64 --format=%ct <ref>`, to age the measured build against main, WI-10003815) and `classifyBuildSha` (at most two `git rev-parse --verify` and two `git merge-base --is-ancestor`, to relate the build's recorded sha to the candidate and main, plan desktop-perf-measure-candidate-build-2026-09-29 P-002). They return scalars, retain nothing, start no resident queue, and sit behind an injectable IO seam that tests fake. The gate that calls them is fail-soft, so a failed read degrades the verdict to unknown rather than blocking; release/control metadata must stay runnable while productive capacity is pressured.",
   },
   {
+    path: "apps/operator/lib/release/precut-containment-cli.ts",
+    code: "resource-start-outside-admission",
+    disposition: "bypass",
+    reason:
+      "P-016 reviewed bypass disposition for apps/operator/lib/release/precut-containment-cli.ts: an operator-invoked release CLI (`npm --prefix apps/operator run release:precut-containment`, WI-10002524 / WI-10004153) that answers one go/no-go question before a desktop cut: is every listed fix's blob in green main. Its only starts are synchronous local git metadata reads against the shared checkout: one `git rev-parse` per ref (main, staging), one `git show <ref>:<path>` per declared path and ref to compare blob contents and grep a marker, and one `git status --porcelain -- <path>` per path to spot uncommitted edits. The set is a few dozen paths, so the run is seconds of bounded local git with no network, no build and no resident process. It returns a table and an exit code, retains nothing, and writes nothing. A cut decision must stay answerable while productive capacity is pressured, so it is release/control metadata rather than a governed workload.",
+  },
+  {
+    path: "packages/operator-core/lib/sync/pot-git/physical-drill-phase-h.ts",
+    code: "resource-start-outside-admission",
+    disposition: "bypass",
+    reason:
+      "P-016 reviewed bypass disposition for packages/operator-core/lib/sync/pot-git/physical-drill-phase-h.ts: the P-521 F3 (serving identity, drill leg H, WI-10003963) evidence verifier. Its one start is the `git(repoPath, args)` helper, a synchronous `spawnSync('git', ['--git-dir', repoPath, ...])`. `assertCanonicalRepoPath` confines repoPath to the drill's own Phase-A test pot bare repo. Per drill step it reads (show-ref, cat-file) and writes exactly one run-scoped test commit under `refs/namespaces/<device>/refs/heads/p521-phase-h-<step>-<runId>` (hash-object, mktree, commit-tree, update-ref). It refuses a ref that already exists, so it never moves an existing ref. It runs only inside the attended hive-git physical drill. There is no network, no build and no resident process, and each call returns one scalar or oid that the verifier folds into a pass/fail record. The rig itself is serialized by the hive-git-physical-rig resource lock, so the verifier adds only a handful of bounded local reads to an already exclusive, attended run.",
+  },
+  {
+    path: "packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.ts",
+    code: "resource-start-outside-admission",
+    disposition: "bypass",
+    reason:
+      "P-016 reviewed bypass disposition for packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.ts: the P-521 F6-remainder protected-effect fencing check (drill leg I, WI-10003964). Its starts are the `sh(cwd, args)` and `tryRev(gitDir, ref)` helpers, both synchronous `spawnSync('git', ...)` in an absolute scratch directory the phase itself created and asserts exists (`assertDir`). They build and inspect throwaway local repos to prove that release promotion, origin push and fork/PR paths are refused, and they commit with a fixed test identity (COMMIT_ENV). They never touch the shared checkout, never reach a real remote and start no resident process. The phase runs only inside the attended physical drill, serialized by the hive-git-physical-rig resource lock, and its cost is a bounded handful of local git calls per drill run.",
+  },
+  {
+    path: "packages/operator-core/lib/sync/pot-git/physical-drill-preflight.ts",
+    code: "resource-start-outside-admission",
+    disposition: "bypass",
+    reason:
+      "P-016 reviewed bypass disposition for packages/operator-core/lib/sync/pot-git/physical-drill-preflight.ts: the hive-git physical drill's read-only pre-run check (D-086, WI-10004088, WI-10004062), which verifies that the pinned drill source commit carries every drill file before the rig run starts. Its default gatherers are awaited `execFile` reads with explicit bounds: `git -C <repo> ...` metadata reads (status, show, ls-tree) with a 20s timeout and capped maxBuffer, and one `ssh -o BatchMode=yes -o ConnectTimeout=10 <vm>` probe of the VM owner's payload identity. They return scalars, retain nothing and start no resident queue. The gatherers sit behind injectable seams that the tests replace, and the preflight runs once per attended drill run, which the hive-git-physical-rig resource lock already serializes. A refused preflight blocks only that drill, never a productive lane.",
+  },
+  {
     path: "apps/operator/lib/release/git-ops.ts",
     code: "resource-start-outside-admission",
     disposition: "bypass",

@@ -1012,11 +1012,15 @@ snapshot_operator_source() {
   source_bytes="$(LC_ALL=C rsync -an --stats "${source_filters[@]}" "$REPO_DIR/" "$snapshot_root/" |
     awk '/^Total file size:/ { gsub(/,/, "", $4); print $4 }')" || return 1
   reserve_verifier_disk "$source_bytes" || return $?
+  local snapshot_rc=0
   rsync -a --delete "${source_filters[@]}" \
-    "$REPO_DIR/" "$snapshot_root/" || {
-      echo "FATAL: could not copy an independent verifier operator source snapshot" >&2
-      return 1
-    }
+    "$REPO_DIR/" "$snapshot_root/" || snapshot_rc=$?
+  # rsync exit 24 = source files vanished mid-copy. The shared tree is edited live (peers'
+  # atomic-write temp files appear and vanish constantly), so that is not a failed snapshot.
+  if [ "$snapshot_rc" -ne 0 ] && [ "$snapshot_rc" -ne 24 ]; then
+    echo "FATAL: could not copy an independent verifier operator source snapshot (rsync exit $snapshot_rc)" >&2
+    return 1
+  fi
   cp -- "$pinned_deps_lib" "$pinned_deps_copy" || return 1
   # shellcheck source=/dev/null
   . "$pinned_deps_copy" || return 1

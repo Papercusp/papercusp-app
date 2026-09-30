@@ -40,6 +40,7 @@ import {
   type HostedDesktopGrant,
 } from '../desktop/hosted-desktop-channel';
 import { OperatorHttpChannel, type OperatorHttpFetch } from './hosted-operator-http';
+import { createAppHttpChannel } from './hosted-app-relay';
 
 export const HOSTED_HOST_MAX_MESSAGE_BYTES = 1024 * 1024;
 export const HOSTED_HOST_MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -390,7 +391,18 @@ type PendingUpload = {
 type Channel =
   | { kind: 'pty'; sessionKey: string; role: HostedHostTabRole }
   | { kind: 'desktop'; desktopSessionId: string; role: HostedHostTabRole }
-  | { kind: 'operator-http'; userId: string; hostedSessionId: string; http: OperatorHttpChannel };
+  | {
+      kind: 'operator-http';
+      userId: string;
+      hostedSessionId: string;
+      http: OperatorHttpChannel;
+      /**
+       * `app` for an `app-http` channel (P-007): the same one-way request pipe, built
+       * with the app plane's route and header policy and no ticket user — the app's
+       * own key is the credential, checked by this operator's bearer chain.
+       */
+      plane?: 'app';
+    };
 
 type DesktopChannel = {
   channelId: string;
@@ -849,6 +861,28 @@ export class HostedWorkspaceHostSessionAdapter {
   }
 
   private async open(message: Record<string, unknown>): Promise<void> {
+    if (message.kind === 'app-http') {
+      // P-007: an outside app's call relayed by the portal. There is no ticket user to
+      // bind; the forwarded `Authorization` (app keys only) is the credential, and the
+      // ingress marker keeps the operator from granting it loopback trust.
+      const appChannelId = string(message.channelId, 256);
+      if (!appChannelId || message.audience !== 'app') return;
+      if (this.channels.has(appChannelId)) {
+        this.options.send({ type: 'relay.close', channelId: appChannelId, reason: 'channel_already_open' });
+        return;
+      }
+      const identity = { userId: 'app-relay', hostedSessionId: appChannelId };
+      const http = createAppHttpChannel({
+        send: (payload) => this.send(appChannelId, payload),
+        audit: (action, detail) => this.audit(action.replace(/^operator_http_/, 'app_http_'), identity, appChannelId, detail),
+        ...(this.options.operatorHttp?.origin ? { origin: this.options.operatorHttp.origin } : {}),
+        ...(this.options.operatorHttp?.fetch ? { fetch: this.options.operatorHttp.fetch } : {}),
+      });
+      this.channels.set(appChannelId, { kind: 'operator-http', ...identity, http, plane: 'app' });
+      this.send(appChannelId, { type: 'http.ready' });
+      this.audit('app_http_attached', identity, appChannelId);
+      return;
+    }
     const channelId = string(message.channelId, 256);
     const userId = string(message.userId);
     const hostedSessionId = string(message.hostedSessionId);

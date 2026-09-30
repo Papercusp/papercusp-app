@@ -49,8 +49,7 @@ import {
 import { defaultRunGit, deviceNamespaceKey, hiveGitRepoPath } from './storage';
 import { WORKTREE_STAGING_REF } from './worktree-bridge';
 import {
-  PHASE_A_POT_HOME,
-  PHASE_A_REPO_KEY,
+  physicalDrillTarget,
   physicalDrillGitSyncSlug,
   type PhysicalDrillGitSyncSlug,
 } from './physical-drill-phase-a';
@@ -120,7 +119,7 @@ export type PhysicalPhaseDEvent = {
   observedAt: string;
   key: typeof STAGING_ADVANCE_EVENT_KEY;
   source: 'git-sync-integrator';
-  repoKey: typeof PHASE_A_REPO_KEY;
+  repoKey: string;
   payload: SignedStagingAdvance;
 };
 
@@ -318,14 +317,16 @@ export async function porcelainDirtyPaths(worktreePath: string): Promise<string[
 }
 
 async function fixedPaths(deps: PhysicalPhaseDDeps = {}): Promise<{ repoPath: string; worktreePath: string }> {
-  const repoPath = deps.repoPath ?? hiveGitRepoPath(PHASE_A_POT_HOME, PHASE_A_REPO_KEY);
-  const worktreePath = deps.worktreePath ?? (await projectDirForSlug(PHASE_A_POT_HOME));
-  if (!worktreePath) throw new Error(`physical Phase D cannot resolve fixed worktree ${PHASE_A_POT_HOME}`);
+  const repoPath = deps.repoPath ?? hiveGitRepoPath(physicalDrillTarget().potHome, physicalDrillTarget().repoKey);
+  // The working tree belongs to the install that owns git-sync for the repo: the canary pot
+  // itself on the physical rig, the pot's member checkout on the same-box rig.
+  const worktreePath = deps.worktreePath ?? (await projectDirForSlug(physicalDrillTarget().gitSyncSlug));
+  if (!worktreePath) throw new Error(`physical Phase D cannot resolve fixed worktree ${physicalDrillTarget().gitSyncSlug}`);
   if (!isAbsolute(repoPath) || !isAbsolute(worktreePath)) {
     throw new Error('physical Phase D fixed repo and worktree paths must be absolute');
   }
   if (!deps.repoPath) {
-    const suffix = join(PHASE_A_POT_HOME, `${PHASE_A_REPO_KEY}.git`);
+    const suffix = join(physicalDrillTarget().potHome, `${physicalDrillTarget().repoKey}.git`);
     if (!resolve(repoPath).endsWith(suffix)) throw new Error(`physical Phase D repo path must target ${suffix}`);
   }
   if (!existsSync(repoPath) || !statSync(repoPath).isDirectory()) {
@@ -593,8 +594,8 @@ export async function capturePhysicalPhaseDRequest(
   const rows = await listIntegrationRequests(
     {
       workspaceId: PHASE_D_WORKSPACE,
-      potSlug: PHASE_A_POT_HOME,
-      repoKey: PHASE_A_REPO_KEY,
+      potSlug: physicalDrillTarget().potHome,
+      repoKey: physicalDrillTarget().repoKey,
       devicePubkey: input.devicePubkey,
       state: input.state,
       limit: 100,
@@ -617,8 +618,8 @@ export async function ratifyPhysicalPhaseDRequest(
   const accepted = await ratifyIntegrationRequest(
     {
       workspaceId: PHASE_D_WORKSPACE,
-      potSlug: PHASE_A_POT_HOME,
-      repoKey: PHASE_A_REPO_KEY,
+      potSlug: physicalDrillTarget().potHome,
+      repoKey: physicalDrillTarget().repoKey,
       devicePubkey: input.devicePubkey,
       headSha: input.headSha,
     },
@@ -652,7 +653,7 @@ export type PhysicalPhaseDTierHoldRecord = {
   schemaVersion: typeof PHASE_D_TIER_HOLD_SCHEMA;
   runId: string;
   workspaceId: typeof PHASE_D_WORKSPACE;
-  potHomeSlug: typeof PHASE_A_POT_HOME;
+  potHomeSlug: string;
   devicePubkey: string;
   githubUserId: number;
   /** The exact prior comms-trust row, or null when none existed. */
@@ -711,7 +712,7 @@ function parseTierHoldRecord(raw: string): PhysicalPhaseDTierHoldRecord {
   if (
     record.schemaVersion !== PHASE_D_TIER_HOLD_SCHEMA ||
     record.workspaceId !== PHASE_D_WORKSPACE ||
-    record.potHomeSlug !== PHASE_A_POT_HOME ||
+    record.potHomeSlug !== physicalDrillTarget().potHome ||
     typeof record.runId !== 'string' ||
     !RUN_ID.test(record.runId) ||
     !Number.isInteger(record.githubUserId) ||
@@ -755,7 +756,7 @@ export async function holdPhysicalPhaseDBelowSteer(
     : (
         await resolveAuthorCommsTier({
           workspaceId: PHASE_D_WORKSPACE,
-          potHomeSlug: PHASE_A_POT_HOME,
+          potHomeSlug: physicalDrillTarget().potHome,
           devicePubkey: input.vmDevicePubkey,
           nowMs: now,
         })
@@ -772,7 +773,7 @@ export async function holdPhysicalPhaseDBelowSteer(
     schemaVersion: PHASE_D_TIER_HOLD_SCHEMA,
     runId: input.runId,
     workspaceId: PHASE_D_WORKSPACE,
-    potHomeSlug: PHASE_A_POT_HOME,
+    potHomeSlug: physicalDrillTarget().potHome,
     devicePubkey: input.vmDevicePubkey,
     githubUserId,
     prior,
@@ -793,7 +794,7 @@ export async function holdPhysicalPhaseDBelowSteer(
     deps.sql,
   );
   const effective = await effectiveCommsTier(
-    { workspaceId: PHASE_D_WORKSPACE, potHomeSlug: PHASE_A_POT_HOME, githubUserId, nowMs: now },
+    { workspaceId: PHASE_D_WORKSPACE, potHomeSlug: physicalDrillTarget().potHome, githubUserId, nowMs: now },
     deps.loadPolicyDefaultTier ? { loadPolicyDefaultTier: deps.loadPolicyDefaultTier } : undefined,
     deps.sql,
   );
@@ -913,11 +914,11 @@ export async function capturePhysicalPhaseDEvent(
       SELECT id, ts::text AS observed_at, body
         FROM harness_shared.coord_event_log
        WHERE workspace_id = ${PHASE_D_WORKSPACE}
-         AND harness_slug = ${PHASE_A_POT_HOME}
+         AND harness_slug = ${physicalDrillTarget().potHome}
          AND surface = 'messages'
          AND id > ${input.afterRowId}
          AND body->'fed_event'->>'key' = ${STAGING_ADVANCE_EVENT_KEY}
-         AND body->'fed_event'->>'repo_key' = ${PHASE_A_REPO_KEY}
+         AND body->'fed_event'->>'repo_key' = ${physicalDrillTarget().repoKey}
        ORDER BY id ASC
        LIMIT 200
     `;
@@ -966,7 +967,7 @@ export async function capturePhysicalPhaseDEvent(
     observedAt: new Date(match.row.observed_at).toISOString(),
     key: STAGING_ADVANCE_EVENT_KEY,
     source: 'git-sync-integrator',
-    repoKey: PHASE_A_REPO_KEY,
+    repoKey: physicalDrillTarget().repoKey,
     payload: match.payload,
   };
 }
@@ -984,7 +985,7 @@ async function loadCursor(sql: OrgSql): Promise<PhysicalPhaseDObservation['curso
     SELECT metadata->'worktree_bridge' AS worktree_bridge
       FROM harness_shared.routines
      WHERE workspace_id = ${PHASE_D_WORKSPACE}
-       AND install_slug = ${PHASE_A_POT_HOME}
+       AND install_slug = ${physicalDrillTarget().gitSyncSlug}
        AND target_role = 'system:git-sync'
      LIMIT 1
   `;
@@ -1133,7 +1134,7 @@ function validateEventPair(
       event.rowId <= 0 ||
       event.key !== STAGING_ADVANCE_EVENT_KEY ||
       event.source !== 'git-sync-integrator' ||
-      event.repoKey !== PHASE_A_REPO_KEY ||
+      event.repoKey !== physicalDrillTarget().repoKey ||
       event.payload.device_pubkey !== expected.integratorDeviceKey ||
       event.payload.staging_sha !== expected.stagingSha ||
       !verifyStagingAdvance(event.payload, expected.integratorDeviceKey)
@@ -1240,8 +1241,8 @@ export function validatePhysicalPhaseD(input: PhysicalPhaseDInput): PhysicalPhas
   const pending = input.belowSteer.pendingReceipt;
   if (
     pending.workspaceId !== PHASE_D_WORKSPACE ||
-    pending.potSlug !== PHASE_A_POT_HOME ||
-    pending.repoKey !== PHASE_A_REPO_KEY ||
+    pending.potSlug !== physicalDrillTarget().potHome ||
+    pending.repoKey !== physicalDrillTarget().repoKey ||
     pending.devicePubkey !== vm ||
     pending.headSha !== input.belowSteer.mutation.headOid ||
     pending.reason !== 'below-steer-tier' ||

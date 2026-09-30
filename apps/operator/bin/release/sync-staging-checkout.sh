@@ -695,6 +695,10 @@ if wait "$restart_tool_pid"; then
 else
   restart_tool_status=$?
 fi
+# ptool exits 5 when the tool ANSWERED ok:false (EI-24654733539966460). That is
+# a delivered terminal receipt, not a missing one: fold it into the success
+# status so the business-level refusal branches below judge the result body.
+[ "$restart_tool_status" -ne 5 ] || restart_tool_status=0
 restart_result="$(cat "$restart_result_file" 2>/dev/null || true)"
 restart_diagnostics="$(cat "$restart_diagnostics_file" 2>/dev/null || true)"
 rm -f "$restart_result_file" "$restart_diagnostics_file"
@@ -708,8 +712,8 @@ if [ "$restart_verified" -ne 1 ]; then
   fi
 fi
 
-# ptool exits successfully for a business-level refusal, so inspect the result
-# rather than treating process status as the verdict. A verified coalesce is a
+# ptool exits successfully for a business-level refusal (its exit 5 is folded to 0
+# above), so inspect the result rather than treating process status as the verdict. A verified coalesce is a
 # success: another recent restart already cycled the same service and the
 # cooldown prevents a redundant outage.
 if [ "$restart_verified" -eq 1 ]; then

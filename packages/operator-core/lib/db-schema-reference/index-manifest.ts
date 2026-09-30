@@ -23,8 +23,8 @@
 import type { IndexManifest } from '../schema-object-drift';
 
 export const INDEX_MANIFEST: IndexManifest = {
-  "generatedAt": "2026-09-30T01:07:01.469Z",
-  "migrationCountAtGeneration": 1043,
+  "generatedAt": "2026-09-30T03:41:37.576Z",
+  "migrationCountAtGeneration": 1048,
   "indexes": [
     {
       "schema": "audit",
@@ -1918,6 +1918,27 @@ export const INDEX_MANIFEST: IndexManifest = {
     },
     {
       "schema": "harness_shared",
+      "name": "connected_app_device_grants_expires_idx",
+      "table": "connected_app_device_grants",
+      "definition": "CREATE INDEX connected_app_device_grants_expires_idx ON harness_shared.connected_app_device_grants USING btree (expires_at)",
+      "constraintBacked": false
+    },
+    {
+      "schema": "harness_shared",
+      "name": "connected_app_device_grants_pending_user_code_key",
+      "table": "connected_app_device_grants",
+      "definition": "CREATE UNIQUE INDEX connected_app_device_grants_pending_user_code_key ON harness_shared.connected_app_device_grants USING btree (user_code) WHERE (state = 'pending'::text)",
+      "constraintBacked": false
+    },
+    {
+      "schema": "harness_shared",
+      "name": "connected_app_device_grants_pkey",
+      "table": "connected_app_device_grants",
+      "definition": "CREATE UNIQUE INDEX connected_app_device_grants_pkey ON harness_shared.connected_app_device_grants USING btree (device_code_hash)",
+      "constraintBacked": true
+    },
+    {
+      "schema": "harness_shared",
       "name": "connected_apps_pkey",
       "table": "connected_apps",
       "definition": "CREATE UNIQUE INDEX connected_apps_pkey ON harness_shared.connected_apps USING btree (id)",
@@ -2394,20 +2415,6 @@ export const INDEX_MANIFEST: IndexManifest = {
     },
     {
       "schema": "harness_shared",
-      "name": "coord_thread_posts_embedding_hnsw_idx",
-      "table": "coord_thread_posts",
-      "definition": "CREATE INDEX coord_thread_posts_embedding_hnsw_idx ON harness_shared.coord_thread_posts USING hnsw (body_embedding vector_cosine_ops)",
-      "constraintBacked": false
-    },
-    {
-      "schema": "harness_shared",
-      "name": "coord_thread_posts_embedding_mode_idx",
-      "table": "coord_thread_posts",
-      "definition": "CREATE INDEX coord_thread_posts_embedding_mode_idx ON harness_shared.coord_thread_posts USING btree (body_embedding_mode) WHERE (body_embedding_mode IS NOT NULL)",
-      "constraintBacked": false
-    },
-    {
-      "schema": "harness_shared",
       "name": "coord_thread_posts_fed_uq",
       "table": "coord_thread_posts",
       "definition": "CREATE UNIQUE INDEX coord_thread_posts_fed_uq ON harness_shared.coord_thread_posts USING btree (workspace_id, post_msg_id) WHERE ((harness_slug IS NOT NULL) AND (post_msg_id IS NOT NULL))",
@@ -2838,6 +2845,27 @@ export const INDEX_MANIFEST: IndexManifest = {
       "name": "decision_ledger_ws_ts_idx",
       "table": "decision_ledger",
       "definition": "CREATE INDEX decision_ledger_ws_ts_idx ON harness_shared.decision_ledger USING btree (workspace_id, ts DESC)",
+      "constraintBacked": false
+    },
+    {
+      "schema": "harness_shared",
+      "name": "decision_model_calls_pkey",
+      "table": "decision_model_calls",
+      "definition": "CREATE UNIQUE INDEX decision_model_calls_pkey ON harness_shared.decision_model_calls USING btree (id)",
+      "constraintBacked": true
+    },
+    {
+      "schema": "harness_shared",
+      "name": "decision_model_calls_state_sha256_idx",
+      "table": "decision_model_calls",
+      "definition": "CREATE INDEX decision_model_calls_state_sha256_idx ON harness_shared.decision_model_calls USING btree (state_sha256)",
+      "constraintBacked": false
+    },
+    {
+      "schema": "harness_shared",
+      "name": "decision_model_calls_ws_consumer_created_idx",
+      "table": "decision_model_calls",
+      "definition": "CREATE INDEX decision_model_calls_ws_consumer_created_idx ON harness_shared.decision_model_calls USING btree (workspace_id, consumer, created_at DESC)",
       "constraintBacked": false
     },
     {
@@ -4126,20 +4154,6 @@ export const INDEX_MANIFEST: IndexManifest = {
       "name": "harness_docs_anchor_paths_idx",
       "table": "harness_docs",
       "definition": "CREATE INDEX harness_docs_anchor_paths_idx ON harness_shared.harness_docs USING gin (anchor_paths)",
-      "constraintBacked": false
-    },
-    {
-      "schema": "harness_shared",
-      "name": "harness_docs_embedding_hnsw_idx",
-      "table": "harness_docs",
-      "definition": "CREATE INDEX harness_docs_embedding_hnsw_idx ON harness_shared.harness_docs USING hnsw (embedding vector_cosine_ops)",
-      "constraintBacked": false
-    },
-    {
-      "schema": "harness_shared",
-      "name": "harness_docs_embedding_mode_idx",
-      "table": "harness_docs",
-      "definition": "CREATE INDEX harness_docs_embedding_mode_idx ON harness_shared.harness_docs USING btree (embedding_mode) WHERE (embedding_mode IS NOT NULL)",
       "constraintBacked": false
     },
     {

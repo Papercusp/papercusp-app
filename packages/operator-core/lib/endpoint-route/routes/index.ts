@@ -216,6 +216,7 @@ import agentMcp_contextEpochBump from './agent-mcp/context-epoch-bump';
 import agentMcp_turnEndDirectiveCheck from './agent-mcp/turn-end-directive-check';
 import agentMcp_turnStartMemory from './agent-mcp/turn-start-memory';
 import agentMcp_midTurnContext from './agent-mcp/mid-turn-context';
+import agentMcp_identityHookSinks from './agent-mcp/identity-hook-sinks';
 import agentMcp_rebindIdentity from './agent-mcp/rebind-identity';
 import agentMcp_identityManagement from './agent-mcp/identity-management';
 import agentMcp_decisions from './agent-mcp/decisions';
@@ -448,6 +449,7 @@ import elevenlabsPostCall from './elevenlabs/post-call';
 import miscScratch from './misc/scratch';
 import deviceQrSvg from './device/qr-svg';
 import devicePair from './device/pair';
+import connectedApps from './connected-apps';
 import deviceVoice from './device/voice';
 import deviceOperator from './device/operator';
 import deviceHarnesses from './device/harnesses';
@@ -546,6 +548,7 @@ export const ALL_ROUTES: ReadonlyArray<AnyRoute> = [
   ...flatten(agentMcp_turnEndDirectiveCheck as AnyRoute[]),
   ...flatten(agentMcp_turnStartMemory as AnyRoute[]),
   ...flatten(agentMcp_midTurnContext as AnyRoute[]),
+  ...flatten(agentMcp_identityHookSinks as AnyRoute[]),
   ...flatten(agentMcp_rebindIdentity as AnyRoute[]),
   ...flatten(agentMcp_decisions as AnyRoute),
   ...flatten(agentMcp_delegateChat as AnyRoute),
@@ -946,6 +949,7 @@ export const ALL_ROUTES: ReadonlyArray<AnyRoute> = [
   ...flatten(miscScratch as AnyRoute),
   ...flatten(deviceQrSvg as AnyRoute),
   ...flatten(devicePair as AnyRoute[]),
+  ...flatten(connectedApps as AnyRoute[]),
   ...flatten(deviceVoice as AnyRoute[]),
   ...flatten(deviceOperator as AnyRoute[]),
   ...flatten(deviceHarnesses as AnyRoute[]),

@@ -46,6 +46,8 @@ physical_failure_summary() {
   # Post-failure housekeeping the probe's EXIT trap prints after fail(): never a cause.
   local trailer_re='^hive-git-physical-probe: preserved failed-run diagnostics at '
   local preflight_re='^PHYSICAL_PREFLIGHT_FAILED '
+  # Errors the TypeScript producer modules throw ("physical-drill-<module>: <message>").
+  local producer_re='^(Error: )?physical-drill-[a-z0-9-]+: '
   local phase_line phase_letter phase_fn reason preflight
   phase_line="$(grep -E "$marker_re" "$err_file" | tail -n 1)"
   reason="$(grep -E "$prefix_re" "$err_file" | grep -vE "$marker_re" | grep -vE "$trailer_re" \
@@ -53,6 +55,13 @@ physical_failure_summary() {
   preflight="$(grep -E "$preflight_re" "$err_file" | head -n 1)"
   if [ -z "$phase_line" ] && [ -n "$preflight" ]; then
     reason="rig preflight refused the run: ${preflight}"
+  fi
+  # A producer that throws exits the probe/scenario under set -e WITHOUT fail(), so no
+  # prefixed line names the cause; the producer's own error line does. Real same-box run
+  # 20260930T043830Z summarised "no prefixed reason line" above
+  # "physical-drill-host-receipt: cached announce identity/keychain mismatch at ...".
+  if [ -z "$reason" ]; then
+    reason="$(grep -E "$producer_re" "$err_file" | tail -n 1 | sed -E 's/^Error: //')"
   fi
   # Keep the summary to one readable line.
   reason="$(printf '%s' "$reason" | tr -d '\r' | cut -c1-400)"

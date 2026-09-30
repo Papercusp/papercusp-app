@@ -438,11 +438,6 @@ continuation gate picks, not a law.
   explicitly deferred-with-reason,** never silently. `work_items:complete` warns
   (`verificationWarning`) when a completion carries neither `tests` nor
   `deferred` — treat that as a red unit, not a passed one.
-- **FILING IS NOT DISPOSING — a residue needs an OWNER before the close.**
-  `work_items:create` without `assign_to` leaves the item unclaimed, with no one
-  accountable. File each out-of-scope defect or follow-up with `assign_to`
-  (`"self"` or the owner id), then list it in `coverage.residue`. An unowned id
-  cited in `deferred` or the summary beside `residue:[]` hides the residue.
 - **SIZE UNITS BY COHERENCE, not by what fits a turn.** A unit is what you can
   finish AND verify together. If work is coupled, keep it in one unit and
   **checkpoint mid-unit** rather than splitting it across a boundary that would

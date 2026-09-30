@@ -764,6 +764,25 @@ export function writeCodexLockHooks(
     });
   }
 
+  // IDENTITY HOOK ports (portable-identity-packages-2026-09-26 P-011, D-023 §2):
+  // a worn identity's pre-tool guards, stop rules and compaction rules, through
+  // the same dispatcher and the same baked sid as the two context ports above.
+  // Every matcher is '.*' — which tools a guard names, and which SessionStart
+  // sources mean a fresh context, are decided by the operator and the adapter
+  // (codex's schemas are read in adapters/codex.mjs). The guard renders only a
+  // deny for the one pending call, so it can never auto-approve (D-027).
+  const stop: CodexHook[] = [];
+  if (opts.injectSid && existsSync(injectDispatcher)) {
+    const injectIdentity = `PAPERCUSP_SID=${shellSingleQuote(opts.injectSid)} PAPERCUSP_AGENT=codex`;
+    const identityHook = (event: string): CodexHook => ({
+      matcher: '.*',
+      hooks: [{ type: 'command', command: `${injectIdentity} ${injectDispatcher} --client=codex --event=${event}` }],
+    });
+    preToolUse.push(identityHook('PreToolUse'));
+    stop.push(identityHook('Stop'));
+    sessionStart.push(identityHook('SessionStart'));
+  }
+
   // UserPromptSubmit is emitted ONLY when non-empty: an empty MatcherGroup array
   // is meaningless, and a key that is always present would make "is turn-start
   // registered on this home?" un-answerable by reading hooks.json.
@@ -772,6 +791,7 @@ export function writeCodexLockHooks(
       PreToolUse: preToolUse,
       PostToolUse: postToolUse,
       ...(userPromptSubmit.length > 0 ? { UserPromptSubmit: userPromptSubmit } : {}),
+      ...(stop.length > 0 ? { Stop: stop } : {}),
       ...(sessionStart.length > 0 ? { SessionStart: sessionStart } : {}),
       ...(sessionEnd.length > 0 ? { SessionEnd: sessionEnd } : {}),
       ...(preCompact.length > 0 ? { PreCompact: preCompact } : {}),
@@ -1436,4 +1456,50 @@ export function writeSuCodexHome(opts: {
   }
 
   return { codexHome, agentsPath, configPath, instructionLint };
+}
+
+const PAPERCUSP_SU_TABLE_RE = /^mcp_servers\.(?:papercusp-su|"papercusp-su")(?:\.|$)/;
+
+/**
+ * The SU `config.toml` minus what makes it an SU session: the papercusp-su MCP
+ * table (and any of its sub-tables) and the psu cap on the project's AGENTS.md.
+ * Every other key and table, the project's own MCP servers included, is kept.
+ */
+export function codingAssistantCodexConfigToml(toml: string): string {
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of toml.split('\n')) {
+    const header = /^\s*\[\[?([^\]]+)\]\]?\s*(?:#.*)?$/.exec(line);
+    if (header) skipping = PAPERCUSP_SU_TABLE_RE.test(header[1].replace(/\s+/g, ''));
+    if (skipping) continue;
+    if (/^\s*project_doc_max_bytes\s*=\s*0\s*(?:#.*)?$/.test(line)) continue;
+    if (line.startsWith('# psu prompt isolation')) continue;
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+/**
+ * pui-chat-first-ux-2026-09-28 P-016 (D-004/D-005 for Codex): a PUI chat opened
+ * outside every registered checkout runs Codex's own identity. This strips the
+ * SU pieces from its already-written per-session home IN PLACE, so rollouts,
+ * auth and the project's own MCP servers survive: the papercusp-su MCP server,
+ * the cap that stops Codex reading the project's AGENTS.md, the SU playbook
+ * (replaced by a COPY of the user's own `~/.codex/AGENTS.md`, never a symlink,
+ * because a later SU repair writes through that path), and the managed
+ * hooks.json. Idempotent. Run it on every engine start: an exact resume first
+ * repairs the home back to its SU configuration.
+ */
+export function makeCodingAssistantCodexHome(codexHome: string, home: string = homedir()): void {
+  const configPath = join(codexHome, 'config.toml');
+  if (existsSync(configPath)) {
+    const current = readFileSync(configPath, 'utf8');
+    const next = codingAssistantCodexConfigToml(current);
+    if (next !== current) writeFileSync(configPath, next, { mode: 0o600 });
+  }
+  const agentsPath = join(codexHome, 'AGENTS.md');
+  rmSync(agentsPath, { force: true });
+  const userAgents = join(home, '.codex', 'AGENTS.md');
+  if (existsSync(userAgents)) writeFileSync(agentsPath, readFileSync(userAgents), { mode: 0o600 });
+  rmSync(join(codexHome, 'hooks.json'), { force: true });
 }

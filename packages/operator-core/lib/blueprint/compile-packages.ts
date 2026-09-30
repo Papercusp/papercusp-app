@@ -291,8 +291,15 @@ export async function compileBlueprintWithPackages(
   const classRefs = [...requiredClasses, ...optionalClasses];
   const contextContributions = ((blueprint as { contributions?: readonly ContextContributionDeclaration[] })
     .contributions ?? []).filter((entry) => entry.inputKind === 'capability-provider' && entry.verb !== undefined);
+  // A sync context rule (P-011, D-023) names the same class@major + verb a
+  // contribution does, so it binds through the same resolver below.
+  const syncContextRules = packages.flatMap((pin) => {
+    if (pin.packageKind !== 'rule') return [];
+    const value = pin.value as { delivery?: unknown; context?: { ref: string; verb: string } } | null;
+    return value?.delivery === 'sync' && value.context ? [{ ref: pin.ref, context: value.context }] : [];
+  });
   let resolvedPotSlug = options.potSlug;
-  if (!resolvedPotSlug && (classRefs.length > 0 || contextContributions.length > 0)) {
+  if (!resolvedPotSlug && (classRefs.length > 0 || contextContributions.length > 0 || syncContextRules.length > 0)) {
     const pots = await resolvePotSlugsForHarnesses(options.workspaceId, [options.harnessSlug]);
     resolvedPotSlug = pots[0] ?? options.harnessSlug;
   }
@@ -350,6 +357,22 @@ export async function compileBlueprintWithPackages(
     }
     throw new CompositionCompilerError('input-invalid',
       `context capability ${contribution.ref}#${contribution.verb} cannot bind: ${code}`, contribution.id);
+  }
+  // A worn rule has no optional form: an operation, asynchronous, unbound or
+  // schema-less provider refuses the bind here instead of omitting on every turn.
+  for (const rule of syncContextRules) {
+    const resolution: IdentityClassProviderResolution = resolvedPotSlug
+      ? await resolveContextCapability({ potSlug: resolvedPotSlug, classRef: rule.context.ref, verb: rule.context.verb })
+      : { ok: false, requestedClassRef: rule.context.ref, code: 'class-unbound' };
+    const code = resolution.ok ? contextOutputSchemaRefusal(resolution.contract.outputSchema) : resolution.code;
+    if (!resolution.ok || code) {
+      throw new CompositionCompilerError('input-invalid',
+        `sync rule ${rule.ref} context ${rule.context.ref}#${rule.context.verb} cannot bind: ${code}`, rule.ref);
+    }
+    const input = contextCapabilityInput(resolution);
+    // The closure keys a provider pin by class and a pot binds one provider per
+    // class, so a class already pinned by a grant or contribution is not re-pinned.
+    if (!capabilityProviders.some((entry) => entry.ref === input.ref)) capabilityProviders.push(input);
   }
   let memoryTarget = options.memoryTarget;
   if (!memoryTarget && packages.some((pin) => pin.packageKind === 'knowledge-pack')) {

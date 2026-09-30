@@ -9,6 +9,7 @@ import {
   rehydrateRegisteredSuSessionHost,
 } from '../../../su-session-host';
 import { readDurableSuSession } from '../../../su-session-persistence';
+import { detachSuClientLease } from '../../../su-session-client-lease';
 
 async function hostFor(slug: string, chatId: string) {
   const input = {
@@ -120,6 +121,36 @@ const commandRoute = defineTool({
   },
 });
 
-export const suSessionRoutes = [snapshotRoute, eventsRoute, commandRoute];
+/**
+ * pui-chat-first-ux-2026-09-28 P-009: keep this session's engine running after
+ * its client leaves. Without it the engine ends once no client has been
+ * attached for the lease TTL. The next attach clears the detach again.
+ */
+const detachRoute = defineTool({
+  method: 'POST',
+  path: '/harness/:slug/agent-chats/:chatId/su-session/detach',
+  auth: 'loopback',
+  async handler(_request, context) {
+    const host = await hostFor(context.params.slug, context.params.chatId);
+    if (!host) {
+      return Response.json(
+        { error: 'no SU session is attached to this agent chat', code: 'su_session_not_attached' },
+        { status: 404 },
+      );
+    }
+    if (host.snapshot().terminal) {
+      return Response.json(
+        { error: 'this session has already ended', code: 'session_terminal' },
+        { status: 409 },
+      );
+    }
+    const detached = await detachSuClientLease(host.descriptor().identity.advSessionId);
+    return detached
+      ? Response.json({ ok: true, detached: true })
+      : Response.json({ error: 'this session has already ended', code: 'session_terminal' }, { status: 409 });
+  },
+});
+
+export const suSessionRoutes = [snapshotRoute, eventsRoute, commandRoute, detachRoute];
 
 export default suSessionRoutes;

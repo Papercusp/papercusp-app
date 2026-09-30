@@ -398,6 +398,41 @@ export interface BackfillTarget {
   recipeVersion?: number;
 }
 
+/**
+ * generic-rag-chunking-2026-09-29 P-013 (R-31, EI-24609404813504679): one
+ * query-time search site that READS a target's stored vector.
+ *
+ * Declared here because the sweep only ever writes vectors, so nothing forced a
+ * target to have a reader. Three write-only vectors were found that way:
+ * carry_notes.note_embedding (dropped by migration 1243, D-020),
+ * harness_docs.embedding and coord_thread_posts.body_embedding (dropped by
+ * migration 1249, D-025; the last carried 1.1M vectors and a 4.3 GB HNSW index
+ * that no query touched). embed-target-readers.test.ts checks every entry
+ * against the file it names.
+ */
+export interface EmbedVectorReader {
+  /** Repo-relative path of the file holding the read. */
+  file: string;
+  /**
+   * Literal substrings of that file which together ARE the read. At least one
+   * must carry a pgvector distance operator; the others tie it to this target,
+   * usually its FROM clause. If any of them disappears the guard fails, so
+   * removing the reader flags the TARGET instead of leaving a vector nobody
+   * reads.
+   */
+  evidence: readonly [string, ...string[]];
+}
+
+/**
+ * A TARGETS entry: sweep mechanics plus the REQUIRED, non-empty list of search
+ * sites that read the vector it fills. A vector with no reader gets no target;
+ * drop the column instead (D-020, D-025). Standalone targets outside the shared
+ * sweep, such as the personal vault's, keep the plain {@link BackfillTarget}.
+ */
+export interface SweepTarget extends BackfillTarget {
+  readers: readonly [EmbedVectorReader, ...EmbedVectorReader[]];
+}
+
 /** The column (migration 530) recording which embedder produced a row's vector. */
 export function modeColOf(target: BackfillTarget): string {
   return `${target.embedCol}_mode`;
@@ -591,7 +626,7 @@ export function settledPredicateSql(
  * row is searchable within a tick. Chunk rows are replaced wholesale when
  * their parent changes, so `updated_at` IS the write time.
  */
-export function chunkStoreBackfillTarget(store: ChunkStoreRegistration): BackfillTarget {
+export function chunkStoreBackfillTarget(store: ChunkStoreRegistration): SweepTarget {
   return {
     table: store.table,
     embedCol: store.embedCol,
@@ -600,13 +635,33 @@ export function chunkStoreBackfillTarget(store: ChunkStoreRegistration): Backfil
     orderBySql: 'updated_at DESC',
     recencyCol: 'updated_at',
     recencyColKind: 'timestamptz',
+    readers: [CHUNK_VECTOR_LEG_READER],
   };
 }
+
+/**
+ * Every chunk store's vectors are read by one helper, the chunk-aware vector leg
+ * (D-009): each chunk-backed search site calls it with its surface, and it
+ * resolves the store's table and embedding column from the registry. Today
+ * session_turn search calls it (search/sources.ts); the text_chunks collections
+ * call it once they register (P-009..P-012).
+ */
+const CHUNK_VECTOR_LEG_READER: EmbedVectorReader = {
+  file: 'libs/generic/search/src/chunks/vector-leg.ts',
+  evidence: ['export function chunkAwareVectorLegSql(', '(${sql.unsafe(emb)} <=> ${q}::vector)'],
+};
+
+/** search:semantic's ranked prose sources (escalations, brainstorm, operator turns, decisions, work items). */
+const SEARCH_SOURCES_FILE = 'packages/operator-core/lib/agent-tools/search/sources.ts';
 
 // Exported for embed-space-self-check.ts (WI-3644): the canonical set of
 // embedded prose surfaces, reused rather than re-listed so the self-check
 // never drifts from what the backfill sweep actually maintains.
-export const TARGETS: BackfillTarget[] = [
+//
+// Every entry names its `readers` (P-013, R-31): the search sites that query
+// the vector it fills. embed-target-readers.test.ts checks each one against the
+// file it names.
+export const TARGETS: SweepTarget[] = [
   // EI-12967: these first four targets had NO char cap on their embed input — unlike
   // every other target below (session_turns/work_items/doc_sections/harness_plans all
   // `left(…, 2000)`). The sidecar hard-rejects any single text over 32000 chars
@@ -625,6 +680,10 @@ export const TARGETS: BackfillTarget[] = [
     bodySql: `left(COALESCE(escalation, ''), 2000) || E'\\n' || left(COALESCE(supervisor_notes, ''), 2000)`,
     keyCols: ['harness_slug', 'phase'],
     // No write-time column on this table at all — recent-coverage reads NULL (absent, not zero).
+    readers: [{
+      file: SEARCH_SOURCES_FILE,
+      evidence: ['FROM harness_shared.harness_escalations', 'ORDER BY body_embedding <=> ${qVec}::vector'],
+    }],
   },
   {
     table: 'harness_shared.harness_brainstorm',
@@ -634,6 +693,10 @@ export const TARGETS: BackfillTarget[] = [
     // Only an update-time column exists here; it is the best available write proxy.
     recencyCol: 'updated_at',
     recencyColKind: 'epochMs',
+    readers: [{
+      file: SEARCH_SOURCES_FILE,
+      evidence: ['FROM harness_shared.harness_brainstorm', 'ORDER BY content_embedding <=> ${qVec}::vector'],
+    }],
   },
   {
     table: 'harness_shared.operator_turns',
@@ -642,6 +705,10 @@ export const TARGETS: BackfillTarget[] = [
     keyCols: ['id'],
     recencyCol: 'created_at',
     recencyColKind: 'epochMs',
+    readers: [{
+      file: SEARCH_SOURCES_FILE,
+      evidence: ['FROM harness_shared.operator_turns t', 'ORDER BY t.text_embedding <=> ${qVec}::vector'],
+    }],
   },
   {
     table: 'harness_shared.harness_decisions',
@@ -651,6 +718,10 @@ export const TARGETS: BackfillTarget[] = [
     bodySql: `COALESCE(verb, '') || ' ' || left(COALESCE(args, ''), 2000)`,
     keyCols: ['harness_slug', 'line_hash'],
     // No write-time column on this table at all — recent-coverage reads NULL (absent, not zero).
+    readers: [{
+      file: SEARCH_SOURCES_FILE,
+      evidence: ['FROM harness_shared.harness_decisions', 'ORDER BY body_embedding <=> ${qVec}::vector'],
+    }],
   },
   // session-search-scope-2026-07-05: the episodic transcript index. Embed
   // SELECTIVELY — short acks are noise for semantic recall. The CASE returns ''
@@ -690,6 +761,26 @@ export const TARGETS: BackfillTarget[] = [
     orderBySql: 'ingested_at DESC',
     recencyCol: 'ingested_at',
     recencyColKind: 'timestamptz',
+    readers: [
+      // session_turn search reads it as the chunk-aware leg's PARENT vector.
+      // Since generic-rag-chunking P-007 the leg takes its parent table and
+      // vector column from the session-turn registry entry
+      // (search/turn-chunk-sync.ts SESSION_TURN_CHUNK_SURFACE.parentVector),
+      // which chunks/derived-registrations.test.ts pins to this column.
+      {
+        file: SEARCH_SOURCES_FILE,
+        evidence: ['surface: SESSION_TURN_CHUNK_SURFACE', 'WITH best AS (${chunkAwareVectorLegSql(sql, {'],
+      },
+      {
+        file: 'libs/generic/search/src/chunks/vector-leg.ts',
+        evidence: ['(${sql.unsafe(parentVec)} <=> ${q}::vector) AS distance'],
+      },
+      // events:await interest watches match new turns against a watch vector.
+      {
+        file: 'packages/operator-core/lib/events/await/interest-watch.ts',
+        evidence: ['FROM harness_shared.session_turns', 'AND 1 - (text_embedding <=> ${qVec}::vector) >= ${row.simFloor}'],
+      },
+    ],
   },
   // The chunk stores: per-chunk vectors for rows longer than the 2,000-char
   // window their parent's entry embeds (session_turn_chunks, P-034 of
@@ -786,6 +877,21 @@ export const TARGETS: BackfillTarget[] = [
     // the 24h signal wants creation, or edit churn on old items masks a real regression.
     recencyCol: 'created_ts',
     recencyColKind: 'epochMs',
+    readers: [
+      {
+        file: 'packages/operator-core/lib/work-items.ts',
+        evidence: ['FROM harness_shared.work_items', 'ORDER BY embedding <=> ${qVec}::vector'],
+      },
+      {
+        file: 'packages/operator-core/lib/agent-tools/work_items/semantic-dupe-guard.ts',
+        evidence: ['ORDER BY embedding <=> ${vecLit}::vector'],
+      },
+      // search:semantic's work_item source reads the engineer_issues view over this table.
+      {
+        file: SEARCH_SOURCES_FILE,
+        evidence: ['FROM harness_shared.engineer_issues', 'ORDER BY embedding <=> ${qVec}::vector'],
+      },
+    ],
   },
   // P-009 (shared-embedding-sidecar-and-enrichment-2026-07-10): documentation
   // sections. docs:search is filesystem-backed, so doc-embed-sync.ts mirrors
@@ -805,20 +911,16 @@ export const TARGETS: BackfillTarget[] = [
     // updated_at IS the write time for this surface.
     recencyCol: 'updated_at',
     recencyColKind: 'timestamptz',
+    readers: [{
+      file: 'packages/operator-core/lib/agent-tools/docs/semantic-leg.ts',
+      evidence: ['FROM harness_shared.doc_sections', 'ORDER BY embedding <=> ${vecLit}::vector'],
+    }],
   },
-  // P-001 (claude-md-projection-from-pg-2026-08-10): migration 781 makes
-  // harness_docs.content canonical for authored docs (and the projector's
-  // cached output for composed docs), so its in-row vector is a maintained
-  // prose surface just like harness_plans. The full PK is required here:
-  // doc_id is only unique within a workspace+harness.
-  {
-    table: 'harness_shared.harness_docs',
-    embedCol: 'embedding',
-    bodySql: `COALESCE(title, '') || E'\\n' || left(COALESCE(content, ''), 2000)`,
-    keyCols: ['workspace_id', 'harness_slug', 'doc_id'],
-    recencyCol: 'updated_at',
-    recencyColKind: 'timestamptz',
-  },
+  // harness_shared.harness_docs is deliberately NOT a target: migration 1249
+  // dropped its in-row embedding because nothing read it (generic-rag-chunking-
+  // 2026-09-29 P-013 / D-025). Harness docs reach docs:search as doc_sections
+  // rows under source_key harness:<slug> (D-007), synced on the sweep by
+  // doc-embed-sync.ts, and are embedded by the doc_sections entry above.
   // P-010 (shared-embedding-sidecar-and-enrichment-2026-07-10): the plan
   // store (migration 553). plans:search gains a semantic leg and plans:new's
   // similar_exists token guard gains cosine confirmation — the token matcher
@@ -830,6 +932,10 @@ export const TARGETS: BackfillTarget[] = [
     keyCols: ['workspace_id', 'harness_slug', 'plan_slug'],
     recencyCol: 'created_at',
     recencyColKind: 'timestamptz',
+    readers: [{
+      file: 'packages/operator-core/lib/agent-tools/plans/semantic-leg.ts',
+      evidence: ['FROM harness_shared.harness_plans', 'ORDER BY embedding <=> ${vecLit}::vector'],
+    }],
   },
   // EI-19374072666153095: code_recipes and datatype_registry are BOTH in
   // PROSE_VECTOR_COLUMNS — so a width migration wipes them (`USING NULL`) — but
@@ -857,6 +963,10 @@ export const TARGETS: BackfillTarget[] = [
     orderBySql: 'created_at DESC',
     recencyCol: 'created_at',
     recencyColKind: 'timestamptz',
+    readers: [{
+      file: 'packages/operator-core/lib/code-recipes-search.ts',
+      evidence: ['FROM harness_shared.code_recipes', 'ORDER BY embedding <=> ${qVec}::vector'],
+    }],
   },
   {
     table: 'harness_shared.datatype_registry',
@@ -865,6 +975,10 @@ export const TARGETS: BackfillTarget[] = [
     keyCols: ['workspace_id', 'id'],
     recencyCol: 'created_at',
     recencyColKind: 'timestamptz',
+    readers: [{
+      file: 'packages/operator-core/lib/datatype-registry-store.ts',
+      evidence: ['FROM harness_shared.datatype_registry', '+ 0.6 * (1 - (embedding <=> ${embeddingLiteral}::vector)) END'],
+    }],
   },
   // WI-39840 — the two columns migration 847 widened to the 768 prose contract.
   // They are in PROSE_VECTOR_COLUMNS, so a width migration WIPES them, and the
@@ -889,6 +1003,11 @@ export const TARGETS: BackfillTarget[] = [
     keyCols: ['workspace_id', 'conversation_id'],
     recencyCol: 'created_at',
     recencyColKind: 'timestamptz',
+    // consult:get_feedback's archive-first lookup.
+    readers: [{
+      file: 'packages/operator-core/lib/consult/peers-know.ts',
+      evidence: ['FROM harness_shared.consult_state', 'ORDER BY query_embedding <=> ${qVec}::vector'],
+    }],
   },
   {
     table: 'harness_shared.interest_watches',
@@ -901,25 +1020,22 @@ export const TARGETS: BackfillTarget[] = [
     keyCols: ['id'],
     recencyCol: 'created_at',
     recencyColKind: 'timestamptz',
+    // The watch's own vector is the QUERY vector matched against new turns.
+    readers: [{
+      file: 'packages/operator-core/lib/events/await/interest-watch.ts',
+      evidence: ['const qVec = row.embeddingText;', 'AND 1 - (text_embedding <=> ${qVec}::vector) >= ${row.simFloor}'],
+    }],
   },
   // harness_shared.carry_notes is deliberately NOT a target: migration 1243
   // dropped note_embedding because nothing read it (generic-rag-chunking-2026-09-29
   // D-020). Carry notes are recovered by scope key and note_tsv. Re-add the column
   // and an entry here only together with a semantic reader.
-  // Migration 1097 (WI-2142144): coord thread discussion posts — the second of the
-  // two only-unindexed continuity corpora. PK is a bigserial `id`, which is already
-  // the sweep's freshest-first order AND a real index (the primary key btree) — no
-  // separate `updated`/`created` sort column needed, unlike every other target here.
-  {
-    table: 'harness_shared.coord_thread_posts',
-    embedCol: 'body_embedding',
-    bodySql: `left(COALESCE(body, ''), 2000)`,
-    keyCols: ['id'],
-    // Backed by coord_thread_posts_pkey — a backward index scan on the PK itself.
-    orderBySql: 'id DESC',
-    recencyCol: 'created_at',
-    recencyColKind: 'timestamptz',
-  },
+  // harness_shared.coord_thread_posts is deliberately NOT a target either:
+  // migration 1097 added body_embedding without wiring any query to it, and none
+  // was ever added, so 1.1M vectors and a 4.3 GB HNSW index went unread.
+  // Migration 1249 dropped them (generic-rag-chunking-2026-09-29 P-013 / D-025).
+  // Thread posts stay findable lexically via body_tsv. As with carry notes,
+  // re-add the column and an entry here only together with a reader.
 ];
 
 /**
@@ -1791,20 +1907,24 @@ export async function runEmbedBackfillOnce(): Promise<void> {
   } catch (err) {
     console.warn('[embed-backfill] doc-sections sync failed:', (err as Error).message);
   }
-  // P-034: derive chunk rows for long turns before the sweep, same reason —
-  // the session_turn_chunks target needs rows to embed. Unlike doc-sections
-  // this runs EVERY tick: its source is a continuously-growing table, not a
-  // process-lifetime memoized filesystem corpus. Fail-open and independently
-  // caught, so a chunk-sync fault can never cost the sweep its whole tick.
+  // generic-rag-chunking P-013 (EI-24580496022910673): backfill every
+  // registered harness's docs into doc_sections (source_key harness:<slug>) —
+  // before this, only the write-time queue wrote them, so docs:search's
+  // semantic leg had zero harness rows. Throttled inside; caught separately so
+  // it can never cost the engineering sync or the sweep.
   try {
-    const { runTurnChunkSyncTick } = await import('./turn-chunk-sync');
-    await runTurnChunkSyncTick();
+    const { runHarnessDocSectionsSweep } = await import('./doc-embed-sync');
+    await runHarnessDocSectionsSweep();
   } catch (err) {
-    console.warn('[embed-backfill] turn-chunk sync failed:', (err as Error).message);
+    console.warn('[embed-backfill] harness doc-sections sweep failed:', (err as Error).message);
   }
-  // generic-rag-chunking P-004: the same, for every registered chunk surface
-  // (search/chunks/registry.ts -> harness_shared.text_chunks). Independently
-  // caught for the same reason; it also logs and counts its own failures.
+  // generic-rag-chunking P-004: derive chunk rows for every registered chunk
+  // surface before the sweep, same reason — the chunk tables' targets need
+  // rows to embed. That includes session turns since P-007 (their dedicated
+  // session_turn_chunks store). Runs EVERY tick: its sources are
+  // continuously-growing tables, not a process-lifetime memoized corpus.
+  // Fail-open and independently caught, so a chunk-sync fault can never cost
+  // the sweep its whole tick; it also logs and counts its own failures.
   try {
     const { runChunkSyncTick } = await import('./chunks/tick');
     await runChunkSyncTick();

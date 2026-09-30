@@ -598,12 +598,14 @@ const turnStartMemory = defineTool({
             { ackAndRead },
             { evaluateTurnStartPackageSink, packageSinkReceipt },
             { withBoundedTimeout },
+            { pgHookTurnStore },
           ] = await Promise.all([
             import('@papercusp/flags/server'),
             import('@papercusp/flags'),
             import('../../../agent-tools/coordination/read-cursors'),
             import('../../../agent-identities/turn-start-package-sink'),
             import('../../../bounded-timeout'),
+            import('../../../agent-identities/sync-hook-rules'),
           ]);
           const on = await getFlag(FLAGS.TURN_START_ORIENTATION, 'system').catch(() => true);
           if (!on) return none;
@@ -612,8 +614,22 @@ const turnStartMemory = defineTool({
             confirmedToken: typeof body.confirmedDelivery === 'string' ? body.confirmedDelivery : null,
           }).catch(() => null);
           const detach = new AbortController();
+          // P-011 / D-024: open the durable hook turn every later sink of this
+          // turn joins (on any cluster worker), and charge what turn start
+          // delivered, so one ceiling spans turn start, post-tool and stop. An
+          // unreachable store costs only that sharing, never this turn's context.
+          const turns = pgHookTurnStore();
+          const evaluate = async () => {
+            const turnId = await turns.begin(owner, workspaceId).then((turn) => turn.turnId, () => randomUUID());
+            const sink = await evaluateTurnStartPackageSink({ ownerId: owner, workspaceId, turnId, signal: detach.signal });
+            if (sink.result) {
+              await turns.charge(owner, workspaceId, turnId,
+                { tokens: sink.result.deliveredTokens, ms: sink.result.elapsedMs }).catch(() => undefined);
+            }
+            return sink;
+          };
           const measured = await withBoundedTimeout(
-            evaluateTurnStartPackageSink({ ownerId: owner, workspaceId, turnId: randomUUID(), signal: detach.signal }),
+            evaluate(),
             { fallback: null, timeoutMs: PACKAGE_SINK_WALL_MS, label: 'turn-start:package-sink' },
           );
           if (!measured.value) {

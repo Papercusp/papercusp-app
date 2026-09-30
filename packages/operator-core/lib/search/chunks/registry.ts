@@ -17,11 +17,14 @@
  * package cannot import operator-core, so its list is pinned by
  * ./derived-registrations.test.ts instead.
  *
- * This module is a leaf on purpose (a type-only import): prose-vector-dims.ts,
- * which every embedding hot path imports, derives from it.
+ * This module stays near-leaf on purpose: prose-vector-dims.ts, which every
+ * embedding hot path imports, derives from it. Its one value import is the
+ * session-turn entry, whose module loads nothing heavier than node:crypto,
+ * @papercusp/module-singleton and its store adapter (P-007).
  */
 
 import type { ChunkSurface } from '@papercusp/search';
+import { SESSION_TURN_CHUNK_SURFACE } from '../turn-chunk-sync';
 
 /** The shared store every entry writes to unless it names another (migration 1242). */
 export const TEXT_CHUNKS_TABLE = 'harness_shared.text_chunks';
@@ -69,11 +72,10 @@ export interface PapercuspChunkSurface extends ChunkSurface {
 export const CHUNK_STORES: readonly ChunkStoreRegistration[] = [
   {
     // P-034 (semantic-search-fingerprint-coverage-2026-08-03, D-016): per-chunk
-    // vectors for LONG session turns — 1500-char windows, 250 overlap,
-    // sha-keyed, derived by turn-chunk-sync.ts. A dedicated store (D-002):
-    // 1.21M chunks stay where they are rather than being copied into the
-    // shared table. No header: a chunk's neighbours are its context, and the
-    // parent's speaker/owner metadata is joined at query time.
+    // vectors for LONG session turns — 1500-char windows, 250 overlap. A
+    // dedicated store (D-002): 1.21M chunks stay where they are rather than
+    // being copied into the shared table. Written by the engine through
+    // ./session-turn-store.ts for the SESSION_TURN_CHUNK_SURFACE entry (P-007).
     table: 'harness_shared.session_turn_chunks',
     embedCol: 'embedding',
     keyCols: ['workspace_id', 'source_kind', 'session_id', 'turn_idx', 'chunk_idx'],
@@ -102,7 +104,10 @@ export const CHUNK_STORES: readonly ChunkStoreRegistration[] = [
   },
 ];
 
-export const CHUNK_SURFACES: readonly PapercuspChunkSurface[] = [];
+export const CHUNK_SURFACES: readonly PapercuspChunkSurface[] = [
+  // Session turns (P-007): the dedicated store above, not the shared table.
+  SESSION_TURN_CHUNK_SURFACE,
+];
 
 /** Bare table name (the storage-growth-alarm's key form). */
 export function bareTableName(table: string): string {

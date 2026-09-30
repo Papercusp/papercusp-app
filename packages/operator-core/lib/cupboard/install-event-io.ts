@@ -31,6 +31,7 @@
  * `RegisterEventKeyInput` mirrors that boundary in the type system: it has no field for a
  * derived measurement, so the projection below is total by construction.
  */
+import { rmSync } from 'node:fs';
 import { cupboardGitDeps } from './install-io';
 import type { ContentPinRef } from './install-self-describing-core';
 import { resolveListingByKind } from './resolve-listing-by-kind';
@@ -48,10 +49,15 @@ export interface InstallEventInput {
   createdBy?: string;
 }
 
+/** A registry write on behalf of a package always names the package as contributor. */
+export type PackageRegistryInput = RegisterEventKeyInput & { contributor: string };
+
 export interface InstallEventDeps {
   /** Seed/refresh the `event_key_registry` row from the installed package. Injected so the
-   *  seam is testable without Postgres, and so the registry stays the one writer. */
-  seedRegistry: (input: RegisterEventKeyInput) => Promise<{ eventKey: string }>;
+   *  seam is testable without Postgres, and so the registry stays the one writer.
+   *  `refusedBy` reports a key another contributor already holds (D-026): the row is
+   *  untouched, and the value names that holder (null for a row with no contributor). */
+  seedRegistry: (input: PackageRegistryInput) => Promise<{ eventKey: string } | { refusedBy: string | null }>;
 }
 
 export interface InstalledEventResult extends InstalledEvent {
@@ -71,14 +77,20 @@ export type InstallEventResult =
   | { ok: false; status: number; error: string; detail?: string };
 
 /** The default seeder: the registry store, reached through the harness pool. Imported lazily
- *  so a test (or an export-only caller) never opens a pool it will not use. */
-async function defaultSeedRegistry(input: RegisterEventKeyInput): Promise<{ eventKey: string }> {
-  const [{ getOrgPg }, { registerEventKey }] = await Promise.all([
+ *  so a test (or an export-only caller) never opens a pool it will not use.
+ *
+ *  It CLAIMS rather than registers (D-026): a Cupboard package may create a key or refresh
+ *  one it created, never overwrite a key that core, a plugin or another listing holds — that
+ *  would hand every `events:await` on the key a stranger's contract. */
+async function defaultSeedRegistry(
+  input: PackageRegistryInput,
+): Promise<{ eventKey: string } | { refusedBy: string | null }> {
+  const [{ getOrgPg }, { claimEventKey }] = await Promise.all([
     import('@papercusp/db-org'),
     import('../event-key-registry-store'),
   ]);
-  const row = await registerEventKey(getOrgPg().sql, input);
-  return { eventKey: row.eventKey };
+  const claim = await claimEventKey(getOrgPg().sql, input);
+  return claim.claimed ? { eventKey: claim.row.eventKey } : { refusedBy: claim.holder };
 }
 
 /** Project an installed package into the registry write. Kept separate from the install so
@@ -93,7 +105,7 @@ export function registryInputFromPackage(
   event: InstalledEvent,
   workspaceId: string,
   createdBy?: string,
-): RegisterEventKeyInput {
+): PackageRegistryInput {
   return {
     workspaceId,
     eventKey: event.eventKey,
@@ -163,7 +175,13 @@ export async function installEventFromCupboard(
   }
 
   const seeded = await seed(installed, workspaceId, input.createdBy, deps);
-  if (!seeded.ok) return seeded;
+  if (!seeded.ok) {
+    // A key another contributor holds refuses the install outright (D-026). A FRESH
+    // install removes what it just landed, so a refused package leaves nothing behind; an
+    // update keeps the replaced package, since the directory was already this listing's.
+    if (seeded.status === 409 && !existing) rmSync(installed.installedTo, { recursive: true, force: true });
+    return seeded;
+  }
   return {
     ok: true,
     result: {
@@ -185,6 +203,15 @@ async function seed(
 ): Promise<{ ok: true; eventKey: string } | { ok: false; status: number; error: string; detail?: string }> {
   try {
     const row = await deps.seedRegistry(registryInputFromPackage(event, workspaceId, createdBy));
+    if ('refusedBy' in row) {
+      return {
+        ok: false,
+        status: 409,
+        error:
+          `event key "${event.eventKey}" is already registered by ${row.refusedBy ?? 'an unattributed contributor'}; ` +
+          'a Cupboard event package may create a key or refresh its own, never take over another contributor\'s',
+      };
+    }
     return { ok: true, eventKey: row.eventKey };
   } catch (error) {
     // The package is on disk but its keys resolve nowhere, so this is an install failure —

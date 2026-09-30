@@ -90,6 +90,8 @@ export const GATE_CODE_CLOSURE_LEG: Record<
   spec_proof_stale: { leg: 'verificationReadBack', rating: 'fail' },
   spec_clause_unproven: { leg: 'verificationReadBack', rating: 'fail' },
   design_evidence_unsatisfied: { leg: 'verificationReadBack', rating: 'fail' },
+  // WI-10004135: the author declared delivery-plane evidence outstanding (no BAR contract).
+  acceptance_pending_delivery: { leg: 'verificationReadBack', rating: 'fail' },
   // The census degraded rather than judged. Not a finding about the plan.
   design_evidence_unavailable: { leg: 'verificationReadBack', rating: 'unknown' },
   spec_coverage_unavailable: { leg: 'verificationReadBack', rating: 'unknown' },

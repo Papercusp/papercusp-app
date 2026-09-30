@@ -17,7 +17,7 @@ import path from 'node:path';
 import { ClaudeFileMemoryBackend, Mem0Backend, HybridBackend } from '@papercusp/memory';
 import { seedCorpus, runGoldSet, queryLevelPRF } from '@papercusp/memory/bench';
 
-import { benchPgClient, dropBenchSchema, ensureBenchSchema, setupBenchMemoryHost } from './bench-host';
+import { benchPgClient, releaseBenchSchema, ensureBenchSchema, setupBenchMemoryHost } from './bench-host';
 import { loadCorpusFixture } from './corpus';
 import { loadGoldSetFixture } from './gold-set';
 
@@ -101,7 +101,7 @@ async function main() {
     fs.writeFileSync(mdPath, md, 'utf8');
     console.log('\n' + md + '\nwrote ' + mdPath);
   } finally {
-    await dropBenchSchema(pg);
+    await releaseBenchSchema(pg);
     await pg.end();
     fs.rmSync(dir, { recursive: true, force: true });
   }

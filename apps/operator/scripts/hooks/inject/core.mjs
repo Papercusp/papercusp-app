@@ -225,6 +225,29 @@ export function buildDigest(calls) {
 }
 
 /**
+ * The pre-tool guard's view of one pending call (P-011, D-023 §3). Shared by
+ * every adapter so the clients cannot drift on what a guard gets to see.
+ *
+ * ⚠ WHOLE UP TO THE BOUND, THEN NOTHING — never a lossy prefix. A guard reads
+ * fields of the input; a clamp that cut it could hide exactly the tail a deny
+ * rule would have matched. Over the bound the input is dropped and flagged, and
+ * the server refuses the call for any guard that matches the tool.
+ *
+ * @param {unknown} tool
+ * @param {unknown} input
+ * @returns {{ tool: string, input: unknown } | { tool: string, inputTruncated: true } | null}
+ */
+export function guardCall(tool, input) {
+  if (typeof tool !== 'string' || !tool) return null;
+  const serialized = safeStringify(input ?? null);
+  // An unserializable input is one the guard cannot see: treat it as cut.
+  if (!serialized || Buffer.byteLength(serialized, 'utf8') > PORTS['pre-tool'].guardInputMaxBytes) {
+    return { tool, inputTruncated: true };
+  }
+  return { tool, input: input ?? null };
+}
+
+/**
  * Clamp a turn-start prompt to the contract length.
  * @param {unknown} prompt
  * @returns {string}

@@ -23,7 +23,7 @@ import {
   type SignedSigrefs,
 } from './sigrefs';
 import { defaultRunGit, deviceNamespaceKey, hiveGitRepoPath, readNamespaceRef, writeNamespaceRef } from './storage';
-import { PHASE_A_POT_HOME, PHASE_A_REPO_KEY } from './physical-drill-phase-a';
+import { physicalDrillTarget } from './physical-drill-phase-a';
 
 export const PHASE_C_HOST_SCHEMA = 'hive-git-physical-phase-c-host-result/v1' as const;
 export const PHASE_C_INPUT_SCHEMA = 'hive-git-physical-phase-c-input/v1' as const;
@@ -122,7 +122,8 @@ async function git(repoPath: string, args: string[]): Promise<string> {
 }
 
 async function assertCanonicalRepoPath(repoPath: string): Promise<void> {
-  const expected = hiveGitRepoPath(PHASE_A_POT_HOME, PHASE_A_REPO_KEY);
+  const target = physicalDrillTarget();
+  const expected = hiveGitRepoPath(target.potHome, target.repoKey);
   if (!isAbsolute(repoPath) || resolve(repoPath) !== resolve(expected)) {
     throw new Error(`physical Phase C repo path must be the fixed ${expected}: ${repoPath}`);
   }
@@ -232,7 +233,7 @@ export async function executePhysicalPhaseCHost(input: {
   }
 
   const scope = physicalPhaseCScope(input.runId);
-  const physicalScopeRepo = await ensureScopeRepo(PHASE_A_POT_HOME, scope);
+  const physicalScopeRepo = await ensureScopeRepo(physicalDrillTarget().potHome, scope);
   const scopeRepoBare = (await git(physicalScopeRepo, ['rev-parse', '--is-bare-repository'])) === 'true';
   if (!scopeRepoBare) throw new Error('physical Phase C scope control did not target a real bare repo');
   let membershipChecks = 0;
@@ -309,7 +310,8 @@ function validateHost(
   if (host.physicalDeviceKey !== expected.physicalDeviceKey || host.peerDeviceKey !== expected.peerDeviceKey) {
     errors.push(`${label} physical identities are invalid`);
   }
-  const suffix = join(PHASE_A_POT_HOME, `${PHASE_A_REPO_KEY}.git`);
+  const target = physicalDrillTarget();
+  const suffix = join(target.potHome, `${target.repoKey}.git`);
   if (!isAbsolute(host.repoPath) || !resolve(host.repoPath).endsWith(suffix)) {
     errors.push(`${label} repo path is not the fixed physical target`);
   }
@@ -366,7 +368,7 @@ function validateHost(
   const scope = physicalPhaseCScope(expected.runId);
   const expectedScopeId = formatScopeId(scope);
   const expectedScopeSuffix = join(
-    PHASE_A_POT_HOME,
+    physicalDrillTarget().potHome,
     'scopes',
     `fleet-${SCOPE_OWNER_GITHUB_USER_ID}`,
     `${scope.slug}.git`,

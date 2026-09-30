@@ -1513,6 +1513,10 @@ import './cupboard/install-app';
 // plan row, not a file the store reads directly.
 import './cupboard/publish-rubric';
 import './cupboard/install-rubric';
+// portable-identity-packages-2026-09-26 P-011 (D-023 §6) — the rule kind's publish +
+// install legs. Single-step: an installed rule is inert until a blueprint pins it.
+import './cupboard/publish-rule';
+import './cupboard/install-rule';
 // cupboard-plan-rubric-recipe-sharing-2026-08-21 P-009/P-010/P-011 — the plan kind.
 // publish-plan SANITIZES before it lists (a plan fuses a reusable shape with a run
 // log; only the shape may travel). install-plan gates on the listing's
@@ -1744,6 +1748,13 @@ import './lexicon/active_pack';
 // Storage page (federated categories refused; default keep-all).
 import './storage/usage';
 import './storage/prune';
+
+// access:* (external-app-access-to-workspaces-2026-09-29 P-012) — local-only list /
+// create / pause / revoke of the keys outside apps use. Hard-denied to every app key.
+import './access/list';
+import './access/create';
+import './access/pause';
+import './access/revoke';
 
 // reports-library-2026-09-15 (P-003) — the owner-facing Reports library verbs:
 // publish / get / list / search / retire. Origin is stamped from ctx inside

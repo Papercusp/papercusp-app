@@ -3595,6 +3595,32 @@ const REPO_WIDE_INVARIANT_GUARDS = [
         f.endsWith(".sql.PENDING-CODE-DEPLOY")),
   },
   {
+    // WI-10004160 — the federated-column drift guard is the only check that a column added
+    // to a federated CDC table is either carried by the federation mapper or declared
+    // machine-local. It is an integration test, so the unit-layer operator-core task never
+    // ran it and the local gate never passes `--integration`: it went unrun from 2026-08-29
+    // to 2026-09-30 while 16 columns on 4 tables landed undeclared (7 of them the mig-1111
+    // acceptance-BAR seed, which is what surfaced it — WI-10004146).
+    //
+    // Trigger on the two sides of the contract: a migration (adds the column) and the
+    // mapper/projections (carry it), plus the test and the seams that can detach it.
+    workspace: "@papercusp/operator-core",
+    script: "test:integration:federated-column-completeness",
+    appliesTo: (f) =>
+      (f.startsWith(`${MIGRATION_SQL_DIR}/`) &&
+        (f.endsWith(".sql") ||
+          f.endsWith(".sql.DRAFT") ||
+          f.endsWith(".sql.PENDING-CODE-DEPLOY"))) ||
+      f === "packages/operator-core/lib/sync/hyperbee/feature-issue-op-keys.ts" ||
+      (f.startsWith("packages/operator-core/lib/sync/hyperbee/projections/") &&
+        /\.ts$/.test(f) &&
+        !/\.test\.ts$/.test(f)) ||
+      f === "packages/operator-core/lib/sync/hyperbee/__tests__/federated-column-completeness.integration.test.ts" ||
+      f === "packages/operator-core/package.json" ||
+      f === "packages/operator-core/vitest.integration.config.ts" ||
+      f === "scripts/affected-tests.mjs",
+  },
+  {
     // WI-2141163 — P-003's real-Postgres queue recurrence suite was never reached by
     // the local green-checkpoint: operator-core's ordinary task is unit-layer and the
     // broad `test:integration` task is opt-in behind `--integration`, which the local

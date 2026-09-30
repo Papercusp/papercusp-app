@@ -34,7 +34,9 @@
 import { createHash } from 'node:crypto';
 
 import { mcnemarExact, pairedBootstrapCI, type McNemarResult, type PairedComparison } from '@papercusp/bench-metrics';
-import type { DecisionOutcome, DecisionRequest, QuestionMap, YesNoQuestion } from '@papercusp/decision-model';
+import type { DecisionOutcome, QuestionMap } from '@papercusp/decision-model';
+
+import { admissionPYes, RELEVANCE_CRITERIA, RELEVANCE_INSTRUCTIONS, type AdmissionEncoding } from '../jev-admission-request';
 import {
   aggregateByClass,
   latencyStats,
@@ -78,67 +80,17 @@ export const PENDING_P005 = [
 
 // ─── The Jev request ───────────────────────────────────────────────────────
 
-/**
- * Where the memory text travels. `state` puts every candidate in the shared
- * state and asks one question per id; `instructions` keeps only the message in
- * state and carries each memory inside its own question. P-005 compares the
- * two; P-004 runs `state`.
- */
-export type AdmissionEncoding = 'state' | 'instructions';
-
-const RELEVANCE_INSTRUCTIONS =
-  'Would this memory help respond to the message? Answer yes only when it is directly relevant to what the ' +
-  'message asks about or is about to do. A memory that merely shares a word or a broad topic with the message ' +
-  'is not relevant.';
-
-const RELEVANCE_CRITERIA = {
-  yes: 'The memory is directly relevant to the message.',
-  no: 'The memory is unrelated to the message, or related only by a shared word or a broad topic.',
-} as const;
-
-/** Stable question id for the i-th candidate (retrieval order). */
-export function admissionQuestionId(index: number): string {
-  return `m${index + 1}`;
-}
-
-export interface AdmissionRequest {
-  readonly request: DecisionRequest<QuestionMap>;
-  /** Index-aligned with the candidates. */
-  readonly questionIds: readonly string[];
-}
-
-/** ONE request per query, one yes/no question per candidate (plan P-004). */
-export function buildAdmissionRequest(
-  message: string,
-  candidates: readonly Pick<CandidateHit, 'text'>[],
-  encoding: AdmissionEncoding = 'state',
-): AdmissionRequest {
-  if (candidates.length === 0) throw new Error('buildAdmissionRequest: no candidates to judge');
-  const questionIds = candidates.map((_, i) => admissionQuestionId(i));
-  const questions: Record<string, YesNoQuestion> = {};
-  if (encoding === 'state') {
-    const memories: Record<string, string> = {};
-    candidates.forEach((c, i) => {
-      memories[questionIds[i]] = c.text;
-    });
-    for (const id of questionIds) {
-      questions[id] = {
-        type: 'yesNo',
-        instructions: `Consider only memories.${id}. ${RELEVANCE_INSTRUCTIONS}`,
-        criteria: RELEVANCE_CRITERIA,
-      };
-    }
-    return { request: { state: { message, memories }, questions }, questionIds };
-  }
-  candidates.forEach((c, i) => {
-    questions[questionIds[i]] = {
-      type: 'yesNo',
-      instructions: `${RELEVANCE_INSTRUCTIONS}\n\nMemory:\n${c.text}`,
-      criteria: RELEVANCE_CRITERIA,
-    };
-  });
-  return { request: { state: { message }, questions }, questionIds };
-}
+// The admission question itself lives in ../jev-admission-request so production
+// (jev-memory-gate.ts) asks exactly what this bench measured. Re-exported here
+// because the bench CLIs and tests import the whole evaluation surface from one module.
+export {
+  admissionQuestionId,
+  alternateEncoding,
+  buildAdmissionRequest,
+  parseAdmissionEncoding,
+  type AdmissionEncoding,
+  type AdmissionRequest,
+} from '../jev-admission-request';
 
 function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
@@ -171,27 +123,14 @@ export interface QueryScores {
 
 /** Map a decision outcome onto candidate-aligned P(yes) scores. */
 export function scoresFromDecision(outcome: DecisionOutcome<QuestionMap>, questionIds: readonly string[]): QueryScores {
-  if (outcome.kind === 'inconclusive') {
-    return {
-      scores: null,
-      failure: outcome.reason,
-      latencyMs: outcome.latencyMs,
-      cached: false,
-      inputTokens: null,
-      costUsd: null,
-    };
-  }
-  const scores: number[] = [];
-  for (const id of questionIds) {
-    const answer = (outcome.answers as Readonly<Record<string, { type: string; pYes?: number }>>)[id];
-    if (!answer || answer.type !== 'yesNo' || typeof answer.pYes !== 'number') {
-      return { scores: null, failure: 'malformed-response', latencyMs: outcome.latencyMs, cached: false, inputTokens: null, costUsd: null };
-    }
-    scores.push(answer.pYes);
+  const p = admissionPYes(outcome, questionIds);
+  if (outcome.kind === 'inconclusive' || 'failure' in p) {
+    const failure = outcome.kind === 'inconclusive' ? outcome.reason : 'failure' in p ? p.failure : 'malformed-response';
+    return { scores: null, failure, latencyMs: outcome.latencyMs, cached: false, inputTokens: null, costUsd: null };
   }
   const inputTokens = outcome.usage.inputTokens;
   return {
-    scores,
+    scores: p.scores,
     latencyMs: outcome.latencyMs,
     cached: false,
     inputTokens,

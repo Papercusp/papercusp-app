@@ -41,13 +41,28 @@
  * PermissionRequestDecisionWire), and a hook that only wants to SAY something
  * must never also vote on whether the call runs. post-tool-use.command.output
  * carries `additionalContext` with no permission field.
+ *
+ * ── THE IDENTITY HOOK PORTS (portable-identity-packages-2026-09-26 P-011) ──
+ * pre-tool-use maps to the GUARD port, which only ever votes no (D-023 §3).
+ * Re-read from codex-cli 0.159.0's embedded schemas on 2026-09-30:
+ *   pre-tool-use.command.output  hookSpecificOutput.permissionDecision
+ *                                allow|deny|ask + permissionDecisionReason
+ *   stop.command.output          NO hookSpecificOutput (additionalProperties
+ *                                false); only decision:'block' + reason
+ *   stop.command.input           stop_hook_active: boolean (required)
+ *   session-start.command.output hookSpecificOutput.additionalContext
+ *   session-start.command.input  source: startup|resume|clear|compact|fork
  */
 
 /** @typedef {import('../ports.mjs').InjectionPort} InjectionPort */
 
-import { buildDigest, clampPrompt } from '../core.mjs';
+import { buildDigest, clampPrompt, guardCall } from '../core.mjs';
 
 export const client = 'codex';
+
+/** See adapters/claude.mjs: a resume or a fork replays a transcript that
+ *  already holds what the compaction rules said. */
+const COMPACTION_SOURCES = new Set(['startup', 'clear', 'compact']);
 
 /**
  * Codex delivers `hook_event_name` in PascalCase in the event payload
@@ -68,6 +83,15 @@ export function portForEvent(nativeEvent) {
     case 'PostToolUse':
     case 'post-tool-use':
       return 'mid-turn';
+    case 'PreToolUse':
+    case 'pre-tool-use':
+      return 'pre-tool';
+    case 'Stop':
+    case 'stop':
+      return 'stop';
+    case 'SessionStart':
+    case 'session-start':
+      return 'compaction';
     default:
       return null;
   }
@@ -104,21 +128,59 @@ export function parse(port, event) {
     return { toolCalls, ...(cwd ? { cwd } : {}) };
   }
 
+  if (port === 'pre-tool') {
+    const call = guardCall(event.tool_name, event.tool_input);
+    return call ? { ...call, ...(cwd ? { cwd } : {}) } : null;
+  }
+
+  if (port === 'stop') {
+    // The block below makes the turn continue once; a stop that is already the
+    // result of one must end, or a stop rule loops the session forever.
+    if (event.stop_hook_active === true) return null;
+    return cwd ? { cwd } : {};
+  }
+
+  if (port === 'compaction') {
+    const source = event.source;
+    if (typeof source !== 'string' || !COMPACTION_SOURCES.has(source)) return null;
+    return { source, ...(cwd ? { cwd } : {}) };
+  }
+
   return null;
 }
+
+/** @type {Partial<Record<InjectionPort, string>>} */
+const CONTEXT_EVENT_NAMES = {
+  'turn-start': 'UserPromptSubmit',
+  'mid-turn': 'PostToolUse',
+  compaction: 'SessionStart',
+};
 
 /**
  * Codex's injection envelope is shape-identical to Claude's: the output schemas
  * define `hookSpecificOutput: { hookEventName, additionalContext }`, with
  * `hookEventName` a const echoing the event. Identical shape, independently
  * verified from codex's own schema — not assumed from claude.
+ *
+ * Two ports differ, both per the schemas in the header: pre-tool renders ONLY
+ * as a deny, and stop has no context channel at all — `decision: 'block'` with
+ * the context as its `reason` is how a stop hook makes codex continue with it.
  * @param {InjectionPort} port
  * @param {string} text
  * @returns {string | null}
  */
 export function render(port, text) {
-  const hookEventName =
-    port === 'turn-start' ? 'UserPromptSubmit' : port === 'mid-turn' ? 'PostToolUse' : null;
+  if (port === 'pre-tool') {
+    return JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: text,
+      },
+    });
+  }
+  if (port === 'stop') return JSON.stringify({ decision: 'block', reason: text });
+  const hookEventName = CONTEXT_EVENT_NAMES[port];
   if (!hookEventName) return null;
   return JSON.stringify({ hookSpecificOutput: { hookEventName, additionalContext: text } });
 }

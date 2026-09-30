@@ -13,6 +13,13 @@
  */
 import type { Sql } from 'postgres';
 
+/**
+ * Ceiling on one isolated bench worker run (precision-monitor.ts kills it past this).
+ * Lives here, in the light module, so the learning-loop health read can size its
+ * since-fire grace from it without importing the heavy runner (WI-10004117).
+ */
+export const PRECISION_BENCH_WORKER_TIMEOUT_MS = 30 * 60 * 1_000;
+
 /** One recorded memory-precision-bench run (newest-first in a trend). */
 export interface MemoryPrecisionRun {
   ranAt: string;
@@ -40,6 +47,31 @@ export interface MemoryPrecisionRun {
    * across runs sharing this value — see `evaluateRecallDrop`.
    */
   notes?: string | null;
+  /**
+   * The Jev operating point this run was gated by (plan
+   * jev-decision-model-integration-2026-09-29, P-008), parsed from `notes`; null
+   * for a floor-only run. `model` is the id the provider says answered, so a
+   * served-model change is visible on the Learning tab.
+   */
+  jevGate?: JevGateShape | null;
+}
+
+export interface JevGateShape {
+  readonly model: string;
+  readonly encoding: string;
+  readonly threshold: number;
+}
+
+/**
+ * Parse the `;jev:<model>/<encoding>@<threshold>` segment precision-monitor's
+ * `jevGatedShape` writes. Anything else, including every pre-P-008 row, is null.
+ */
+export function parseJevGateShape(notes: string | null | undefined): JevGateShape | null {
+  if (!notes) return null;
+  const m = /(?:^|;)jev:([^/;]+)\/([^@;]+)@([0-9.]+)(?:;|$)/.exec(notes);
+  if (!m) return null;
+  const threshold = Number(m[3]);
+  return Number.isFinite(threshold) ? { model: m[1], encoding: m[2], threshold } : null;
 }
 
 /** The Learning-tab snapshot: the latest run + a short trend + the headline delta. */
@@ -47,7 +79,12 @@ export interface MemoryPrecisionSnapshot {
   latest: MemoryPrecisionRun | null;
   /** Newest-first, capped — for a tiny trend / sparkline. */
   trend: MemoryPrecisionRun[];
-  /** fp@5 of the latest run minus the previous run (negative = improving). Null when <2 runs. */
+  /**
+   * fp@5 of the latest run minus the most recent EARLIER run measured under the
+   * same admission shape (negative = improving). Null when there is none: a
+   * Jev-gated run and a floor-only run measure different systems, so their
+   * difference is a switch flip, not drift.
+   */
   fpAt5Delta: number | null;
   /** Total recorded runs for this workspace (not just the capped trend). */
   runCount: number;
@@ -102,6 +139,7 @@ function mapRow(r: Record<string, unknown>): MemoryPrecisionRun {
     // Normalize absent/empty to null so an untagged legacy row and a row whose
     // tag was never written compare EQUAL as one shape (both are floored-union).
     notes: r.notes == null || String(r.notes) === '' ? null : String(r.notes),
+    jevGate: parseJevGateShape(r.notes == null ? null : String(r.notes)),
   };
 }
 
@@ -125,7 +163,7 @@ export async function readMemoryPrecision(
   `) as Array<Record<string, unknown>>;
   const trend = rows.map(mapRow);
   const latest = trend[0] ?? null;
-  const prev = trend[1] ?? null;
+  const prev = latest ? (trend.slice(1).find((r) => (r.notes ?? null) === (latest.notes ?? null)) ?? null) : null;
   const fpAt5Delta =
     latest?.fpAt5 != null && prev?.fpAt5 != null ? latest.fpAt5 - prev.fpAt5 : null;
 
