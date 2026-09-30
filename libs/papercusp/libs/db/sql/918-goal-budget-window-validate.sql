@@ -1,0 +1,36 @@
+-- 918-goal-budget-window-validate.sql
+-- Follow-up to 914 (work-on-everything-goal-2026-08-23 P-004). NOT a redo.
+--
+-- 914 added goals_budget_window_sec_positive as NOT VALID, reasoning that a
+-- validation scan on a hot table was worth avoiding. That reasoning was wrong
+-- on the facts: harness_shared.goals is 19 rows / 920 kB, so the scan is
+-- instant. The cost was real and elsewhere.
+--
+-- WHAT NOT VALID ACTUALLY COST. pg_get_constraintdef appends ' NOT VALID' to
+-- the definition, and the drizzle-kit pull that generates
+-- libs/db/src/schema/generated.ts strips the wrapping parens assuming the plain
+-- CHECK ((expr)) shape. With the trailing clause present it mis-strips, and
+-- emitted:
+--   check("goals_budget_window_sec_positive",
+--         sql`(budget_window_sec IS NULL) OR (budget_window_sec > 0))) NOT VALID`)
+-- — unbalanced parens, and the ONLY malformed one of the 435 check constraints
+-- in that file, because this was the only NOT VALID constraint in the schema.
+-- It still parses as TypeScript (it is a template string), so nothing fails
+-- loudly; it would surface later as broken SQL if anything ever generated
+-- migrations from the schema.
+--
+-- Validating the constraint makes convalidated true, pg_get_constraintdef stops
+-- emitting the trailing clause, and the next schema pull renders it like every
+-- other check. That fixes the generated file at its source rather than
+-- hand-patching a generated artifact, which the next pull would overwrite.
+--
+-- NOTE FOR THE NEXT NOT VALID CONSTRAINT: NOT VALID remains the correct tool on
+-- a genuinely large table. The generator defect is filed separately — this
+-- migration removes THIS instance, it does not fix the generator.
+--
+-- NOT DESTRUCTIVE: VALIDATE CONSTRAINT takes only SHARE UPDATE EXCLUSIVE (it
+-- does not block reads or writes), and cannot fail here — every existing row
+-- has budget_window_sec IS NULL, which satisfies the predicate.
+
+ALTER TABLE harness_shared.goals
+  VALIDATE CONSTRAINT goals_budget_window_sec_positive;

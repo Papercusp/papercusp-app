@@ -1,0 +1,125 @@
+{
+  "kind": "plugin",
+  "name": "@papercupai/linear-sync",
+  "version": "0.2.0",
+  "papercusp": "^0.1.0",
+  "description": "Bidirectional background sync between harness features/issues and a Linear team. No dashboard CTAs \u2014 runs on a 30s cron, reacts to Linear webhooks, and pushes harness state changes via lifecycle hooks. Harness wins on field conflicts; remote-only metadata (assignee, priority) is mirrored read-only into a JSONB sidecar.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "main": "./index.js",
+  "capabilities": [
+    "db:plugin-schema",
+    "secrets:read:LINEAR_API_KEY",
+    "secrets:read:LINEAR_WEBHOOK_SECRET",
+    "http:fetch:api.linear.app",
+    "events:listen:feature-passed",
+    "events:listen:feature-failed",
+    "events:listen:proposal-accepted",
+    "events:listen:mission-done",
+    "routines:read",
+    "routines:write",
+    "tasks:read",
+    "tasks:write"
+  ],
+  "schema": {
+    "schemaName": "plugin_linear_sync",
+    "sqlPaths": [
+      "./schema.sql"
+    ]
+  },
+  "routines": [
+    {
+      "name": "sync-tick",
+      "trigger": {
+        "kind": "cron",
+        "expr": "*/30 * * * * *"
+      },
+      "targetRole": "linear-sync.runSync",
+      "concurrency": "skip",
+      "catchup": "skip-old"
+    },
+    {
+      "name": "webhook",
+      "trigger": {
+        "kind": "webhook",
+        "tokenEnv": "LINEAR_WEBHOOK_SECRET"
+      },
+      "targetRole": "linear-sync.runSync",
+      "concurrency": "queue"
+    },
+    {
+      "name": "manual-sync",
+      "trigger": {
+        "kind": "api",
+        "method": "POST"
+      },
+      "targetRole": "linear-sync.runSync",
+      "concurrency": "queue"
+    }
+  ],
+  "actions": [
+    {
+      "name": "force-sync",
+      "label": "Force full sync",
+      "surfaces": [
+        "plugin-detail"
+      ],
+      "capabilities": [
+        "secrets:read:LINEAR_API_KEY",
+        "http:fetch:api.linear.app"
+      ],
+      "serverHandler": {
+        "timeoutSec": 60
+      }
+    },
+    {
+      "name": "backfill-local-to-remote",
+      "label": "Push every harness feature/issue to Linear",
+      "surfaces": [
+        "plugin-detail"
+      ],
+      "capabilities": [
+        "secrets:read:LINEAR_API_KEY",
+        "http:fetch:api.linear.app"
+      ],
+      "serverHandler": {
+        "timeoutSec": 300
+      }
+    },
+    {
+      "name": "backfill-remote-to-local",
+      "label": "Import every Linear issue tagged for this harness",
+      "surfaces": [
+        "plugin-detail"
+      ],
+      "capabilities": [
+        "secrets:read:LINEAR_API_KEY",
+        "http:fetch:api.linear.app"
+      ],
+      "serverHandler": {
+        "timeoutSec": 300
+      }
+    }
+  ],
+  "config": {
+    "defaultTeamKey": {
+      "type": "string",
+      "description": "Linear team key (e.g. ENG). One of teamKey/teamId required."
+    },
+    "defaultTeamId": {
+      "type": "string",
+      "description": "Linear team UUID. Overrides teamKey if both set."
+    },
+    "labelPrefix": {
+      "type": "string",
+      "default": "papercusp",
+      "description": "Label prefix; the plugin owns labels matching `<prefix>-*`"
+    },
+    "fullSyncIntervalSec": {
+      "type": "number",
+      "default": 3600
+    }
+  },
+  "hidden": true,
+  "hiddenReason": "Not ready yet \u2014 outbound integration is functional against a mock; live wiring against real Jira/Linear/Notion/Slack tenants is not yet verified. Hidden from marketplace until v1.0."
+}

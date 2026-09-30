@@ -1,0 +1,108 @@
+{
+  "evidenceRef": "EI-20285616516435031, follow-on to plan sql-escape-tool-routing-2026-08-12 — buildSqlFixture(pair) over agent-authored dev:pg_query calls, 14d window, status=ok",
+  "extractedAt": "2026-08-12",
+  "totalAtoms": 505,
+  "totalSessions": 87,
+  "sample": [
+    {
+      "sid": "su-4ac9f3f2-d039-4869-9f26-333f26f8a66d",
+      "ts": "2026-08-10 16:22:16.597-04",
+      "atom": "SELECT (metadata->'gate_health'->>'consecutiveReds') AS reds, (metadata->'gate_health'->>'green') AS green, (metadata->'gate_health'->>'logPath') AS logpath, (metadata->'gate_health'->>'candidate') AS candidate, substr((metadata->'gate_health')::text, 700, 800) AS tail FROM harness_shared.routines WHERE target_role='system:green-checkpoint' AND install_slug='papercusp' AND workspace_id='papercusp-workspace' LIMIT 1"
+    },
+    {
+      "sid": "su-707029ce-300a-469b-8fca-4cd393f5a0d2",
+      "ts": "2026-08-02 07:45:15.323-04",
+      "atom": "SELECT install_slug, active, last_fired_at, next_fire_at, jsonb_pretty(metadata->'gate_health') AS gate_health FROM harness_shared.routines WHERE target_role = 'system:green-checkpoint' AND install_slug = 'papercusp' AND workspace_id = 'papercusp-workspace'"
+    },
+    {
+      "sid": "su-ae348e33-2987-4686-85ae-5e80606fe77b",
+      "ts": "2026-08-03 00:42:56.929-04",
+      "atom": "SELECT install_slug, metadata->'gate_health'->>'observedCandidate' AS last_completed_candidate, metadata->'gate_health'->>'consecutiveReds' AS reds, metadata->'gate_health'->>'lastVerdict' AS last_verdict, metadata->'gate_health'->>'lastReason' AS last_reason, metadata->'gate_health'->'inFlightRetriage' AS in_flight, to_char(last_fired_at,'MM-DD HH24:MI:SS') AS last_fired FROM harness_shared.routines WHERE target_role='system:green-checkpoint' AND workspace_id='papercusp-workspace' AND install_slug='papercusp'"
+    },
+    {
+      "sid": "su-0dd2c62e-31ba-43c3-8046-58fc099b2cfd",
+      "ts": "2026-08-09 12:01:37.027-04",
+      "atom": "SELECT install_slug, workspace_id, metadata->'gate_health'->'inFlightRetriage' AS in_flight_retriage, metadata->'gate_health'->>'observedCandidate' AS last_completed, metadata->'gate_health'->>'consecutiveReds' AS reds FROM harness_shared.routines WHERE target_role = 'system:green-checkpoint' AND install_slug = 'papercusp'"
+    },
+    {
+      "sid": "su-e15fb42f-6686-41e7-8368-37f5ec26ef3c",
+      "ts": "2026-08-02 07:21:01.526-04",
+      "atom": "SELECT last_fired_at, metadata->'gate_health'->'checkpointRunInFlight' AS in_flight, metadata->'gate_health'->'inFlightRetriage' AS retriage, metadata->'gate_health'->>'autoRefire' AS auto_refire FROM harness_shared.routines WHERE target_role='system:green-checkpoint' AND install_slug='papercusp' AND workspace_id='papercusp-workspace'"
+    },
+    {
+      "sid": "su-5ca1df5d-6b67-47a7-9417-2d2aab9fe3d5",
+      "ts": "2026-08-03 00:42:15.587-04",
+      "atom": "SELECT last_fired_at, next_fire_at, active, jsonb_pretty(metadata->'gate_health') AS gate_health FROM harness_shared.routines WHERE target_role='system:green-checkpoint' AND install_slug='papercusp' AND workspace_id='papercusp-workspace'"
+    },
+    {
+      "sid": "su-b9269a31-fa09-465f-8690-a04e6bb30470",
+      "ts": "2026-08-03 00:29:56.76-04",
+      "atom": "SELECT last_status, consecutive_error_ticks, left(coalesce(last_error,''), 300) AS last_error, jsonb_pretty(metadata->'gate_health') AS gate_health FROM harness_shared.routines WHERE target_role = 'system:green-checkpoint' AND install_slug = 'papercusp' AND workspace_id = 'papercusp-workspace'"
+    },
+    {
+      "sid": "su-e044d888-c238-4311-8eb0-aef7896b3e92",
+      "ts": "2026-08-02 07:41:29.62-04",
+      "atom": "SELECT metadata->'gate_health'->'inFlightRetriage' AS in_flight_retriage, metadata->'gate_health'->>'consecutiveReds' AS reds, metadata->'gate_health'->>'observedCandidate' AS observed_cand, updated_at FROM harness_shared.routines WHERE target_role = 'system:green-checkpoint' AND install_slug = 'papercusp' AND workspace_id = 'papercusp-workspace'"
+    },
+    {
+      "sid": "su-e6ac4eb7-9966-4e03-8122-5d761aff294d",
+      "ts": "2026-08-02 08:59:35.747-04",
+      "atom": "SELECT metadata->'gate_health'->'inFlightRetriage' AS live_refire, metadata->'gate_health'->>'observedCandidate' AS last_completed, metadata->'gate_health'->>'consecutiveReds' AS reds, active, last_fired_at FROM harness_shared.routines WHERE target_role = 'system:green-checkpoint' AND install_slug = 'papercusp' AND workspace_id = 'papercusp-workspace'"
+    },
+    {
+      "sid": "su-373a9b5c-c505-40e2-8591-5204c62712f2",
+      "ts": "2026-08-03 14:28:09.414-04",
+      "atom": "SELECT metadata->'gate_health'->'inFlightRetriage' AS live_refire, metadata->'gate_health'->>'observedCandidate' AS last_completed, metadata->'gate_health'->>'consecutiveReds' AS reds, last_fired_at, next_fire_at, now() AS now FROM harness_shared.routines WHERE target_role = 'system:green-checkpoint' AND install_slug = 'papercusp' AND workspace_id = 'papercusp-workspace'"
+    },
+    {
+      "sid": "su-b9269a31-fa09-465f-8690-a04e6bb30470",
+      "ts": "2026-08-02 20:31:53.814-04",
+      "atom": "SELECT metadata->'gate_health'->'inFlightRetriage' AS live_refire, metadata->'gate_health'->>'observedCandidate' AS last_completed, metadata->'gate_health'->>'consecutiveReds' AS reds, metadata->'gate_health'->>'lastGreenAt' AS last_green_at, to_timestamp((metadata->'gate_health'->>'observedAt')::bigint/1000) AS observed_at FROM harness_shared.routines WHERE target_role='system:green-checkpoint' AND install_slug='papercusp' AND workspace_id='papercusp-workspace'"
+    },
+    {
+      "sid": "su-3a5df0ae-a3a6-43ce-a793-e60b5098c2b3",
+      "ts": "2026-08-02 18:26:12.163-04",
+      "atom": "SELECT metadata->'gate_health'->'inFlightRetriage' AS live_refire, metadata->'gate_health'->>'observedCandidate' AS last_completed, metadata->'gate_health'->>'consecutiveReds' AS reds, to_timestamp((metadata->'gate_health'->>'lastGreenAt')::bigint/1000) AS last_green, last_fired_at FROM harness_shared.routines WHERE target_role = 'system:green-checkpoint' AND install_slug = 'papercusp' AND workspace_id = 'papercusp-workspace'"
+    },
+    {
+      "sid": "su-c53b7dde-a1d0-4d1e-8d9a-4cf1f5a26fac",
+      "ts": "2026-08-02 04:38:58.876-04",
+      "atom": "SELECT metadata->'gate_health'->'inFlightRetriage'->>'fromCandidate' AS from_cand, metadata->'gate_health'->'inFlightRetriage'->>'refiringCandidate' AS refiring, metadata->'gate_health'->'inFlightRetriage'->>'refireAttempt' AS attempt, to_timestamp(((metadata->'gate_health'->'inFlightRetriage'->>'observedAtMs')::bigint)/1000) AS observed_at, updated_at FROM harness_shared.routines WHERE target_role = 'system:green-checkpoint' AND install_slug = 'papercusp' AND workspace_id = 'papercusp-workspace'"
+    },
+    {
+      "sid": "su-b9269a31-fa09-465f-8690-a04e6bb30470",
+      "ts": "2026-08-02 20:11:55.739-04",
+      "atom": "SELECT metadata->'gate_health'->>'consecutiveReds' AS reds, metadata->'gate_health'->>'observedCandidate' AS last_cand, to_timestamp((metadata->'gate_health'->>'lastGreenAt')::bigint/1000) AS last_green, to_timestamp((metadata->'gate_health'->>'observedAt')::bigint/1000) AS observed_at, metadata->'gate_health'->'failingTests' AS failing FROM harness_shared.routines WHERE target_role = 'system:green-checkpoint' AND install_slug = 'papercusp' AND workspace_id = 'papercusp-workspace'"
+    },
+    {
+      "sid": "su-ae348e33-2987-4686-85ae-5e80606fe77b",
+      "ts": "2026-08-03 21:40:07.256-04",
+      "atom": "SELECT metadata->'gate_health'->>'consecutiveReds' AS reds, metadata->'gate_health'->>'observedCandidate' AS last_completed, metadata->'gate_health'->'inFlightRetriage'->>'refiringCandidate' AS refiring, metadata->'gate_health'->'inFlightRetriage'->>'totalRefires' AS refires, last_fired_at FROM harness_shared.routines WHERE target_role='system:green-checkpoint' AND install_slug='papercusp' AND workspace_id='papercusp-workspace'"
+    },
+    {
+      "sid": "su-b9269a31-fa09-465f-8690-a04e6bb30470",
+      "ts": "2026-08-02 22:04:22.037-04",
+      "atom": "SELECT metadata->'gate_health'->>'observedCandidate' AS last_completed, metadata->'gate_health'->>'consecutiveReds' AS reds, metadata->'gate_health'->'inFlightRetriage' AS live_refire, metadata->'gate_health'->>'lastGreenAt' AS last_green_at, last_fired_at, active FROM harness_shared.routines WHERE target_role = 'system:green-checkpoint' AND install_slug = 'papercusp' AND workspace_id = 'papercusp-workspace'"
+    },
+    {
+      "sid": "su-6eab8a26-2a45-4253-a708-671fd3182607",
+      "ts": "2026-08-03 10:16:58.018-04",
+      "atom": "SELECT name, active, last_fired_at, metadata->'gate_health'->>'consecutiveReds' AS reds, metadata->'gate_health'->>'observedCandidate' AS last_cand, metadata->'gate_health'->>'lastGreenAt' AS last_green, metadata->'gate_health'->'inFlightRetriage' AS refire FROM harness_shared.routines WHERE target_role IN ('system:green-checkpoint','system:git-sync','system:release-trigger') AND install_slug='papercusp' AND workspace_id='papercusp-workspace'"
+    },
+    {
+      "sid": "su-c53b7dde-a1d0-4d1e-8d9a-4cf1f5a26fac",
+      "ts": "2026-08-02 08:18:00.475-04",
+      "atom": "SELECT now() AS db_now, metadata->'gate_health'->>'consecutiveReds' AS reds, metadata->'gate_health'->>'observedCandidate' AS candidate, metadata->'gate_health'->'failingTests' AS failing, metadata->'gate_health'->'inFlightRetriage' AS retriage, metadata->'gate_health'->>'candidateCommittedAt' AS cand_committed, metadata->'gate_health'->>'commitsBehindTip' AS behind, to_timestamp(((metadata->'gate_health'->>'lastGreenAt')::bigint)/1000) AS last_green, last_fired_at FROM harness_shared.routines WHERE target_role='system:green-checkpoint' AND install_slug='papercusp' AND workspace_id='papercusp-workspace'"
+    },
+    {
+      "sid": "su-ae348e33-2987-4686-85ae-5e80606fe77b",
+      "ts": "2026-08-03 03:41:10.848-04",
+      "atom": "SELECT to_char(last_fired_at,'HH24:MI:SS') AS fired, metadata->'gate_health'->>'observedCandidate' AS last_completed_cand, metadata->'gate_health'->>'consecutiveReds' AS reds, to_char(to_timestamp((metadata->'gate_health'->>'lastGreenAt')::bigint/1000),'HH24:MI:SS') AS last_green, metadata->'gate_health'->'inFlightRetriage' AS live_refire FROM harness_shared.routines WHERE target_role='system:green-checkpoint' AND install_slug='papercusp' AND workspace_id='papercusp-workspace'"
+    },
+    {
+      "sid": "su-f14e191f-7ec7-457e-91f9-af24e6e978d6",
+      "ts": "2026-08-12 02:50:29.478-04",
+      "atom": "select metadata->'gate_health'->>'consecutiveReds' as reds, metadata->'gate_health'->>'observedCandidate' as cand, metadata->'gate_health'->>'inFlightCandidate' as inflight, to_timestamp((metadata->'gate_health'->>'observedAt')::bigint/1000) at time zone 'UTC' as observed_at, to_timestamp((metadata->'gate_health'->>'lastGreenAt')::bigint/1000) at time zone 'UTC' as last_green from harness_shared.routines where name='green-checkpoint' and install_slug='papercusp' and workspace_id='papercusp-workspace'"
+    }
+  ]
+}

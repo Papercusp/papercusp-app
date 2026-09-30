@@ -1,0 +1,91 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/social-scheduled-crosspost",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Starter trigger pack: one composed post is adapted per platform and published to several connected accounts on a cadence the owner arms.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": { "mode": "exact" },
+  "capabilities": [],
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["destinations"],
+      "properties": {
+        "destinations": {
+          "type": "array",
+          "title": "Destinations",
+          "description": "Canonical \"<platform>:<destination>\" refs. The platform half selects the credential; it is never inferred from post content.",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 512,
+            "pattern": "^(bluesky|mastodon|reddit|facebook-pages|instagram|threads|linkedin):.+$"
+          }
+        },
+        "adaptPerPlatform": {
+          "type": "boolean",
+          "title": "Adapt per platform",
+          "default": true
+        },
+        "composeGuidance": {
+          "type": "string",
+          "title": "Compose guidance",
+          "default": "One idea per post, in the owner's own voice, with no platform-specific jargon in the shared draft.",
+          "maxLength": 1000
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 1,
+      "windowSeconds": 1728
+    },
+    "targets": [
+      {
+        "id": "crosspost",
+        "kind": "plan",
+        "path": "plan.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["destinations"],
+          "properties": {
+            "destinations": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 10,
+              "items": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 512,
+                "pattern": "^(bluesky|mastodon|reddit|facebook-pages|instagram|threads|linkedin):.+$"
+              }
+            },
+            "adaptPerPlatform": { "type": "boolean", "default": true },
+            "composeGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "One idea per post, in the owner's own voice, with no platform-specific jargon in the shared draft."
+            }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "owner-launches-crosspost",
+        "source": { "kind": "manual" },
+        "target": "crosspost",
+        "mapping": { "mode": "payload-context" }
+      }
+    ],
+    "edges": []
+  },
+  "icon": "Share2"
+}

@@ -1,0 +1,21 @@
+-- Migration 273 — add `verified_author_github_user_id` to harness_features_consolidated.
+--
+-- Plan: shared-hive-trust-admission-2026-06-14 (Phase 2 / P-007).
+--
+-- Stamps a VERIFIED author identity on federated work. On a REMOTE feature row,
+-- the federated-ingest projection resolves author_pubkey → the owning hive
+-- member's github_user_id, but ONLY via a verified, non-revoked device
+-- attestation (hive_members.device_attestations) — never a self-claimed id. The
+-- admission gate (work-items-admission.ts, Phase 3) then consults the owner's
+-- LOCAL user_trust_list against this verified id to decide whether un-screened
+-- remote work is auto-runnable.
+--
+-- Type is BIGINT to match hive_members.github_user_id (the canonical github id
+-- type) so the trust-list join is type-clean. Nullable: local rows (origin
+-- 'local'/NULL), legacy rows, and remote rows whose author_pubkey has no
+-- verified attestation all stay NULL (NULL = "not a verified-author id", which
+-- the trust leg treats as untrusted). Additive metadata-only ADD COLUMN — fast,
+-- no rewrite, safe under the deploy lock_timeout; boot-applies (A1) before the
+-- new projection code serves.
+ALTER TABLE harness_shared.harness_features_consolidated
+  ADD COLUMN IF NOT EXISTS verified_author_github_user_id BIGINT;

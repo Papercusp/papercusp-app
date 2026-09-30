@@ -1,0 +1,1754 @@
+{
+  "detail": {
+    "run": {
+      "workspaceId": "dream-ui",
+      "runId": "fixture-run",
+      "cycleId": "fixture-cycle",
+      "potSlug": "pot-a",
+      "mode": "manual",
+      "status": "accepted",
+      "fragmentRefs": [],
+      "fragmentKinds": [],
+      "pairing": null,
+      "similarity": null,
+      "dreamerModel": "dreamer",
+      "reviewerModel": "reviewer",
+      "dreamUsage": null,
+      "reviewUsage": null,
+      "outcome": {
+        "verdict": "insight",
+        "insight": {
+          "schemaVersion": "dream-capability-result-v1",
+          "capability": {
+            "beneficiary": "Engineers testing combined behavior.",
+            "behavior": "Combine the A output with the B check.",
+            "observed": [
+              {
+                "claim": "A produces an output.",
+                "sources": [
+                  {
+                    "unit": "A",
+                    "evidenceId": "code"
+                  }
+                ]
+              },
+              {
+                "claim": "B supplies the check.",
+                "sources": [
+                  {
+                    "unit": "B",
+                    "evidenceId": "code"
+                  }
+                ]
+              }
+            ],
+            "hypothesis": "The composition can detect a mismatch.",
+            "primaryContributions": {
+              "A": {
+                "uniqueContribution": "Produces the input.",
+                "removalEffect": "No input.",
+                "sources": [
+                  {
+                    "unit": "A",
+                    "evidenceId": "code"
+                  }
+                ]
+              },
+              "B": {
+                "uniqueContribution": "Checks the input.",
+                "removalEffect": "No check.",
+                "sources": [
+                  {
+                    "unit": "B",
+                    "evidenceId": "code"
+                  }
+                ]
+              }
+            },
+            "thirdContribution": null,
+            "relations": [
+              {
+                "kind": "producer-consumer",
+                "from": {
+                  "unit": "A",
+                  "evidenceId": "code"
+                },
+                "to": {
+                  "unit": "B",
+                  "evidenceId": "code"
+                },
+                "mapping": "Feed A into B.",
+                "preconditions": [
+                  "Compatible input."
+                ],
+                "transferRisks": [
+                  "A changes."
+                ]
+              }
+            ],
+            "assumptions": [],
+            "missingEvidence": [
+              "Composition not run."
+            ],
+            "priorArt": {
+              "knownRelatedWork": [],
+              "proposedDelta": "A composed check rather than separate outputs.",
+              "verification": "unverified"
+            },
+            "experiment": {
+              "baseline": "Separate outputs.",
+              "change": "Compose A with B.",
+              "measurement": "Count mismatches.",
+              "successCriterion": "Detect the seeded mismatch.",
+              "falsifier": "The seeded mismatch is missed."
+            }
+          },
+          "text": "Combine the A output with the B check.",
+          "requiresA": "Produces the input.",
+          "requiresB": "Checks the input.",
+          "actionable": "Compose A with B."
+        },
+        "capabilityRun": {
+          "manifestHash": "44fd9fedce91c24c5be37fb9b456b7e48907cccb4bf42186696d3eed896184e8",
+          "manifestRevision": "ledger-fixture-v1",
+          "dreamerModel": "dreamer",
+          "reviewerModel": "reviewer",
+          "dreamPromptVersion": "capability-relational-v1",
+          "reviewPromptVersion": "dream-capability-review-v1",
+          "schemaVersion": "dream-capability-run-v1",
+          "sampling": {
+            "status": "selected",
+            "selection": {
+              "a": {
+                "packet": {
+                  "schemaVersion": "dream-capability-packet-v1",
+                  "scope": {
+                    "workspaceId": "dream-ui",
+                    "potSlug": "pot-a",
+                    "repositoryId": "fixture-repo"
+                  },
+                  "unit": {
+                    "id": "capability:A",
+                    "granularity": "capability",
+                    "name": "Confine recall fan-out to a hive",
+                    "homeDomain": "memory",
+                    "relatedDomains": [
+                      "harness"
+                    ],
+                    "parentId": null,
+                    "branch": "A",
+                    "relatedUnitIds": [],
+                    "overlapsUnitIds": [],
+                    "purpose": [
+                      {
+                        "text": "Produces A output.",
+                        "status": "observed",
+                        "evidenceIds": [
+                          "code"
+                        ]
+                      }
+                    ],
+                    "mechanism": [
+                      {
+                        "text": "Calls the A mechanism.",
+                        "status": "observed",
+                        "evidenceIds": [
+                          "code"
+                        ]
+                      }
+                    ],
+                    "evaluation": [
+                      {
+                        "text": "Checks output.",
+                        "status": "observed",
+                        "evidenceIds": [
+                          "test"
+                        ]
+                      }
+                    ],
+                    "contracts": {
+                      "inputs": [],
+                      "outputs": [],
+                      "events": [],
+                      "state": [],
+                      "guarantees": [],
+                      "prerequisites": [],
+                      "failureModes": [],
+                      "resourceConstraints": []
+                    },
+                    "evidence": [
+                      {
+                        "id": "code",
+                        "kind": "implementation",
+                        "path": "evidence/A.ts",
+                        "anchor": "function A",
+                        "proves": "Current behavior."
+                      },
+                      {
+                        "id": "test",
+                        "kind": "test",
+                        "path": "evidence/A.test.ts",
+                        "anchor": "expect(A())",
+                        "proves": "Executable contract."
+                      }
+                    ]
+                  },
+                  "unitHash": "d95dbb7b97b68911872d00baf1b02cf6b30e2a43e2765bfe914229afcf27e5f9",
+                  "manifestRevision": "ledger-fixture-v1",
+                  "sources": [
+                    {
+                      "id": "code",
+                      "kind": "implementation",
+                      "path": "evidence/A.ts",
+                      "anchor": "function A",
+                      "proves": "Current behavior.",
+                      "excerpt": "export function A() { return \"A\"; }",
+                      "sourceHash": "59750af6ad55d3b1a64e37e8f0b6d811a52b961f9c24c71ca4cb687be6e37601",
+                      "excerptHash": "59750af6ad55d3b1a64e37e8f0b6d811a52b961f9c24c71ca4cb687be6e37601",
+                      "startLine": 1,
+                      "endLine": 1
+                    },
+                    {
+                      "id": "test",
+                      "kind": "test",
+                      "path": "evidence/A.test.ts",
+                      "anchor": "expect(A())",
+                      "proves": "Executable contract.",
+                      "excerpt": "expect(A()).toBe(\"A\");",
+                      "sourceHash": "6f59c6bf8949fb935d35036693eaacde5608e2208acfcbe3e8c6a99962d95b0d",
+                      "excerptHash": "6f59c6bf8949fb935d35036693eaacde5608e2208acfcbe3e8c6a99962d95b0d",
+                      "startLine": 1,
+                      "endLine": 1
+                    }
+                  ],
+                  "extraction": {
+                    "recipeVersion": "scanned-anchors-and-radius-v2",
+                    "promptVersion": "manifest-facets-v1",
+                    "capturedAt": "2026-09-07T14:00:00Z",
+                    "sourceCommit": null,
+                    "dirty": true,
+                    "backend": "text",
+                    "indexHealth": "unknown",
+                    "artifactRef": "/home/builduser/.papercusp/scratch/packs/dream-capability-ledger-CWcMqe/pack.xml",
+                    "artifactHash": "22d04cf0e044c1e6c328a508051e29ee542b057b416f56a2889a2a6cfa2d68e7",
+                    "durationMs": 0,
+                    "securityScan": "passed",
+                    "costUsd": 0
+                  },
+                  "coverage": {
+                    "status": "partial",
+                    "includedPaths": [
+                      "evidence/A.ts",
+                      "evidence/A.test.ts"
+                    ],
+                    "excluded": [],
+                    "unresolved": [],
+                    "truncated": false,
+                    "note": "Fixture scope only."
+                  }
+                },
+                "contentVersion": "b7bfd8429d51a51cbc61254fb376d89434a734ff6793b0f5359da0ba3521d7c0"
+              },
+              "b": {
+                "packet": {
+                  "schemaVersion": "dream-capability-packet-v1",
+                  "scope": {
+                    "workspaceId": "dream-ui",
+                    "potSlug": "pot-a",
+                    "repositoryId": "fixture-repo"
+                  },
+                  "unit": {
+                    "id": "capability:B",
+                    "granularity": "capability",
+                    "name": "Confine recall fan-out to a hive",
+                    "homeDomain": "memory",
+                    "relatedDomains": [
+                      "harness"
+                    ],
+                    "parentId": null,
+                    "branch": "B",
+                    "relatedUnitIds": [],
+                    "overlapsUnitIds": [],
+                    "purpose": [
+                      {
+                        "text": "Produces B output.",
+                        "status": "observed",
+                        "evidenceIds": [
+                          "code"
+                        ]
+                      }
+                    ],
+                    "mechanism": [
+                      {
+                        "text": "Calls the B mechanism.",
+                        "status": "observed",
+                        "evidenceIds": [
+                          "code"
+                        ]
+                      }
+                    ],
+                    "evaluation": [
+                      {
+                        "text": "Checks output.",
+                        "status": "observed",
+                        "evidenceIds": [
+                          "test"
+                        ]
+                      }
+                    ],
+                    "contracts": {
+                      "inputs": [],
+                      "outputs": [],
+                      "events": [],
+                      "state": [],
+                      "guarantees": [],
+                      "prerequisites": [],
+                      "failureModes": [],
+                      "resourceConstraints": []
+                    },
+                    "evidence": [
+                      {
+                        "id": "code",
+                        "kind": "implementation",
+                        "path": "evidence/B.ts",
+                        "anchor": "function B",
+                        "proves": "Current behavior."
+                      },
+                      {
+                        "id": "test",
+                        "kind": "test",
+                        "path": "evidence/B.test.ts",
+                        "anchor": "expect(B())",
+                        "proves": "Executable contract."
+                      }
+                    ]
+                  },
+                  "unitHash": "f6fc18744dab01126ea96a348dbe950d79cccc7ce27e98e0fb62d3c2a5ef3d7c",
+                  "manifestRevision": "ledger-fixture-v1",
+                  "sources": [
+                    {
+                      "id": "code",
+                      "kind": "implementation",
+                      "path": "evidence/B.ts",
+                      "anchor": "function B",
+                      "proves": "Current behavior.",
+                      "excerpt": "export function B() { return \"B\"; }",
+                      "sourceHash": "e0d673b3b7337858d524b622a9009d5f9081477b759f9bf971e284d912dbe9fc",
+                      "excerptHash": "e0d673b3b7337858d524b622a9009d5f9081477b759f9bf971e284d912dbe9fc",
+                      "startLine": 1,
+                      "endLine": 1
+                    },
+                    {
+                      "id": "test",
+                      "kind": "test",
+                      "path": "evidence/B.test.ts",
+                      "anchor": "expect(B())",
+                      "proves": "Executable contract.",
+                      "excerpt": "expect(B()).toBe(\"B\");",
+                      "sourceHash": "5a336f61b40e32dcdd4155f1cd2ddb72e6efbf5a4a9c1a0f226ca401dbe7bd1c",
+                      "excerptHash": "5a336f61b40e32dcdd4155f1cd2ddb72e6efbf5a4a9c1a0f226ca401dbe7bd1c",
+                      "startLine": 1,
+                      "endLine": 1
+                    }
+                  ],
+                  "extraction": {
+                    "recipeVersion": "scanned-anchors-and-radius-v2",
+                    "promptVersion": "manifest-facets-v1",
+                    "capturedAt": "2026-09-07T14:00:00Z",
+                    "sourceCommit": null,
+                    "dirty": true,
+                    "backend": "text",
+                    "indexHealth": "unknown",
+                    "artifactRef": "/home/builduser/.papercusp/scratch/packs/dream-capability-ledger-CWcMqe/pack.xml",
+                    "artifactHash": "22d04cf0e044c1e6c328a508051e29ee542b057b416f56a2889a2a6cfa2d68e7",
+                    "durationMs": 0,
+                    "securityScan": "passed",
+                    "costUsd": 0
+                  },
+                  "coverage": {
+                    "status": "partial",
+                    "includedPaths": [
+                      "evidence/B.ts",
+                      "evidence/B.test.ts"
+                    ],
+                    "excluded": [],
+                    "unresolved": [],
+                    "truncated": false,
+                    "note": "Fixture scope only."
+                  }
+                },
+                "contentVersion": "e438a2b46b1731714c9e6e83e7e146e78b94519bda0e7f806c3a9c2623f40d05"
+              },
+              "c": null,
+              "pairKey": "2b78ee29fff94ff487a9a122e706a143fdf56bb4ebca2909f6203faa1c569e00",
+              "attemptKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "recipe": "capability-capability",
+              "relation": null
+            },
+            "log": {
+              "version": "domain-structural-v1",
+              "snapshotFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "seed": "fixed-seed",
+              "promptVersion": "capability-relational-v1",
+              "mode": "structured",
+              "arity": 2,
+              "policy": {
+                "strategyWeights": [
+                  0.5,
+                  0.3,
+                  0.2
+                ],
+                "thirdRate": 0.2,
+                "underexplorationBonus": 1,
+                "cooldownMs": 86400000
+              },
+              "exposures": {},
+              "now": 1788789600000,
+              "inputFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "requestedStrategy": "uniform-cross-domain",
+              "strategy": "uniform-cross-domain",
+              "fallback": null,
+              "exclusions": [],
+              "pairExclusions": {
+                "alias": 0,
+                "recipe": 0,
+                "cooldown": 0
+              },
+              "invalidRelations": 0,
+              "invalidThirdRoles": 0,
+              "thirdOutcome": "off",
+              "draws": [],
+              "pathProbability": 1
+            }
+          },
+          "calls": [
+            {
+              "callId": "generation",
+              "phase": "generation",
+              "model": "dreamer",
+              "reservedUsd": 0.1,
+              "status": "settled",
+              "usage": {
+                "model": "dreamer",
+                "costUsd": 0.01,
+                "inputTokens": 100,
+                "outputTokens": 10
+              },
+              "error": null
+            },
+            {
+              "callId": "control-a",
+              "phase": "control-a",
+              "model": "reviewer",
+              "reservedUsd": 0.1,
+              "status": "settled",
+              "usage": {
+                "model": "reviewer",
+                "costUsd": 0.02,
+                "inputTokens": 100,
+                "outputTokens": 10
+              },
+              "error": null
+            },
+            {
+              "callId": "control-b",
+              "phase": "control-b",
+              "model": "reviewer",
+              "reservedUsd": 0.1,
+              "status": "settled",
+              "usage": {
+                "model": "reviewer",
+                "costUsd": 0.02,
+                "inputTokens": 100,
+                "outputTokens": 10
+              },
+              "error": null
+            },
+            {
+              "callId": "review",
+              "phase": "review",
+              "model": "reviewer",
+              "reservedUsd": 0.1,
+              "status": "settled",
+              "usage": {
+                "model": "reviewer",
+                "costUsd": 0.02,
+                "inputTokens": 100,
+                "outputTokens": 10
+              },
+              "error": null
+            }
+          ],
+          "artifactId": null
+        }
+      },
+      "review": {
+        "schemaVersion": "dream-capability-review-v1",
+        "candidateHash": "9f68472a1f4f2fbac0f8d6a5484bc91305991af4ce1eead74e4d6499f9ff61e4",
+        "evidenceHash": "d50d2c3e2234977f43be4982862990460de8d574cf79a5fe928cf50ea0efd18e",
+        "verdict": "accept",
+        "reason": "supported-delta",
+        "note": "Bounded source-supported proposal.",
+        "coverage": {
+          "scope": {
+            "workspaceId": "dream-ui",
+            "potSlug": "pot-a",
+            "repositoryId": "fixture-repo"
+          },
+          "globalNovelty": "not-established",
+          "searches": [],
+          "packetIndexes": [],
+          "rerank": {
+            "attempted": false,
+            "reason": "fixture"
+          },
+          "unknown": []
+        },
+        "priorMatches": [
+          {
+            "ref": "plan:fixture",
+            "kind": "plan",
+            "scope": {
+              "workspaceId": "dream-ui",
+              "potSlug": "pot-a",
+              "repositoryId": "fixture-repo"
+            },
+            "text": "Prior checks each output separately.",
+            "contentHash": "e24e5b78750465df33684c09fd9d8f75b701a0fec7968fc52136d77770880dc6",
+            "sourceHash": "e24e5b78750465df33684c09fd9d8f75b701a0fec7968fc52136d77770880dc6",
+            "candidateHash": null,
+            "evidenceHash": null,
+            "locator": {
+              "kind": "plan",
+              "id": "fixture"
+            }
+          }
+        ],
+        "controls": {
+          "aOnly": {
+            "unchanged": false,
+            "note": "No check.",
+            "evidence": [
+              {
+                "ref": "A:code",
+                "quote": "export function A() { return \"A\"; }"
+              }
+            ]
+          },
+          "bOnly": {
+            "unchanged": false,
+            "note": "No input.",
+            "evidence": [
+              {
+                "ref": "B:code",
+                "quote": "export function B() { return \"B\"; }"
+              }
+            ]
+          }
+        },
+        "judgment": {
+          "verdict": "accept",
+          "note": "Supported.",
+          "observations": [
+            {
+              "index": 0,
+              "status": "supported",
+              "note": "Supported.",
+              "evidence": [
+                {
+                  "ref": "A:code",
+                  "quote": "export function A() { return \"A\"; }"
+                }
+              ]
+            },
+            {
+              "index": 1,
+              "status": "supported",
+              "note": "Supported.",
+              "evidence": [
+                {
+                  "ref": "A:code",
+                  "quote": "export function A() { return \"A\"; }"
+                }
+              ]
+            }
+          ],
+          "comparisons": [
+            {
+              "ref": "plan:fixture",
+              "disposition": "distinct",
+              "note": "Adds composition.",
+              "evidence": [
+                {
+                  "ref": "prior:plan:fixture",
+                  "quote": "Prior checks each output separately."
+                }
+              ]
+            }
+          ],
+          "relation": {
+            "status": "supported",
+            "note": "Supported.",
+            "evidence": [
+              {
+                "ref": "A:code",
+                "quote": "export function A() { return \"A\"; }"
+              }
+            ]
+          },
+          "feasibility": {
+            "status": "supported",
+            "note": "Supported.",
+            "evidence": [
+              {
+                "ref": "A:code",
+                "quote": "export function A() { return \"A\"; }"
+              }
+            ]
+          },
+          "experiment": {
+            "executable": true,
+            "probe": "Run the composed check.",
+            "baseline": "Separate outputs.",
+            "falsifier": "Missed mismatch.",
+            "evidence": [
+              {
+                "ref": "B:test",
+                "quote": "expect(B()).toBe(\"B\");"
+              }
+            ]
+          }
+        },
+        "usage": {
+          "model": "reviewer",
+          "costUsd": 0.06,
+          "inputTokens": 300,
+          "outputTokens": 30
+        }
+      },
+      "routedRef": "engineer-issue:EI-123",
+      "inputTokens": 400,
+      "outputTokens": 40,
+      "costUsd": 0.07,
+      "error": null,
+      "startedAt": "2026-09-07T14:00:00Z",
+      "completedAt": null,
+      "spendRecordedAt": null,
+      "updatedAt": "2026-09-07T14:00:00Z"
+    },
+    "provenance": {
+      "manifestHash": "44fd9fedce91c24c5be37fb9b456b7e48907cccb4bf42186696d3eed896184e8",
+      "manifestRevision": "ledger-fixture-v1",
+      "dreamerModel": "dreamer",
+      "reviewerModel": "reviewer",
+      "dreamPromptVersion": "capability-relational-v1",
+      "reviewPromptVersion": "dream-capability-review-v1",
+      "schemaVersion": "dream-capability-run-v1",
+      "sampling": {
+        "status": "selected",
+        "selection": {
+          "a": {
+            "packet": {
+              "schemaVersion": "dream-capability-packet-v1",
+              "scope": {
+                "workspaceId": "dream-ui",
+                "potSlug": "pot-a",
+                "repositoryId": "fixture-repo"
+              },
+              "unit": {
+                "id": "capability:A",
+                "granularity": "capability",
+                "name": "Confine recall fan-out to a hive",
+                "homeDomain": "memory",
+                "relatedDomains": [
+                  "harness"
+                ],
+                "parentId": null,
+                "branch": "A",
+                "relatedUnitIds": [],
+                "overlapsUnitIds": [],
+                "purpose": [
+                  {
+                    "text": "Produces A output.",
+                    "status": "observed",
+                    "evidenceIds": [
+                      "code"
+                    ]
+                  }
+                ],
+                "mechanism": [
+                  {
+                    "text": "Calls the A mechanism.",
+                    "status": "observed",
+                    "evidenceIds": [
+                      "code"
+                    ]
+                  }
+                ],
+                "evaluation": [
+                  {
+                    "text": "Checks output.",
+                    "status": "observed",
+                    "evidenceIds": [
+                      "test"
+                    ]
+                  }
+                ],
+                "contracts": {
+                  "inputs": [],
+                  "outputs": [],
+                  "events": [],
+                  "state": [],
+                  "guarantees": [],
+                  "prerequisites": [],
+                  "failureModes": [],
+                  "resourceConstraints": []
+                },
+                "evidence": [
+                  {
+                    "id": "code",
+                    "kind": "implementation",
+                    "path": "evidence/A.ts",
+                    "anchor": "function A",
+                    "proves": "Current behavior."
+                  },
+                  {
+                    "id": "test",
+                    "kind": "test",
+                    "path": "evidence/A.test.ts",
+                    "anchor": "expect(A())",
+                    "proves": "Executable contract."
+                  }
+                ]
+              },
+              "unitHash": "d95dbb7b97b68911872d00baf1b02cf6b30e2a43e2765bfe914229afcf27e5f9",
+              "manifestRevision": "ledger-fixture-v1",
+              "sources": [
+                {
+                  "id": "code",
+                  "kind": "implementation",
+                  "path": "evidence/A.ts",
+                  "anchor": "function A",
+                  "proves": "Current behavior.",
+                  "excerpt": "export function A() { return \"A\"; }",
+                  "sourceHash": "59750af6ad55d3b1a64e37e8f0b6d811a52b961f9c24c71ca4cb687be6e37601",
+                  "excerptHash": "59750af6ad55d3b1a64e37e8f0b6d811a52b961f9c24c71ca4cb687be6e37601",
+                  "startLine": 1,
+                  "endLine": 1
+                },
+                {
+                  "id": "test",
+                  "kind": "test",
+                  "path": "evidence/A.test.ts",
+                  "anchor": "expect(A())",
+                  "proves": "Executable contract.",
+                  "excerpt": "expect(A()).toBe(\"A\");",
+                  "sourceHash": "6f59c6bf8949fb935d35036693eaacde5608e2208acfcbe3e8c6a99962d95b0d",
+                  "excerptHash": "6f59c6bf8949fb935d35036693eaacde5608e2208acfcbe3e8c6a99962d95b0d",
+                  "startLine": 1,
+                  "endLine": 1
+                }
+              ],
+              "extraction": {
+                "recipeVersion": "scanned-anchors-and-radius-v2",
+                "promptVersion": "manifest-facets-v1",
+                "capturedAt": "2026-09-07T14:00:00Z",
+                "sourceCommit": null,
+                "dirty": true,
+                "backend": "text",
+                "indexHealth": "unknown",
+                "artifactRef": "/home/builduser/.papercusp/scratch/packs/dream-capability-ledger-CWcMqe/pack.xml",
+                "artifactHash": "22d04cf0e044c1e6c328a508051e29ee542b057b416f56a2889a2a6cfa2d68e7",
+                "durationMs": 0,
+                "securityScan": "passed",
+                "costUsd": 0
+              },
+              "coverage": {
+                "status": "partial",
+                "includedPaths": [
+                  "evidence/A.ts",
+                  "evidence/A.test.ts"
+                ],
+                "excluded": [],
+                "unresolved": [],
+                "truncated": false,
+                "note": "Fixture scope only."
+              }
+            },
+            "contentVersion": "b7bfd8429d51a51cbc61254fb376d89434a734ff6793b0f5359da0ba3521d7c0"
+          },
+          "b": {
+            "packet": {
+              "schemaVersion": "dream-capability-packet-v1",
+              "scope": {
+                "workspaceId": "dream-ui",
+                "potSlug": "pot-a",
+                "repositoryId": "fixture-repo"
+              },
+              "unit": {
+                "id": "capability:B",
+                "granularity": "capability",
+                "name": "Confine recall fan-out to a hive",
+                "homeDomain": "memory",
+                "relatedDomains": [
+                  "harness"
+                ],
+                "parentId": null,
+                "branch": "B",
+                "relatedUnitIds": [],
+                "overlapsUnitIds": [],
+                "purpose": [
+                  {
+                    "text": "Produces B output.",
+                    "status": "observed",
+                    "evidenceIds": [
+                      "code"
+                    ]
+                  }
+                ],
+                "mechanism": [
+                  {
+                    "text": "Calls the B mechanism.",
+                    "status": "observed",
+                    "evidenceIds": [
+                      "code"
+                    ]
+                  }
+                ],
+                "evaluation": [
+                  {
+                    "text": "Checks output.",
+                    "status": "observed",
+                    "evidenceIds": [
+                      "test"
+                    ]
+                  }
+                ],
+                "contracts": {
+                  "inputs": [],
+                  "outputs": [],
+                  "events": [],
+                  "state": [],
+                  "guarantees": [],
+                  "prerequisites": [],
+                  "failureModes": [],
+                  "resourceConstraints": []
+                },
+                "evidence": [
+                  {
+                    "id": "code",
+                    "kind": "implementation",
+                    "path": "evidence/B.ts",
+                    "anchor": "function B",
+                    "proves": "Current behavior."
+                  },
+                  {
+                    "id": "test",
+                    "kind": "test",
+                    "path": "evidence/B.test.ts",
+                    "anchor": "expect(B())",
+                    "proves": "Executable contract."
+                  }
+                ]
+              },
+              "unitHash": "f6fc18744dab01126ea96a348dbe950d79cccc7ce27e98e0fb62d3c2a5ef3d7c",
+              "manifestRevision": "ledger-fixture-v1",
+              "sources": [
+                {
+                  "id": "code",
+                  "kind": "implementation",
+                  "path": "evidence/B.ts",
+                  "anchor": "function B",
+                  "proves": "Current behavior.",
+                  "excerpt": "export function B() { return \"B\"; }",
+                  "sourceHash": "e0d673b3b7337858d524b622a9009d5f9081477b759f9bf971e284d912dbe9fc",
+                  "excerptHash": "e0d673b3b7337858d524b622a9009d5f9081477b759f9bf971e284d912dbe9fc",
+                  "startLine": 1,
+                  "endLine": 1
+                },
+                {
+                  "id": "test",
+                  "kind": "test",
+                  "path": "evidence/B.test.ts",
+                  "anchor": "expect(B())",
+                  "proves": "Executable contract.",
+                  "excerpt": "expect(B()).toBe(\"B\");",
+                  "sourceHash": "5a336f61b40e32dcdd4155f1cd2ddb72e6efbf5a4a9c1a0f226ca401dbe7bd1c",
+                  "excerptHash": "5a336f61b40e32dcdd4155f1cd2ddb72e6efbf5a4a9c1a0f226ca401dbe7bd1c",
+                  "startLine": 1,
+                  "endLine": 1
+                }
+              ],
+              "extraction": {
+                "recipeVersion": "scanned-anchors-and-radius-v2",
+                "promptVersion": "manifest-facets-v1",
+                "capturedAt": "2026-09-07T14:00:00Z",
+                "sourceCommit": null,
+                "dirty": true,
+                "backend": "text",
+                "indexHealth": "unknown",
+                "artifactRef": "/home/builduser/.papercusp/scratch/packs/dream-capability-ledger-CWcMqe/pack.xml",
+                "artifactHash": "22d04cf0e044c1e6c328a508051e29ee542b057b416f56a2889a2a6cfa2d68e7",
+                "durationMs": 0,
+                "securityScan": "passed",
+                "costUsd": 0
+              },
+              "coverage": {
+                "status": "partial",
+                "includedPaths": [
+                  "evidence/B.ts",
+                  "evidence/B.test.ts"
+                ],
+                "excluded": [],
+                "unresolved": [],
+                "truncated": false,
+                "note": "Fixture scope only."
+              }
+            },
+            "contentVersion": "e438a2b46b1731714c9e6e83e7e146e78b94519bda0e7f806c3a9c2623f40d05"
+          },
+          "c": null,
+          "pairKey": "2b78ee29fff94ff487a9a122e706a143fdf56bb4ebca2909f6203faa1c569e00",
+          "attemptKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "recipe": "capability-capability",
+          "relation": null
+        },
+        "log": {
+          "version": "domain-structural-v1",
+          "snapshotFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "seed": "fixed-seed",
+          "promptVersion": "capability-relational-v1",
+          "mode": "structured",
+          "arity": 2,
+          "policy": {
+            "strategyWeights": [
+              0.5,
+              0.3,
+              0.2
+            ],
+            "thirdRate": 0.2,
+            "underexplorationBonus": 1,
+            "cooldownMs": 86400000
+          },
+          "exposures": {},
+          "now": 1788789600000,
+          "inputFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "requestedStrategy": "uniform-cross-domain",
+          "strategy": "uniform-cross-domain",
+          "fallback": null,
+          "exclusions": [],
+          "pairExclusions": {
+            "alias": 0,
+            "recipe": 0,
+            "cooldown": 0
+          },
+          "invalidRelations": 0,
+          "invalidThirdRoles": 0,
+          "thirdOutcome": "off",
+          "draws": [],
+          "pathProbability": 1
+        }
+      },
+      "calls": [
+        {
+          "callId": "generation",
+          "phase": "generation",
+          "model": "dreamer",
+          "reservedUsd": 0.1,
+          "status": "settled",
+          "usage": {
+            "model": "dreamer",
+            "costUsd": 0.01,
+            "inputTokens": 100,
+            "outputTokens": 10
+          },
+          "error": null
+        },
+        {
+          "callId": "control-a",
+          "phase": "control-a",
+          "model": "reviewer",
+          "reservedUsd": 0.1,
+          "status": "settled",
+          "usage": {
+            "model": "reviewer",
+            "costUsd": 0.02,
+            "inputTokens": 100,
+            "outputTokens": 10
+          },
+          "error": null
+        },
+        {
+          "callId": "control-b",
+          "phase": "control-b",
+          "model": "reviewer",
+          "reservedUsd": 0.1,
+          "status": "settled",
+          "usage": {
+            "model": "reviewer",
+            "costUsd": 0.02,
+            "inputTokens": 100,
+            "outputTokens": 10
+          },
+          "error": null
+        },
+        {
+          "callId": "review",
+          "phase": "review",
+          "model": "reviewer",
+          "reservedUsd": 0.1,
+          "status": "settled",
+          "usage": {
+            "model": "reviewer",
+            "costUsd": 0.02,
+            "inputTokens": 100,
+            "outputTokens": 10
+          },
+          "error": null
+        }
+      ],
+      "artifactId": null
+    },
+    "proposal": {
+      "beneficiary": "Engineers testing combined behavior.",
+      "behavior": "Combine the A output with the B check.",
+      "observed": [
+        {
+          "claim": "A produces an output.",
+          "sources": [
+            {
+              "unit": "A",
+              "evidenceId": "code"
+            }
+          ]
+        },
+        {
+          "claim": "B supplies the check.",
+          "sources": [
+            {
+              "unit": "B",
+              "evidenceId": "code"
+            }
+          ]
+        }
+      ],
+      "hypothesis": "The composition can detect a mismatch.",
+      "primaryContributions": {
+        "A": {
+          "uniqueContribution": "Produces the input.",
+          "removalEffect": "No input.",
+          "sources": [
+            {
+              "unit": "A",
+              "evidenceId": "code"
+            }
+          ]
+        },
+        "B": {
+          "uniqueContribution": "Checks the input.",
+          "removalEffect": "No check.",
+          "sources": [
+            {
+              "unit": "B",
+              "evidenceId": "code"
+            }
+          ]
+        }
+      },
+      "thirdContribution": null,
+      "relations": [
+        {
+          "kind": "producer-consumer",
+          "from": {
+            "unit": "A",
+            "evidenceId": "code"
+          },
+          "to": {
+            "unit": "B",
+            "evidenceId": "code"
+          },
+          "mapping": "Feed A into B.",
+          "preconditions": [
+            "Compatible input."
+          ],
+          "transferRisks": [
+            "A changes."
+          ]
+        }
+      ],
+      "assumptions": [],
+      "missingEvidence": [
+        "Composition not run."
+      ],
+      "priorArt": {
+        "knownRelatedWork": [],
+        "proposedDelta": "A composed check rather than separate outputs.",
+        "verification": "unverified"
+      },
+      "experiment": {
+        "baseline": "Separate outputs.",
+        "change": "Compose A with B.",
+        "measurement": "Count mismatches.",
+        "successCriterion": "Detect the seeded mismatch.",
+        "falsifier": "The seeded mismatch is missed."
+      }
+    },
+    "capabilityReview": {
+      "schemaVersion": "dream-capability-review-v1",
+      "candidateHash": "9f68472a1f4f2fbac0f8d6a5484bc91305991af4ce1eead74e4d6499f9ff61e4",
+      "evidenceHash": "d50d2c3e2234977f43be4982862990460de8d574cf79a5fe928cf50ea0efd18e",
+      "verdict": "accept",
+      "reason": "supported-delta",
+      "note": "Bounded source-supported proposal.",
+      "coverage": {
+        "scope": {
+          "workspaceId": "dream-ui",
+          "potSlug": "pot-a",
+          "repositoryId": "fixture-repo"
+        },
+        "globalNovelty": "not-established",
+        "searches": [],
+        "packetIndexes": [],
+        "rerank": {
+          "attempted": false,
+          "reason": "fixture"
+        },
+        "unknown": []
+      },
+      "priorMatches": [
+        {
+          "ref": "plan:fixture",
+          "kind": "plan",
+          "scope": {
+            "workspaceId": "dream-ui",
+            "potSlug": "pot-a",
+            "repositoryId": "fixture-repo"
+          },
+          "text": "Prior checks each output separately.",
+          "contentHash": "e24e5b78750465df33684c09fd9d8f75b701a0fec7968fc52136d77770880dc6",
+          "sourceHash": "e24e5b78750465df33684c09fd9d8f75b701a0fec7968fc52136d77770880dc6",
+          "candidateHash": null,
+          "evidenceHash": null,
+          "locator": {
+            "kind": "plan",
+            "id": "fixture"
+          }
+        }
+      ],
+      "controls": {
+        "aOnly": {
+          "unchanged": false,
+          "note": "No check.",
+          "evidence": [
+            {
+              "ref": "A:code",
+              "quote": "export function A() { return \"A\"; }"
+            }
+          ]
+        },
+        "bOnly": {
+          "unchanged": false,
+          "note": "No input.",
+          "evidence": [
+            {
+              "ref": "B:code",
+              "quote": "export function B() { return \"B\"; }"
+            }
+          ]
+        }
+      },
+      "judgment": {
+        "verdict": "accept",
+        "note": "Supported.",
+        "observations": [
+          {
+            "index": 0,
+            "status": "supported",
+            "note": "Supported.",
+            "evidence": [
+              {
+                "ref": "A:code",
+                "quote": "export function A() { return \"A\"; }"
+              }
+            ]
+          },
+          {
+            "index": 1,
+            "status": "supported",
+            "note": "Supported.",
+            "evidence": [
+              {
+                "ref": "A:code",
+                "quote": "export function A() { return \"A\"; }"
+              }
+            ]
+          }
+        ],
+        "comparisons": [
+          {
+            "ref": "plan:fixture",
+            "disposition": "distinct",
+            "note": "Adds composition.",
+            "evidence": [
+              {
+                "ref": "prior:plan:fixture",
+                "quote": "Prior checks each output separately."
+              }
+            ]
+          }
+        ],
+        "relation": {
+          "status": "supported",
+          "note": "Supported.",
+          "evidence": [
+            {
+              "ref": "A:code",
+              "quote": "export function A() { return \"A\"; }"
+            }
+          ]
+        },
+        "feasibility": {
+          "status": "supported",
+          "note": "Supported.",
+          "evidence": [
+            {
+              "ref": "A:code",
+              "quote": "export function A() { return \"A\"; }"
+            }
+          ]
+        },
+        "experiment": {
+          "executable": true,
+          "probe": "Run the composed check.",
+          "baseline": "Separate outputs.",
+          "falsifier": "Missed mismatch.",
+          "evidence": [
+            {
+              "ref": "B:test",
+              "quote": "expect(B()).toBe(\"B\");"
+            }
+          ]
+        }
+      },
+      "usage": {
+        "model": "reviewer",
+        "costUsd": 0.06,
+        "inputTokens": 300,
+        "outputTokens": 30
+      }
+    },
+    "assessments": [],
+    "currentSourceFreshness": "not-rechecked"
+  },
+  "metrics": {
+    "schemaVersion": "dream-metrics-v1",
+    "scope": {
+      "workspaceId": "dream-ui",
+      "potSlug": "pot-a",
+      "since": "2026-09-07T00:00:00Z",
+      "until": "2026-09-08T00:00:00Z"
+    },
+    "population": {
+      "complete": true,
+      "attempts": 1,
+      "legacy": 0,
+      "versions": {
+        "dream-capability-run-v1": 1
+      }
+    },
+    "configurationVersions": {
+      "[\"ledger-fixture-v1\",\"capability-relational-v1\",\"dream-capability-review-v1\"]": 1
+    },
+    "funnel": {
+      "statuses": {
+        "running": 0,
+        "no-pair": 0,
+        "abstained": 0,
+        "malformed": 0,
+        "duplicate": 0,
+        "rejected": 0,
+        "accepted": 1,
+        "error": 0
+      },
+      "terminal": 1,
+      "eligibleAttempts": 1,
+      "proposalAttempts": 1,
+      "reviewedAttempts": 1,
+      "assessedAttempts": 0,
+      "reviewPassedAttempts": 1,
+      "reviewOutcomes": {
+        "not-reviewed": 0,
+        "accepted": 1,
+        "rejected": 0,
+        "duplicate": 0,
+        "refinement": 0,
+        "unverified": 0,
+        "unavailable": 0
+      },
+      "reviewPassRate": {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1
+      },
+      "dedupeSurvival": {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1
+      },
+      "routedAttempts": 1,
+      "uniqueRoutedArtifacts": 1,
+      "qualifiedFamilies": 0,
+      "proposalsPerEligibleAttempt": {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1
+      },
+      "qualifiedFamiliesPerEligibleAttempt": {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      "noPairRate": {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      },
+      "errorRate": {
+        "numerator": 0,
+        "denominator": 1,
+        "value": 0
+      }
+    },
+    "novelty": {
+      "scope": "recorded-assessments",
+      "identifiedFamilies": 0,
+      "unidentifiedProposalAttempts": 1,
+      "qualificationUnknown": 1,
+      "repeatedFamilyRate": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      },
+      "largestFamilyShare": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      }
+    },
+    "reuse": {
+      "rediscovery": 0,
+      "refinement": 0,
+      "linkedToPrior": 0,
+      "usefulness": { "supported": 0, "disproven": 0, "unknown": 0 },
+      "noveltyCredit": "none"
+    },
+    "discoveryCurve": {
+      "points": [
+        {
+          "runId": "fixture-run",
+          "at": "2026-09-07T14:00:00Z",
+          "knownCallUsd": 0.07,
+          "qualifiedFamilies": 0,
+          "costIncomplete": false
+        }
+      ],
+      "omittedEarlierPoints": 0
+    },
+    "quality": {
+      "novelty": {
+        "supported": 0,
+        "disproven": 0,
+        "unknown": 1
+      },
+      "usefulness": {
+        "supported": 0,
+        "disproven": 0,
+        "unknown": 1
+      },
+      "feasibility": {
+        "supported": 1,
+        "disproven": 0,
+        "unknown": 0
+      },
+      "maintainability": {
+        "supported": 0,
+        "disproven": 0,
+        "unknown": 1
+      }
+    },
+    "reviewerDisagreement": {
+      "numerator": 0,
+      "denominator": 0,
+      "value": null
+    },
+    "coverage": {
+      "selectedUnits": 2,
+      "selectedMechanismUnits": 0,
+      "domainPairs": 1,
+      "sourceSnapshots": 1,
+      "sourcePopulationCoverage": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      },
+      "snapshotsWithUnknownPopulation": 1,
+      "selectedPacketUses": 2,
+      "incompletePacketUses": 0,
+      "exclusions": {},
+      "arities": {
+        "2": 1
+      },
+      "recipes": {
+        "capability-capability": 1
+      },
+      "strategies": {
+        "uniform-cross-domain": 1
+      },
+      "thirdRoles": {
+        "none": 1
+      },
+      "indexHealth": {
+        "unknown": 2
+      }
+    },
+    "cost": {
+      "knownCallUsd": 0.07,
+      "unresolvedBoundUsd": 0,
+      "unknownUsageCount": 0,
+      "fullyAttributedCallUsd": 0.07,
+      "phases": {
+        "packet": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        },
+        "retrieval": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        },
+        "rerank": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        },
+        "generation": {
+          "knownUsd": 0.01,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0.01
+        },
+        "control-a": {
+          "knownUsd": 0.02,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0.02
+        },
+        "control-b": {
+          "knownUsd": 0.02,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0.02
+        },
+        "review": {
+          "knownUsd": 0.02,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0.02
+        },
+        "experiment": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        }
+      },
+      "models": {
+        "dreamer": {
+          "knownUsd": 0.01,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0.01
+        },
+        "reviewer": {
+          "knownUsd": 0.06,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0.06
+        }
+      },
+      "packetColdStartUsd": 0,
+      "packetColdStartKnownUsd": 0,
+      "distinctPacketHistoricalUsd": 0,
+      "distinctPacketKnownUsd": 0,
+      "unknownPacketUses": 0,
+      "unknownPackets": 0,
+      "packetAmortizedUsdPerUse": 0,
+      "packetLocalDurationMs": 0,
+      "fullyAttributedDiscoveryUsd": 0.07,
+      "reconciliationErrors": []
+    },
+    "leading": {
+      "qualifiedFamiliesPerUsd": null
+    },
+    "downstream": {
+      "routes": {
+        "unknown": 1
+      },
+      "grades": {
+        "unknown": 1
+      },
+      "outcomes": {
+        "unknown": 1
+      }
+    },
+    "experiments": {
+      "linked": 0,
+      "executed": 0,
+      "winning": 0,
+      "declaredLinks": 0,
+      "missingResults": 0,
+      "recordedCostUsd": 0,
+      "engineeringTimeMs": null,
+      "decisions": {}
+    }
+  },
+  "emptyMetrics": {
+    "schemaVersion": "dream-metrics-v1",
+    "scope": {
+      "workspaceId": "dream-ui",
+      "potSlug": "pot-a",
+      "since": "2026-09-07T00:00:00Z",
+      "until": "2026-09-08T00:00:00Z"
+    },
+    "population": {
+      "complete": true,
+      "attempts": 0,
+      "legacy": 0,
+      "versions": {}
+    },
+    "configurationVersions": {},
+    "funnel": {
+      "statuses": {
+        "running": 0,
+        "no-pair": 0,
+        "abstained": 0,
+        "malformed": 0,
+        "duplicate": 0,
+        "rejected": 0,
+        "accepted": 0,
+        "error": 0
+      },
+      "terminal": 0,
+      "eligibleAttempts": 0,
+      "proposalAttempts": 0,
+      "reviewedAttempts": 0,
+      "assessedAttempts": 0,
+      "reviewPassedAttempts": 0,
+      "reviewOutcomes": {
+        "not-reviewed": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "duplicate": 0,
+        "refinement": 0,
+        "unverified": 0,
+        "unavailable": 0
+      },
+      "reviewPassRate": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      },
+      "dedupeSurvival": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      },
+      "routedAttempts": 0,
+      "uniqueRoutedArtifacts": 0,
+      "qualifiedFamilies": 0,
+      "proposalsPerEligibleAttempt": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      },
+      "qualifiedFamiliesPerEligibleAttempt": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      },
+      "noPairRate": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      },
+      "errorRate": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      }
+    },
+    "novelty": {
+      "scope": "recorded-assessments",
+      "identifiedFamilies": 0,
+      "unidentifiedProposalAttempts": 0,
+      "qualificationUnknown": 0,
+      "repeatedFamilyRate": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      },
+      "largestFamilyShare": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      }
+    },
+    "reuse": {
+      "rediscovery": 0,
+      "refinement": 0,
+      "linkedToPrior": 0,
+      "usefulness": { "supported": 0, "disproven": 0, "unknown": 0 },
+      "noveltyCredit": "none"
+    },
+    "discoveryCurve": {
+      "points": [],
+      "omittedEarlierPoints": 0
+    },
+    "quality": {
+      "novelty": {
+        "supported": 0,
+        "disproven": 0,
+        "unknown": 0
+      },
+      "usefulness": {
+        "supported": 0,
+        "disproven": 0,
+        "unknown": 0
+      },
+      "feasibility": {
+        "supported": 0,
+        "disproven": 0,
+        "unknown": 0
+      },
+      "maintainability": {
+        "supported": 0,
+        "disproven": 0,
+        "unknown": 0
+      }
+    },
+    "reviewerDisagreement": {
+      "numerator": 0,
+      "denominator": 0,
+      "value": null
+    },
+    "coverage": {
+      "selectedUnits": 0,
+      "selectedMechanismUnits": 0,
+      "domainPairs": 0,
+      "sourceSnapshots": 0,
+      "sourcePopulationCoverage": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      },
+      "snapshotsWithUnknownPopulation": 0,
+      "selectedPacketUses": 0,
+      "incompletePacketUses": 0,
+      "exclusions": {},
+      "arities": {},
+      "recipes": {},
+      "strategies": {},
+      "thirdRoles": {},
+      "indexHealth": {}
+    },
+    "cost": {
+      "knownCallUsd": 0,
+      "unresolvedBoundUsd": 0,
+      "unknownUsageCount": 0,
+      "fullyAttributedCallUsd": 0,
+      "phases": {
+        "packet": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        },
+        "retrieval": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        },
+        "rerank": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        },
+        "generation": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        },
+        "control-a": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        },
+        "control-b": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        },
+        "review": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        },
+        "experiment": {
+          "knownUsd": 0,
+          "unresolvedBoundUsd": 0,
+          "unknownCalls": 0,
+          "actualUsd": 0
+        }
+      },
+      "models": {},
+      "packetColdStartUsd": 0,
+      "packetColdStartKnownUsd": 0,
+      "distinctPacketHistoricalUsd": 0,
+      "distinctPacketKnownUsd": 0,
+      "unknownPacketUses": 0,
+      "unknownPackets": 0,
+      "packetAmortizedUsdPerUse": null,
+      "packetLocalDurationMs": 0,
+      "fullyAttributedDiscoveryUsd": 0,
+      "reconciliationErrors": []
+    },
+    "leading": {
+      "qualifiedFamiliesPerUsd": null
+    },
+    "downstream": {
+      "routes": {},
+      "grades": {},
+      "outcomes": {}
+    },
+    "experiments": {
+      "linked": 0,
+      "executed": 0,
+      "winning": 0,
+      "declaredLinks": 0,
+      "missingResults": 0,
+      "recordedCostUsd": 0,
+      "engineeringTimeMs": null,
+      "decisions": {}
+    }
+  }
+}

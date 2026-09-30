@@ -1,0 +1,245 @@
+/* /admin — ops dashboard (build + run commands). */
+
+.pc-ops-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  height: 100%;
+  background: transparent;
+  color: var(--fg, #e7f7ff);
+  font-size: 13px;
+}
+
+.pc-ops-body {
+  flex: 1;
+  overflow: auto;
+  padding: 24px 24px 56px;
+  max-width: 1240px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.pc-ops-intro {
+  margin: 0 0 18px;
+  padding: 16px 18px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-1), transparent 6%);
+  box-shadow: none;
+  color: var(--fg-dim, rgba(214, 236, 248, 0.74));
+  font-size: 13px;
+  line-height: 1.55;
+}
+.pc-ops-intro p { margin: 0; }
+.pc-ops-intro code {
+  background: var(--bg-2, rgba(255, 255, 255, 0.05));
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--fg, #eff8ff);
+}
+
+.pc-ops-error {
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--bad), transparent 66%);
+  border-radius: 8px;
+  color: var(--bad, #fecaca);
+  background: color-mix(in srgb, var(--bad), transparent 86%);
+  margin-bottom: 18px;
+}
+
+.pc-ops-section { margin-bottom: 28px; }
+.pc-ops-section-title {
+  font-size: 11px;
+  font-weight: 760;
+  color: var(--fg-dim, rgba(203, 238, 255, 0.74));
+  text-transform: uppercase;
+  margin: 0 0 10px;
+}
+.pc-ops-empty {
+  background: color-mix(in srgb, var(--bg), transparent 6%);
+  border: 1px dashed color-mix(in srgb, var(--accent-strong), transparent 82%);
+  border-radius: 8px;
+  padding: 18px;
+  color: var(--fg-dim, rgba(214, 236, 248, 0.68));
+  font-size: 12px;
+}
+.pc-ops-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 14px;
+}
+
+.pc-ops-card {
+  background: color-mix(in srgb, var(--bg-1), transparent 6%);
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: none;
+  transition: border-color 120ms, background 120ms;
+}
+.pc-ops-card:hover {
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 70%);
+  background: color-mix(in srgb, var(--bg-2), transparent 4%);
+}
+.pc-ops-card-running { border-color: color-mix(in srgb, var(--accent-strong), transparent 58%); }
+.pc-ops-card-error { border-color: color-mix(in srgb, var(--bad), transparent 66%); }
+.pc-ops-card-done { border-color: color-mix(in srgb, var(--good), transparent 70%); }
+
+.pc-ops-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pc-ops-card-title {
+  flex: 1;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--fg, #eff8ff);
+}
+.pc-ops-card-desc {
+  color: var(--fg-dim, rgba(205, 226, 240, 0.74));
+  font-size: 12px;
+  line-height: 1.5;
+}
+.pc-ops-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pc-ops-card-cmd {
+  background: color-mix(in srgb, var(--bg-deepest), transparent 6%);
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 88%);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--warn, #fbbf24);
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.pc-ops-btn {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 78%);
+  background: color-mix(in srgb, var(--bg-2), transparent 4%);
+  color: var(--fg, #eff8ff);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  line-height: 1.2;
+  transition: background 100ms, border-color 100ms, color 100ms;
+}
+.pc-ops-btn:hover {
+  background: color-mix(in srgb, var(--bg-3), transparent 2%);
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 66%);
+}
+.pc-ops-btn:active { background: color-mix(in srgb, var(--bg-3), transparent 0%); }
+.pc-ops-btn-run {
+  background: color-mix(in srgb, var(--accent), transparent 74%);
+  color: var(--accent-ink, #f4fbff);
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 58%);
+}
+.pc-ops-btn-run:hover { background: color-mix(in srgb, var(--accent), transparent 66%); }
+.pc-ops-btn-stop {
+  background: color-mix(in srgb, var(--bad), transparent 78%);
+  color: var(--fg, #fff);
+  border-color: color-mix(in srgb, var(--bad), transparent 58%);
+}
+.pc-ops-btn-stop:hover { background: color-mix(in srgb, var(--bad), transparent 68%); }
+.pc-ops-btn-ghost {
+  background: transparent;
+  color: var(--fg-dim, rgba(214, 236, 248, 0.72));
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 86%);
+}
+.pc-ops-btn-mini { padding: 3px 8px; font-size: 11px; }
+
+.pc-ops-meta {
+  color: color-mix(in srgb, var(--accent-soft), transparent 34%);
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.pc-ops-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: lowercase;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+.pc-ops-pill-idle { background: color-mix(in srgb, var(--fg-mute), transparent 84%); color: var(--fg-dim, rgba(214, 236, 248, 0.70)); }
+.pc-ops-pill-running {
+  background: color-mix(in srgb, var(--accent), transparent 82%);
+  color: var(--accent-soft, #93ecff);
+  position: relative;
+  padding-left: 18px;
+}
+.pc-ops-pill-running::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-soft, #93ecff);
+  transform: translateY(-50%);
+  animation: pc-ops-pulse 1s ease-in-out infinite;
+}
+@keyframes pc-ops-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.pc-ops-pill-done { background: color-mix(in srgb, var(--good), transparent 82%); color: var(--good, #86efac); }
+.pc-ops-pill-error { background: color-mix(in srgb, var(--bad), transparent 78%); color: var(--bad, #fca5a5); }
+.pc-ops-pill-cancelled { background: color-mix(in srgb, var(--warn), transparent 82%); color: var(--warn, #fcd34d); }
+
+.pc-ops-log-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 2px;
+}
+.pc-ops-log-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.pc-ops-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fg-dim, rgba(214, 236, 248, 0.72));
+  font-size: 11px;
+  cursor: pointer;
+}
+.pc-ops-checkbox input { margin: 0; cursor: pointer; }
+
+.pc-ops-log-box {
+  background: color-mix(in srgb, var(--bg-deepest), transparent 6%);
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 88%);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--fg-dim, #d1d5db);
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre;
+}
+.pc-ops-log-line { white-space: pre-wrap; word-break: break-all; }
+.pc-ops-log-stderr { color: var(--bad, #fca5a5); }

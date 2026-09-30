@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# harness-features — read-only PG access to a harness's features table.
+#
+# Drop-in replacement for `cat <harness>/features.json` in agent prompts.
+# Reads from harness_<slug>.harness_features in the papercusp DB.
+#
+# Usage:
+#   harness-features list <harness-slug>            # all features as JSON array
+#   harness-features list <harness-slug> --status todo
+#   harness-features get <harness-slug> <feature-id>
+#   harness-features count <harness-slug>           # totals by status
+#
+# Exit codes: 0 ok, 2 usage, 3 not-found, 4 db error.
+#
+# Layer E migration target: agents reading `cat features.json` should switch
+# to `harness-features list <slug>` so the data source becomes Postgres
+# instead of the on-disk JSON. Both are still kept in sync (the harness API
+# writes to JSON + PG); this just changes the read path.
+set -euo pipefail
+
+PSQL_CONN="${HARNESS_DATABASE_URL:-postgresql://harness_app:harness_app_pwd@localhost:5432/papercusp}"
+
+usage() {
+  cat <<EOF
+harness-features <command> <harness-slug> [args...]
+
+Commands:
+  list <slug>                    All features as JSON array
+  list <slug> --status <s>       Filter by status (todo | in_progress | done | etc.)
+  get <slug> <feature-id>        Single feature as JSON object
+  count <slug>                   Totals by status as JSON object
+  all                            All features across every harness
+  all --status <s>               Cross-harness, filtered by status
+  all --review                   Cross-harness, only needs_human_review = true
+
+Connection: \$HARNESS_DATABASE_URL or default harness_app role on localhost
+EOF
+}
+
+cmd="${1:-}"
+[ -z "$cmd" ] && { usage >&2; exit 2; }
+
+# `all` doesn't require a slug — it queries the cross-harness view.
+if [ "$cmd" = "all" ]; then
+  status_filter=""
+  review_only=0
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --status)
+        [ -z "${2:-}" ] && { echo "harness-features all --status requires a value" >&2; exit 2; }
+        sf="${2//\'/\'\'}"
+        status_filter="status = '${sf}'"
+        shift 2
+        ;;
+      --review)
+        review_only=1
+        shift
+        ;;
+      *)
+        echo "harness-features all: unknown arg '$1'" >&2; exit 2
+        ;;
+    esac
+  done
+  filters=()
+  [ -n "$status_filter" ] && filters+=("$status_filter")
+  [ "$review_only" = 1 ] && filters+=("needs_human_review")
+  where=""
+  if [ ${#filters[@]} -gt 0 ]; then
+    where="WHERE $(IFS=' AND '; echo "${filters[*]}")"
+  fi
+  PGPASSWORD="${PSQL_CONN##*:}" psql "$PSQL_CONN" -tA -X -c "
+    SELECT COALESCE(jsonb_agg(to_jsonb(t.*) ORDER BY harness_slug, feature_id), '[]'::jsonb)::text
+    FROM harness_shared.harness_features_all t
+    ${where}
+  " 2>&1
+  exit $?
+fi
+
+slug="${2:-}"
+[ -z "$slug" ] && { echo "harness-features: missing <harness-slug>" >&2; usage >&2; exit 2; }
+
+# Validate slug shape (alphanumeric + dashes/underscores) so it's safe to
+# splice into the schema-qualified table name. Postgres identifiers can
+# contain almost anything when quoted, but agent slugs in this codebase
+# are always [a-z0-9_-]+ so we lock that down.
+case "$slug" in
+  *[!a-zA-Z0-9_-]*) echo "harness-features: invalid slug '$slug'" >&2; exit 2 ;;
+esac
+schema="harness_${slug//-/_}"
+
+run_psql() {
+  PGPASSWORD="${PSQL_CONN##*:}" psql "$PSQL_CONN" -tA -X "$@" 2>&1
+}
+
+case "$cmd" in
+  list)
+    status_filter=""
+    if [ "${3:-}" = "--status" ] && [ -n "${4:-}" ]; then
+      sf="${4//\'/\'\'}"
+      status_filter="WHERE status = '${sf}'"
+    fi
+    out=$(run_psql -c "
+      SELECT COALESCE(jsonb_agg(to_jsonb(t.*) ORDER BY feature_id), '[]'::jsonb)::text
+      FROM ${schema}.harness_features t
+      ${status_filter}
+    ")
+    rc=$?
+    [ $rc -ne 0 ] && { echo "$out" >&2; exit 4; }
+    echo "$out"
+    ;;
+
+  get)
+    feature_id="${3:-}"
+    [ -z "$feature_id" ] && { echo "harness-features: missing <feature-id>" >&2; exit 2; }
+    fid="${feature_id//\'/\'\'}"
+    out=$(run_psql -c "
+      SELECT to_jsonb(t.*)::text
+      FROM ${schema}.harness_features t
+      WHERE feature_id = '${fid}'
+    ")
+    rc=$?
+    [ $rc -ne 0 ] && { echo "$out" >&2; exit 4; }
+    [ -z "$out" ] && { echo "harness-features: feature '$feature_id' not found in $schema" >&2; exit 3; }
+    echo "$out"
+    ;;
+
+  count)
+    out=$(run_psql -c "
+      SELECT jsonb_object_agg(status, n)::text FROM (
+        SELECT status, COUNT(*)::int AS n
+        FROM ${schema}.harness_features
+        GROUP BY status
+      ) s
+    ")
+    rc=$?
+    [ $rc -ne 0 ] && { echo "$out" >&2; exit 4; }
+    [ -z "$out" ] && echo '{}' || echo "$out"
+    ;;
+
+  *)
+    echo "harness-features: unknown command '$cmd'" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

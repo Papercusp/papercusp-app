@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# bin/dispatch-expert — manually dispatch an autonomous expert role
+#
+# Usage:
+#   bin/dispatch-expert <role> <harness-slug> [--reason "..."] [--context-file <path>]
+#                                              [--operator-url <url>]
+#
+# Examples:
+#   bin/dispatch-expert infra-reviewer sheets --reason "manual smoke"
+#   bin/dispatch-expert security-reviewer myapp \
+#       --reason "audit new comment-rendering" \
+#       --context-file /tmp/ctx.json
+#
+# Defaults:
+#   --operator-url   http://localhost:3155 (override: $OPERATOR_URL or env)
+#
+# The endpoint's contract:
+#   POST /api/harness/<slug>/experts/dispatch
+#   body: { role, reason, context }
+#   200: { ok: true,  expertId, userActionId }
+#   409: { ok: false, error: 'lock-held', existingExpertId, existingStartedAt }
+#
+# Watch the run via:
+#   tail -f ~/<project>/.papercusp/experts/runs/<role>-<expertId>.log
+# Or open the operator UI's "Recent actions" panel.
+set -euo pipefail
+
+usage() {
+  sed -n '2,/^set/p' "$0" | sed 's/^# \?//;s/^set.*//'
+  exit "${1:-1}"
+}
+
+role=""
+slug=""
+reason=""
+context_file=""
+context_inline=""
+operator_url="${OPERATOR_URL:-http://localhost:3155}"
+
+# Parse args (positional first, then flags)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reason) reason="$2"; shift 2 ;;
+    --context-file) context_file="$2"; shift 2 ;;
+    --context) context_inline="$2"; shift 2 ;;
+    --operator-url) operator_url="$2"; shift 2 ;;
+    -h|--help) usage 0 ;;
+    -*) echo "unknown flag: $1" >&2; usage ;;
+    *)
+      if [[ -z "$role" ]]; then role="$1"
+      elif [[ -z "$slug" ]]; then slug="$1"
+      else echo "unexpected arg: $1" >&2; usage; fi
+      shift ;;
+  esac
+done
+
+[[ -z "$role" || -z "$slug" ]] && usage
+
+# Build context JSON
+if [[ -n "$context_file" ]]; then
+  context=$(cat "$context_file")
+elif [[ -n "$context_inline" ]]; then
+  context="$context_inline"
+else
+  context='{}'
+fi
+
+# Validate context is JSON
+if ! echo "$context" | python3 -m json.tool >/dev/null 2>&1; then
+  echo "error: context is not valid JSON" >&2
+  exit 1
+fi
+
+# Build request body via jq (handles quoting cleanly)
+if ! body=$(jq -nc --arg r "$role" --arg rs "$reason" --argjson ctx "$context" \
+  '{role:$r, reason:$rs, context:$ctx}' 2>/dev/null); then
+  echo "error: jq is required (apt-get install jq)" >&2
+  exit 1
+fi
+
+# HTTP code parser variable
+http_code=""
+body_response=""
+
+echo "→ POST $operator_url/api/harness/$slug/experts/dispatch"
+echo "  role:    $role"
+echo "  reason:  $reason"
+echo "  context: $context"
+echo
+
+tmpfile=$(mktemp)
+http_code=$(curl -sS -X POST -H 'content-type: application/json' \
+  -d "$body" \
+  -o "$tmpfile" \
+  -w "%{http_code}" \
+  "$operator_url/api/harness/$slug/experts/dispatch")
+body_response=$(cat "$tmpfile")
+rm -f "$tmpfile"
+
+echo "← HTTP $http_code"
+echo "$body_response" | python3 -m json.tool 2>/dev/null || echo "$body_response"
+
+case "$http_code" in
+  200)
+    expert_id=$(echo "$body_response" | python3 -c 'import json,sys;print(json.load(sys.stdin)["expertId"])' 2>/dev/null)
+    if [[ -n "$expert_id" ]]; then
+      echo
+      echo "watch the run:"
+      # Find the project path from the harness registry
+      ws_root="${PAPERCUSP_HOME:-$HOME/.papercusp-workspaces/default/.papercusp}"
+      reg="$ws_root/registry.json"
+      if [[ -f "$reg" ]]; then
+        proj_path=$(python3 -c "
+import json
+d = json.load(open('$reg'))
+for p in d['projects']:
+    if p['slug'] == '$slug':
+        print(p['path']); break" 2>/dev/null)
+        if [[ -n "$proj_path" ]]; then
+          echo "  tail -F '$proj_path/.papercusp/experts/runs/$role-$expert_id.log'"
+        fi
+      fi
+      echo "  curl -sS '$operator_url/api/user-actions/$slug?limit=5' | jq '.actions[] | select(.kind == \"expert.dispatch\")'"
+    fi
+    exit 0
+    ;;
+  409)
+    echo
+    echo "another dispatch is in flight; not retrying." >&2
+    exit 1
+    ;;
+  *)
+    exit 1 ;;
+esac

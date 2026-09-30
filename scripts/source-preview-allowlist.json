@@ -1,0 +1,249 @@
+{
+  "$comment": "Reviewed false positives of the source-preview gate's ADDITIONAL detectors (gitleaks, trufflehog) — never of audit-release-bundle. An entry matches one exact (detector, rule, path, sha256-of-matched-value); a changed or new value is a new finding. Produce candidates with `npm run preview:gate -- <dir> --json <file>` and review each before adding it. Reviewed 2026-09-28 against Papercusp/papercup@09e39c5d.",
+  "entries": [
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/bin/lib/replication-soak-diagnostics.selftest.sh","sha256":"f445801e0cb899262c9b9e219836880d73ca2d1b0b9c15fb959c90eb121234e3","reason":"Selftest stub replication logKey \"abcdef0123456789\" (sequential hex fixture), not a credential. Reviewed 2026-09-30 (desktop shell joins the public export)."},
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/bin/lib/release-artifacts.selftest.sh","sha256":"e7bfe46c361496b999741aee8c92c68f421c49dd71d2f86b7238d3be83a016b8","reason":"Selftest TAURI_SIGNING_PRIVATE_KEY is base64 of the literal \"test-key-content\"; not a signing key."},
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/test/release-gitleaks.test.js","sha256":"e595a88d14f68027f5211c0f3710e279fa0fe4d5259548e1fe1c78f5af8e8f58","reason":"Fixture of minified-bundle identifier strings (sortKey/signWithDeviceKey/token3/SESSION_PORT_TOKEN_ESTIMATOR) that the release gitleaks test asserts are NOT secrets."},
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/test/release-gitleaks.test.js","sha256":"e432744e9b64c340708220946567b48e5c96bd0e12568b0d09d33d8ad8311390","reason":"Fixture of minified-bundle identifier strings (sortKey/signWithDeviceKey/token3/SESSION_PORT_TOKEN_ESTIMATOR) that the release gitleaks test asserts are NOT secrets."},
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/test/release-gitleaks.test.js","sha256":"0ac01998d6a4c596c259572dd105fd712d74ffbf6cc1e7e592eea186639ddffc","reason":"Fixture of minified-bundle identifier strings (sortKey/signWithDeviceKey/token3/SESSION_PORT_TOKEN_ESTIMATOR) that the release gitleaks test asserts are NOT secrets."},
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/test/release-gitleaks.test.js","sha256":"9def11184ac072b018f9fc1b7d69b9c7f48b8008f58bd64289c9785f6d127e32","reason":"Fixture of minified-bundle identifier strings (sortKey/signWithDeviceKey/token3/SESSION_PORT_TOKEN_ESTIMATOR) that the release gitleaks test asserts are NOT secrets."},
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/test/release-gitleaks.test.js","sha256":"2a5ec9f93506dd7cd6ecbdf818c0ca59c15ba5895dc270ce73bf621fe389edb3","reason":"Fixture of minified-bundle identifier strings (sortKey/signWithDeviceKey/token3/SESSION_PORT_TOKEN_ESTIMATOR) that the release gitleaks test asserts are NOT secrets."},
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/test/release-gitleaks.test.js","sha256":"b659670c688ad1b831b20fbbcc027905425c9bce15a938b5f3e041df8853df74","reason":"Fixture of minified-bundle identifier strings (sortKey/signWithDeviceKey/token3/SESSION_PORT_TOKEN_ESTIMATOR) that the release gitleaks test asserts are NOT secrets."},
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/test/release-gitleaks.test.js","sha256":"bb2d76c5457f08fc71be9534860f2e9847510985721dff565994f0dc3b437989","reason":"Fixture of minified-bundle identifier strings (sortKey/signWithDeviceKey/token3/SESSION_PORT_TOKEN_ESTIMATOR) that the release gitleaks test asserts are NOT secrets."},
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/test/release-gitleaks.test.js","sha256":"9f9896ac62d17bb1cbddf7544c717dfbbcd27e8a36ef53697156463c6dfdf27d","reason":"Fixture of minified-bundle identifier strings (sortKey/signWithDeviceKey/token3/SESSION_PORT_TOKEN_ESTIMATOR) that the release gitleaks test asserts are NOT secrets."},
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/test/release-gitleaks.test.js","sha256":"e0da86954aed89f8b6e0bb820bb4997a3493af6235d8e4b68d15542bef72cc39","reason":"Fixture of minified-bundle identifier strings (sortKey/signWithDeviceKey/token3/SESSION_PORT_TOKEN_ESTIMATOR) that the release gitleaks test asserts are NOT secrets."},
+    {"detector":"gitleaks","rule":"generic-api-key","path":"papercusp-desktop/test/release-identity-scan-archives.test.js","sha256":"3d62a254616472080c73e98c3212e52b9abb3d0b93c5cc57e7db4cd737b86379","reason":"Constant name/SHA-256 of a public WorkOS OAuth example used as a scan fixture; not a credential."},
+    {"detector":"trufflehog","rule":"URI","path":"papercusp-desktop/src-tauri/src/main.rs","sha256":"af68163c3d2cde3c6007e6fd630a098b9eaeffee147214aa4863996141c8eff5","reason":"Unit-test userinfo URI on the RFC 2606 example domain (server.example.com) exercising credential redaction; the password is the literal word secret."},
+    {
+      "detector": "gitleaks",
+      "rule": "curl-auth-user",
+      "path": "apps/operator-public/README.md",
+      "sha256": "02aa14ea0f0138aa99dc49a6ac9fd872a56980f463ee699509444ac122017667",
+      "reason": "Stripe curl example authenticates with the \"$STRIPE_…\" shell variable; no literal key."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "apps/operator-vite/src/components/adv/dream-view.fixture.json",
+      "sha256": "b34c42adeb37349ce8a633c66ba4235b9e6e5299ae686931d9a226bd28874ea3",
+      "reason": "Synthetic UI fixture pairKey (64-hex test data)."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "apps/operator/app/_components/ChatwootWidget.tsx",
+      "sha256": "1c7b8ccd65555055982e6c0a04b13972e952c8a348b3a14861bce87d826542b1",
+      "reason": "Chatwoot website-widget token: a public client identifier every browser receives, not a credential."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "apps/operator/app/_components/voice/VoiceButton.tsx",
+      "sha256": "acb5d88f3018c6535bcec37767389bc0f811e4b74c9925d5e98dd10cdd53a6d0",
+      "reason": "localStorage key name (WAKE_HINT_SEEN_KEY), not a credential."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "apps/papercusp-publish/.dev.vars",
+      "sha256": "7c7e32e7a38216b66b4793761e71b753908c7d9e3e62a7b7ac067cd8fc6efcfa",
+      "reason": "Documented local wrangler dev stub: JWT_SECRET is base64 of a \"local-…-change-me-in-prod\" placeholder, never a deployed secret."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "apps/papercusp-publish/README.md",
+      "sha256": "7c7e32e7a38216b66b4793761e71b753908c7d9e3e62a7b7ac067cd8fc6efcfa",
+      "reason": "README copy of the same local wrangler dev stub (base64 \"local-…-change-me-in-prod\" placeholder)."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "apps/tui/src/models.rs",
+      "sha256": "3eb1bd439947eb762998e566ccc2e099c791118b2f40579cc4f7da2b5061b7f9",
+      "reason": "Unit-test literal inviteSecret \"0123…ef\" (sequential hex)."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "sourcegraph-access-token",
+      "path": "docs/evidence/gitnexus-revised-assessment-2026-09-13.md",
+      "sha256": "056e865f41e94f25300c3a4e98e8c1965ababa3aaf935d5b22782cc39cffa52a",
+      "reason": "Git commit SHA (40 hex) in an evidence doc; the sourcegraph rule fires on any 40-hex string in a file that mentions Sourcegraph."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "sourcegraph-access-token",
+      "path": "docs/evidence/gitnexus-revised-assessment-2026-09-13.md",
+      "sha256": "0799c39f622d8cc5dab9c60eb61817dcb99a2cd714b5be610e50fcfbf80737f8",
+      "reason": "Git commit SHA (40 hex) in an evidence doc; the sourcegraph rule fires on any 40-hex string in a file that mentions Sourcegraph."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "sourcegraph-access-token",
+      "path": "docs/evidence/gitnexus-revised-assessment-2026-09-13.md",
+      "sha256": "59b63025af271c72501eca3a27ceed41ec0cbdbeeefd82b32e74175097bee622",
+      "reason": "Git commit SHA (40 hex) in an evidence doc; the sourcegraph rule fires on any 40-hex string in a file that mentions Sourcegraph."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "sourcegraph-access-token",
+      "path": "docs/evidence/gitnexus-revised-assessment-2026-09-13.md",
+      "sha256": "91cf1bd5edb058c95df28829822364db04cf162047da2fca1ef8f105cab54769",
+      "reason": "Git commit SHA (40 hex) in an evidence doc; the sourcegraph rule fires on any 40-hex string in a file that mentions Sourcegraph."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "sourcegraph-access-token",
+      "path": "docs/evidence/gitnexus-revised-assessment-2026-09-13.md",
+      "sha256": "cbbb2e7f59b1dbe3f5a1ac3036e47ccdde06d2eaec33cf39b80640c0ecf2fc75",
+      "reason": "Git commit SHA (40 hex) in an evidence doc; the sourcegraph rule fires on any 40-hex string in a file that mentions Sourcegraph."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "sourcegraph-access-token",
+      "path": "docs/evidence/gitnexus-revised-assessment-2026-09-13.md",
+      "sha256": "dc7112d551a3acf13337f6265da06aee558c7c4ef45229008e853cf1e4665ebf",
+      "reason": "Git commit SHA (40 hex) in an evidence doc; the sourcegraph rule fires on any 40-hex string in a file that mentions Sourcegraph."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "sourcegraph-access-token",
+      "path": "docs/evidence/gitnexus-revised-assessment-2026-09-13.md",
+      "sha256": "ddc3a2afb4ea473ccc1245ac6eb747a54a9a05dacb965540043125056beabbdd",
+      "reason": "Git commit SHA (40 hex) in an evidence doc; the sourcegraph rule fires on any 40-hex string in a file that mentions Sourcegraph."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "docs/evidence/pui-p006-omp-gateway-repairs-2026-09-08.json",
+      "sha256": "76a5e61ab1dafc4d74b060155631fcdadd7dcf9e4cb709d47a8704068934d23e",
+      "reason": "SHA-256 digest of an evidence log file, not a key."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "docs/evidence/pui-p006-omp-gateway-repairs-2026-09-08.json",
+      "sha256": "aa9e36bc4f855643a9337afbbefe0f97b2940b72937dfb8b483307fc9b5df7df",
+      "reason": "SHA-256 digest of an evidence log file, not a key."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "docs/evidence/pui-p006-omp-gateway-repairs-2026-09-08.json",
+      "sha256": "c3ae919058d923ae72768dc9573c4280aeabb54a7ffd1b76284fddbf6e1e38eb",
+      "reason": "SHA-256 digest of an evidence log file, not a key."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "docs/evidence/pui-p006-omp-gateway-repairs-2026-09-08.json",
+      "sha256": "fe2de31f90e27b38bca10773474b043837990c2b5311b4a0ed4094ea8a69e400",
+      "reason": "SHA-256 digest of an evidence log file, not a key."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "libs/generic/papergrid/grid-core/storybook-static/assets/iframe-CNILC3Sh.js",
+      "sha256": "0d31ff95bf524f8bd877c20f166e2fa35f4bf413cf06d1752876c1758e136254",
+      "reason": "Minified Storybook bundle code (e.key,…), not a credential."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "jwt",
+      "path": "libs/papercusp/packages/cli/src/secret-scrubber.node-test.ts",
+      "sha256": "1a2d174bf663e3da838706f04ac77846e4c1267b92f6156e7d2610bf279c15fb",
+      "reason": "jwt.io public example JWT used as scrubber test input."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "libs/papercusp/packages/orchestrator/src/spawn-mcp.ts",
+      "sha256": "2b4026fd2fd85a4483c6925028497b5ab6bfbc33588ba99ae750458deb8b38c6",
+      "reason": "Chunk/feature identifier string in a list, not a credential."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "packages/operator-core/lib/harness/canonical-hive-invite.ts",
+      "sha256": "c4a8b0b701917f77eee757673b9b66b25047e90356728687492837550ba9c9c8",
+      "reason": "Canonical hive DISCOVERY token (dogfood-silent-canonical-hive-join D-001): it only lets an install request the hive; access is gated by GitHub repo permissions and the owner-signed admission allowlist. Installers already ship it. Named in the P-005 owner review."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "packages/operator-core/lib/posthog-public-defaults.ts",
+      "sha256": "3f22ffe56a3cd614153eb52a25b09f9c7b34653a8da5b05f76f689335b76d5d0",
+      "reason": "PostHog phc_ project key: a public, ingest-only client key shipped to every client."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "packages/operator-core/lib/session-port/types.ts",
+      "sha256": "9f9896ac62d17bb1cbddf7544c717dfbbcd27e8a36ef53697156463c6dfdf27d",
+      "reason": "Token-estimator name constant (\"utf8-…\"), not a credential."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "packages/operator-core/lib/workspace-host/image-scan-secret-allowances.ts",
+      "sha256": "e3a1dda78f9bcf46546091b5928ca1949f95a198c2e704c9d9f78be81dd9c94d",
+      "reason": "Identifier string (\"result…\") inside the image-scan allowance table, not a credential."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "scripts/measure-fanout-firewall-economics.mjs",
+      "sha256": "07c6ff450b53f6548173485a9d307653569d99aa3b265d86a3e2bcd0dc9bbb96",
+      "reason": "Variable name (depositTokensP50) matched by the generic rule, not a credential."
+    },
+    {
+      "detector": "trufflehog",
+      "rule": "UnifyID",
+      "path": "apps/operator-docs/src/content/docs/agent-insights/bare-fetch-failed-spawns-are-loopback-undici-codes.mdx",
+      "sha256": "8b65177cb24860c6a575c8c8111b406ce400e62d3d5ddbefcb8e7e2eeac9ef4a",
+      "reason": "Plan slug in frontmatter (unify-agent-launches-as-blueprints-…) matched by the UnifyID 44-char pattern."
+    },
+    {
+      "detector": "trufflehog",
+      "rule": "UnifyID",
+      "path": "apps/operator/public/internal/docs/reference/plans-index.html",
+      "sha256": "dda5f5a16c11d79cfd9891a0cd9b9020a4ccda6be837a3769b5c36f559ff95d4",
+      "reason": "Plan slug text (unify-agent-launches-as-blueprints-…) matched by the UnifyID 44-char pattern."
+    },
+    {
+      "detector": "trufflehog",
+      "rule": "URI",
+      "path": "apps/tui/src/http.rs",
+      "sha256": "a418b081cdaafce524b0830f9567499d59c57f3a6989a48c162a7b841de93ceb",
+      "reason": "Unit-test literal credentialed URLs (placeholder user/password on a loopback host) asserting that credentialed URLs are rejected."
+    },
+    {
+      "detector": "trufflehog",
+      "rule": "URI",
+      "path": "apps/tui/src/http.rs",
+      "sha256": "ff4d877fdc623d1062b7cf2740bdeca7717f2335b168d7c59655bdf2c998740b",
+      "reason": "Unit-test literal credentialed URLs (placeholder user/password on a loopback host) asserting that credentialed URLs are rejected."
+    },
+    {
+      "detector": "trufflehog",
+      "rule": "URI",
+      "path": "apps/tui/src/self_install.rs",
+      "sha256": "1f2774b5d9966b19059630fb4f709c118e9a8736e4a016dee7ccbbb6002977a2",
+      "reason": "Unit-test literal credentialed endpoint on the reserved op.example domain (placeholder user/password)."
+    },
+    {
+      "detector": "trufflehog",
+      "rule": "Postgres",
+      "path": "libs/papercusp/packages/cli/src/pg-client.node-test.ts",
+      "sha256": "eb6e163f1ebc4b71ede5c842ec49f9eb3414c8945ad5bee5255ba11a345a29b1",
+      "reason": "Unit-test literal placeholder Postgres connection string (single-letter user, password, host, database)."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.ts",
+      "sha256": "62325c3ff51a6b19a9845707b6e64d5e08440fb49970bef0bcedd551ecd8e27e",
+      "reason": "Drill fixture token literal 'p521-phase-i-disposable' passed to a local bare-repo fork-PR simulation; never a real credential (reviewed 2026-09-30, open-source-release P-009)."
+    }
+  ]
+}

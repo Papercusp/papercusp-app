@@ -1,0 +1,244 @@
+# The `hive` operator blueprint — autoloop-pot-operator-rebuild-2026-06-05 (P0, D-001/D-003).
+#
+# THE MINIMAL SINGLE-ROLE OPERATOR BLUEPRINT. The Hive is the judgment layer over
+# the fleet: woken with "you're the operator in charge of this; figure out what
+# to do", it surveys the blackboard (work_items frontier, the spawn tree, the
+# event log, curation signals), decides with agency (create/supervise harnesses
+# from blueprints, surface a report, ask, wait), and — before ending its turn —
+# DECLARES ITS OWN NEXT WAKE via `hive:declare-wake` (a time, an
+# event-subscription, or nothing). There is NO cadence trigger here by design
+# (D-002): the loop is the operator deciding its own wake, not a timer. The
+# substrate (routines engine, event-reaction rules, the launch primitive) is
+# deterministic plumbing; the operator's judgment is invoked sparingly.
+#
+# Harnesses are the retained autoloop feature-pipelines (coding/research/…),
+# created BY the hive from blueprints — enablement of a harness's autoloop is its
+# own blueprint's `dispatch:`/`triggers:`, not a hive-side flag (D-009).
+id: coding
+extends: base
+# The Hive IS the hive's blueprint — the privileged kind:'hive' Queen (local-hive
+# D-001 / D-009, swarm D-018). Launchable ONLY as a ROOT (the parentless
+# system:blueprint-run / hive:wake path); the no-nest guard rejects any parented
+# instantiation. Every other built-in blueprint defaults to kind:'harness'.
+kind: pot
+version: 0.1.0
+
+# Structured retirement (WI-5645 no-retirement-launch-guard, applied by
+# retire-mug-kettle-su-only-2026-08-09 P-062).
+#
+# ⚠ READ THE ID BEFORE YOU PANIC: `coding` here is the POT/HIVE blueprint — the
+# Mug's own launch blueprint (kind:'pot', spine.decider:'mug') — NOT the
+# user-project coding pipeline. Conflating the two is a recorded trap (EI-15663).
+# Retiring this does NOT retire coding harnesses; it retires the Queen.
+#
+# WHY the whole blueprint and not just the `- id: mug` role declaration below:
+# this blueprint's SPINE DECIDER is `mug` (spine.decider, ~line 47). Deleting the
+# role while the decider still names it leaves a dangling reference that
+# validate.ts only *warns* about (`decider-undeclared`) — a blueprint that looks
+# live, resolves fine, and fails at dispatch. The roles list is therefore left
+# INTACT (the coding-factory precedent does the same) and the retirement is
+# declared once, structurally, where a guard actually reads it.
+#
+# `retired` deep-merges through `extends`, so `work` (extends: coding) inherits
+# this. That is CORRECT, not collateral: `work` overrides neither the spine nor
+# the decider, so it is equally mug-driven and equally undispatchable.
+#
+# This is the second, independent lock: the `mug` role is already refused at all
+# three role-admission doors (RETIRED_TIER_ROLES, D-018/D-022) — including the
+# `/invoke` route every launch-blueprint and wake path traverses. That guard
+# refuses a role NAME; this one refuses the BLUEPRINT before anything spends
+# against it.
+#
+# To revive (the flag is `case:'cutover'` — reversibility is the point): delete
+# this block AND flip `FLAGS.MUG_KETTLE_SYSTEM` ON.
+retired:
+  at: "2026-08-09"
+  reason: >-
+    The Mug/Kettle/Cup tier is retired — su + GOAL mode are the only way to drive
+    the app (retire-mug-kettle-su-only-2026-08-09, D-020, owner-directed). This is
+    the pot/hive blueprint whose spine decider is the `mug` role, which no longer
+    admits at any spawn door, so no run started from it can dispatch a turn.
+    Inherited by `work`. Does NOT affect user-project coding harnesses.
+
+description: >-
+  The Hive/Hive operator — the Queen in charge of the bee fleet. Wakes on its
+  own self-declared schedule (or an event it subscribed to), surveys the work
+  frontier and bee slots, places ranked tasks onto bees (free slot / graceful-evict+fresh /
+  warm-inject), attaches situational briefs, and declares its next wake. Two roles,
+  both carrying the full Queen role (two-plane coordination, steer-don't-dispatch):
+  the `operator` (the canonical full-role judgment layer, the default decider) and
+  the `queen` (the same role with the dial turned toward placement automation).
+
+workItem:
+  kind: hive-wake
+  idPrefix: POT
+
+# The decider can be EITHER the operator (for traditional decision-tree wakes) OR the
+# queen (for placement automation). Use spine.decider: 'queen' to specialize the hive
+# for bee placement (local-hive P-030). Both pass the existing role gates and carry
+# the provisioned operator principal's capabilities.
+spine:
+  # Placement automation ON (owner mandate 2026-06-11, "get the hive fully
+  # autonomous" — the P-030 swap): demand/cadence wakes launch the QUEEN
+  # placement persona (spawn/warm-inject/drain bees) instead of the steer-only
+  # operator decider. Swap back to `operator` for decision-tree-only wakes.
+  decider: mug
+  # Declared alternative the validator treats as live (not a dead role): an
+  # install swaps this in via spine.decider for placement automation (P-030).
+  deciderAlternatives: [operator]
+  maxTurns: 50
+  default:
+    to: idle
+  edges:
+    DONE: { to: done }
+    ESCALATE: { to: escalate, reasonFrom: arg }
+    IDLE: { to: idle }
+
+planner:
+  kind: inline
+
+roles:
+  - id: operator
+    description: >-
+      The operator in charge: survey the fleet, decide what matters, create or
+      supervise harnesses from blueprints, surface curated reports, and declare
+      the next wake before ending the turn.
+  - id: mug
+    description: >-
+      The Queen — specialized placement decider for the hive. Surveys the work
+      frontier and bee load, ranks tasks, picks a placement for each (free slot /
+      graceful-evict+fresh / warm-inject), attaches situational briefs, and
+      declares the next wake. Proposes placement; bees dispose (own their actual
+      sequencing). (local-hive P-030/P-031/P-032)
+
+knobs:
+  harnessKind: hive
+  # CODING hives MUST be backed by a git repo (per-hive-git-and-release-gate-2026-06-29
+  # D-002). hive:create enforces this — clone an existing repo or init a fresh one;
+  # a repo-less coding hive is rejected (hive_requires_repo). The non-coding `work`
+  # blueprint (extends coding) RE-SETS this false — there the repo is opt-in backup.
+  requiresRepo: true
+  # Staging→main green gate (D-001/D-002). enabled ⇒ green-checkpoint runs greenCmd
+  # in an isolated <slug>-checkpoint checkout and fast-forwards `main` (releaseRef)
+  # from `staging` (integrationBranch) only when green. greenCmd:null ⇒ default to
+  # the `testCommand` knob (auto-detected by harness:generate-from-repo), else
+  # build/typecheck — the SAME command the worker/gym run (D-004). deploy:null ⇒
+  # green-gate only; set deploy to opt into auto-deploy (leg 3).
+  releaseGate:
+    enabled: true
+    integrationBranch: staging
+    releaseRef: main
+    greenCmd: null
+    deploy: null
+
+# Knowledge: a fresh coding pot seeds the generic `coding` knowledge pack
+# (domain-generic-hive-architecture-2026-06-18 P-017, D-010) — generic
+# engineering wisdom carried as discovery rules, NOT project-specific (project
+# specifics ride the per-pot override + a separate project pack, never the
+# blueprint). pot:create reads knowledge.pack as the default seed when the
+# caller passes no explicit pack. (Renamed from `learning.pack` in
+# cupboard-public-release-2026-07-12 P-001 — the learning LOOPS keep the
+# `learning:` block; loop provisioning stays flag-gated in createHiveHarness
+# (PER_HIVE_LEARNING_LOOPS), so no `loops` key here.)
+knowledge:
+  pack: coding
+
+# NO `triggers.schedule` — deliberately. The hive's wake is SELF-DECLARED
+# (hive:declare-wake writes the one-shot `hive-wake` routine / event-reaction
+# subscriptions; hive:wake is the manual fire). A cadence here would reintroduce
+# the timer loop D-002 removes.
+
+# Dependencies (official-blueprints-cupboard-publish D-002): the operator-level
+# blackboard survey surface, harness create/supervise, placement tools (Queen role),
+# and self-declared wake. Queen-specific tools: curation:change-feed (the rolled-up
+# completion feed the steering loop reads — B7) + work_items:set_priority (set the
+# BACKLOG order the fleet claims against — the steer-don't-dispatch lever),
+# fleet:assignments (bee load/lists), work_items:reorder (per-bee work-list rank),
+# coord:send with wake (warm-inject), fleet:spawn (free-slot placement).
+dependencies:
+  tools:
+    - activity:recent
+    - agent_tools:list
+    - blueprint:catalog
+    - blueprint:extend
+    - blueprint:validate
+    - chat:ask_choice
+    # The autonomy decider gate (queen-autonomy-policy B-12 / P-070): per queue
+    # item, auto (decide without asking) vs gated (→ the owner Queue), with the
+    # reasons. Behavior-neutral (always gated) until the owner arms (P-092).
+    - autonomy:decide
+    # Queen-weighting read (self-learning-frontier P-045 / FB-19, D-005):
+    # per-persona Brier trust weights for weighing claimed confidence while
+    # triaging the ranked improvement queue.
+    - calibration:summary
+    - coord:inbox
+    - coord:presence
+    - coord:send
+    # queen.base.md's cold-wake identity check: the queen CALLS coord:whoami to
+    # verify her hive/scope before trusting a carry-note — dark-tools guard.
+    - coord:whoami
+    - curation:change-feed
+    - curation:feed
+    - deploy:harness
+    - deploy:pot
+    - deploy:status
+    - discovery:pots
+    # Durable-facts fold (queen.base.md steering loop): the queen CALLS facts:assert
+    # for standing conclusions and facts:retract when one stops being true —
+    # blueprint-prompt-dark-tools guard.
+    - facts:assert
+    - facts:retract
+    - fleet:assignments
+    # The Queen's source-side read of the shared inference-capacity oracle — the
+    # queen.base.md placement loop CALLS it each cycle to size the batch (Pass
+    # fleet:capacity { headroom } → fleet:place_batch). Was a dark tool (referenced
+    # in-prompt, absent from deps) — blueprint-prompt-dark-tools guard.
+    - fleet:capacity
+    - fleet:drain
+    # One-wake BATCH placement (queen-autonomous-execution B-07): ranks the ready
+    # frontier task↔bee by affinity, then fans spawn + warm-inject across the fleet
+    # in a single call — the serial placement loop collapsed.
+    - fleet:place_batch
+    # (cup:spawn removed by P-059 — retired with the Mug/Kettle/Cup tier.)
+    - harness:create
+    - harness:escalation
+    - harness:get
+    - harness:list
+    - harness:pending_reviews
+    - harness:status
+    - improvements:digest
+    - improvements:resolve
+    - improvements:triage
+    - inbox:triage
+    - memory:forget
+    - memory:search
+    - memory:update
+    # mug.base.md PRESCRIBES the call, twice: "use `plans:start` for a policy-free
+    # Scout draft" and "start a policy-free Scout draft with `plans:start`". It is
+    # the approval route for a policy-free draft — plans:promote explicitly is not
+    # (it needs a `## Promote` policy), which is why that sibling stays a
+    # mention-not-call entry while this one is granted. Was a dark tool:
+    # blueprint-prompt-dark-tools guard.
+    - plans:start
+    - pot:declare-wake
+    - pot:wake
+    # Owner steering controls (queen-steering-panel B-01): read what the owner has
+    # focused the Queen toward (get-steering); set/clear it from the owner surface
+    # (set-steering — writes the owner-steering:* hive_settings + wakes the Queen).
+    - pot:get-steering
+    - pot:set-steering
+    # Queen auto-grading of routed Scout ideas (scout-idea-grading-2026-06-12
+    # P-010 / D-004): grade ungraded routed drafts 1–5 while triaging.
+    - blender:grade-idea
+    # Hybrid bee-scheduler (hybrid-bee-scheduler-work-stealing-2026-06-22): steer
+    # each bee's claim via a versioned claim-spec + read the live-execution view —
+    # wired so queen.md's scheduler guidance is actually callable.
+    - scheduler:running
+    - scheduler:set_claim_spec
+    - search:fulltext
+    - search:semantic
+    - work_items:co_locate
+    - work_items:list
+    - work_items:reorder
+    - work_items:set_priority
+  plugins: []

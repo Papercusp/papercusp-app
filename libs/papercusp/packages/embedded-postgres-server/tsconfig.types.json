@@ -1,0 +1,61 @@
+// Declaration generation for this package's JS sources.
+//
+// The package ships plain `.js` with JSDoc. Consumers in operator-core imported
+// it — by package name AND by deep `src/migration-runner.js` path — with no
+// declarations at all, which cost each importer a TS7016 ("implicitly has an
+// 'any' type") that was then absorbed into that file's permanent per-file tsc
+// baseline (EI-18804531117413708).
+//
+// The declarations are GENERATED from the JSDoc rather than hand-written, and
+// that choice is load-bearing. A hand-written `index.d.ts` is a projection of a
+// source it cannot see change: this repo has already paid for that twice on
+// `scripts/lint-tsc.d.mts`, where an export added to the `.mjs` and forgotten in
+// the `.d.mts` became TS2305 for every importer. A partial hand shim is worse
+// still — it makes a runtime-present export a compile error, which reads as a
+// missing feature rather than a missing declaration.
+//
+// This file is the SINGLE source of the generation flags: `npm run gen:types`
+// emits in place, and the drift test re-runs this same config against a
+// hermetic copy of the sources and byte-compares. Neither can silently disagree
+// with the other about flags.
+//
+// ⚠ `gen:types` deletes the two `.d.ts` files before invoking tsc, and that `rm`
+// is REQUIRED, not tidiness. Once `migration-runner.d.ts` exists, `index.js`'s
+// `export … from './migration-runner.js'` resolves to the DECLARATION rather
+// than the JS, which makes it a compilation INPUT — and tsc then refuses to
+// overwrite its own input (TS5055 "would overwrite input file"). Without the
+// `rm`, generation therefore succeeds exactly once, on a clean tree, and fails
+// for everyone afterwards.
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    // The package's own deps (embedded-postgres, postgres) are typed elsewhere
+    // or not at all; we are emitting THIS package's surface, not typechecking
+    // its dependencies.
+    "skipLibCheck": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "es2022",
+    // Emit beside the sources so `./migration-runner.js` resolves to
+    // `migration-runner.d.ts` and `main: src/index.js` pairs with
+    // `types: src/index.d.ts` without a build step at consume time.
+    //
+    // `rootDir` must be set explicitly and must equal `outDir` here: tsc infers
+    // the "common source directory" as `./src` and then, without a stated
+    // rootDir, re-appends it under outDir — emitting `src/src/index.d.ts`
+    // (TS5011). Pinning both to `src` is what makes the emit land BESIDE the
+    // sources rather than in a nested copy.
+    "rootDir": "src",
+    "outDir": "src"
+  },
+  // `files`, NOT `include` — deliberately. Because `outDir` is `src`, tsc adds it
+  // to the implicit `exclude`, and `exclude` filters `include`; the two together
+  // cancel out to zero inputs (TS18003 "No inputs were found"). `exclude` does
+  // not apply to `files`, so this is the form that works when emitting beside
+  // the sources. It also states the surface exactly: globbing `src/**/*.js`
+  // would sweep up any future fixture or helper and silently widen what the
+  // package publishes types for.
+  "files": ["src/index.js", "src/migration-runner.js", "src/pg-supervisor.js"]
+}

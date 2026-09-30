@@ -1,0 +1,41 @@
+# Local non-engineering identity proof — identities-v1 P-042 / D-031.
+#
+# This is an ABSTRACT identity layer. It fills the research domain slot and is
+# composed with the runnable `research` blueprint by the local proof fixture;
+# it is not a second scheduler, store, or product surface.
+id: research-steward
+extends: base
+version: 0.1.0
+description: >-
+  IDENTITY (abstract — a layer, never runnable alone): research and
+  documentation stewardship for a repo-less task pipeline.
+
+slots:
+  - slot: domain
+
+# Clause 8 / D-037 — the profession's OWN vocabulary, declared on the identity
+# layer (P-025: identity layers contribute `lexicon`) rather than on the runnable
+# `research` blueprint, because the profession is what carries the nouns.
+#
+# Every key below is a noun MEASURED in the shared personas this identity
+# inherits — not an invented list (D-037 forbids inventing one):
+#   base/prompts/agent-base-preamble.md (every role)  test 8, feature 3, bug 2, ship 1, deploy 1
+#   base/prompts/worker.base.md                       code 1
+#   base/prompts/researcher.md, searcher.md           repo 1 each
+# There are ZERO occurrences of PR / commit / branch / merge / green gate in
+# these files; those are deliberately absent here rather than remapped for show.
+#
+# `repo` is the load-bearing entry: the runnable pipeline sets
+# knobs.requiresRepo:false, yet the inherited persona still instructs "repo
+# reads" — a real vocabulary defect, not a cosmetic rename.
+#
+# buildPrompt (prompt-build.ts:1722) renders each pair under
+# `## This hive's vocabulary` as: a "<key>" is called a "<value>".
+lexicon:
+  feature: research task
+  repo: source corpus
+  code: source material
+  test: verification
+  bug: correction
+  ship: publish
+  deploy: publish

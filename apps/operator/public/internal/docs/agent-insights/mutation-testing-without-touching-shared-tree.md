@@ -1,0 +1,91 @@
+# Verify a guard bites by mutating a COPY, never the real file, in the shared tree (EI-18679874588795100)
+URL: /internal/docs/agent-insights/mutation-testing-without-touching-shared-tree
+
+Many plans instruct 'verify the guard bites by temporarily regressing the code' — the naive version edits the real source file in place, runs the test, and reverts in a `finally`. On this shared checkout that is unsafe: a killed/stalled background process (run_in_background dies silently, host overload, a compaction respawn) can strand the injected regression in a live, untracked-or-uncommitted file that git-sync will happily commit and every peer will inherit. Worse, `git diff` does not reliably catch this — a NEW file has no diff baseline to compare against. The fix: copy the module + its test into a scratch subdir inside the same package (so vitest config/aliases still resolve), rewrite the relative imports one level deeper, mutate the COPY, run vitest against the copy, then rm -rf the scratch dir. A kill at any point leaves only a stray directory; production is never touched. Also documents a second, unrelated trap hit in the same incident: a background script with no output for minutes was not necessarily hung — Python (and many interpreters) buffer stdout when it isn't a tty, so a silent log is indistinguishable from a stalled one; run such scripts with `python3 -u` / `stdbuf -oL` when you intend to watch their progress.
+
+## What happened
+
+While implementing `drop-sync-batcher-2026-07-25` P-008 ("verify the guards
+BITE by temporarily regressing the code"), an agent ran a mutation-test script
+via `Bash { run_in_background: true }`. The script's job was: edit a source
+file in place to inject a known-bad change (`createConcurrencyGate(1)`), run
+Vitest against it to confirm the guard's test catches the regression, then
+revert the file in a `finally` block.
+
+The background task was killed or stalled mid-run. Its stdout stayed empty for
+minutes — indistinguishable from a hang, because Python buffers stdout when it
+isn't attached to a tty (see the buffering trap below). The agent only
+discovered the problem by re-reading the file by hand: it was still carrying
+the injected regression, sitting in the **shared checkout**
+(`libs/generic/sync/src/transports/polling/query-fetcher.ts`) where the
+background git-sync routine would have committed it on its next tick, and
+every peer working from `staging` would have silently inherited a broken
+concurrency gate.
+
+## Why the usual safety net doesn't catch this
+
+The standard reflex — "check `git diff` before trusting the tree" — does not
+save you here. If the mutated file is new/untracked in your working context,
+or if you never think to look because the plan says "revert when done," there
+is no diff baseline prompting a second look. A `finally` block only runs if
+the process gets the chance to reach it; a hard kill (OOM, host overload, a
+`run_in_background` task reaped by the Claude Code CLI — see
+\[\[native-bash-background-task-killed-under-host-overload]] — or a session
+compaction/respawn mid-script) skips it entirely, and the regression is left
+live with no visible signal that anything is wrong.
+
+## The durable fix: mutate a COPY, never the real file
+
+Never edit the real module in place to "temporarily" break it. Instead:
+
+1. **Copy the module + its test** into a scratch subdirectory inside the
+   *same package* (so the existing `vitest.config` / path aliases still
+   resolve without extra wiring) — e.g.
+   `libs/generic/sync/src/transports/polling/__mutation_scratch__/`.
+2. **Rewrite the relative imports** in the copies one level deeper (the
+   scratch dir adds a path segment).
+3. **Mutate the copy** with the intended regression.
+4. **Run Vitest against the copied test file** (`npm run test:file --
+   .../__mutation_scratch__/query-fetcher.test.ts`) and confirm it fails the
+   way the guard is supposed to catch.
+5. **`rm -rf` the scratch directory** when done — no `finally`-dependent
+   revert of a real file required.
+
+If the process is killed at *any* point in this sequence, the worst outcome is
+a stray scratch directory left in the tree — annoying, easily spotted, and
+harmless to production code. The real module is never touched, so there is
+nothing for git-sync to commit and nothing for a peer to inherit.
+
+Verified working end-to-end: 4/4 intended mutations were caught by their
+guards' tests, and the real files were never modified at any point.
+
+## Secondary trap: a silent background script may not be hung
+
+Separately from the mutation-safety issue: if you background a script whose
+progress you intend to watch via its stdout/log file, and the file stays empty
+far longer than expected, do not assume it means the process is stalled.
+Python (like many interpreters) switches to fully-buffered stdout the moment
+it isn't a tty, so output can sit in an in-process buffer for the entire run
+and appear all at once at exit — a silent log file is indistinguishable from a
+hung process using only that signal. Launch such scripts unbuffered when you
+intend to monitor them live:
+
+```sh
+python3 -u your_script.py …          # -u: unbuffered stdout/stderr
+# or, for an arbitrary already-buffering binary:
+stdbuf -oL your_script …             # -oL: line-buffer stdout
+```
+
+Absent that, verify liveness by PID (`ps`/`pgrep`) rather than by "has it
+printed anything yet" — the same guidance as
+\[\[native-bash-background-task-killed-under-host-overload]] for a different
+root cause (buffering vs. an external kill), same actionable fix (don't trust
+silence as a liveness signal).
+
+## Takeaway for plan authors
+
+Any plan step phrased as "verify the guard bites by temporarily regressing the
+code" is, as currently written, an instruction toward the unsafe in-place
+method — it should instead point here, or spell out the copy-and-mutate
+recipe directly, especially for plans executed by a multi-agent fleet sharing
+one checkout.

@@ -1,0 +1,36 @@
+# Auto-implement "host-restart" orphans are gateway-deaths, not operator restarts
+URL: /internal/docs/agent-insights/auto-implement-orphans-are-gateway-deaths-not-restarts
+
+The improvement_dispatches orphan rate (~91-98%) is workers dying mid-turn on the inference gateway, misattributed by the boot collector as host-restart victims and re-dispatched into the same storm — NOT the operator's SIGTERM drain.
+
+## TL;DR
+
+If you see a high **auto-implement dispatch-orphan rate** (`harness_shared.improvement_dispatches.outcome='orphaned'`, dominated by `resolved_by='host-restart-recovery'`), do **NOT** assume the operator is restarting and chase the SIGTERM/DBOS-drain shutdown path. That diagnosis is stale. The real cause is almost always **the dispatched worker agent dying mid-turn on the inference gateway** (`[durable-spawn] infra_loss … agent produced no turn`), which the boot orphan-collector then **misattributes** as a host-restart victim and re-dispatches straight back into the same gateway storm — a churn loop. See `rate-limit-is-usually-account-routing-not-capacity`.
+
+## Evidence (2026-06-24, su-54b32)
+
+The round-3 plan (`infra-perf-reliability-audit-round3-2026-06-19` P-005) framed this as: deploy SIGTERMs the cluster → 90s DBOS drain hang → SIGKILL orphans 78% of dispatches. **That framing is disproven live:**
+
+* `papercup-dev-api`: `NRestarts=0`, **10.5h uptime**, `TimeoutStopUSec` already lowered to **15s** (not 90s). It is not restarting hourly.
+* `papercup-bg-host` (the DBOS routines primary) is installed + running, also not flapping.
+* `improvement_dispatches` (7d): 130/195 orphans are `host-restart-recovery`, **but** the bg-host journal is full of `[durable-spawn] infra_loss: … returned HTTP 200 but the agent produced no turn (exitCode=1) — agent died before emitting a turn … upstream gateway stall/429 storm killing the agent MID-TURN`, plus repeated `TypeError: fetch failed`.
+* Live orphan rate at the time: **0.978** (45/46 in 24h).
+
+## Mechanism
+
+1. The auto-implement dispatch fires a worker agent (spawned `detached: true` in `orchestrator-runner.ts`; the operator only `killTree`s it on explicit abort/timeout, never on its own shutdown). `fire_result='ok'` — the worker launches.
+2. The worker makes \~1-2 model calls, hits a gateway 429/stall, and dies before producing a turn → `infra_loss`. The `EI-404` back-edge never fires (no resolving turn).
+3. The boot/periodic orphan-collector (`orphaned-dispatch.ts` `collectOrphanedDispatchSignals` → `isHostRestartVictim`) uses the heuristic **"fired before this process boot ⟹ dead host-restart victim"**, marks it `host-restart-recovery`, releases the claim, rolls the attempt back, and the next implement tick **re-dispatches** — into the same unhealthy gateway → repeat. The `EI-1689` thrash breaker eventually routes the item to a human (`needs-human`).
+
+So the label `host-restart-recovery` is a **misattribution**: the worker died of gateway loss, not a host restart.
+
+## What actually fixes it
+
+* **Root**: inference-gateway stability (429/stall) — owned by `inference-gateway-stability-ownership-2026-06-23` (durable-spawn misclassification + account-pool routing). The orphan rate cannot reach 0 until gateway-loss stops killing workers mid-turn. Do not duplicate that work here.
+* **Misattribution/churn** (`orphaned-dispatch.ts`) — **now landed**, not just proposed. `resolved_by` classifies distinct death causes instead of lumping everything into `host-restart-recovery`: `worker-exit-backedge-env` (rate-limit/auth/connectivity, EI-406) and `worker-exit-backedge-context-overflow` (WI-716, oversized item) are both recognized, and `isLaneBreakageOrphan()` excludes them (plus genuine `host-restart-recovery` rows) from the human-facing "lane broken" signal — so a gateway storm no longer files a self-amplifying cascade of false-alarm EIs (the EI-536/523/512/509 loop). `laneInEnvOutage()` goes further: once ≥2 env-failure deaths land inside a 6h window, even *cause-unknown* orphans (no back-edge ever fired — durable-fire lost, or the worker killed before it reported) are suppressed as outage casualties via `isCauseUnknownOrphan()`, since during an outage they're indistinguishable from env casualties. The `resolved_by` ledger/rollup still counts every row; only the noisy human signal is suppressed.
+* **Detection**: the perf/reliability regression rig (`system-health/perf-regression-rig.ts`, watchdog collector `perf-regression`, flag `papercusp-perf-regression-rig`) now tracks **dispatch-orphan-rate** as an SLO (crit at 0.6) so this can never again regress silently — it ran at 91-98% with nothing watching.
+
+## Don't
+
+* Don't lower `TimeoutStopUSec` further or rewrite the SIGTERM/DBOS-drain path to "fix orphans" — the drain is already fast (15s) and the operator isn't the one dying.
+* Don't treat `host-restart-recovery` rows as proof of operator restarts — cross-check the bg-host journal for `infra_loss` first.

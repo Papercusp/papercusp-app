@@ -1,0 +1,147 @@
+# Codex hooks are real — how to read their contract, and how to test them
+URL: /internal/docs/agent-insights/codex-hooks-are-real-and-how-to-read-their-contract
+
+codex-cli 0.146.0 ships a complete, self-describing hook system. The 2026-06-21 \"codex hooks are inert\" verdict is refuted. How to extract the wire contract from the binary, how to test hooks when the ChatGPT quota is exhausted, and the two probes that look decisive and are not.
+
+**If you are about to route around codex hooks because a prior plan said they are
+inert — stop.** That verdict is wrong, and this page is the evidence.
+
+`codex-omp-claude-feature-parity-2026-06-21` (shipped) concluded in two item
+titles that "Codex PreToolUse hooks do not reliably fire" and are "inert", and
+closed the gap at the platform layer instead. Measured live on 2026-08-09 against
+codex-cli **0.146.0**: hooks fire. Full verdict:
+`codex-context-injection-parity-2026-08-09` **D-002**.
+
+## The contract is IN the binary — do not infer it from Claude's
+
+Codex embeds **21 draft-07 JSON Schemas describing its own hook wire format**,
+titled `<event>.command.input` / `<event>.command.output`. This is codex
+describing itself, so nothing about the shapes below is guessed.
+
+The binary is at:
+
+```
+node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+```
+
+311MB at the time of measurement. The launcher is the installed `@openai/codex` npm package; locate its environment-specific shim with `readlink -f "$(command -v codex)"`, then inspect that shim's `findCodexExecutable()`.
+(A prior plan asserted this binary was *not* in the linuxbrew tree and therefore
+could not be string-scanned. It is, and it can.)
+
+Extract by taking a window and balanced-brace-parsing it — `strings` alone
+destroys the JSON nesting:
+
+```bash
+dd if=<binary> bs=1 skip=247553000 count=60000 2>/dev/null > /tmp/blob.bin
+# then: for each '{', scan to its matching '}' and keep whatever json.loads cleanly
+```
+
+### The event set (11)
+
+`pre-tool-use` · `post-tool-use` · `permission-request` · `pre-compact` ·
+`post-compact` · `session-start` · `session-end` · `user-prompt-submit` ·
+`subagent-start` · `subagent-stop` · `stop`
+
+⚠ **Two spellings, both real.** Config/CLI uses **kebab-case**; the event payload's
+own `hook_event_name` field is **PascalCase**. An adapter should accept both, or it
+will silently fail to map depending on where the caller got the name.
+
+### The shapes that matter
+
+|                    | codex                                                     | Claude                      |
+| ------------------ | --------------------------------------------------------- | --------------------------- |
+| turn-start event   | `UserPromptSubmit`                                        | `UserPromptSubmit`          |
+| mid-turn event     | `PostToolUse` — **per tool CALL**                         | `PostToolBatch` — per BATCH |
+| injection envelope | `hookSpecificOutput { hookEventName, additionalContext }` | identical                   |
+
+`UserPromptSubmit` input carries (all required): `cwd`, `hook_event_name`,
+`model`, `permission_mode`, `prompt`, `session_id`, `transcript_path`, `turn_id`.
+`PostToolUse` adds `tool_name`, `tool_input`, `tool_response`, `tool_use_id`.
+
+**There is no batch event.** That is the one genuine structural difference: a codex
+turn making N tool calls hits a mid-turn boundary N times where Claude hits it once.
+
+### Declaration and trust
+
+Declared in `config.toml` under `[hooks]` (feature `hooks` = **stable/true**), shape
+`MatcherGroup { matcher, hooks: [{ type = "command", command = ... }] }`.
+
+Trust persists as `HookStateToml { enabled, trusted_hash }` — **pinned to a HASH of
+the hook**. So *editing an installed hook de-trusts it*: any installer must handle
+re-enrolment on upgrade, not just first install.
+
+🚫 **Plugins are not a hook path.** `codex features list` reports
+`plugin_hooks` = **removed**. Do not design around plugin-declared hooks.
+
+## Testing when the ChatGPT quota is exhausted
+
+Codex's ChatGPT auth hit its usage limit on this box (until 2026-08-16), so
+`codex exec` could not complete a turn at all. That does **not** block hook work:
+
+> **Hooks are CLIENT-SIDE. They fire regardless of which model backend answers.**
+
+```bash
+codex exec --oss --local-provider ollama -m qwen3.5:latest \
+  -c 'hooks.UserPromptSubmit=[{hooks=[{type="command",command="/tmp/probe.sh ups"}]}]' \
+  --dangerously-bypass-hook-trust --skip-git-repo-check -s read-only "reply DONE"
+```
+
+Have `probe.sh` append its stdin to a file: one run yields both *did it fire* and
+the *real payload shape*.
+
+* ollama is up on `127.0.0.1:11434`. **Most local models fail** with
+  `"<model>" does not support thinking` — `qwen3.5:latest` works;
+  `qwen3-coder:30b` and `qwen2.5-coder:14b` do not.
+* `--dangerously-bypass-hook-trust` is a **diagnostic**, never a production path —
+  its own help text calls it dangerous. It isolates the trust variable; it does not
+  prove untrusted hooks behave.
+
+🚨 **NEVER copy `~/.codex/auth.json` into a throwaway `CODEX_HOME`.** The OAuth
+refresh token is single-use and rotating — the throwaway run rotates it and breaks
+the owner's real login. Running against the real `~/.codex` is fine; that is what
+psu does.
+
+## Two probes that look decisive and are not
+
+Both of these produced confident, coherent, wrong answers during this work. They
+generalise well beyond codex.
+
+### 1. A serde field list in a strings dump is not a struct definition
+
+The dump reads as though `HookEventsToml` has **nine** fields and omits
+`UserPromptSubmit` — skipping exactly the slot the kebab-case list fills. It was
+reproducible across several independent blobs and pointed at a dramatic conclusion:
+that codex's turn-start port is undeclarable.
+
+**It is wrong.** `hooks.UserPromptSubmit` is accepted and fires.
+
+Serde blobs interleave and truncate. **An absence in a strings dump is not evidence
+of absence** — and the more dramatic the conclusion it supports, the more it needs a
+live falsifier before it is published as fact.
+
+### 2. A probe whose CONTROL passes identically proves nothing
+
+The obvious falsifier for the above is to feed codex a bogus hook event key and see
+whether it complains:
+
+```bash
+codex exec --strict-config -c 'hooks.UserPromptSubmit=[...]' ...   # accepted
+codex exec --strict-config -c 'hooks.TotallyFakeEvent=[...]' ...   # ALSO accepted
+```
+
+`--strict-config` does not validate hook event keys, so the control behaves exactly
+like the real events. The probe **could not have detected the thing it was built to
+detect**.
+
+Noticing that is what kept a false finding out of the record. Whenever a probe
+returns a clean answer, ask what its control did — if the control passes identically,
+the result is not evidence, however many times it reproduces.
+
+## See also
+
+* `codex-context-injection-parity-2026-08-09` **D-002** — the full verdict, event
+  vocabulary, trust model, and the two refuted premises.
+* **D-003** — the shared injection seam's claude-equivalence proof and the
+  suppress-vs-degrade kill-switch asymmetry.
+* `apps/operator/scripts/hooks/inject/adapters/codex.mjs` — the adapter, with the
+  provenance of every event name in its header.

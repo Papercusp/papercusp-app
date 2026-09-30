@@ -1,0 +1,188 @@
+# Substrate write-side stack — one shape per Hyperbee table
+URL: /internal/docs/agent-insights/substrate-write-side-stack
+
+The 7-layer pattern for shipping a new Hyperbee-backed write path (substrate write helper → PG projection → HTTP wrapper → polling read hook → pure UI → client wrapper → list integration). Shipped in batch for feature_queue (P-032) and contributors (P-033) on 2026-05-25; document so the next per-table pickup can replicate without rediscovering.
+
+import { Aside } from '@astrojs/starlight/components';
+
+The **server layers (1–4)** all moved out of `apps/operator/lib/` into
+`packages/operator-core/lib/sync/hyperbee/**` and
+`packages/operator-core/lib/endpoint-route/routes/harness/**` — the
+write helpers, projections, `load-queue-membership`, and the
+`feature-queue` route still exist there and the route is still mounted.
+But the **UI layers (5–7)** named in the worked examples below —
+`useQueueMembership`, `QueueAvatarCluster`, `PullToQueueButton(Client)`,
+the `FeatureList.tsx`/`FeatureFilterChips` integration, and the
+`ContributorsTab`/`ContributorRow` surfaces — **no longer exist** in the
+tree (the operator UI moved to the Vite SPA and those write-side surfaces
+were not carried over). Treat the 7-layer shape as the still-valid
+*pattern*, but don't expect to find those exact UI files. The `app/harness/insights/`
+directory today holds the substrate-*diagnostic* components
+(`SubstrateStatusBadge`, `BootstrapProgressIndicator`, `ClaimAttemptStatsPill`, …),
+not the feature-queue write UI.
+
+## When this applies
+
+You are adding (or wiring up) a Hyperbee-backed table that users can
+*write to* from the UI. The read-side projection probably already
+exists; the write path needs all 7 layers below.
+
+Skip this insight when you're only consuming (read-only) — the
+projection writes to PG and a normal PG-read endpoint is fine.
+
+## The 7-layer stack
+
+Each Hyperbee write-table follows the same shape:
+
+```
+┌───────────────────────────────────────────────────────────┐
+│ 1. Substrate write helper                                  │
+│    packages/operator-core/lib/sync/hyperbee/write-<table>.ts│
+│    Pure: takes BootedHarnessHandle + row, appends op.      │
+├───────────────────────────────────────────────────────────┤
+│ 2. PG projection (existing)                                │
+│    .../lib/sync/hyperbee/projections/<table>.ts            │
+│    Substrate's applyHyperbeeOpToPg fans the op to here.    │
+├───────────────────────────────────────────────────────────┤
+│ 3. PG reader                                               │
+│    .../lib/sync/hyperbee/load-<table>-membership.ts        │
+│    Pure: SELECT joined with `contributors` for UI.         │
+├───────────────────────────────────────────────────────────┤
+│ 4. HTTP wrapper                                            │
+│    .../lib/endpoint-route/routes/harness/<table>.ts        │
+│    GET membership; POST per write verb.                    │
+│    substrate-off → 200 + reason='substrate-off'.           │
+├───────────────────────────────────────────────────────────┤
+│ 5. Polling read hook                                       │
+│    use<Table>Membership.ts (UI layer)                      │
+│    Polls every 8s; pauses when document.hidden.            │
+│    Returns {map, membersFor, isQueued, refresh}.           │
+├───────────────────────────────────────────────────────────┤
+│ 6. Pure UI primitives                                      │
+│    <Table>AvatarCluster.tsx (read) / <Action>Button.tsx    │
+│    No state; consumer feeds props.                         │
+├───────────────────────────────────────────────────────────┤
+│ 7. Client wrapper                                          │
+│    <Action>ButtonClient.tsx                                │
+│    Optimistic flip + POST + revert on failure.             │
+└───────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+        List integration (FeatureList.tsx, FeaturePage, etc.)
+        — drops hook + UI + client into the row render.
+```
+
+## Cardinality + contract
+
+* **One write helper module per table** — exports `enqueueX` /
+  `dequeueX` / `publishXRow`. Both put-ops with semantic differences
+  (e.g. dequeue is soft-delete `removed_at = now`, not a `del` op;
+  the projection treats `del` as hard delete).
+* **One PG reader per table** — pure; injectable `runQuery`; returns
+  `{}` when the substrate table doesn't exist yet (not booted, flag
+  off, etc.).
+* **One HTTP route file per table** with N tools (one GET +
+  enqueue/dequeue/etc. POSTs). The route's `parseWriteBody` exported
+  so unit tests can hit it directly without spinning a fake Request.
+* **The hook + UI tests use vitest + @testing-library/react with
+  `@vitest-environment jsdom`** and `afterEach(() => cleanup())` —
+  the project's house style.
+
+## Substrate-off behavior contract
+
+Every layer must handle "substrate not booted" cleanly:
+
+| Layer           | substrate-off shape                         |
+| --------------- | ------------------------------------------- |
+| Write helper    | Caller's problem — helper assumes handle.   |
+| HTTP write POST | `{ok: false, reason: 'substrate-off'}` 200. |
+| Client wrapper  | Reverts optimistic flip on `ok: false`.     |
+| PG read         | `{}` when projection table doesn't exist.   |
+| Read hook       | `loaded: true` with empty map.              |
+| Avatar cluster  | Renders em-dash for empty members.          |
+
+The point: a flag-flip toggles the entire stack alive without route
+changes. The UI shows "—" before flip, real data after.
+
+## Worked example — feature\_queue
+
+What was shipped on 2026-05-25 for P-031b → P-032:
+
+1. `packages/operator-core/lib/sync/hyperbee/write-feature-queue.ts` (enqueueFeature/dequeueFeature)
+2. `packages/operator-core/lib/sync/hyperbee/projections/feature-queue.ts` (was already there)
+3. `packages/operator-core/lib/sync/hyperbee/load-queue-membership.ts` (PG joined w/ contributors)
+4. `packages/operator-core/lib/endpoint-route/routes/harness/feature-queue.ts` (still mounted)
+5. `useQueueMembership.ts` — **removed** (UI layer not carried to the Vite SPA)
+6. `QueueAvatarCluster.tsx` + `PullToQueueButton.tsx` — **removed**
+7. `PullToQueueButtonClient.tsx` — **removed**
+
+* list integration (`FeatureList.tsx` / `FeatureFilterChips`) — **removed**.
+  (Layers 1–4 above are real; 5–7 are historical — see the Update note at top.)
+
+Commits: `2501088c` `c9861001` `139e6a7b` `310c87e2` `6a7dee42`
+`730119af` `7397a7ce` `1240532e` `2dd0b34b`.
+
+## Worked example — contributors
+
+Same shape, fewer write verbs:
+
+1. `packages/operator-core/lib/sync/hyperbee/write-contributor-row.ts` (publishContributorRow)
+2. `packages/operator-core/lib/sync/hyperbee/projections/contributors.ts` (was already there)
+3. PG read happens directly inside step8 — no separate `load-` module
+   needed because `contributors` rows go to a dedicated PG table whose
+   readers already exist (`/harness/:slug/contributors` route).
+4. HTTP write happens inside the join-shared-harness orchestrator
+   step8, not via a public route — bound to the join flow.
+   5-7. UI surfaces are P-048 ContributorsTab + ContributorRow (pre-existing).
+
+Commits: `1f53912e` (write helper), `ac7b99b7` (step8 wire-up).
+
+## Bouncing the hono-host to pick up new routes
+
+`tsx` doesn't auto-restart on new file additions. New route files
+need a host bounce:
+
+```sh
+pkill -9 -f "tsx.*hono-host"; sleep 2
+cd apps/operator
+nohup env PAPERCUSP_DOGFOOD_SUBSTRATE_ENABLE=1 \
+  PAPERCUSP_HONO_PORT=3070 PAPERCUSP_BIND_HOST=0.0.0.0 \
+  npx tsx bin/hono-host.ts > /tmp/hono-host.log 2>&1 &
+sleep 8
+curl -sw '%{http_code}\n' http://127.0.0.1:3070/api/admin/dogfood-substrate-status
+```
+
+Live-substrate writes through Autobase can hang on a degraded
+corestore — if the POST never returns, the host is probably crashed.
+Bring it back up cleanly + skip live writes from curl. The unit
+tests cover correctness; live integration through Autobase needs a
+proper test rig.
+
+## Anti-patterns to avoid
+
+* **Don't write to PG directly from a write-side endpoint** — bypasses
+  the projection's LWW conflict resolution + the substrate sync. The
+  PG row is a *projection*, not the source of truth.
+* **Don't `del` on dequeue** — the projection treats `del` as a hard
+  delete and we lose the history. Use a `put` with the tombstone
+  field set (e.g. `removed_at = now`).
+* **Don't fetch per-row from the UI** — the hook fetches the whole
+  membership map once at the list level + polls. Per-row HTTP would
+  be N × pollMs requests.
+* **Don't add a new field to a HarnessFeatureRow without adding it to
+  `isHarnessFeatureRow`** — the projection drops rows that fail the
+  predicate, so a typo here silently makes ops vanish.
+
+## What's still missing
+
+**Update:** the clobber-toast delivery channel has since been built.
+`packages/operator-core/lib/sync/hyperbee/clobber-events.ts` emits
+`clobber` events on the server, and
+`packages/operator-core/lib/endpoint-route/routes/harness/clobber-stream.ts`
+(`GET /api/harness/:slug/clobber-stream` → `text/event-stream`, Phase 5b
+P-035) now forwards each emission as an SSE `clobber` event to a
+browser-side `ClobberToast`. It emits all clobber events globally and
+relies on the browser-side per-row `hbKey` filter to scope what the
+user sees (per-harness filtering at the SSE side is deferred — the
+event doesn't carry the source harness slug, and the operator boots one
+harness per process today).

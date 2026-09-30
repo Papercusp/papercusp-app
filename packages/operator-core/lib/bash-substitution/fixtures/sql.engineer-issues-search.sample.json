@@ -1,0 +1,108 @@
+{
+  "evidenceRef": "plan sql-escape-tool-routing-2026-08-12 P-009 tranche 2 — buildSqlFixture(pair) over agent-authored dev:pg_query calls, 14d window, status=ok",
+  "extractedAt": "2026-08-12",
+  "totalAtoms": 47,
+  "totalSessions": 15,
+  "sample": [
+    {
+      "sid": "su-07374fbd-e848-4204-87aa-bb86a31e5a92",
+      "ts": "2026-08-02 13:41:53.854-04",
+      "atom": "SELECT feature_id, status, assignee, left(title,90) AS title FROM harness_shared.engineer_issues WHERE workspace_id='papercusp-workspace' AND title ILIKE '%trust-admission-e2e%' ORDER BY created_at DESC LIMIT 5"
+    },
+    {
+      "sid": "s-1786233942856-ea3ac019",
+      "ts": "2026-08-08 20:08:33.235-04",
+      "atom": "SELECT id, assignee, needs_human, left(title, 95) AS title FROM harness_shared.engineer_issues WHERE scope = 'harness:papercusp' AND status = 'open' AND severity = 'critical' ORDER BY created_at ASC LIMIT 30"
+    },
+    {
+      "sid": "su-707029ce-300a-469b-8fca-4cd393f5a0d2",
+      "ts": "2026-08-01 22:33:16.528-04",
+      "atom": "SELECT id, kind, state, severity, assignee, left(title,70) AS title FROM harness_shared.engineer_issues WHERE scope = 'harness:papercusp' AND state = 'open' AND severity = 'critical' AND assignee IS NULL ORDER BY created_at DESC LIMIT 20"
+    },
+    {
+      "sid": "su-4a6e2255-f324-4774-a05e-c3bc87e643ac",
+      "ts": "2026-08-04 02:05:09.267-04",
+      "atom": "SELECT id, state, closed_at, left(title, 70) AS t, created_at FROM harness_shared.engineer_issues WHERE workspace_id='papercusp-workspace' AND scope='harness:papercusp' AND title LIKE '[main-behind-staging%' ORDER BY created_at DESC LIMIT 12"
+    },
+    {
+      "sid": "su-35330165-a301-49fa-a5e0-fd879444127b",
+      "ts": "2026-08-02 23:17:57.39-04",
+      "atom": "SELECT id, title, severity, status, assignee, created_at FROM harness_shared.engineer_issues WHERE scope = 'harness:papercusp' AND kind = 'bug' AND status = 'open' AND severity IN ('critical','major') AND assignee IS NULL ORDER BY created_at ASC LIMIT 20"
+    },
+    {
+      "sid": "s-1786233942856-ea3ac019",
+      "ts": "2026-08-08 20:08:39.413-04",
+      "atom": "SELECT issue_id, assignee, lane, left(title,88) AS title FROM harness_shared.engineer_issues WHERE scope='harness:papercusp' AND state='open' AND severity='critical' ORDER BY created_at ASC LIMIT 25"
+    },
+    {
+      "sid": "s-1786233942856-ea3ac019",
+      "ts": "2026-08-08 20:15:46.502-04",
+      "atom": "SELECT issue_id, feature_order FROM harness_shared.engineer_issues WHERE scope='harness:papercusp' AND state='open' AND feature_order IS NOT NULL ORDER BY feature_order ASC LIMIT 20"
+    },
+    {
+      "sid": "su-707029ce-300a-469b-8fca-4cd393f5a0d2",
+      "ts": "2026-08-01 22:34:16.186-04",
+      "atom": "SELECT issue_id, kind, severity, assignee, state, left(title,90) AS title FROM harness_shared.engineer_issues WHERE scope = 'harness:papercusp' AND state = 'open' AND severity = 'critical' AND assignee IS NULL ORDER BY created_at DESC LIMIT 10"
+    },
+    {
+      "sid": "su-707029ce-300a-469b-8fca-4cd393f5a0d2",
+      "ts": "2026-08-01 22:34:05.561-04",
+      "atom": "SELECT issue_id, kind, severity, left(title,70) AS title FROM harness_shared.engineer_issues WHERE scope = 'harness:papercusp' AND state = 'open' AND severity = 'critical' AND assignee IS NULL ORDER BY created_at DESC LIMIT 8"
+    },
+    {
+      "sid": "s-1786233942856-ea3ac019",
+      "ts": "2026-08-08 20:09:22.178-04",
+      "atom": "SELECT issue_id, lane, left(title,80) AS title FROM harness_shared.engineer_issues WHERE scope='harness:papercusp' AND state='open' AND severity='critical' AND lane='observation'"
+    },
+    {
+      "sid": "su-bb5d513f-c15c-4bc7-8a68-edf9430a523a",
+      "ts": "2026-08-03 12:30:29.91-04",
+      "atom": "SELECT issue_id, left(title, 60) AS title, created_at FROM harness_shared.engineer_issues WHERE workspace_id = 'papercusp-workspace' AND scope = 'harness:papercusp' AND title ILIKE '%code span%' ORDER BY created_at DESC LIMIT 5"
+    },
+    {
+      "sid": "su-707029ce-300a-469b-8fca-4cd393f5a0d2",
+      "ts": "2026-08-01 14:52:39.725-04",
+      "atom": "SELECT issue_id, left(title,60) AS t FROM harness_shared.engineer_issues WHERE workspace_id='papercusp-workspace' AND scope='harness:papercusp' AND state='open' AND assignee IS NULL AND severity='critical' AND kind='bug' AND title !~* '(p2p|holepunch|hyperswarm|federat)' ORDER BY created_at ASC LIMIT 30"
+    },
+    {
+      "sid": "s-1786233942856-ea3ac019",
+      "ts": "2026-08-08 20:17:50.564-04",
+      "atom": "SELECT issue_id, severity, state FROM harness_shared.engineer_issues WHERE scope='harness:papercusp' AND title ILIKE '%primary steering lever is silently ineffective%' ORDER BY created_at DESC LIMIT 2"
+    },
+    {
+      "sid": "su-f49ebf76-2d26-4eca-a124-6fdcb0b21c1f",
+      "ts": "2026-08-02 13:48:04.32-04",
+      "atom": "SELECT issue_id, severity, state, left(title, 120) AS title FROM harness_shared.engineer_issues WHERE workspace_id = 'papercusp-workspace' AND scope = 'harness:papercusp' AND title ILIKE 'OWNER-REPORTED%' AND state <> 'done' ORDER BY severity, issue_id"
+    },
+    {
+      "sid": "su-87fbbdfe-b9b5-4b23-8afa-2edca6d8d163",
+      "ts": "2026-08-03 21:10:24.107-04",
+      "atom": "SELECT issue_id, state, assignee IS NOT NULL AS claimed, left(title,72) AS title, created_at::date AS created FROM harness_shared.engineer_issues WHERE workspace_id='papercusp-workspace' AND title ILIKE 'Loop iteration:%' ORDER BY state, created_at LIMIT 30"
+    },
+    {
+      "sid": "su-07374fbd-e848-4204-87aa-bb86a31e5a92",
+      "ts": "2026-08-02 13:42:17.748-04",
+      "atom": "SELECT issue_id, state, assignee, left(title,80) AS title FROM harness_shared.engineer_issues WHERE workspace_id='papercusp-workspace' AND title ILIKE '%trust-admission%' ORDER BY created_at DESC LIMIT 5"
+    },
+    {
+      "sid": "su-5ca1df5d-6b67-47a7-9417-2d2aab9fe3d5",
+      "ts": "2026-08-03 13:02:18.789-04",
+      "atom": "SELECT issue_id, state, created_at, closed_at, left(title, 70) AS title FROM harness_shared.engineer_issues WHERE workspace_id='papercusp-workspace' AND title LIKE '[replication-liveness]%' ORDER BY created_at DESC LIMIT 15"
+    },
+    {
+      "sid": "su-e02f5c3d-bf2e-4ee7-bed8-2bdd96279e48",
+      "ts": "2026-08-01 14:52:30.797-04",
+      "atom": "SELECT issue_id, state, created_at::date AS created, left(title, 100) AS title FROM harness_shared.engineer_issues WHERE workspace_id = 'papercusp-workspace' AND scope = 'harness:papercusp' AND title ILIKE 'live-federation-gate RED%' ORDER BY created_at DESC LIMIT 12"
+    },
+    {
+      "sid": "su-f49ebf76-2d26-4eca-a124-6fdcb0b21c1f",
+      "ts": "2026-08-02 04:44:16.539-04",
+      "atom": "SELECT issue_id, state, severity, left(title, 70) AS title FROM harness_shared.engineer_issues WHERE workspace_id='papercusp-workspace' AND scope='harness:papercusp' AND title ILIKE 'OWNER-REPORTED%' AND state <> 'done' ORDER BY issue_id"
+    },
+    {
+      "sid": "su-1a0a0a1a-4c71-4ce5-abcf-58897784edf1",
+      "ts": "2026-08-02 04:36:52.666-04",
+      "atom": "SELECT issue_id, substring(title from 'harness=([^ ]+)') AS harness, substring(title from '\\[replication-liveness\\] ([a-z_]+):') AS kind, to_timestamp(created_ts/1000)::timestamptz(0) AS filed, origin FROM harness_shared.engineer_issues WHERE title LIKE '[replication-liveness] drain%' AND state='open' ORDER BY harness, kind"
+    }
+  ]
+}

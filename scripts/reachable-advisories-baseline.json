@@ -1,0 +1,151 @@
+{
+  "$comment": [
+    "SHRINK-ONLY baseline for scripts/check-reachable-advisories.mjs (plan",
+    "security-boundary-remediation-and-usability-2026-09-04, P-007).",
+    "",
+    "`accepted` is the flat list the analyzer reads: a shipping high/critical advisory",
+    "listed here does not fail --strict. `entries` carries the REASON for each, which is",
+    "the part a reviewer needs and the derivation cannot supply.",
+    "",
+    "This list may only SHRINK. Fixing an advisory removes its entry (the gate reports a",
+    "still-listed-but-resolved entry as STALE). A NEW shipping high/critical advisory must",
+    "be patched, not appended — appending is how a gate becomes a parking lot. Re-seed only",
+    "from `node scripts/check-reachable-advisories.mjs --list`, never from a hand grep.",
+    "",
+    "Seeded 2026-09-05 from a measured run: 99 total advisories, 9 gating, 22 non-shipping",
+    "only, 12 unattributed (failed closed as shipping). RE-MEASURED 2026-09-05 after the",
+    "lodash-es fix landed: 93 total, 8 gating, 22 non-shipping only, 7 unattributed,",
+    "8 baselined, 0 NEW offenders, 0 stale.",
+    "",
+    "Dispositions are now 8 deferred-semver-major and ZERO patch-eligible: the single",
+    "patch-eligible entry (lodash-es) was FIXED on 2026-09-05 and removed from this list,",
+    "which is what shrink-only looks like in practice. The split was corrected",
+    "TWICE on 2026-09-05, by two different failures of the same optimism:",
+    "",
+    "  (1) `npm audit --omit=dev` is OPTIMISTIC about fixes and called style-dictionary",
+    "      patch-compatible when the installed tree required a major bump, so the analyzer",
+    "      now reads fix feasibility from both lenses and takes the pessimistic one.",
+    "",
+    "  (2) That two-lens reconciliation only bites when npm returns fixAvailable as an",
+    "      OBJECT carrying isSemVerMajor. When npm returns the BARE BOOLEAN `true` there is",
+    "      no version to compare and BOTH lenses read patch-compatible — so the optimism",
+    "      came straight back through a different door. Re-measured against the published",
+    "      registry the same day: of the four then marked patch-eligible, only lodash-es",
+    "      (4.17.21 -> 4.18.1) is genuinely semver-compatible. The other three each require",
+    "      a breaking bump, which the ADVISORY RANGE alone proves without any manifest read:",
+    "      `^<installed>` is a semver SUBSET of the vulnerable range, so no compatible",
+    "      version escapes it. See each entry's reason for its measurement.",
+    "",
+    "      lodash-es has SINCE BEEN FIXED (root `overrides` pin to ^4.18.1 + install:safe,",
+    "      2026-09-05) and is no longer in this list. The paragraph above is kept as the",
+    "      reason the derivation exists, not as a description of an open entry.",
+    "",
+    "      That derivation IS NOW IMPLEMENTED (deriveFixFeasibility, WI-2144851): the",
+    "      analyzer computes semver.subset('^' + installed, advisory range) per finding and",
+    "      a lens saying `true` can no longer make a finding patch-compatible on its own.",
+    "",
+    "HOW THESE DISPOSITIONS ARE MAINTAINED NOW — read this before editing one.",
+    "",
+    "The stored `disposition` stays CURATED and the derivation POLICES it (rung 2 of",
+    "CLAUDE.md's derived-truth ladder, not rung 1). The reason is narrow: the derivation",
+    "reads the PROD `npm ls` tree, so an advisory whose only vulnerable copy is genuinely",
+    "dev-reachable is invisible to it, and a blind re-seed would DOWNGRADE a correct human",
+    "judgment to `undetermined`.",
+    "",
+    "⚠ RETRACTED 2026-09-05: this paragraph used to cite langsmith as the measured example",
+    "of that blind spot, claiming its 0.3.87 copy was dev-reachable only. THAT WAS FALSE and",
+    "it was load-bearing — it is why nobody looked. @browserbasehq/stagehand is a PROD",
+    "`dependencies` entry of apps/operator (dev=false), and langsmith 0.3.87 sits in the",
+    "--omit=dev tree at testing-shell -> stagehand -> @langchain/core. The derivation could",
+    "not see it because of a bug in OUR collector, not a limit of the instrument:",
+    "collectInstalledVersions guarded its walk on a global `name@version` key, and npm ls",
+    "emits a workspace both as a bare dedupe stub and once in full — so meeting the stub",
+    "first skipped the populated node and dropped that whole subtree. Fixed by guarding on",
+    "node identity. langsmith now reports CORROBORATED.",
+    "",
+    "The lesson worth keeping: an UNCORROBORATED row is a claim about OUR instrument, so",
+    "treat it as a bug report against this analyzer until proven otherwise. Writing down",
+    "'expect this to stay uncorroborated, correctly' converts a fixable defect into",
+    "permanent policy, and a fail-OPEN one reads as reassurance while it does so.",
+    "",
+    "So the gate reports two different things, and they must not be conflated:",
+    "  ADVISORY_DISPOSITION_DRIFT — the derivation measured and DISAGREES. Re-adjudicate the",
+    "    entry; never edit the derivation to agree with it.",
+    "  UNCORROBORATED — the derivation could not measure. The entry stands; this is a gap in",
+    "    the instrument, never evidence against a curated reason.",
+    "",
+    "Re-seed from `--list`, which now prints the derived disposition and the range it was",
+    "derived from beside each row."
+  ],
+  "seededAt": "2026-09-05",
+  "seededFrom": "npm audit --omit=dev --json (reachability/severity) + npm audit --json (fix feasibility, tree as installed) + npm ls --omit=dev --all --json, attributed by workspace",
+  "accepted": [
+    "@browserbasehq/stagehand",
+    "d3",
+    "d3-color",
+    "js-yaml",
+    "langsmith",
+    "markmap-view",
+    "nanoid",
+    "style-dictionary"
+  ],
+  "entries": {
+    "@browserbasehq/stagehand": {
+      "severity": "high",
+      "disposition": "deferred-semver-major",
+      "reason": "Deferring the semver-major upgrade @browserbasehq/stagehand@3.4.0 -> 4.0.2 (latest published). CORRECTED 2026-09-05 from patch-eligible: npm returns the bare boolean fixAvailable:true, which the analyzer reads as patch-compatible, but the advisory range is `3.0.0 - 4.0.0-alpha-49bc5b68e4fbeb28a120b301b51c31a36db7d922` and apps/operator declares \"^3.4.0\" — `^3.4.0` is a semver SUBSET of that range (prereleases sort below 4.0.0), so no compatible 3.x escapes it. The bare `true` is npm saying it could fix the deps this package is vulnerable THROUGH (@langchain/core, puppeteer-core), not that stagehand itself has a compatible fix.",
+      "owners": ["@papercusp/testing-shell", "@papercusp/web"]
+    },
+    "langsmith": {
+      "severity": "high",
+      "disposition": "deferred-semver-major",
+      "reason": "Deferring the breaking upgrade langsmith@0.3.87 -> 0.6.0+ (0.10.1 is latest published). CORRECTED 2026-09-05 from patch-eligible: the hoisted copy at node_modules/langsmith is 0.8.7 and is NOT vulnerable — the vulnerable copy is the one nested under @browserbasehq/stagehand at 0.3.87. The worst advisory (GHSA-3644-q5cj-c5c7, high) is fixed only at >=0.6.0, and `^0.3.87` is a semver SUBSET of `<0.6.0`; under 0.x semver a minor bump is breaking, so no compatible version escapes. Also blocked behind the stagehand entry: the vulnerable copy is stagehand's own pinned dependency, so a root override would force it inside a package that was never tested against it. This row now reports CORROBORATED. ⚠ RETRACTED 2026-09-05: it previously said 'EXPECT THIS ROW TO REPORT UNCORROBORATED, permanently and correctly', on the claim that the 0.3.87 copy was reachable only through a dev path. That was FALSE — stagehand is a PROD `dependencies` entry of apps/operator (dev=false) and 0.3.87 IS in the --omit=dev tree. The derivation could not see it because collectInstalledVersions keyed its cycle guard on `name@version` and npm ls emits a workspace both as a dedupe stub and once in full, so the populated subtree was skipped. That was a fail-OPEN bug in our own collector, now fixed by guarding on node identity. The disposition below was right all along and is now DERIVED-corroborated rather than merely asserted — but the instruction not to investigate was wrong, and is exactly why the bug survived.",
+      "owners": ["@papercusp/testing-shell", "@papercusp/web"]
+    },
+    "style-dictionary": {
+      "severity": "high",
+      "disposition": "deferred-semver-major",
+      "reason": "Deferring the semver-major upgrade style-dictionary@4.4.0 -> 5.5.2 (latest published; the advisory's own fix floor is 5.4.4). Root declares \"^4.4.0\", which cannot reach either. RE-MEASURED 2026-09-05, later the same day: BOTH lenses now return the bare boolean fixAvailable:true — npm's advisory record moved from an isSemVerMajor object naming 5.5.2 to `>=4.3.0 <5.4.4` with no version attached — so the two-lens reconciliation that first corrected this entry no longer fires on it, and the analyzer currently reports it as patch-compatible. The disposition here is still right and is now derivable from the range alone: `^4.4.0` is a semver SUBSET of `>=4.3.0 <5.4.4`, so NO compatible version escapes. Do not re-file this as patch-eligible on the analyzer's say-so until that subset check is implemented.",
+      "owners": ["@papercusp/token-kit"]
+    },
+    "d3": {
+      "severity": "high",
+      "disposition": "deferred-semver-major",
+      "reason": "Only fix is d3@7.9.0, a semver-major upgrade. P-007 explicitly excludes forced feature-removing upgrades, so this is deferred pending a compatibility assessment of the chart/graph surfaces.",
+      "owners": ["@papercusp/web"]
+    },
+    "d3-color": {
+      "severity": "high",
+      "disposition": "deferred-semver-major",
+      "reason": "Transitive via d3; same semver-major upgrade as d3. Resolves when d3 is assessed.",
+      "owners": ["@papercusp/web"]
+    },
+    "js-yaml": {
+      "severity": "high",
+      "disposition": "deferred-semver-major",
+      "reason": "Only fix routes through @mdxeditor/editor@4.2.3, a semver-major editor upgrade. Deferred: the editor surface is feature-bearing and P-007 forbids forcing it.",
+      "owners": [
+        "@papercupai/operator-docs",
+        "@papercusp/docs-engine",
+        "@papercusp/operator-core",
+        "@papercusp/web"
+      ]
+    },
+    "markmap-view": {
+      "severity": "high",
+      "disposition": "deferred-semver-major",
+      "reason": "Only fix is markmap-view@0.18.12, semver-major. Deferred pending mindmap-rendering compatibility assessment.",
+      "owners": ["@papercusp/web"]
+    },
+    "nanoid": {
+      "severity": "high",
+      "disposition": "deferred-semver-major",
+      "reason": "Only fix routes through @excalidraw/excalidraw@0.17.6, semver-major. Deferred; excalidraw is a feature-bearing canvas surface.",
+      "owners": [
+        "@papercup/marketplace-public-ui",
+        "@papercusp/operator-core",
+        "@papercusp/web"
+      ]
+    }
+  }
+}

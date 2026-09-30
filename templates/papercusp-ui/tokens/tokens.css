@@ -1,0 +1,71 @@
+/* GENERATED — do not hand-edit. Source: tokens.base.json (DTCG).
+ * Regenerate: node generate-tokens.mjs   Verify: node generate-tokens.mjs --check
+ * Papercusp app-family semantic theme tokens (D-011). Light/dark/system:
+ * explicit choice via data-theme on <html>; no attribute = follow the system.
+ * Per-app accents/extras are a thin override layer ON TOP of this file —
+ * never edit these values in place. */
+:root {
+  color-scheme: light;
+  --paper: #f4f0e8;
+  --ink: #20201e;
+  --ink-soft: #4d4a45;
+  --muted: #77736b;
+  --line: #d8d2c7;
+  --line-soft: #e3ddd3;
+  --line-strong: #c9c2b7;
+  --panel: #fffefa;
+  --panel-dim: #f8f5ef;
+  --panel-raised: #ffffff;
+  --rail: #eae4da;
+  --chip: #f1eee8;
+  --accent: #28655a;
+  --accent-soft: #dfeee8;
+  --danger: #9c3b36;
+  --danger-soft: #f8dedb;
+  --shadow-soft: rgba(70, 63, 52, 0.08);
+  --shadow-strong: rgba(43, 39, 31, 0.14);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #191817;
+  --ink: #ece9e2;
+  --ink-soft: #c9c4ba;
+  --muted: #9b968c;
+  --line: #38352f;
+  --line-soft: #2e2b27;
+  --line-strong: #454138;
+  --panel: #201f1d;
+  --panel-dim: #1c1b19;
+  --panel-raised: #262523;
+  --rail: #141312;
+  --chip: #2a2825;
+  --accent: #5fae9f;
+  --accent-soft: #24423b;
+  --danger: #da7a72;
+  --danger-soft: #402320;
+  --shadow-soft: rgba(0, 0, 0, 0.35);
+  --shadow-strong: rgba(0, 0, 0, 0.5);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper: #191817;
+    --ink: #ece9e2;
+    --ink-soft: #c9c4ba;
+    --muted: #9b968c;
+    --line: #38352f;
+    --line-soft: #2e2b27;
+    --line-strong: #454138;
+    --panel: #201f1d;
+    --panel-dim: #1c1b19;
+    --panel-raised: #262523;
+    --rail: #141312;
+    --chip: #2a2825;
+    --accent: #5fae9f;
+    --accent-soft: #24423b;
+    --danger: #da7a72;
+    --danger-soft: #402320;
+    --shadow-soft: rgba(0, 0, 0, 0.35);
+    --shadow-strong: rgba(0, 0, 0, 0.5);
+  }
+}

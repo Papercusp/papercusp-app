@@ -1,0 +1,40 @@
+-- Correct the `turn_origin_verdict` column comment so `dev:pg_query { describe }`
+-- -- which is how an agent actually meets this column -- carries BOTH halves of the
+-- reading rule, and enumerates the values the classifier can really persist.
+--
+-- WHY (EI-21506915532672609). The 794 comment warned only about the FALSE POSITIVE
+-- ("owner-typed is a residual, not positive evidence of owner speech", D-013). It said
+-- nothing about the FALSE NEGATIVE, which is the far more common failure: a file-backed
+-- CLI row (claude/omp/codex) cannot carry an enrolment envelope, so `stampTurnProvenance`
+-- downgrades its owner-typed residual to 'unenrolled-origin'. A typed owner directive in
+-- a psu session therefore lands under a value the comment never mentioned, and the census
+-- an agent naturally writes from the comment --
+--   WHERE speaker='user' AND turn_origin_verdict='owner-typed'
+-- -- returns zero rows however much the owner actually said.
+--
+-- Measured 2026-09-05, speaker='user' over 30 days:
+--   unenrolled-origin 12,872 | owner-dialog 126 | owner-typed 75
+-- So the filter the old comment implies covers ~0.6% of candidate owner speech. That is
+-- not a cosmetic gap: every agent's compaction strategy mandates verifying "the owner
+-- said X" against the transcript and treats a not-found as authoritative, so an agent
+-- verifying via `owner-typed` alone is instructed to DOWNGRADE a real owner directive to
+-- [self-imposed]. That is the mirror of the manufactured-directive rot WI-3532 exists to
+-- stop, and it is the EI-13472/WI-37419 failure with database authority behind it.
+--
+-- The old enum also omitted `not-user-turn` -- 886,906 rows, the single largest
+-- population in the table -- and `owner-dialog`.
+--
+-- DELIBERATELY PRESERVED: the NULL vs 'unknown' distinction. 'unknown' is currently
+-- unemitted (0 rows) but is RESERVED for classified-but-undeterminable; session-ingest.ts
+-- calls the distinction load-bearing because collapsing it re-creates that same failure.
+-- It is described below as reserved rather than dropped.
+--
+-- Comment-only: no DDL that changes data, types, constraints or indexes, so no
+-- FORWARD-COMPAT acknowledgment is required -- the currently-deployed release reads
+-- this column exactly as before.
+--
+-- Pinned by packages/operator-core/lib/doc-claims/session-turn-verdict-comment.test.ts,
+-- which fails if a persisted verdict the code can emit is missing from this text.
+
+COMMENT ON COLUMN harness_shared.session_turns.turn_origin_verdict IS
+  'classifyRecordedTurn verdict. PERSISTED values: owner-typed | owner-dialog | agent-injected | machine-surface | synthetic | unenrolled-origin | not-user-turn (every non-user row, e.g. assistant). ''owner-turn'' and ''unknown'' are declared but currently unemitted; ''unknown'' is RESERVED for classified-but-undeterminable. NULL means NEVER CLASSIFIED (ingested before this feature) and is deliberately distinct from ''unknown'' -- see stampTurnProvenance in packages/operator-core/lib/search/session-ingest.ts, which calls that distinction load-bearing. NOTE: owner-typed is the RESIDUAL of a versioned deny-list, i.e. "no rule matched" -- it is NOT positive evidence of owner speech, and must never be read as such (D-013). CONVERSELY, AND THIS IS THE MORE COMMON ERROR: owner speech in file-backed CLI sessions (claude/omp/codex) is stored as ''unenrolled-origin'', NOT ''owner-typed'', because those rows cannot carry an enrolment envelope and ingest refuses to assert authorship it cannot prove. Filtering for ''owner-typed'' alone therefore returns a structural zero that looks exactly like "the owner never said it". To ask whether the owner said X -- INCLUDING when the answer sought is NO -- filter on OWNER_CANDIDATE_TURN_VERDICTS {owner-typed, owner-dialog, unenrolled-origin} (packages/operator-core/lib/turn-provenance/turn-ref.ts), never ''owner-typed'' alone. Those are CANDIDATES, not proof: read each hit''s text and provenance before attributing anything to the owner.';

@@ -1,0 +1,9 @@
+{
+  "name": "papercusp-worker",
+  "displayName": "Papercusp Worker",
+  "version": "0.1.0",
+  "description": "Cross-CLI Papercusp worker integration for Claude Code: file-lock coordination, and the activity bridge (mirrors each tool call into the pui fleet view + curator, and folds in coord-inbox injection on the same round trip). A convenience packaging of the worker hooks installed by install-standalone-mcp.sh — assumes a running Papercusp operator + ~/.papercusp.",
+  "author": { "name": "Papercusp" },
+  "keywords": ["papercusp", "worker", "coordination", "activity-bridge", "fleet"],
+  "hooks": "./hooks/hooks.json"
+}

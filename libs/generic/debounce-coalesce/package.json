@@ -1,0 +1,18 @@
+{
+  "name": "@papercusp/debounce-coalesce",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic per-subscriber wake-floor + burst-coalesce primitive: a leading-edge debounce that enforces a minimum re-invocation interval per subscriber and folds the events suppressed inside the window into ONE delivery carrying their union, with an urgency bypass and a max-staleness deadline. Pure algorithm over injected time + state; zero domain coupling, zero runtime deps. The host persists the per-subscriber state and supplies `now`.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  }
+}

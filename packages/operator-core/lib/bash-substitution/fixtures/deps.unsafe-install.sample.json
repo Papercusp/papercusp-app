@@ -1,0 +1,38 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 / pair deps.unsafe-install (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T13:34:00Z",
+  "totalAtoms": 18,
+  "totalSessions": 8,
+  "sample": [
+    {
+      "sid": "su-6f5ca4fb-38ab-468f-8d82-247940a52119",
+      "ts": "2026-07-25T23:43:18.848Z",
+      "atom": "npm install --legacy-peer-deps 2>&1"
+    },
+    {
+      "sid": "su-6f5ca4fb-38ab-468f-8d82-247940a52119",
+      "ts": "2026-07-25T23:51:43.025Z",
+      "atom": "npm install --legacy-peer-deps > /tmp/wi5769/full-clean-reinstall-final.log 2>&1 &"
+    },
+    {
+      "sid": "su-6f7850f2-2112-4e72-bb09-e8983af3f851",
+      "ts": "2026-07-19T19:53:41.632Z",
+      "atom": "npm install --no-audit --no-fund 2>&1"
+    },
+    {
+      "sid": "su-ccb43bf4-89a3-4222-88e8-0c345cea2749",
+      "ts": "2026-07-20T07:28:46.545Z",
+      "atom": "npm install --package-lock-only --workspaces=false 2>&1"
+    },
+    {
+      "sid": "su-cfeca4f2-6e46-41d3-89f3-ae8916b0cc95",
+      "ts": "2026-07-25T22:22:46.167Z",
+      "atom": "npm install --package-lock-only 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T23:06:42.511Z",
+      "atom": "npm install --silent 2>&1"
+    }
+  ]
+}

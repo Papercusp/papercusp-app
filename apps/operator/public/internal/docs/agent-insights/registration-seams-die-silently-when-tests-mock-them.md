@@ -1,0 +1,71 @@
+# Registration seams die silently when tests mock them
+URL: /internal/docs/agent-insights/registration-seams-die-silently-when-tests-mock-them
+
+A registerX()/getX() seam is only alive if some HOST actually calls registerX() at bootstrap — and nothing in CI checks that, because every unit test mocks or registers the seam itself. HostPlatform was dead on every production host for 9 days (agent:role / operator:scanner prompts/get threw) after the only registration call was deleted along with 'dead' instrumentation-node.ts. Fixing it then exposed a SECOND masked bug: import.meta.dirname is undefined under the operator host's tsx CJS transform. Verify seams on :3170, not in vitest.
+
+## The mistake this prevents
+
+`@papercusp/host-platform` shipped 05-20 with a deliberate design:
+`registerHostPlatform()` at host bootstrap, `getHostPlatform()` in consumers,
+**no silent fallback** — an unregistered host throws. The one production
+registration call lived in `apps/operator/instrumentation-node.ts` (a Next
+instrumentation hook). On 06-03, commit `5694e7d58` deleted that file as
+"dead scheduler code — its duties run via the embedded-pg boot runner +
+host-bootstrap, or are vestigial. Confirmed zero importers."
+
+The registration was neither vestigial nor ported. From 06-03 to 06-12,
+**every** `prompts/get` for `agent:role` or `operator:scanner` on every host
+(green :3070, staging :3170, Tauri sidecar, stdio agent-mcp) returned
+`render_error: No HostPlatform registered`. Nothing noticed for 9 days:
+
+* `role.test.ts` mocks `@papercusp/host-platform` (deliberately, and well) —
+  so the only test of the real resolver never exercises registration.
+* `tool-manifest.test.ts` drove real `node:fs` (pre-migration) — no seam.
+* No test anywhere asserts "the hosts register a platform at bootstrap".
+
+The same deletion-commit pattern had already bitten once before: the
+endpoint-IPC server start ALSO lived only in instrumentation-node.ts and had
+to be ported to `host-bootstrap.ts` (see the long comment there). The
+registration call was the second side effect in that file, and it was missed.
+
+## The rules
+
+1. **Deleting a "dead" entry file: enumerate its side effects, not its
+   importers.** "Zero importers" proves nothing for a file whose job was to
+   RUN things (registrations, server starts, watchers). Diff the file body
+   against `host-bootstrap.ts` and port every effect, or state per-effect why
+   it's vestigial.
+2. **A `registerX()/getX()` seam needs one test that fails when no host
+   registers.** Unit tests mocking the seam keep the consumers green forever;
+   the only honest check is at the host level (a bootstrap test, or a live
+   probe). If you add such a seam, add the tripwire in the same PR.
+3. **Verify on the running host, not in vitest.** The probe that found both
+   bugs (bearer = any `kind='system'` row from `harness_shared.token_index`):
+
+   ```bash
+   curl -s -X POST http://127.0.0.1:3170/api/mcp \
+     -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"agent:role","arguments":{"role":"architect"}}}'
+   ```
+
+   Note: `~/.papercusp/superuser-token` does NOT resolve on this surface
+   (`invalid_bearer`) — the prompts/resources paths resolve bearers via
+   `token_index`, not the superuser bypass.
+
+## The second bug a first bug can mask
+
+With registration fixed, the same probe failed differently:
+`render_error: The "paths[0]" argument must be of type string`.
+`import.meta.dirname` is **undefined** when the operator host runs agent-mcp
+through tsx's CJS transform (apps/operator has no `"type": "module"`), while
+under vitest (real ESM) it works — so tests pass and the host crashes.
+`import.meta.url` IS shimmed there. Portable helper:
+`packages/agent-mcp/src/prompts/module-dir.ts` (`dirname` → `fileURLToPath`
+fallback, null-safe). If you write `resolve(import.meta.dirname, …)` in code
+any operator host loads, use `moduleDir(import.meta)` instead — and remember
+the hosts run with **cwd `apps/operator`**, so cwd-relative fallbacks need a
+`../../` candidate too.
+
+Fixed in: host-architecture-2026-05-20-v2 P-001..P-003 (D-002 has the full
+phase-by-phase re-baseline).

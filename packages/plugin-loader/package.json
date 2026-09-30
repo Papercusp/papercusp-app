@@ -1,0 +1,49 @@
+{
+  "name": "@papercusp/plugin-loader",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./manifest-validate": {
+      "types": "./src/manifest-validate.ts",
+      "import": "./src/manifest-validate.ts",
+      "default": "./src/manifest-validate.ts"
+    },
+    "./manifest-lint": {
+      "types": "./src/manifest-lint.ts",
+      "import": "./src/manifest-lint.ts",
+      "default": "./src/manifest-lint.ts"
+    },
+    "./wasm": {
+      "types": "./src/wasm/index.ts",
+      "import": "./src/wasm/index.ts",
+      "default": "./src/wasm/index.ts"
+    },
+    "./daemon": {
+      "types": "./src/daemon/index.ts",
+      "import": "./src/daemon/index.ts",
+      "default": "./src/daemon/index.ts"
+    }
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@papercusp/agent-mcp": "*",
+    "@papercusp/plugin-loader-core": "*",
+    "@papercusp/plugin-sdk": "*",
+    "@papercusp/scheduled-registry": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

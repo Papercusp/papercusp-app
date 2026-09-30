@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Launch the desktop app in DEV mode WITHOUT HMR.
+#
+# ⚠ THIS SCRIPT LOADS THIS SESSION'S OWN WORKING-TREE OPERATOR (default :3270;
+#    it relocates when papercup-bg-host reserves the default). Not :3070.
+#
+# Do not restate the port here. The `exec` at the bottom of this file is the
+# authority, and tauri.conf.json's `devUrl` is the fallback when it is bypassed.
+# A previous version of this header asserted ":3070 is now the DEFAULT devUrl",
+# which was false and contradicted this same file ~50 lines below. An agent who
+# read only the header concluded the dev shell runs the RELEASE checkout, and
+# therefore that landed fixes were broken — it cost a wasted owner test cycle
+# (WI-37858) and was then promoted into a plan decision that had to be refuted
+# (hud-session-chat-release-audit-2026-08-11 D-004 → D-005). See WI-37907.
+#   - `frontendDist` in tauri.conf.json is the PRODUCTION-build path. It is NOT
+#     what `tauri dev` loads, and reading it as the dev target is the same trap.
+#   - Because the resolved dev port is `npx tsx bin/hono-host.ts` over apps/operator,
+#     it serves
+#     the WORKING TREE — UNCOMMITTED edits included. There is no build artifact
+#     and no git object in that path, so "is my change committed/promoted?" is
+#     the wrong question for this shell. `dev:pipeline_position` answers a git
+#     question and does not describe what :3270 is serving.
+#   - The host has NO file-watch: a :3270 started BEFORE your edit serves stale
+#     code just as confidently as :3070 would. Check the operator's start time
+#     against your file's mtime before trusting a verdict, and restart the dev
+#     shell if it is older — do not wait for a promotion that is not involved.
+#
+# HMR is the explicit opt-in: `npm run dev:hmr` (devUrl http://localhost:3055,
+# Vite dev server with the HMR client active).
+#
+# Why the no-HMR path is the default:
+#   - The Tauri shell is the product surface and this checkout is edited by a
+#     FLEET of agents at once. A Vite dev server (:3055) reloads the webview on
+#     fleet edits / dep re-optimization / proxy errors, so the window
+#     "constantly refreshes". The operator serves a built SPA bundle instead —
+#     no dev-server reload pressure.
+#   - Mirrors the prod runtime path exactly (Hono host + static dist).
+#   - No `ws://localhost:3055/?token=…` HMR socket competing with SSE for the
+#     libsoup 6-connection budget.
+#
+# Post-cutover topology — the dev-box ports (release-pipeline P-010, the
+# owner-approved OWN-PORT option 2026-06-10):
+#   :3070 = the GREEN release operator (papercup-dev-api, papercup-release
+#   checkout, pinned to green `main`) — SHIPPED state, frozen between deploys.
+#   :3170 = the fleet's shared staging operator — the working tree, but
+#   restarted by agents at will (drain protocol), so the owner's webview
+#   would die/reload under them.
+#   :3270 (or its resolved fallback when bg-host reserves it) = THIS session's
+#   own working-tree operator, spawned by beforeDevCommand
+#   (bin/dev-operator-ifneeded.sh). Same tree as :3170,
+#   nothing else restarts it — `npm run dev` finally shows YOUR edits.
+#   The dev-wrapper bar still switches to prod :3070 / staging :3170 at will.
+#
+# Cost: manual reload (Cmd-R / Ctrl-R in the Tauri webview) to pick up new
+# work (the SPA dist is fed by the staging `vite build --watch`).
+
+# Agent-E2E display contract (EI-20107438986388650): this launcher deliberately
+# preserves the caller's display for normal interactive development. If that
+# shell is Wayland, tauri-agent-tools can still drive DOM/eval/check, but its
+# screenshot path needs the compositor tools `swaymsg` + `grim`; their absence
+# makes a screenshot attempt fail late, after the app has already booted. For
+# pixel evidence use the packaged isolated verifier instead — it owns an Xvfb
+# display, scrubs WAYLAND_DISPLAY, and performs the VirtualGL check:
+#   scripts/verify-tauri-headless.sh -- <assertion-command>
+set -euo pipefail
+
+# See /internal/docs/agent-insights/wayland-tauri-agent-e2e-display for the
+# decision tree and the distinction between structural and pixel evidence.
+if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+  echo "NOTICE: this Tauri dev shell inherited Wayland; tauri-agent-tools screenshot/capture needs swaymsg+grim."
+  echo "       For pixel evidence use scripts/verify-tauri-headless.sh (DOM/eval/check still work here)."
+fi
+# Resolve BEFORE the cd — `$0` may be relative, and a relative dirname re-evaluated
+# after cd'ing resolves against the NEW cwd (silently sourcing nothing, or worse).
+__here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$__here/.."
+
+# Claim a Rust target dir this instance can own alone, so a second desktop cannot
+# corrupt the shared generated app-manifest and take the FIRST one down with it
+# (WI-7101 — it took down the owner's live desktop). Sourced, not executed: it
+# exports CARGO_TARGET_DIR and holds a lock fd that the `exec` below inherits.
+# Single-instance launches keep the shared dir and its warm cache, unchanged.
+. "$__here/lib/claim-target-dir.sh"
+. "$__here/lib/resolve-dev-operator-port.sh"
+
+# Pin content + /api to the session's own operator (EI-296 seam) — outranks a
+# previously persisted prod/staging bar selection, and is never persisted, so
+# it can't repoint anyone else's launch.
+# The beforeDevCommand sources the same resolver. Exporting the selected port
+# here makes the Tauri webview and its Hono child agree when bg-host reserves
+# the default :3270 and the operator is relocated (EI-21445362974769138).
+export OPERATOR_DEV_PORT="$(resolve_dev_operator_port "${OPERATOR_DEV_PORT:-3270}")"
+export PAPERCUSP_DEV_API_TARGET="${PAPERCUSP_DEV_API_TARGET:-$OPERATOR_DEV_PORT}"
+
+# tauri dev --config takes a JSON5 string and merges it over tauri.conf.json.
+# We only override devUrl; everything else stays the same. A boot migration
+# may correctly wait behind an active workspace backup longer than Tauri's
+# fixed 180-second dev-server deadline. The Linux webview's recovery page
+# already polls the origin and reconnects when it becomes available, so let
+# the native window start while the operator finishes booting.
+#
+# Use 127.0.0.1, NOT localhost: on a box where `localhost` resolves to IPv6
+# ::1 first (getent hosts localhost → ::1) and the operator binds IPv4
+# only (0.0.0.0), a `localhost` devUrl makes WebKitGTK hit ::1, fail, and the
+# webview reload-loops on first load before limping onto IPv4. (Same reason
+# main.rs injects the runtime base as 127.0.0.1.)
+exec npm run tauri -- dev --no-dev-server-wait --config "{\"build\":{\"devUrl\":\"http://127.0.0.1:${OPERATOR_DEV_PORT}\"}}"

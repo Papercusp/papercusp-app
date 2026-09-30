@@ -1,0 +1,150 @@
+# HIVE_REKEY (C-001 read-plane re-key) flip-readiness — code-complete, owner-gated on the live 2-machine cut witness
+URL: /internal/docs/agent-insights/pot-rekey-flip-readiness
+
+The papercusp-pot-rekey flip is an ATTENDED security cutover, not a code task. The op-path is wired end-to-end (encrypt-on-write, decrypt-on-read, advance-on-boundary), the hermetic end-to-end content read-cut witness is green, and ~88 re-key tests pass. The ONE remaining gate is the live 2-machine K-CUT-on-content witness (WI-560, blocked on WI-559 peering). This is the exact flip surface (3 edits), the evidence, the residual risk, and the go/no-go the owner ratifies against.
+
+## Current behavior (2026-07-09) — the flip already happened; this page is HISTORICAL
+
+The flag graduated. `FLAGS.POT_REKEY` (the flag key was renamed from `HIVE_REKEY`
+→ `POT_REKEY`; the runtime flag string is now `"papercusp-hive-rekey"`, was
+`"papercusp-pot-rekey"`) is now **DEFAULT ON** in `libs/flags/src/types.ts`, per
+the comment there: *"graduated 2026-06-29 via the P-011 flag-default inversion —
+NOT in DARK\_FLAGS: the live cut-off witness (P-008 / public-release GATE-1)
+passed cross-machine on the real binary (shared-hive-public-release D-014) and
+shipped in desktop alpha.2, so the gate condition is met."* It no longer appears
+in `KNOWN_DARK_FLAGS` / `DARK_FLAG_CASE` in
+`libs/flags/src/production-defaults.test.ts` at all.
+
+So the **residual gate this page describes (the live 2-machine K-CUT witness,
+WI-560/WI-559) has since been satisfied** and the owner has already ratified
+the flip — the "3 edits" flip surface below was executed. v1 scope (new hives
+only; existing hives stay legacy-unencrypted) still applies as designed (D-003).
+The rest of this page is kept for the **historical evidence trail** (the
+witness detail, the flip mechanics, the residual-risk reasoning) — read it as
+"what got us to GO," not as a still-pending decision.
+
+## TL;DR — what the owner is deciding
+
+`papercusp-pot-rekey` (FLAGS.HIVE\_REKEY) is the master gate for the shared-pot **read-plane
+re-key** (C-001): pot CONTENT is AEAD-encrypted under a per-epoch group key, and a
+removed/excluded member loses the ability to **READ** post-boundary content (key-denial **and**
+ciphertext-unreadability), not just the ability to write.
+
+**This is no longer a code task.** As of 2026-06-24 the op-path is wired end-to-end, the hermetic
+**end-to-end content read-cut witness is green**, and \~88 re-key tests pass. WI-403's
+2026-06-22 note ("advanceEpochAndWrap + encrypt-on-write + decrypt-on-read are NOT yet in the live
+op path — resolveHiveEpochCrypto returns the notImplemented stub") is **STALE** — that wiring has
+since landed.
+
+The flag stays dark **only** because flipping it begins encrypting **live** federated content: a
+crypto/op-path bug would break federation reads for a whole pot. So the dark case is an
+**attended security cutover** (owner-authority), gated on the **live 2-machine K-CUT-on-content
+witness** (WI-560) + owner ratification — exactly the carve-out the CLAUDE.md dark-flag rule
+reserves for a "reversible CUTOVER kill-switch needing an attended live verify the OWNER runs."
+
+The owner performs the flip; an agent must not flip it.
+
+## What is wired (the live op-path)
+
+All flag-gated on `papercusp-pot-rekey`; **OFF ⇒ byte-identical to today** (no encryption, the
+`notImplementedHiveEpochCrypto` fail-closed stub).
+
+| Concern                          | Where                                                           | Note                                                                                                                                                                         |
+| -------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Flag gate / crypto resolve       | `hive-epoch-serving.ts` `resolveHiveEpochCrypto(enabled)`       | `true` ⇒ real `createHiveEpochCrypto()` (sodium); `false` ⇒ fail-closed stub (never silent plaintext)                                                                        |
+| Boot composition (flag FIRST)    | `hive-epoch-boot-deps.ts` `buildHiveRekeyBootDeps`              | one cached flag read; `null` for OFF / non-pot / no-device — cheap off-path                                                                                                  |
+| Encrypt-on-write                 | `wire-outbox.ts` → `outbox-drain.ts` (`epochEncrypt.encryptOp`) | exclude-set: `shouldEncryptOpForRekey` encrypts all CONTENT, keeps admission/key/policy tags plaintext (`REKEY_PLAINTEXT_TAGS`), fail-closed (new tag defaults to encrypted) |
+| Decrypt-on-read                  | `boot.ts` `rekeyDeps.epochGate(enforcedApply)`                  | op carries its `epoch`; gate resolves epoch key → decrypt, else defers (pending-epoch buffer)                                                                                |
+| Advance-on-boundary (revoke)     | `hive-revoke-contributor.ts` → `advanceEpochOnHiveBoundary`     | wraps the new epoch key to REMAINING members only; revoked device excluded forever (K-CUT). Loud `rekey_boundary_skipped` boot event if it no-ops                            |
+| Advance-on-boundary (go-private) | `hive-set-listing.ts` → `advanceEpochOnHiveBoundary`            | re-keys to all current members (no cutOff)                                                                                                                                   |
+| Deferred-content drain           | `boot.ts` `epochDrainQueue` / `onEpochKeyApplied`               | re-applies buffered content once a member's key row arrives                                                                                                                  |
+
+## Witness evidence (re-ran 2026-06-24, this checkout, staging)
+
+* **Hermetic end-to-end content read-cut witness — `hive-epoch-read-cut-witness.test.ts` 2/2 GREEN.**
+  Drives the **REAL** XChaCha20-Poly1305 + Ed25519 sealed-box crypto through the **production
+  op-path capabilities** (`buildEpochEncryptCapability` → federated op → `buildEpochDecryptGate` +
+  `createEpochKeyProvider`) across the full lifecycle **K0 → K1 → K-revoke → K-CUT**:
+  * K-CUT (revoked B): replicates the identical epoch-2 ciphertext bytes but the decrypt gate
+    defers it forever (no epoch-2 key row ever arrives) AND B's only held key (epoch 1) **fails the
+    real AEAD** against the epoch-2 ciphertext → content read-cut, not mere key-denial.
+  * K-CUT (remaining C): unwraps epoch-2 and decrypts the post-boundary content.
+  * Forward-cut only: B still reads the OLD epoch-1 content it legitimately holds.
+  * Flag-OFF arm: `resolveHiveEpochCrypto(false)` returns the stub that **rejects** rather than
+    ever shipping plaintext.
+* **Re-key unit suite — 86/86 GREEN** across 14 files (crypto-impl, op-gate, boundary,
+  boundary-wiring, key-provider, keys, producer, serving, state, content-ops, pending-epoch,
+  drain, enforcement-compose-order, read-cut witness).
+* **`outbox-drain-rekey.integration.test.ts` — 6/6 GREEN** (encrypt-on-capture integration).
+
+### Test-context flag flip (why the witness needs no exclusive window)
+
+The witness flips the flag **at the call site** — `resolveHiveEpochCrypto(true)` is exactly the
+code path the prod flip enables — never the global PostHog flag. So it is the **evidence the owner
+ratifies against**, not the flip itself, and it runs green without consuming the global exclusive
+re-key window.
+
+## The flip surface (the owner's LAST step — 3 edits)
+
+1. `libs/flags/src/types.ts` (\~line 1658): `[FLAGS.HIVE_REKEY]: false` → `true`.
+2. `libs/flags/src/production-defaults.test.ts`: remove `FLAGS.HIVE_REKEY` from `KNOWN_DARK_FLAGS`
+   (the set SHRINKS — allowed; the high-watermark is a ceiling).
+3. `libs/flags/src/production-defaults.test.ts`: remove `[FLAGS.HIVE_REKEY, 'incomplete']` from
+   `DARK_FLAG_CASE` (the 1:1 coverage test fails otherwise).
+
+The runtime override `flags:set papercusp-pot-rekey=true` is **already ON on this dev host**, so
+`:3170`/desktop already exercise the real crypto here; the **prod default** edit above is the real
+flip. (Note: the `DARK_FLAG_CASE` tag is `'incomplete'`, but the authoritative dark comment now
+describes an **attended cutover** — the case shifted once the op-path landed; the flip removes the
+entry either way.)
+
+## Residual gate — what is NOT yet green (the real owner decision)
+
+The **LIVE 2-machine K-CUT-on-content witness** (`WI-560`) has **not** run green. It is blocked on:
+
+* **`WI-559` (F-PEER):** the 2-machine pot peer connection goes **stale on idle** — content
+  written on fed-a stops reaching fed-b after a long-idle window (last root-cause:
+  P-007 snapshot cursor-seeding skipping pre-snapshot ops on a fresh cursor; fix owed in `boot.ts`).
+  No durable green idle-reconnect witness yet.
+* **`WI-560` (F-MEMBER-KCUT):** fed-b is a VIEW-joiner but **not yet a real crypto member**
+  (`hive_epoch_keys` has 0 rows for it) — the member-admission path on the 2-machine rig isn't
+  cracked, so a true K-revoke→K-CUT on the binary hasn't been witnessed.
+
+These prove the composition on REAL federation hardware (idle reconnect + a removed device's
+machine never receiving the new key). The hermetic witness proves the **crypto + op-path
+composition**; the live witness proves it **survives real peering**. The owner is deciding whether
+to flip on the hermetic evidence (accepting v1 risk + monitoring) or to hold for the live green.
+
+### v1 scope the owner should know (back-compat, D-003)
+
+v1 encrypts **NEW pots only**; existing pots stay legacy-unencrypted + documented. So a flip does
+not retroactively encrypt or break existing pots — it changes the write path for pots created
+under the flag. This materially lowers the blast radius of a flip.
+
+## Known non-blocker — a pre-existing RED that is NOT this flip
+
+`packages/operator-core/lib/shared-hive-loop/revoked-swarm.integration.test.ts` fails on `staging`
+HEAD, but it is **flag-independent and not a re-key defect**:
+
+* The failure is `vitest-fail-on-console` tripping on a `console.error("[pot-rekey] owner admit
+  failed … getOrgPg outside cell scope — wrap the call in rig.runAsCell()")`.
+* Root cause: the **WI-639/WI-280 membership-admission** fire-and-forget path
+  (`admitAnnouncedPeerAsOwner`, `boot.ts:1128`) runs **outside** the composition-rig's cell scope,
+  so the test's own `getOrgPg` mock (test line 50) throws. The `[pot-rekey]` prefix is only because
+  the epoch re-grant lives inside `upsertHiveMember` — the admit block is **NOT** gated on
+  HIVE\_REKEY.
+* Confirmed flag-independent: forcing the flag off still fails; the cached last run shows it
+  already red while all 14 hive-epoch files were green.
+* Filed separately (see WI tracking); it does **not** change the flip decision.
+
+## Go / No-Go
+
+* **Code readiness: GO.** Op-path wired, hermetic end-to-end content read-cut witness green, \~88
+  re-key tests green, OFF path byte-identical.
+* **Cutover readiness: owner's call.** Recommended path: flip in an **attended window** after
+  `WI-559` peering is stabilized and `WI-560` runs the live K-CUT green — OR consciously accept the
+  v1 (new-pots-only, D-003) risk and flip on the hermetic witness while monitoring federation
+  health, given the flip is reversible (OFF restores plaintext byte-identically).
+* **Reversibility:** the flag is a clean kill-switch — flipping OFF returns the
+  `notImplementedHiveEpochCrypto` stub (no encryption), so a bad cutover is recoverable by flipping
+  back (new content written while ON would need its pot re-keyed, but the read path degrades safely).

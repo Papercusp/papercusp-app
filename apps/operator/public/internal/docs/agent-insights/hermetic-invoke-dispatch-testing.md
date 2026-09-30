@@ -1,0 +1,53 @@
+# Test agent-dispatch loops hermetically: point PAPERCUSP_OPERATOR_BASE at an in-test HTTP server
+URL: /internal/docs/agent-insights/hermetic-invoke-dispatch-testing
+
+Any code path that fires the /invoke route via loopbackFetch (git-sync's merge-resolver, fireLaunchBlueprint callers) can be integration-tested END-TO-END — real blueprint resolution, real POST, observable settle — by setting PAPERCUSP_OPERATOR_BASE to an in-test node:http server that plays the invoked agent. Never let a test's dispatch reach a live :3070 (it would spawn a REAL agent). Bonus pattern: two member slugs in one process ≡ two operator stacks for git-sync-style per-slug subsystems.
+
+## The problem
+
+Code that dispatches agents through the invoke route — `spawnMergeResolver` in
+`git-sync-action.ts`, anything riding `resolveLaunchTargetForEvent` /
+`fireLaunchBlueprint` — was effectively untestable at integration level: the
+dispatch is a `loopbackFetch` POST at `operatorApiBase()`, which defaults to
+`http://localhost:3070`. On the dev box **that port is the LIVE green
+operator** — a test that lets the POST through would invoke a *real*
+merge-resolver agent. `seed-any-pot.integration.test.ts` S4 therefore parked a
+fake `last_resolver: dispatched` marker to keep the dispatch path from ever
+running, leaving `spawnMergeResolver` (blueprint resolution, the observe loop,
+`merge_resolver` pipeline events) uncovered.
+
+## The pattern
+
+`operatorApiBase()` honors **`PAPERCUSP_OPERATOR_BASE`** (read per call, not
+memoized at import). So an integration test can:
+
+1. Stand up a `node:http` server on an ephemeral port (`listen(0,
+   '127.0.0.1')`) that parses `/api/harness/:slug/invoke?role=...`, queues each
+   arrival, and lets the TEST decide when (and with what body) to respond —
+   `{ ok: true, exitCode: 0 }` settles the caller's observe loop.
+2. `process.env.PAPERCUSP_OPERATOR_BASE = http://127.0.0.1:<port>` in
+   `beforeAll` (delete in `afterAll`; respond to any still-parked request
+   before closing or the caller's dangling promise leaks across teardown).
+3. Drive the production code path for real: the built-in blueprint event map
+   (`git-sync:conflict` → merge-resolution → role `merge-resolver`) resolves
+   fine under vitest, the POST lands on the test server, and the test plays the
+   invoked agent — including *parking* the response to simulate a long-running
+   agent (that is how the `RESOLVER_INFLIGHT_MS` dedup gets tested for real).
+
+Working example with all the trimmings (dispatch queue, parked responses,
+scripted adversarial resolver, settle polling):
+`packages/operator-core/lib/harness/git-sync/two-peer-convergence.integration.test.ts`.
+
+## Bonus: two slugs in one process ≡ two operator stacks
+
+For per-slug subsystems (git-sync's routine rows, `(slug, phase)` escalation
+rows, `git-sync:<slug>` lock resources), N "peer machines" can be simulated as
+N member slugs in ONE process + ONE test PG, each slug owning its own checkout
+of one shared bare origin: peers share *nothing* but the origin — exactly the
+real multi-stack topology — while every race interleaving becomes
+deterministic and scriptable. That is how the P-010 two-peer convergence
+verification (plan `git-sync-any-pot-2026-06-12` D-007) replaced a "stand up
+a second isolated operator stack" manual run with a permanent regression
+suite. Check which state is actually per-slug before reusing this: anything
+keyed on a process-global singleton (one workspace pin, one registry) is
+shared and would diverge from the multi-stack reality.

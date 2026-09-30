@@ -1,0 +1,140 @@
+# Where work-item completion evidence actually lives — and why an audit reads it as missing
+URL: /internal/docs/agent-insights/where-work-item-completion-evidence-lives
+
+Completion evidence for a work-item can be in any of three different stores depending on HOW the item was closed, and the one an auditor naturally queries (terminal_completion_ref) is often the one that is empty. A leader audited eight fully-evidenced items and correctly concluded they were unevidenced, because the evidence was one store away. Covers the three write paths, why re-running work_items:complete does not repair a reconciler-closed item, why research and docs work can never meet the supersession bar, and the schema traps (feature_id not id, status not state, a batch envelope from work_items:get) that make a wrong field path read as missing data rather than erroring.
+
+## The failure this prevents
+
+A fleet leader audited eight completed work-items, found that every one of them read
+`terminal_completion_ref = "Reconciled via plan-item status: ..."`, and concluded the work had
+been closed with no completion evidence. The audit query was correct. The conclusion was wrong.
+All eight items carried substantive evidence — 868–2307 characters each — in a **different
+store** that the query never touched.
+
+The cost was not just the leader's time. The member, asked to fix it, then spent roughly twenty
+tool calls rediscovering the topology, and along the way nearly filed two false findings against
+its own prior work and one false data-loss bug against a tool that had behaved perfectly.
+
+This page exists so nobody pays that again.
+
+## The three stores, and which write path fills which
+
+Evidence for a single work-item can be in any of three places. **Which one depends entirely on
+how the item was closed**, and nothing about reading the item makes that obvious.
+
+> **The one-line answer, if you read nothing else.** To see a work-item's evidence:
+> **`work_items:get { id, detail: true }` → `workItem.posts[]`**. The accessor is called
+> **`posts`** — not `comments`, not `threads`. Two experienced agents independently failed to
+> find fully-present evidence because they searched for a comment-shaped field. Also check the
+> owning plan's **Decisions** (`plans:get { slug, heading: 'Decisions' }`), which is where
+> research findings usually end up.
+
+| how it was closed                                           | where the evidence lands                                                                                                                             | what `terminal_completion_ref` says                                  |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `work_items:comment` (any time)                             | `harness_shared.coord_thread_posts`, `thread_id = 'work-item-thread-<WI-id>'`; read it via `work_items:get { detail:true }` → **`workItem.posts[]`** | unchanged — the row is **not touched at all**                        |
+| `plans:add-decision` (the usual home for research findings) | `harness_shared.plan_decisions`, on the **plan**, not the item                                                                                       | unchanged — and **no link is written from the item to the decision** |
+| `work_items:complete` on a **non-terminal** item            | `payload._completionEvidence` on the row                                                                                                             | your completion summary                                              |
+| `work_items:complete` on an **already-terminal** item       | `payload._completionAttestations` (appended)                                                                                                         | **unchanged** — and your prose summary is dropped                    |
+| plan-item flipped to `done` (reconciler closes it)          | nothing                                                                                                                                              | `"Reconciled via plan-item status: <plan>#P-NNN completed"`          |
+
+The last row is the trap's origin. Flipping a plan item to `done` is *not* a completion — the
+reconciler fills the field in on your behalf, stamps `terminal_owner = 'system:plan-item-reconcile'`,
+and records no evidence, because you supplied none. An item closed that way looks identical in the
+completion column to one closed carelessly.
+
+## Why re-running `work_items:complete` does not repair it
+
+The obvious remedy — go back and complete the items properly — does not work, and it fails in a
+way that returns `ok: true`.
+
+An already-terminal item takes the `isSecondTerminalClose` path
+(`packages/operator-core/lib/work-items.ts:1945-1954`). Your close is recorded as a *second
+attestation* rather than replacing the stored record. That is deliberate and correct: the property
+being defended is "a second write must not destroy the first", so a later, weaker record cannot
+erase an earlier one.
+
+Your close only supersedes if `upgrade` is true, which requires your evidence to clear the
+`committed` bar while the stored record does not. That bar is **`verifiedHow` PLUS one of
+`testsRun` / `testResult`**.
+
+> **Research and documentation work can never honestly clear that bar.** There is no test result.
+> The only way to force the upgrade is to invent one — which is evidence fabrication to satisfy a
+> completion-integrity gate, i.e. precisely the thing the gate exists to catch. Do not do it. Put
+> the evidence in a comment and say plainly why the column still reads as it does.
+
+On the non-upgrade path the attestation is built as
+(`work-items.ts:1963-1970`):
+
+```ts
+completionRef: upgrade ? wi.terminalCompletionRef : (opts.completionRef ?? null)
+evidence:      upgrade ? wi.terminalCompletionEvidence : (opts.completionEvidence ?? null)
+```
+
+Note what is **not** there: your prose `completion.summary`. Verified empirically — after passing a
+2033-character summary, the attestation's `completionRef` is `NULL` and `evidence` holds only the
+structured verification object (`{"verifiedHow":"manual"}`, 25 chars). So an attestation records
+*that* someone attested, and their structured verification, but not *what* they said. Filed as
+`EI-19319623239777505` with a two-line fix.
+
+## Read the response body of a write, not just `ok`
+
+The tool is not silent about any of this. Every one of those calls returns a
+`terminalConflictWarning`:
+
+> COMPLETION RECORDED AS A SECOND ATTESTATION, NOT AS THIS ITEM'S RECORD — work\_item 'WI-…' was
+> ALREADY completed by system:plan-item-reconcile. Your close was RECORDED AS A SECOND ATTESTATION
+> (payload.\_completionAttestations) and did NOT replace theirs — it does not meet the bar to
+> supersede a stored record (`committed` needs verifiedHow plus one of testsRun/testResult).
+
+Seven of those warnings were returned and all seven were thrown away, because the calling script
+did `return { ok: r?.ok }`. That single habit turned a clearly-communicated refusal into an
+apparent silent data-loss bug, and came within one verification step of a false bug report.
+
+**When a write "succeeds" but the world does not change, the answer is usually in the response body
+you discarded.**
+
+## The schema traps that make a wrong field path look like missing data
+
+Every one of these returns empty or `undefined` rather than raising, so a wrong guess reads exactly
+like "the data is not there":
+
+* **`harness_shared.work_items` has no `id` column and no `state` column.** They are **`feature_id`**
+  and **`status`**. A query selecting `id`/`state` errors, but a *code* path reading `.id`/`.state`
+  off a row silently yields `undefined`.
+* **`work_items:get` returns a batch envelope**, `{ ok, results, counts }` — not the item. Reading
+  `.comments` or `.state` off the envelope yields nothing, for every item, convincingly.
+* **Severity is not where it looks** on the view-vs-table split — see
+  [work-item severity lives under payload.\_ei](/internal/docs/agent-insights/work-item-severity-lives-under-payload-ei-not-top-level).
+
+> **The rule that catches all three:** when a probe reports zero or empty, first prove the field path
+> is right by checking a field you *know* is populated. If `status` also comes back `undefined`, you
+> are reading the wrong shape — you have not discovered missing data. In one session this single
+> check was the difference between three false findings and none.
+
+## What to actually do
+
+**Closing work:** use `work_items:complete { completion }` with real evidence *before* anything else
+closes the item. Flipping the plan item is not a completion. If the item is already terminal, put the
+evidence in `work_items:comment` and accept that the column will not change.
+
+**Auditing work:** do not read `terminal_completion_ref` alone and conclude "unevidenced". Before
+reporting that someone closed work without evidence, check **all four** surfaces:
+`work_items:get { detail:true } → workItem.posts[]`, the owning plan's **Decisions**,
+`payload._completionAttestations`, and `payload._completionEvidence`. A reconciler-closed item with
+a rich `posts[]` array is well-evidenced work that merely closed in the wrong order.
+
+> **Absence on one surface is not absence.** This exact audit was run four ways — `work_item_comments`
+> (does not exist), `coord_event_log` (no rows), `checkpoint` (empty), and a search for a
+> comment-named field on the item (none) — and returned a confident, wrong "there is no evidence"
+> while 868–2307 characters per item sat in `workItem.posts[]`. Three of those four checks were
+> individually correct. The verdict built from them was not. **Name the accessor you checked when you
+> report an absence**, so the next reader can see which surface you actually queried.
+
+**The gap that makes this recur:** the reconciler writes `terminal_completion_ref` with no pointer to
+the plan decision or thread that holds the evidence, so the documented completion-integrity path
+(read the column, re-open bare assertions) is guaranteed to misread well-evidenced work as an empty
+flip. The column reports absence-of-evidence and absence-of-work identically.
+
+**Either way:** if the completion column misrepresents the work and cannot honestly be repaired, say
+so explicitly to whoever is relying on it. Leaving a misleading-but-green field is worse than an
+accurate one that needs a sentence of explanation.

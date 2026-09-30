@@ -1,0 +1,20 @@
+{
+  "name": "@papercusp/gui-readiness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic, domain-free GUI process/window readiness barrier + cold-start measurement. Level-triggered polling with a hard deadline and process-liveness fail-fast, so waiting for readiness can NEVER hang — including when attaching to an already-running (persistent) process whose one-shot startup signal already fired before you started watching.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

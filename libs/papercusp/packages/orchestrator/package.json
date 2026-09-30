@@ -1,0 +1,154 @@
+{
+  "name": "@papercusp/orchestrator",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript port of the Papercusp harness orchestrator. Default since v0.0.x — set PAPERCUSP_USE_TS_ORCHESTRATOR=0 only as an emergency escape hatch back to the deprecated bash run.sh. Drops the bash prereq for Windows users while keeping the agent CLI shell-out (default `omp -p` via Meridian + Claude Max OAuth, or `claude -p` when AGENT_BACKEND=claude-code) so Claude Max subscriptions continue to work without API keys.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./config": {
+      "types": "./src/config.ts",
+      "import": "./src/config.ts",
+      "default": "./src/config.ts"
+    },
+    "./state": {
+      "types": "./src/state.ts",
+      "import": "./src/state.ts",
+      "default": "./src/state.ts"
+    },
+    "./role-prompt": {
+      "types": "./src/role-prompt-from-slug.ts",
+      "import": "./src/role-prompt-from-slug.ts",
+      "default": "./src/role-prompt-from-slug.ts"
+    },
+    "./role-models": {
+      "types": "./src/role-models.ts",
+      "import": "./src/role-models.ts",
+      "default": "./src/role-models.ts"
+    },
+    "./managed-capability-contract": {
+      "types": "./src/managed-capability-contract.ts",
+      "import": "./src/managed-capability-contract.ts",
+      "default": "./src/managed-capability-contract.ts"
+    },
+    "./managed-capability-policy": {
+      "types": "./src/managed-capability-policy.ts",
+      "import": "./src/managed-capability-policy.ts",
+      "default": "./src/managed-capability-policy.ts"
+    },
+    "./native-scheduler-deny": {
+      "types": "./src/native-scheduler-deny.ts",
+      "import": "./src/native-scheduler-deny.ts",
+      "default": "./src/native-scheduler-deny.ts"
+    },
+    "./native-tool-search-deny": {
+      "types": "./src/native-tool-search-deny.ts",
+      "import": "./src/native-tool-search-deny.ts",
+      "default": "./src/native-tool-search-deny.ts"
+    },
+    "./no-subagent-deny": {
+      "types": "./src/no-subagent-deny.ts",
+      "import": "./src/no-subagent-deny.ts",
+      "default": "./src/no-subagent-deny.ts"
+    },
+    "./owner-desktop-notify-deny": {
+      "types": "./src/owner-desktop-notify-deny.ts",
+      "import": "./src/owner-desktop-notify-deny.ts",
+      "default": "./src/owner-desktop-notify-deny.ts"
+    },
+    "./session-launch-dirs": {
+      "types": "./src/session-launch-dirs.ts",
+      "import": "./src/session-launch-dirs.ts",
+      "default": "./src/session-launch-dirs.ts"
+    },
+    "./fleet-claude-token": {
+      "types": "./src/fleet-claude-token.ts",
+      "import": "./src/fleet-claude-token.ts",
+      "default": "./src/fleet-claude-token.ts"
+    },
+    "./spawn-signing-core": {
+      "types": "./src/spawn-signing-core.ts",
+      "import": "./src/spawn-signing-core.ts",
+      "default": "./src/spawn-signing-core.ts"
+    },
+    "./codex-gateway-config": {
+      "types": "./src/codex-gateway-config.ts",
+      "import": "./src/codex-gateway-config.ts",
+      "default": "./src/codex-gateway-config.ts"
+    },
+    "./omp-gateway-config": {
+      "types": "./src/omp-gateway-config.ts",
+      "import": "./src/omp-gateway-config.ts",
+      "default": "./src/omp-gateway-config.ts"
+    },
+    "./decision-parse": {
+      "types": "./src/decision-parse.ts",
+      "import": "./src/decision-parse.ts",
+      "default": "./src/decision-parse.ts"
+    },
+    "./blueprint": {
+      "types": "./src/blueprint/index.ts",
+      "import": "./src/blueprint/index.ts",
+      "default": "./src/blueprint/index.ts"
+    },
+    "./mode-catalog": {
+      "types": "./src/blueprint/mode-catalog.generated.ts",
+      "import": "./src/blueprint/mode-catalog.generated.ts",
+      "default": "./src/blueprint/mode-catalog.generated.ts"
+    },
+    "./blueprint/params": {
+      "types": "./src/blueprint/params.ts",
+      "import": "./src/blueprint/params.ts",
+      "default": "./src/blueprint/params.ts"
+    },
+    "./blueprint/schema": {
+      "types": "./src/blueprint/schema.ts",
+      "import": "./src/blueprint/schema.ts",
+      "default": "./src/blueprint/schema.ts"
+    },
+    "./run-output-pg": {
+      "types": "./src/run-output-pg.ts",
+      "import": "./src/run-output-pg.ts",
+      "default": "./src/run-output-pg.ts"
+    },
+    "./run-chunks-pg": {
+      "types": "./src/run-chunks-pg.ts",
+      "import": "./src/run-chunks-pg.ts",
+      "default": "./src/run-chunks-pg.ts"
+    },
+    "./prompt-build": {
+      "types": "./src/prompt-build.ts",
+      "import": "./src/prompt-build.ts",
+      "default": "./src/prompt-build.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:legacy": "node --test --import tsx src/**/*.test.ts",
+    "typecheck": "node ../../../../scripts/lint-tsc-orchestrator.mjs"
+  },
+  "dependencies": {
+    "@papercusp/file-claim": "*",
+    "@papercusp/model-pricing": "*",
+    "@papercusp/locks": "*",
+    "@papercusp/harness": "*",
+    "@papercusp/rules": "*",
+    "@papercusp/step-program": "*",
+    "postgres": "^3.4.5",
+    "tsx": "^4.7.0",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.2"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

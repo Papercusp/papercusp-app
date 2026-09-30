@@ -1,0 +1,163 @@
+# A 'weekly limit' refusal is NOT a fleet-wide block — re-probe + check the gateway before escalating
+URL: /internal/docs/agent-insights/fleet-token-weekly-limit-silent-invoke-failures
+
+Agents read a 'You've hit your weekly limit · resets <date>' refusal (usually a STALE run-output snapshot) and escalate 'the fleet is blocked until <date>' — wrong on two counts. (1) With papercusp-inference-gateway ON, cup egress routes through the localhost gateway on a bound POOL account (ownerhandle10 via sole-pool-account), centrally paced — one account's Max weekly cap is not a fleet block. (2) The one-line discrimination probe usually shows the account answering live RIGHT NOW. Re-probe + check the flag before concluding blocked; switching to the pool account is the SANCTIONED recovery you do yourself, not an owner-gated policy call. Original silent-exit-1 diagnosis preserved below.
+
+## ⚠️ STOP — before you conclude "the fleet is blocked"
+
+This insight's original framing ("one shared token hits its weekly cap → the
+whole fleet is dead until the owner re-mints") is the **pre-gateway** world.
+Agents keep escalating "blocked until Jun 18" off a stale refusal string. Two
+checks kill that conclusion in under a minute:
+
+1. **Is the inference gateway ON?** `flags:get { key: 'papercusp-inference-gateway' }`.
+   When ON (it is, as of 2026-06-13), every cup spawn gets
+   `ANTHROPIC_BASE_URL=http://127.0.0.1:8788` (`inference-gateway/spawn-env.ts`):
+   the gateway **strips the cup's own auth and reinjects a bound POOL account**
+   (`ownerhandle10` via `sole-pool-account`, `account-resolver.ts`), paces centrally
+   against the rate governor, and proxies to `api.anthropic.com`. So cup egress
+   rides the **pool account through the API**, NOT `~/.papercusp/claude-token`'s
+   Max-subscription weekly cap. A weekly-limit refusal on `claude-token` does
+   **not** block gateway-routed spawns. (This is the conflation the owner keeps
+   flagging: agents think they ride the Max subscription when their traffic
+   actually egresses the API gateway — see
+   [llm-429-check-the-transport-not-the-account](/internal/docs/agent-insights/llm-429-check-the-transport-not-the-account)
+   and the `reference_max_oauth_needs_claude_code_framing` memory.)
+
+2. **Re-probe LIVE — don't parrot a snapshot.** A `"resets <date>"` string in a
+   `harness_run_output` row (or a peer's escalation citing it) is a *timestamp
+   of a past failure*, not current state. The limit may have reset; it may have
+   been transport-specific. Run the one-line discrimination test below against
+   **both** `~/.papercusp/claude-token` AND `~/.papercusp/deploy-credentials/ownerhandle10`.
+   (2026-06-13: both answered `exit=0` while a day-old "blocked until Jun 18"
+   escalation still sat open in the inbox — the live state contradicted the
+   snapshot every agent was citing.)
+
+**The pool account (ownerhandle10) is sanctioned, not a last resort.** The fleet keeps
+multiple OAuth accounts + the gateway precisely so one account's weekly cap never
+blocks it. Switching the fleet to the pool account (install its token at
+`~/.papercusp/claude-token`, or rely on the gateway binding) is the **normal
+recovery you perform yourself** — not a "burns the test account" escalation to
+the owner. Only escalate after the live probe shows **every** account refusing.
+
+## If you are a fleet-monitor about to file "the fleet is blocked"
+
+This insight keeps getting re-escalated by *automated fleet-health summaries*,
+not just humans — and the recurrence is a **propagation loop, not a real
+outage**:
+
+* **A still-open peer escalation citing "weekly limit · resets \<date>" is
+  NOT current truth.** Each monitor reads the last open blocker escalation and
+  re-files it forward, so one stale 2026-06-12 snapshot kept regenerating
+  "blocked until Jun 18" escalations for *days* after both tokens were live
+  (re-verified `exit=0` on 06-12, 06-13 08:08, and again 06-13 17:12). Before
+  you re-escalate, run the STOP checks above; if they pass, **`coord:resolve`
+  the open escalation with the live evidence** instead of filing a new one.
+  Don't propagate a snapshot.
+* **A dead-spawn signature is more often EI-85 than a quota cap.** EI-85
+  (open, critical): a restart of the shared `:3170` staging-api host cgroup-kills
+  every in-flight `cup:spawn` child, and the nursery mislabels it as
+  stale-heartbeat reclaim. The fleet bounces `:3170` for live smoke tests
+  several times a day, so "spawn exited 1 / empty output" *right after* a
+  `:3170` restart is almost certainly EI-85 — check for a recent
+  `papercup-staging-api.service` restart before you conclude "weekly limit."
+
+## Symptom (genuine exhaustion — verify it's real via the STOP checks above first)
+
+Autonomous LLM work dies fleet-wide while every *interactive* agent session
+works fine. The visible shape, wherever an orchestrator spawn runs (gym
+cycles, improvement implement-lane workers, wake-executor resumes, headless
+cups):
+
+```
+[dbos-invoke] role=director exited 1 with empty stderr (stdout 526 chars)
+Error: decide invoke failed (exit=1, empty=false)
+```
+
+Three traps stacked on top of each other make this hard to read:
+
+1. **stderr is empty** — the claude CLI prints its refusal to *stdout*.
+2. The invoke log line only prints the stdout **length**, not its content
+   (full tail requires `PAPERCUSP_DBOS_INVOKE_DEBUG=1` on the host).
+3. Your own session works, because interactive psu/Claude-Code sessions ride
+   the rotating `~/.claude/.credentials.json` family — a **different
+   account/pool** than the fleet token.
+
+## Where the real error text lives
+
+The agent's stdout is persisted even when the log hides it: for the gym, the
+run row in the **gym DB testcontainer** (DSN in `/tmp/gym-loop-op-*.log`):
+
+```sql
+SELECT role, exit_code, left(out_body, 200)
+  FROM harness_shared.harness_run_output ORDER BY ended_at DESC LIMIT 3;
+-- out_body: "You've hit your weekly limit · resets Jun 18, 7am (America/New_York)"
+```
+
+## One-line discrimination test
+
+```bash
+CLAUDE_CODE_OAUTH_TOKEN=$(cat ~/.papercusp/claude-token) claude -p 'reply ok' --model haiku
+```
+
+Compare with the same call *without* the env override (interactive family)
+and, if registered, the Mug's pool credentials under
+`~/.papercusp/deploy-credentials/<id>`. Whichever refuses names the exhausted
+account; whichever answers is a candidate replacement.
+
+## Why a single token's cap used to matter — and why the gateway changed it
+
+`@papercusp/orchestrator` invoke.ts + the wake-executor export
+`CLAUDE_CODE_OAUTH_TOKEN` from `~/.papercusp/claude-token` when the file
+exists (see `fleet-claude-token.ts`) — deliberately, so autonomous refreshes
+never invalidate the owner's interactive terminals (the every-terminal-relogin
+cascade; insight precedent in `claude-credential-sync-2026-06-10`). In the
+pre-gateway world the cost was real: the whole autonomous fleet shared ONE
+account's usage caps.
+
+**The inference gateway (ON since 2026-06-13) is the structural fix for exactly
+that.** With it on, cup spawns still carry `claude-token` in their env, but the
+gateway **overrides it** — `ANTHROPIC_BASE_URL` points the cup's `claude -p`
+subprocess at `127.0.0.1:8788`, and a placeholder `ANTHROPIC_AUTH_TOKEN=papercusp-gateway`
+bearer (`GATEWAY_CLIENT_AUTH_TOKEN` in `spawn-env.ts`) makes the CLI *send at all*
+without gating on its local login state; the gateway then strips that auth and
+reinjects the routed pool account's real OAuth, so egress no longer rides
+`claude-token`'s weekly cap at all (the local credential the spawn inherits is
+"harmlessly ignored" per `spawn-env.ts`).
+
+**NOTE the seam — and that it has since been CLOSED (D-011).** The routing
+decision now lives in ONE shared helper, `resolveSpawnGatewayEnv`
+(`inference-gateway/spawn-env.ts`), that BOTH spawn chokepoints apply: the cup
+path (`fleet/operator-spawn.ts`) AND the `/invoke` route
+(`endpoint-route/routes/harness/spawn.ts`). Earlier the `/invoke` path had
+DRIFTED and never routed Mug/overwatch/blueprint-run agents through the pool,
+so they egressed the single shared `~/.claude` OAuth credential and 429'd on its
+WEEKLY cap (silent 0-token wakes, the Mug placing nothing) while the 8-account
+pool sat idle — this insight's exact failure, on the one path the gateway wasn't
+covering. That drift is fixed (see the `resolveSpawnGatewayEnv` header's D-011
+note): a non-spawn invoke path is no longer a routing hole. Still verify the
+specific failing path actually egresses the gateway before assuming — any egress
+path OUTSIDE these two chokepoints would ride `claude-token` directly.
+
+## Recovery — verify first, then switch it yourself (rarely an owner act)
+
+1. **Re-probe LIVE** (the STOP section): if any account answers `exit=0`, the
+   fleet is **not** blocked — fix your own diagnosis, don't escalate.
+2. **Switch to the pool account yourself** — install `ownerhandle10` (or any
+   `~/.papercusp/deploy-credentials/<id>`) at `~/.papercusp/claude-token`
+   (credential-sync propagates it; spawns recover in seconds), or point one host
+   via `PAPERCUSP_CLAUDE_TOKEN_PATH`. This is sanctioned routine recovery.
+3. **Re-mint** (owner act, only if every account is genuinely exhausted): on an
+   account with headroom, `claude setup-token` → paste the `sk-ant-oat01…` token
+   into `~/.papercusp/claude-token` (0600).
+4. Waiting out a reset is the **last** resort, never the first conclusion.
+
+## Related gotchas
+
+* This failure class does NOT trip the gym's rate-pause detection or the
+  learning-infra health chip (the spine probe checks credential *presence*,
+  not *quota*) — first seen 2026-06-12 when the gym circuit accumulated
+  errors on a perfectly healthy boot path.
+* The gym autoloop keeps dispatching doomed $0 cycles every tick until the
+  error backoff opens the circuit; after recovery, `autoloop:control
+  reset-errors` for `gymloopharness` clears the backoff.

@@ -1,0 +1,20 @@
+{
+  "name": "@papercusp/embedded-postgres-server",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Boot a real Postgres (via embedded-postgres) with logical replication enabled. The desktop's DB substrate (real PG underneath).",
+  "type": "module",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "bin": {
+    "embedded-postgres-server": "bin/embedded-postgres-server.mjs"
+  },
+  "scripts": {
+    "gen:types": "rm -f src/index.d.ts src/migration-runner.d.ts src/pg-supervisor.d.ts && node ../../../../node_modules/typescript/lib/tsc.js -p tsconfig.types.json"
+  },
+  "dependencies": {
+    "embedded-postgres": "^18.3.0-beta.17",
+    "postgres": "^3.4.0"
+  },
+  "license": "MIT"
+}

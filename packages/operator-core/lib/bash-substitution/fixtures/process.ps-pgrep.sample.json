@@ -1,0 +1,128 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 / pair process.ps-pgrep (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T01:23:00Z",
+  "totalAtoms": 2236,
+  "totalSessions": 62,
+  "sample": [
+    {
+      "sid": "su-1c841b25-410f-45ef-b0ed-c0e22034a0c9",
+      "ts": "2026-07-21T01:13:12.462Z",
+      "atom": "pgrep -P $(pgrep -P $MAINPID) 2>/dev/null"
+    },
+    {
+      "sid": "su-7a80832c-ade5-4ed2-9a08-43f72fbbdae4",
+      "ts": "2026-07-26T06:32:23.191Z",
+      "atom": "pgrep -af \"build-and-archive-deb|cargo build\" 2>&1"
+    },
+    {
+      "sid": "su-38101f27-bf18-4044-9ca1-bd66bcf0b411",
+      "ts": "2026-07-25T22:29:26.717Z",
+      "atom": "pgrep -af \"mac-vm-verify\""
+    },
+    {
+      "sid": "su-ccb43bf4-89a3-4222-88e8-0c345cea2749",
+      "ts": "2026-07-20T15:13:22.286Z",
+      "atom": "pgrep -af \"sleep 600|papercusp-dev-operator-squatter\" 2>/dev/null"
+    },
+    {
+      "sid": "su-48ed7aaf-a682-4059-b032-42e9488f6620",
+      "ts": "2026-07-26T10:23:58.657Z",
+      "atom": "pgrep -af \"wi5980-verify.sh|tauri build|local-matrix.sh\""
+    },
+    {
+      "sid": "su-6f5ca4fb-38ab-468f-8d82-247940a52119",
+      "ts": "2026-07-25T23:06:24.943Z",
+      "atom": "pgrep -af 'mac-universal' 2>&1"
+    },
+    {
+      "sid": "su-707029ce-300a-469b-8fca-4cd393f5a0d2",
+      "ts": "2026-07-26T08:55:41.855Z",
+      "atom": "pgrep -c node"
+    },
+    {
+      "sid": "su-4ef7fb1d-c309-4356-a09a-638833555a7c",
+      "ts": "2026-07-25T21:07:03.907Z",
+      "atom": "pgrep -f \"test:affected:integration\\|vitest.*integration\" >/dev/null"
+    },
+    {
+      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
+      "ts": "2026-07-26T15:49:35.170Z",
+      "atom": "pgrep -f build-and-archive-deb >/dev/null"
+    },
+    {
+      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
+      "ts": "2026-07-25T21:04:35.126Z",
+      "atom": "pgrep -fc \"fleet=p2p-release\" 2>/dev/null"
+    },
+    {
+      "sid": "su-a8ea9aff-9469-4a8f-90bf-f09c6a383ca3",
+      "ts": "2026-07-25T21:57:21.913Z",
+      "atom": "ps --ppid 2980800 -o pid,etime,pcpu,cmd --no-headers 2>/dev/null"
+    },
+    {
+      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
+      "ts": "2026-07-26T07:27:14.171Z",
+      "atom": "ps -eo pcpu,pmem,etimes,comm,args --sort=-pcpu 2>/dev/null"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T10:16:44.808Z",
+      "atom": "ps -eo pid,pcpu,pmem,etime,comm --sort=-pcpu"
+    },
+    {
+      "sid": "su-a28a5f3c-4f45-465e-af05-e1e6e05668a9",
+      "ts": "2026-07-26T06:51:35.633Z",
+      "atom": "ps -o etime,%cpu -p 892768"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T16:55:07.246Z",
+      "atom": "ps -o pid,etime,cmd -p $(pgrep -f vitest"
+    },
+    {
+      "sid": "su-48ed7aaf-a682-4059-b032-42e9488f6620",
+      "ts": "2026-07-26T17:19:53.640Z",
+      "atom": "ps -o pid,etimes,%cpu,cmd -p 1324040 2>&1"
+    },
+    {
+      "sid": "su-d93ac1bf-d48f-420d-8136-dea6de467e7f",
+      "ts": "2026-07-21T01:13:06.557Z",
+      "atom": "ps -o pid,ppid,cmd --no-headers -p $(ps -o ppid= -p 867723) 2>/dev/null"
+    },
+    {
+      "sid": "su-48ed7aaf-a682-4059-b032-42e9488f6620",
+      "ts": "2026-07-26T16:40:48.672Z",
+      "atom": "ps -o pid,ppid,etimes,cmd -p 1323861"
+    },
+    {
+      "sid": "su-e3b21216-e294-4a92-b8f8-5a73a244ff09",
+      "ts": "2026-07-26T15:33:55.743Z",
+      "atom": "ps -o pid,time,pcpu,args -p 1181918"
+    },
+    {
+      "sid": "su-b0971728-8161-44b0-9e6a-9adbe4d42cd6",
+      "ts": "2026-07-26T08:39:03.399Z",
+      "atom": "ps -p $newest -o pid,lstart,cmd --cols=1000 2>&1"
+    },
+    {
+      "sid": "su-6bf2ddf4-01af-4873-a116-9ddcb2a0a779",
+      "ts": "2026-07-25T22:28:55.727Z",
+      "atom": "ps -p 160516 2>&1"
+    },
+    {
+      "sid": "su-48ed7aaf-a682-4059-b032-42e9488f6620",
+      "ts": "2026-07-26T14:04:28.682Z",
+      "atom": "ps -p 2283150 -o pid,etime,cmd 2>&1"
+    },
+    {
+      "sid": "su-73565638-a17a-4be4-adfd-86a6750ac1c1",
+      "ts": "2026-07-26T16:52:03.212Z",
+      "atom": "ps -p 31450,54083 -o pid,ppid,etimes,pgid,cmd 2>&1"
+    },
+    {
+      "sid": "su-a8557b00-55fb-4438-a7bd-f269a7a3bf6c",
+      "ts": "2026-07-26T06:22:09.077Z",
+      "atom": "ps -p 3900550 > /dev/null 2>&1"
+    }
+  ]
+}

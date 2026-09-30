@@ -1,0 +1,43 @@
+-- 1191 — hosted self-serve signup: legal_acceptances needs SELECT for hosted_owner.
+--
+-- SYMPTOM (owner-reported twice, WI-10002367 / WI-10002240): a real user completes
+-- WorkOS sign-up at app.papercusp.com and is silently returned to the entry page.
+-- No account is created, nothing is logged, and it never self-heals.
+--
+-- ROOT CAUSE: migration 1188 created the sanctioned SECURITY DEFINER function
+-- papercusp_auth.record_hosted_self_signup_legal() (owner hosted_owner) and granted
+-- the underlying table only:
+--
+--     GRANT INSERT ON papercusp_auth.legal_acceptances TO hosted_owner;   -- 1188:138
+--
+-- but the function body writes with an upsert:
+--
+--     INSERT INTO papercusp_auth.legal_acceptances (...)
+--     ON CONFLICT (organization_id, user_id, document_kind, document_version)
+--     DO NOTHING;
+--
+-- PostgreSQL requires **SELECT** privilege on the target table to evaluate an
+-- ON CONFLICT arbiter index. With INSERT alone the SECURITY DEFINER function
+-- denies ITSELF:
+--
+--     ERROR 42501: permission denied for table legal_acceptances (aclcheck_error)
+--
+-- That error is raised inside the single admission transaction, so the whole
+-- sign-up rolls back: papercusp_auth.hosted_signup_attempts keeps ZERO rows, no
+-- user/org/membership is created, and self-signup.ts maps the throw to
+-- { ok:false, code:'unavailable' } -> the route 303s to /?hosted_auth_error=signup_unavailable.
+-- A missing GRANT never heals, which is why the owner saw the identical bounce
+-- on every attempt.
+--
+-- FIX: grant SELECT, matching EVERY sibling table hosted_owner touches
+-- (external_identities, hosted_users, organizations, organization_memberships, ...
+-- all already carry SELECT). legal_acceptances was the lone outlier.
+--
+-- Least privilege is preserved deliberately: this grants nothing to hosted_service,
+-- which still cannot read or write legal_acceptances directly and must continue to
+-- go through the SECURITY DEFINER function. This migration widens only the
+-- function-owner role, by exactly the one privilege its own body requires.
+--
+-- Non-destructive (GRANT only, idempotent) — no FORWARD-COMPAT acknowledgment needed.
+
+GRANT SELECT ON papercusp_auth.legal_acceptances TO hosted_owner;

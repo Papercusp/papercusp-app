@@ -1,0 +1,128 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 P-005 / pair file-read.head (re-drawn for EI-18799531134810488: single-file-operand pattern) (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T13:34:00Z",
+  "totalAtoms": 208,
+  "totalSessions": 52,
+  "sample": [
+    {
+      "sid": "su-a28a5f3c-4f45-465e-af05-e1e6e05668a9",
+      "ts": "2026-07-26T02:39:58.180Z",
+      "atom": "head -1 /home/dev/.papercusp/live-fed-gate/triage/serve-b-220159.log"
+    },
+    {
+      "sid": "su-48ed7aaf-a682-4059-b032-42e9488f6620",
+      "ts": "2026-07-26T04:35:37.654Z",
+      "atom": "head -10 /tmp/wi5863-cand7-run2.log"
+    },
+    {
+      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
+      "ts": "2026-07-26T14:25:42.969Z",
+      "atom": "head -12 apps/operator-docs/src/content/docs/agent-insights/judging-claimable-work-not-status-open.mdx 2>/dev/null"
+    },
+    {
+      "sid": "su-e3b21216-e294-4a92-b8f8-5a73a244ff09",
+      "ts": "2026-07-25T22:23:07.523Z",
+      "atom": "head -2 serve-b-182058.log"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T02:33:06.992Z",
+      "atom": "head -20 /tmp/live-fed-gate-20260720-220200/build.log"
+    },
+    {
+      "sid": "su-92bacd98-b714-4f44-a4fc-08e73ea7ca39",
+      "ts": "2026-07-26T01:14:24.005Z",
+      "atom": "head -20 apps/operator-docs/src/content/docs/reference/agent-insights-index.md"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T12:10:47.183Z",
+      "atom": "head -20 scn.content_bidir-042035.log"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T21:09:38.285Z",
+      "atom": "head -25 packages/db/src/forward-forecasts.test.ts"
+    },
+    {
+      "sid": "su-a8ea9aff-9469-4a8f-90bf-f09c6a383ca3",
+      "ts": "2026-07-26T02:02:06.680Z",
+      "atom": "head -3 /tmp/gate-final.log 2>/dev/null"
+    },
+    {
+      "sid": "su-48ed7aaf-a682-4059-b032-42e9488f6620",
+      "ts": "2026-07-26T04:35:55.773Z",
+      "atom": "head -3 /tmp/wi5863-window-a.log"
+    },
+    {
+      "sid": "su-48ed7aaf-a682-4059-b032-42e9488f6620",
+      "ts": "2026-07-26T15:15:32.519Z",
+      "atom": "head -30 /home/dev/papercupai-workspace/papercusp/papercusp-desktop/bin/build-and-archive-deb.sh 2>&1"
+    },
+    {
+      "sid": "su-e15fb42f-6686-41e7-8368-37f5ec26ef3c",
+      "ts": "2026-07-26T04:00:19.498Z",
+      "atom": "head -30 Serializer.cjs 2>/dev/null"
+    },
+    {
+      "sid": "su-6f7850f2-2112-4e72-bb09-e8983af3f851",
+      "ts": "2026-07-19T04:24:05.992Z",
+      "atom": "head -30 deploy.sh 2>/dev/null"
+    },
+    {
+      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
+      "ts": "2026-07-26T06:04:34.311Z",
+      "atom": "head -4 /tmp/tsc_direct.log"
+    },
+    {
+      "sid": "su-3dfbc0fd-e642-46b0-b81e-abed2ae62eea",
+      "ts": "2026-07-20T02:17:01.659Z",
+      "atom": "head -40 /tmp/querynames.txt"
+    },
+    {
+      "sid": "su-88c3bf51-e38b-47a4-b357-4c547d0e65be",
+      "ts": "2026-07-25T22:03:27.047Z",
+      "atom": "head -40 packages/operator-core/lib/harness/docs/doc-steward-dispatch.ts"
+    },
+    {
+      "sid": "su-707029ce-300a-469b-8fca-4cd393f5a0d2",
+      "ts": "2026-07-26T05:53:07.080Z",
+      "atom": "head -45 claim-hold-guard.ts"
+    },
+    {
+      "sid": "su-7a80832c-ade5-4ed2-9a08-43f72fbbdae4",
+      "ts": "2026-07-26T06:26:46.918Z",
+      "atom": "head -5 /tmp/wi5863-rig-rebuild/build.log 2>&1"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T00:37:48.683Z",
+      "atom": "head -50 /home/dev/papercupai-workspace/papercusp/papercusp-desktop/bin/deb-hetzner-matrix.sh"
+    },
+    {
+      "sid": "su-88c3bf51-e38b-47a4-b357-4c547d0e65be",
+      "ts": "2026-07-26T00:27:07.845Z",
+      "atom": "head -6 adding-a-sync-query.md 2>/dev/null"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T02:40:56.163Z",
+      "atom": "head -60 apps/desktop/src/lib/engine-wiring.test.ts"
+    },
+    {
+      "sid": "su-7905fadc-2ba3-4492-897d-99d351a64a68",
+      "ts": "2026-07-26T06:34:23.283Z",
+      "atom": "head -60 packages/operator-core/lib/work-items-hold-open.integration.test.ts"
+    },
+    {
+      "sid": "su-cd450e2a-a441-442a-afe6-f112522cbde8",
+      "ts": "2026-07-20T12:12:21.477Z",
+      "atom": "head -70 load-070954.txt"
+    },
+    {
+      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
+      "ts": "2026-07-25T23:41:47.621Z",
+      "atom": "head -80 apps/operator/scripts/psu-pty-host.mjs"
+    }
+  ]
+}

@@ -1,0 +1,202 @@
+# Establish what your evidence covers before you read it
+URL: /internal/docs/agent-insights/establish-evidence-scope-before-reading
+
+Five confidently-wrong conclusions in one night, all from reading a log/artifact without first establishing what it actually covers — plus the temporal freshness guard that prevents a current pass from falsely retracting a bug fixed after it was filed.
+
+## The trap
+
+A grep, a read, or an artifact's mtime produces a **plausible, quotable
+number** — a hit count, a zero, a timestamp — and that number gets promoted
+straight into a confident, evidenced-sounding conclusion. What's missing is
+the step in between: **establishing what the thing you just read actually
+covers.** Nothing in a log's output announces its own scope, so the failure
+is silent and the wrong conclusion sounds exactly as evidenced as the right
+one would have.
+
+This is a sibling trap to
+[a local test pass is not evidence about a candidate SHA](/agent-insights/local-test-pass-is-not-evidence-about-a-sha)
+— same shape (a correct measurement of the wrong object), different surface
+(artifact *coverage* rather than artifact *identity*).
+
+## What it cost: five instances in one night (WI-5863, 2026-07-26)
+
+Four separate agents — one of them three times — reached a confident, wrong
+conclusion during one overnight P2P federation-rig session. Each was caught
+only by luck, by a peer, or (instance 5) by going back to settle a caveat
+that had been written down and then left standing — never by the process
+that produced it.
+
+### 1. Case-sensitive grep false negative
+
+An agent banked a check — "the punch/relay discriminator has never fired on
+a failing connection" — marked ✓ VERIFIED, evidence `grep -l 'never came up'`.
+The log actually writes `**NEVER** came up` in caps. Real counts in the very
+files already banked: 58 and 128 matches. The false negative was carried as
+verified fact for hours and reported to the fleet.
+
+### 2. Grepping the source field name that the log renames
+
+`grep udxRelayed` in `swarm.ts` returned 0 hits, read as "the emitter is
+missing" — narrowing a bug's scope. But `swarm.ts:1319` does
+`out.relayed = s.udxRelayed`; `extractConnectionPath()` deliberately renames
+the field on the way out. The same file has 126 hits under `relayed`. A grep
+for a source-side identifier told you nothing about the log's own vocabulary.
+
+### 3. Nested captures read as independent runs
+
+Three banked log snapshots — `serve-a-020217.log`, `serve-a-021834.log`,
+`serve-a-022802.log` — looked like three separate runs because their
+filenames carry three different timestamps. **They all begin at the
+identical first log line, `05:59:08.366Z`.** They are three *nested*
+snapshots of one continuous, cumulative `serve.log`, because the rig ran
+with `--reuse --keep-up` (`local-matrix.sh`: `--keep-up` leaves frames + DHT
+up, `--reuse` re-enters them without a fresh provision). Warning counts
+0 / 58 / 128 across the three files are not per-run deltas — they're
+cumulative totals of the same growing file, so diffing or summing them
+double-counts. An agent was one step from broadcasting "healthy control run
+vs. failing run" off two files where one file's content is a strict prefix
+of the other's.
+
+### 4. Build-time vs. pack-time artifact confusion
+
+A `.deb`'s mtime was read as "when its contents were built." A container/
+package's mtime records when it was **assembled**, not when its payload was
+**compiled** — two agents mis-diagnosed a staleness question off it the same
+night.
+
+### 5. Joining two records by PROXIMITY instead of a shared field
+
+The nastiest of the five, because **it produced the correct answer.**
+
+Confirming the WI-5863 root cause needed each failing connection tied to its
+remote peer key. The `[swarm] ⚠ data path NEVER came up` warning appeared to
+follow its `[swarm-churn] close {` block, so the two were joined by *nearest
+preceding block* — and the result (one stable peer key presenting 33 distinct
+source ports) was reported with the adjacency flagged as an unverified
+heuristic.
+
+Going back to test that flag: **0 of 128 warnings actually follow a
+close-block end.** The join was invalid. The numbers were right anyway,
+because the warning block turns out to be *self-contained* — it carries
+`remotePublicKeyHex` **and** its own `path{ serverAddress, clientAddress,
+remotePort }`. Re-deriving from a real in-block join reproduced 33/31 exactly
+and additionally showed the local port pinned at exactly 1.
+
+Two lessons, and the second is the one that generalizes:
+
+* **Never join log records by proximity.** Adjacency is a rendering
+  accident, not a relation. Check whether the record already carries the
+  field you need — these did.
+* **A wrong method that yields a right answer is worse than one that
+  fails**, because the correct answer certifies the method. Had the numbers
+  come out wrong, the bad join would have been found immediately. Instead it
+  was about to be canonized: the fleet leader broadcast this method as "the
+  standard the lane should hold" *13 seconds before* the correction landed.
+* **A caveat you don't return to is just a disclaimer.** The heuristic was
+  labelled as unverified in the very message that used it. Writing the
+  caveat is worthless unless something makes you go back and settle it.
+
+## Why it keeps happening
+
+Every one of these produces output that *looks* self-describing:
+
+* A zero from grep reads as "confirmed absent," not "my pattern didn't
+  match this vocabulary."
+* A file named for a timestamp reads as "the run that started at that
+  timestamp," not "the state of a cumulative log the moment I sampled it."
+* A file's mtime reads as "when the content was produced," not "when this
+  copy of it was written to disk."
+
+None of these readings is *forced* by the artifact — they're the reader's
+default assumption, filled in because the artifact doesn't say otherwise.
+
+## The rule: a zero (or any absence claim) needs a positive control
+
+This is the same discipline already applied to typecheck logs ("the log
+must contain a *known* error, proving `tsc` actually ran") — generalize it:
+
+* **An absence claim is not evidence until the probe is shown capable of a
+  non-zero.** Before trusting `grep -c PATTERN file` → 0 as "PATTERN never
+  happened," grep for something you *know* is in the file (a different
+  known-present string, or the same pattern case-relaxed / field-renamed) to
+  confirm the search mechanism actually works against this artifact's real
+  vocabulary. No positive control ⇒ label the finding **PREDICTED**, not
+  **VERIFIED**.
+* **Bank artifact identity alongside every count.** A file's *name* is not
+  its *coverage*. Before comparing two log/artifact snapshots, check their
+  own first+last content timestamps (or a content hash) — two files sharing
+  a first timestamp are one process, not two. `rig_bank_logs()` (in
+  `deb-hetzner-rig.sh`) now stamps this automatically: every banked
+  `serve-<frame>-<stamp>.log` gets a header line recording the file's own
+  first/last in-content timestamp and an explicit note that `serve.log` is
+  cumulative for the whole rig session — so a reader sees the nesting risk
+  before drawing a conclusion, not after.
+* **A grep hit is evidence a string appears — never evidence about the
+  enclosing semantics** (does the field still have that name at the log
+  boundary; is the match case/spelling-sensitive to how *this* artifact
+  actually writes it).
+* **An mtime tells you when a file was written, not when its payload was
+  produced.** For a build/pack pipeline, trace back to the compile step's
+  own timestamp or a content hash — never the container/artifact's mtime.
+
+## The mechanical guards, by claim type
+
+| Claim                                | Don't trust                        | Check instead                                                                           |
+| ------------------------------------ | ---------------------------------- | --------------------------------------------------------------------------------------- |
+| "X never happened" (grep count = 0)  | the raw zero                       | a positive control: grep something known-present in the same file/vocabulary first      |
+| "these are two separate runs"        | the filename/stamp                 | the file's own first content timestamp — do the two overlap or nest?                    |
+| "the emitter/field is missing"       | a grep for the *source* identifier | the log's actual output vocabulary at the point it's written (renames, wrapping)        |
+| "this artifact was built at mtime T" | the artifact's mtime               | the compile/build step's own timestamp, or a content hash                               |
+| "record A belongs to record B"       | that A sits next to B in the log   | a field the records actually share — check whether the record is already self-contained |
+
+## Generalize
+
+**Nothing in a log's output announces its own scope.** Before a read/grep
+result becomes a claim — especially a claim of *absence*, or a claim that
+two artifacts represent *independent* runs — ask explicitly: what window
+does this file cover, is my probe capable of a hit against this file's real
+vocabulary, does this file's own content (not its name) confirm that, and —
+if I am relating two records — do they share an actual field or am I relying
+on where they sit.
+
+Four careful agents, explicitly watching for this class of mistake, still
+produced it **five times in one session** — the discipline has to be a
+checked step, not a held intention. Instance 5 is the warning about the
+other four: it is the one where the flawed method returned the *right*
+answer, which is precisely how a flawed method survives long enough to be
+adopted.
+
+## A non-reproduction result also needs a temporal freshness check
+
+A probe can be correctly aimed and still answer the wrong triage question if the
+artifact or source path changed after the bug was filed. **Before closing a
+filed bug as non-reproducing, establish that the thing you probed is the same
+state that the report described.** A current green result is not evidence that
+the reported failure never existed when a peer may have fixed it minutes
+earlier.
+
+Use a small, explicit freshness record:
+
+1. Record the work-item's `createdAt` in UTC, the exact cited artifact or
+   source path, and the commit or content identity under test.
+2. Compare that timestamp with the path's relevant Git history and, for
+   generated artifacts, with `TZ=UTC stat`/mtime. Read the writer's timestamp
+   or commit time; do not compare a local-time display to a UTC work-item
+   timestamp or treat an artifact's mtime as its build time.
+3. If the path or artifact changed after `createdAt`, classify the result as
+   **temporally stale**, not as proof of non-reproduction. Re-test the reported
+   revision when available, or preserve the bug with the change and uncertainty
+   recorded.
+4. Only call the bug non-reproducing when the probe covered the same artifact
+   state; include the compared UTC timestamps and identity in the evidence.
+
+This guard was added after a local-vs-UTC mtime reading caused a false
+retraction of a real fix. It is the temporal counterpart to the positive-control
+rule above: calibration proves that the instrument can distinguish the case,
+while freshness proves that it measured the case that was actually filed.
+
+Add this row to the claim table:
+
+| Claim                              | Don't trust                                            | Check instead                                                                                   |
+| ---------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| "the filed bug does not reproduce" | a current pass against an unverified or newer artifact | work-item `createdAt` versus Git history / UTC mtime and the exact revision or content identity |

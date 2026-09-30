@@ -1,0 +1,106 @@
+# The terminal-title pipeline (and its two silent fail-open traps)
+URL: /internal/docs/agent-insights/terminal-title-osc-pipeline
+
+How the fleet 👑/👤 identity reaches an OS title bar across claude/codex/omp — and the two bugs that made it silently not, for a long time.
+
+The fleet identity you see in a terminal's title bar — `👑 p2p-rest 🟪 · ⟳1m · ▶ · su-4d7a4 · 🔭 <objective>` —
+is rendered **once, server-side**, by
+`packages/operator-core/lib/agent-tools/coordination/status-display.ts` into
+`coord:glance`'s `display.title`. Every CLI hook is a dumb pipe that writes that
+string to the OS title as an OSC-0 escape (`ESC ] 0 ; <title> BEL`).
+
+Add a chip **there**, once, and every TUI picks it up. That part has worked since WI-1963.
+
+What had *not* worked: the title reaching the terminal at all. Two independent bugs,
+one per transport, each hidden by a **fail-open** path — which is the whole lesson here.
+A fail-open write and a successful write look identical from outside, so nothing detected
+either one. Both are fixed (WI-3665, 2026-07-09) and both are now guarded.
+
+## Trap 1 — `/dev/tty` is not the terminal you own
+
+`/dev/tty` is the process's **controlling** terminal. Claude Code spawns its `statusLine`
+command **setsid'd** — its own session, no controlling terminal:
+
+```
+pid=853874 ppid=853873 sid=853873 tty=?
+  /dev/tty -> ENXIO
+```
+
+So the open failed, the hook failed open, and the title write was a silent no-op on
+**every statusline tick**, for as long as that spawn mode has existed. The title was
+computed correctly the whole time; it just never landed. Claude's own topic title then
+won the window uncontested.
+
+**The rule:** never write the title to `/dev/tty` alone. Use the shared resolver —
+`apps/operator/scripts/hooks/cc/pc_tty.py` (`write_osc_title`) for the shell hooks, or its
+TS twin `writeOscTitle` / `ttyCandidates` in `hooks/omp/coord-hook.ts`. Both try
+`$PAPERCUSP_TTY` (the terminal this session **owns**) before `/dev/tty`.
+
+`psu-launcher.mjs`'s `resolveOwnedTtyPath()` resolves that terminal at launch — psu is the
+process that attaches the agent to it, so psu is the only thing that knows — and exports it
+as `PAPERCUSP_TTY`. Env crosses the setsid boundary that a controlling terminal does not.
+
+Two non-obvious invariants:
+
+* **Re-derived per launch, never inherited.** `sanitizeInheritedEnv` keeps `PAPERCUSP_*`, so
+  an agent session that owns a terminal and spawns a *headless* psu child would otherwise leak
+  its `PAPERCUSP_TTY` down — and the bee would retitle the human's window on every tool call.
+  `runWrapper` recomputes it and `delete`s it when the launch owns no terminal.
+* **Do not "fix" this by walking `/proc` ancestry** to the nearest tty. It works, and it is
+  wrong: ancestry crosses ownership boundaries. Measured on the dev box while diagnosing this,
+  a bash under one agent's session walks up to `claude tty_nr=34881` → `/dev/pts/65`, a
+  *different* agent's terminal.
+
+## Trap 2 — a hook that reads `coord:glance` must pin JSON
+
+`coord:glance` is **TOON-encoded by default**. A hook that doesn't ask for JSON gets back
+`format: toon\nok: true\n…`, its `json.loads` / `JSON.parse` throws, the glance reads as
+`null`, and the render falls back to a bare session id — **no fleet, no crown**, silently.
+
+* python hooks: `&format=json` on the `/api/mcp` url
+* omp `callMcpTool`: `{ meta: { format: 'json' } }`
+
+This is the **EI-7029 class**. It was fixed in `statusline-fleet.sh` back in 2026-06 and never
+propagated, so **codex and omp rendered a crownless title from the day TOON became the default**
+until WI-3665. If you add a hook that reads a glance, pin the format.
+
+## One writer per title
+
+Claude Code writes its own topic title (`✳ Claude Code`, then `⠐ <topic>`). Verified by capturing
+its pty output: **1 OSC-0 write by default, 0 with `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1`.** Two
+writers on one title means last-writer-wins and the title flickers.
+
+`psu-launcher.mjs`'s `shouldSilenceClaudeTitle()` sets that env — but only when **all** hold:
+claude backend · this launch owns a terminal · the `statusLine` claude will actually load *is*
+our hook. A user with a personal statusLine keeps Claude's title, because silencing the only
+writer would leave no title at all. (The installer likewise refuses to clobber a foreign
+`statusLine`; the two refusals must agree.)
+
+## `pc_tty.py` ships on three paths — miss one and the bug returns invisibly
+
+It is `import`ed off the hooks' own dirname, so it must land **beside** them everywhere:
+
+| path                                                            | how it copies             | the trap                                                             |
+| --------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------- |
+| `apps/operator/scripts/install-standalone-mcp.sh`               | explicit `cp` per file    | a new file is simply forgotten                                       |
+| `papercusp-desktop/bin/build-desktop-sidecar.sh`                | `cp -a .../*.sh`          | **the glob drops `.py`** — every packaged Mac/Windows app            |
+| `packages/operator-core/lib/desktop-install/papercusp-files.ts` | `CC_HOOK_FILES` allowlist | absent ⇒ never installed; also install it `0644` (a lib, not a hook) |
+
+A hook that lands without the lib it imports raises `ImportError`, **fails open**, and silently
+stops setting the title. That is the same shape as EI-8191 ("blank bottom statusline").
+
+## Testing this
+
+`apps/operator/lib/objective-title-parity.test.ts` drives the hooks with **fixtures** — which
+bypass both the tty and the network. It therefore **cannot** catch either trap above, and didn't.
+
+`apps/operator/lib/tty-title-target.test.ts` is the guard that can:
+
+* runs the real hooks under real **`setsid`**, reproducing Claude's spawn mode, and asserts the
+  escape reaches `$PAPERCUSP_TTY`;
+* asserts that with **no** owned terminal a hook writes **nothing** (the headless-bee invariant);
+* asserts `format=json` at the **request-construction site** for all three CLIs;
+* asserts install parity across **all three** copy paths.
+
+When you touch this pipeline, verify against a real window (`xprop -id <win> WM_NAME`), and reset
+the title to a sentinel first — otherwise a stale title reads as success.

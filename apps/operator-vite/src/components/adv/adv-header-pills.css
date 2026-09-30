@@ -1,0 +1,485 @@
+/*
+ * adv-header-pills.css — the SHARED styles for the AdvShell header "running" pills
+ * (AgentsRunningPill = "⚡ N agents running", TasksRunningPill). PotsRunningPill
+ * was the third and is gone (P-075, [owner 2026-08-10]).
+ *
+ * SINGLE SOURCE OF TRUTH (quick-panel-status-pills-2026-07-13 D-001). These rules
+ * used to live in AdvShell.tsx's inline <style>, so the pills rendered correctly
+ * ONLY while AdvShell was mounted. The Quick Panel popup window
+ * (apps/operator/app/quick-panel) reuses the SAME two pill components but does NOT
+ * mount AdvShell, so a bare drop-in rendered the pills as unstyled browser-default
+ * buttons (the "silver 3D outset button" gotcha). Extracting the button base +
+ * the hives pill/popover here — and importing it from BOTH AdvShell AND each pill
+ * component — makes the pills portable to any consumer with no duplicated CSS to
+ * drift.
+ *
+ * AdvNowRunning's own variants (--start/--stop/--waiting + the harness bar) moved
+ * here for the SAME reason, 2026-07-27: the pot cluster left AdvShell's header for
+ * the pot-scoped tab bodies (AdvPotBar), so AdvNowRunning no longer renders inside
+ * AdvShell's markup and can no longer borrow its inline <style>. It imports this
+ * sheet directly now. The selector-specific rules (--new/--share/--shared, the
+ * select trigger, the sub-pots toggle) live with the row that owns them, in
+ * adv-pot-bar.css. Everything below cascades off the `.pc-advshell__action` base.
+ *
+ * AgentsRunningPill's own wrapper + roster popover styles remain self-injected in
+ * its RosterStyles <style> (already portable); this file only needs to carry what
+ * BOTH pills share (the `.pc-advshell__action` button base) plus the hives pill's
+ * button variant + fold-out popover.
+ */
+
+/* ── The header pill/toolbar button base (shared by both pills) ───────────── */
+.pc-advshell__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.pc-advshell__action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ── AdvNowRunning: the pot status bar + its Start/Stop buttons ───────────── */
+.pc-advshell__harness-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding-left: 10px;
+  margin-left: 2px;
+  border-left: 1px solid var(--border, rgba(125, 211, 252, 0.18));
+}
+.pc-advshell__idle {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--fg-mute);
+  white-space: nowrap;
+}
+.pc-advshell__action--start {
+  background: var(--good-bg);
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good), transparent 62%);
+}
+.pc-advshell__action--start:hover:not(:disabled) {
+  background: rgba(34, 197, 94, 0.26);
+}
+.pc-advshell__action--stop {
+  background: var(--bad-bg);
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad), transparent 66%);
+}
+.pc-advshell__action--stop:hover {
+  background: rgba(239, 68, 68, 0.22);
+}
+/* The amber `--waiting` variant ("N plans waiting") was removed with its only
+   consumer, the AdvNowRunning nudge (P-075, [owner 2026-08-10]). */
+
+/* ── PotsRunningPill — REMOVED 2026-08-10 (P-075) ─────────────────────────────
+   The "▶ N POT running" button, its `--pots` variant, the `pots-pill-wrap`
+   positioning context and the whole `pots-pop` fold-out popover (which hosted
+   LocalPotsControl's per-pot start/stop rows, hence the `.pclsb-*` overrides)
+   lived here until the owner directive removed the button
+   ([owner 2026-08-10] "remove the ... 'pots running' button"). The component was
+   deleted, so every selector in this block had zero possible matches; they are
+   removed rather than left as dead CSS the next reader has to disprove.
+   The `.pclsb-*` rules here were OVERRIDES of the left-sidebar panel styles for
+   this popover only — the base rules still live with that panel and are
+   untouched. */
+
+/* ── Tasks pill + Task Manager dropdown (WI-6844) ─────────────────────────────
+   Owner ask 2026-08-02: the task manager moves out of the left rail's middle
+   pane and becomes the third pill in `pc-advshell__header-status`, right of
+   "agents running". Styles live HERE rather than self-carried in the component
+   because that is the D-001 reason this file exists — AdvShell and the Quick
+   Panel popup both render these pills, and a self-carried <style> only ships
+   with whichever tree mounted the component first. */
+.pc-advshell__action--tasks {
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent), transparent 58%);
+}
+.pc-advshell__action--tasks:hover,
+.pc-advshell__action--tasks[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: var(--bg-raised-high);
+}
+
+/* ── AgentsRunningPill: the "⚡ N agents running" button + its running STATE ──
+   The pill stays mounted at zero and reads "0 agents running" (WI-10001471), so
+   the running/idle distinction has to be VISIBLE, not just a count: `is-running`
+   toggles on running.length > 0 (EI-23336692339406030, [owner 2026-09-15]).
+   Idle = the quiet base pill in --fg-mute; running = --good tint + a thin inset
+   ring, the same affordance the retired pots pill carried. The ring is
+   re-asserted with !important + :not(:focus-visible) because AdvShell's body
+   flattens every non-focus button's box-shadow (see adv-pot-bar.css's note on
+   `.pc-advshell__action--pots.is-running`) — it is a STATE, not a bevel. */
+.pc-advshell__action--agents {
+  color: var(--fg-mute);
+  border-color: color-mix(in srgb, var(--fg-mute), transparent 70%);
+}
+.pc-advshell__action--agents:hover,
+.pc-advshell__action--agents[aria-expanded="true"] {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--fg-mute), transparent 40%);
+  background: var(--bg-raised-high);
+}
+.pc-advshell__action--agents.is-running {
+  color: var(--good);
+  background: var(--good-bg);
+  border-color: color-mix(in srgb, var(--good), transparent 58%);
+}
+.pc-advshell__action--agents.is-running:hover,
+.pc-advshell__action--agents.is-running[aria-expanded="true"] {
+  color: var(--good);
+  border-color: var(--good);
+  background: color-mix(in srgb, var(--good), transparent 78%);
+}
+.pc-advshell__action--agents.is-running:not(:focus-visible) {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good), transparent 86%) !important;
+}
+
+/* OWNER-REPORTED 2026-08-02: the panel rendered fully TRANSLUCENT — work-item rows
+   and status chips from the page behind it bled straight through the task list and
+   nothing was readable.
+   Cause: this rule set only geometry. The sibling `.pc-advshell__pots-pop` carries
+   its own background/border/shadow/position because the shared <Popover> primitive
+   supplies GEOMETRY ONLY, not a surface — I copied the width/padding from it and not
+   the thing that makes it opaque. Mirroring the hives popover's full surface here.
+   The background is deliberately a flat opaque colour (not a gradient with alpha):
+   this panel scrolls a dense monospace table, and any translucency at all makes the
+   text underneath legible through it. */
+.pc-advshell__tasks-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 80;
+  width: 620px;
+  max-width: calc(100vw - 40px);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-strong, rgba(125, 211, 252, 0.26));
+  border-radius: 10px;
+  background: var(--bg-popover);
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.62),
+    0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+}
+.pc-advshell__tasks-pop::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  right: 24px;
+  width: 10px;
+  height: 10px;
+  transform: rotate(45deg);
+  border-left: 1px solid var(--border-strong, rgba(125, 211, 252, 0.26));
+  border-top: 1px solid var(--border-strong, rgba(125, 211, 252, 0.26));
+  background: var(--bg-popover);
+}
+/* The scroll body must also be opaque in its own right: the sticky group headers
+   scroll UNDER nothing, but the rows scroll under the sticky header, and a
+   transparent row lets the header's own text show through as the list moves. */
+.pc-tasks-roster,
+.pc-tasks-roster__scroll {
+  background: var(--bg-popover);
+}
+.pc-tasks-roster {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  color: var(--fg);
+}
+/* Chromeless portal iframe route. The native popover supplies its own 620px
+   containing block; this route instead gives the SAME panel the full frame and
+   lets only its canonical row scroller consume the remaining height. */
+.pc-tasks-roster-embed {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-popover);
+}
+.pc-tasks-roster-embed > .pc-tasks-roster {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.pc-tasks-roster-embed .pc-tasks-roster__scroll {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+.pc-tasks-roster__loading,
+.pc-tasks-roster__empty {
+  padding: 14px;
+  color: var(--fg-mute);
+  font-size: 11.5px;
+}
+
+/* Summary before detail. `Enrolled` and `Scanned` are deliberately two numbers:
+   the ledger undercounts real processes until every spawn seam enrols (P-009),
+   and presenting one figure would hide that gap rather than expose it. */
+.pc-tasks-roster__pressure {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  margin: 0;
+  background: var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.pc-tasks-roster__pressure > div {
+  background: var(--bg-popover);
+  padding: 6px 10px 7px;
+}
+.pc-tasks-roster__pressure dt {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+.pc-tasks-roster__pressure dd {
+  margin: 1px 0 0;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.pc-tasks-roster__pressure dd.is-warn { color: var(--warn); }
+.pc-tasks-roster__pressure dd.is-bad { color: var(--bad); }
+/* Says out loud that Enrolled and Scanned are different UNITS. Without it the
+   ratio looks computable, and computing it is how a 98% "coverage hole" got
+   reported to the owner (EI-19325095302441792). */
+.pc-tasks-roster__units {
+  margin: 0;
+  padding: 0 10px 6px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--fg-mute);
+}
+.pc-tasks-roster__units strong { color: var(--fg-dim); font-weight: 600; }
+
+.pc-tasks-roster__alarm {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bad-bg);
+  color: var(--bad);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.pc-tasks-roster__alarm.is-warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+.pc-tasks-roster__alarm span {
+  display: block;
+  font-weight: 400;
+  color: var(--fg-mute);
+  font-size: 10.5px;
+}
+
+.pc-tasks-roster__search { padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.pc-tasks-roster__search input {
+  width: 100%;
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 8px;
+  background: var(--bg-deep);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+}
+.pc-tasks-roster__search input::placeholder { color: var(--fg-mute); }
+
+.pc-tasks-roster__scroll { max-height: 360px; overflow-y: auto; }
+.pc-tasks-roster__group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 3px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  position: sticky;
+  top: 0;
+  background: var(--bg-popover);
+  z-index: 1;
+}
+.pc-tasks-roster__group-head.is-bad { color: var(--bad); }
+/* The exempt group's header is a real <button> (nuqs-backed expand, so the state
+   is in the URL and `ui:get_state` can see it). Strip the UA button chrome so it
+   matches the sibling <header> elements exactly. */
+button.pc-tasks-roster__group-head {
+  width: 100%;
+  border: 0;
+  font: inherit;
+  font-size: 10.5px;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.pc-tasks-roster__group-head:hover { color: var(--fg-dim); }
+button.pc-tasks-roster__group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* An exempt group's chip states a REASON, not a warning — neutral, not amber. */
+.pc-tasks-roster__group.is-muted .pc-tasks-roster__chip {
+  color: var(--fg-mute);
+  border-color: var(--border);
+}
+.pc-tasks-roster__group-count {
+  font-family: ui-monospace, monospace;
+  opacity: 0.6;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.pc-tasks-roster__chip {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 10px;
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn), transparent 60%);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.pc-tasks-roster__row {
+  display: grid;
+  /* 6 tracks; the last is the kill control (P-023). Scanned/exempt rows render only
+     five children and the sixth track collapses to 0 for them — deliberate, because a
+     scanned row has no ledger identity and must never offer a kill. */
+  grid-template-columns: 34px minmax(84px, max-content) minmax(0, 1fr) 56px 34px max-content;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  border-left: 3px solid transparent;
+}
+.pc-tasks-roster__row:hover { background: var(--bg-raised-high); }
+/* An unconfined row ran outside a cgroup scope; an orphan has no ledger row at
+   all. Both are visible gaps, tinted rather than hidden. */
+.pc-tasks-roster__row.is-unconfined { border-left-color: color-mix(in srgb, var(--warn), transparent 45%); }
+.pc-tasks-roster__row.is-orphan { background: var(--bad-bg); }
+/* Exempt rows are CONTEXT, not findings: they exist so the scan total adds up.
+   Deliberately the quietest thing in the panel — the whole defect this fixes was
+   alarm styling applied to the owner's own terminal windows. */
+.pc-tasks-roster__row.is-muted { opacity: 0.5; }
+.pc-tasks-roster__row.is-muted:hover { opacity: 0.8; }
+.pc-tasks-roster__row[data-state="stranded"] { opacity: 0.55; }
+
+.pc-tasks-roster__age {
+  font-family: ui-monospace, monospace;
+  font-size: 9.5px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.pc-tasks-roster__name {
+  font-weight: 600;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-tasks-roster__doing {
+  color: var(--fg-mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.pc-tasks-roster__wi {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--accent);
+  margin-right: 5px;
+}
+.pc-tasks-roster__num {
+  font-family: ui-monospace, monospace;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--fg-mute);
+}
+
+/* ── the kill control (P-023/P-025) ──────────────────────────────────────────
+   The idle button is deliberately quiet: it appears on hover/focus-within only, so a
+   620px popover people open to READ does not present a row of destructive buttons.
+   It stays visible once armed or once it has something to say, and it is never hidden
+   from the keyboard — `:focus-within` keeps a tabbed-to control on screen. */
+.pc-tasks-roster__act {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  opacity: 0;
+  transition: opacity 90ms ease-out;
+}
+.pc-tasks-roster__row:hover .pc-tasks-roster__act,
+.pc-tasks-roster__row:focus-within .pc-tasks-roster__act,
+.pc-tasks-roster__act:has(.is-armed),
+.pc-tasks-roster__act:has(.is-refused),
+.pc-tasks-roster__act:has(.is-done) {
+  opacity: 1;
+}
+
+/* A refusal is prose, not a chip — it names the pid and both identities, which is
+   what makes it checkable. Let it span the whole row on its own line rather than
+   truncating the one thing the reader needs (P-025). */
+.pc-tasks-roster__act:has(.is-refused) { grid-column: 1 / -1; }
+.pc-task-kill.is-refused {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--bad);
+  white-space: normal;
+}
+.pc-task-kill__detail {
+  font-family: ui-monospace, monospace;
+  color: var(--fg-mute);
+}
+.pc-task-kill.is-done { font-size: 10.5px; color: var(--good); }
+.pc-task-kill__ask { font-size: 10.5px; color: var(--fg-mute); }
+
+/* The pane-level outcome notice. It exists because a kill unmounts its own row (and with
+   it the in-row chip), so this is frequently the ONLY surviving answer to "did that fire,
+   and what did the server say" — it is deliberately louder than the inline chip. */
+.pc-task-kill-notice {
+  margin: 6px 10px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: normal;
+  border: 1px solid var(--border);
+}
+.pc-task-kill-notice.is-refused {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad), transparent 58%);
+  background: var(--bad-bg);
+}
+.pc-task-kill-notice.is-done {
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good), transparent 58%);
+  background: var(--good-bg);
+}
+.pc-task-kill-notice__id {
+  font-family: ui-monospace, monospace;
+  color: var(--fg-mute);
+}
+
+.pc-tasks-roster__foot {
+  border-top: 1px solid var(--border);
+  padding: 6px 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10.5px;
+  color: var(--fg-mute);
+}
+.pc-tasks-roster__foot a { color: var(--accent); text-decoration: none; }
+.pc-tasks-roster__foot a:hover { text-decoration: underline; }

@@ -1,0 +1,25 @@
+{
+  "name": "@papercusp/plugin-loader-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic, domain-free plugin-loader kernel: a filesystem→typed-plugin discovery pipeline (discover dirs → read+validate manifest → optional alternate-runtime dispatch → import entry → validate → dedupe by name with source precedence), a pluggable JSON-Schema manifest validator (ajv), and a minimal semver-range matcher. All host-specifics (manifest shape, validation rules, runtime kinds, search-path resolution) inject through a ports object — the lib names no consuming app.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./semver": "./src/semver.ts",
+    "./manifest-validator": "./src/manifest-validator.ts",
+    "./loader": "./src/loader.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ajv": "^8.0.0"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

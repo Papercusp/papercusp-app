@@ -1,0 +1,30 @@
+diff --git a/node_modules/hyperswarm/index.js b/node_modules/hyperswarm/index.js
+index a242046..a4fabe6 100644
+--- a/node_modules/hyperswarm/index.js
++++ b/node_modules/hyperswarm/index.js
+@@ -213,6 +213,7 @@ module.exports = class Hyperswarm extends EventEmitter {
+       keyPair: this.keyPair,
+       relayThrough
+     })
++    conn._createdAt = Date.now();
+     this._allConnections.add(conn)
+ 
+     this.stats.connects.client.attempted++
+@@ -356,7 +357,8 @@ module.exports = class Hyperswarm extends EventEmitter {
+       // - pick the new one if the existing stream is already established (has sent and received bytes),
+       //   because the other client must have lost that connection and be reconnecting
+       // - otherwise, pick the one thats expected to initiate in a tie break
+-      const existingIsOutdated = existing.rawBytesRead > 0 && existing.rawBytesWritten > 0
++      const isHanging = existing.rawBytesRead === 0 && existing.rawBytesWritten === 0 && (!existing._createdAt || Date.now() - existing._createdAt > 5000);
++      const existingIsOutdated = (existing.rawBytesRead > 0 && existing.rawBytesWritten > 0) || isHanging
+       const expectedInitiator = b4a.compare(conn.publicKey, conn.remotePublicKey) > 0
+       const keepNew = existingIsOutdated || expectedInitiator === conn.isInitiator
+ 
+@@ -379,6 +381,7 @@ module.exports = class Hyperswarm extends EventEmitter {
+     const peerInfo = this._upsertPeer(conn.remotePublicKey, null)
+ 
+     this.connections.add(conn)
++    conn._createdAt = Date.now();
+     this._allConnections.add(conn)
+     this._serverConnections++
+ 

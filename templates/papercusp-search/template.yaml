@@ -1,0 +1,76 @@
+# papercusp-search — 'Papercusp Official: Search' (scope: aspect,
+# category: search; owner directive 2026-07-04 / P-018). Integrates the search
+# generic-library family into a composed app: BM25 + pgvector hybrid retrieval
+# over the app's own Postgres, rank fusion, cross-encoder reranking, and the
+# engine-agnostic relevance core. Machine twin: @papercusp/template-kit
+# src/reference-templates.ts PAPERCUSP_SEARCH_TEMPLATE — the kit's suite pins
+# this file to it.
+id: papercusp-search
+version: "0.1.0"
+scope: aspect
+category: search
+summary: >-
+  The search plane for a papercusp-composed app: @papercusp/search
+  (host-agnostic BM25 + pgvector hybrid retrieval over Postgres via pluggable
+  SearchSources) fused by @papercusp/rrf, with @papercusp/rerank
+  (engine-agnostic cross-encoder precision pass) and @papercusp/search-core
+  (rerank steering, LLM category-match, query rewrite, and the shared
+  eval-harness metric contract) layered on when relevance quality matters.
+  Compose into any app whose data users need to find by meaning, not just
+  by filter.
+components:
+  - { id: search, version: 0.1.0 }
+  - { id: search-core, version: 0.1.0 }
+  - { id: rerank, version: 0.1.0 }
+  - { id: rrf, version: 0.1.0 }
+contracts: []
+decisionPoints:
+  - id: search-surfaces
+    prompt: >-
+      Which app tables/entities are searchable? Each becomes a pluggable
+      SearchSource owning its own tsvector/pgvector SQL — the engine composes
+      them; it never guesses your schema.
+  - id: retrieval-mode
+    prompt: >-
+      BM25-only or hybrid BM25+embeddings? Hybrid needs a query embedder
+      injected (the lib carries no embedding provider). Default BM25-only
+      until the app has an embedding pipeline; RRF fusion turns on with the
+      second ranking.
+  - id: relevance-stack
+    prompt: >-
+      Is raw retrieval enough, or does the app need the precision stack —
+      cross-encoder reranking (@papercusp/rerank; needs a ZeroEntropy API
+      key) plus search-core's steering/rewrite/category-match? Drop rerank +
+      search-core from the composition when plain retrieval suffices.
+  - id: relevance-evals
+    prompt: >-
+      What proves relevance for THIS domain — which golden queries and which
+      metrics (search-core's shared eval-harness contract)? A search plane
+      without an eval set degrades silently.
+composesWith:
+  - papercusp-tauri-desktop-shell
+  - papercusp-data-sync
+  - papercusp-data-layer
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+checks:
+  - id: components-integrated
+    run: checks/components-integrated.test.ts
+    summary: >-
+      every pinned component package is a declared dependency of the composed
+      app (config section: components)
+musts:
+  - id: own-postgres-search
+    rule: "Search queries the app OWN embedded Postgres — never a separate search engine or service"
+    enforcedBy: prose-only
+  - id: source-per-surface
+    rule: "Each searchable surface is its own SearchSource owning its SQL — never one source with schema switches"
+    enforcedBy: prose-only
+  - id: secrets-injected
+    rule: "Rerank and embedding-provider keys are injected config — never committed"
+    enforcedBy: prose-only
+  - id: deps-declared
+    rule: "Every kept component is a real package dependency — not wired on paper"
+    enforcedBy: components-integrated

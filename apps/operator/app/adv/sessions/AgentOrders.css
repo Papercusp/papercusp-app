@@ -1,0 +1,542 @@
+/**
+ * AgentOrders — the session popup's LEFT panel
+ * (session-chat-popup-direction-d-2026-08-02 P-014).
+ *
+ * Every colour/space/radius comes from the operator's DTCG token scale
+ * (design/tokens/base.json via globals.css) — no literal hexes.
+ *
+ * The panel's own visual job: read as INSTRUCTIONS rather than telemetry, so it
+ * cannot be confused with the activity rail on the opposite edge. It does that
+ * with a cooler ground, a verbatim-quote treatment that no other rail uses, and
+ * age chips whose tone is graded by verdict rather than shown as raw timestamps.
+ * State is encoded in FORM as well as colour (a glyph, a rule, a badge), so the
+ * panel survives greyscale and a colour-blind reader — the same rule hud.css
+ * follows for the fleet board.
+ */
+
+.pc-orders {
+  --pc-orders-text: color-mix(in oklab, var(--fg), white 12%);
+  --pc-orders-dim: color-mix(in oklab, var(--fg-dim), white 22%);
+  --pc-orders-mute: color-mix(in oklab, var(--fg-mute), white 26%);
+  --pc-orders-rule: color-mix(in oklab, var(--border), white 18%);
+  /* These three replace two tokens the operator vocabulary does not define
+     (a "bg surface" and a "status warn bg"), which failed the css-tokens lint and
+     red-pinned the green checkpoint. Only their inline FALLBACKS were ever
+     rendering, which is why nothing looked broken. Restated as local tokens
+     derived from the real scale — this file's own convention and its "no literal
+     hexes" rule — preserving the exact prior appearance: a 4.5% white veil, and a
+     warn tint at the two strengths the file actually used (10% and 6%).
+     NB: do not name the old tokens in `var(...)` form anywhere here, comments
+     included — the lint scans raw source text and counts that as a reference. */
+  --pc-orders-surface: color-mix(in oklab, transparent, white 4.5%);
+  --pc-orders-warn-bg: color-mix(in oklab, transparent, var(--warn) 10%);
+  --pc-orders-warn-bg-soft: color-mix(in oklab, transparent, var(--warn) 6%);
+
+  /* ── the card + its edge — Treatment C3's two load-bearing values ──────────
+     Plan P-005. The study behind them (D-001) measured why separation on this
+     ground CANNOT come from fill lightness: card fills sweep 1.11:1 to 1.58:1
+     and the rail reads grey and washed before the top of that range. STROKE is
+     where the range is. The cards shipped for a day carrying neither value —
+     a 3.5% white veil (#152030, 1.09:1 vs ground) inside a 62%-mixed edge
+     (#205170, 1.92:1 vs card), i.e. a frame under the 3:1 non-text floor around
+     a fill that was barely there. That is exactly the "barely-there card" the
+     study was written to diagnose, reproduced.
+
+     MEASURED live in the Tauri webview (WCAG 2.1 on composited sRGB; the probe
+     self-tested against white/black = 21.00, #767676/#fff = 4.54 and 50% white
+     over black = #808080 before any of these were trusted):
+
+                       was                    now                  C3 target
+       card    #152030  1.09:1 vs ground  #1c3146  1.34:1      #1d3048  1.33:1
+       edge    #205170  1.92:1 vs card    #4c81a0  3.15:1      #5182a0  3.22:1
+                        2.09:1 vs ground           4.22:1               4.28:1
+
+     Derived from --accent-strong rather than pinned to the study's literal
+     hexes: four themes ship, and `black` (monochrome) and `honeycomb` (honey)
+     would both read as off-palette with a fixed sky blue. Under `frost` the
+     mixes land within ~5/255 per channel of C3's own values.
+
+     The card is a token here rather than inline on `.pc-orders__sec` because
+     the cap plate below has to be measured AGAINST it — an anchor that is a
+     literal in two places drifts the moment one of them moves. */
+  --pc-orders-card: color-mix(in oklab, var(--accent-strong) 16%, var(--bg-popover));
+  --pc-orders-edge: color-mix(in oklab, var(--accent-strong) 60%, var(--bg-popover));
+
+  /* ── section-cap plate ────────────────────────────────────────────────────
+     The section caps used to paint `var(--accent)` / `var(--warn)` at FULL
+     saturation — six stacked full-strength plates down a narrow rail, and the
+     brightest surface anywhere in the popup [owner 2026-08-02, "the bars are
+     too bright"]. They are also what the eye lands on first, so making
+     them shout costs more than any other element here.
+
+     "Less bright" could NOT be done by dimming alone, and the measurement says
+     why. Holding the dark ink and darkening the plate, contrast falls with it:
+     the blue is AA-legal only down to 71% (-21% luminance) and the amber to
+     65%. A -21% change does not read as "less bright" — but going further
+     makes the cap ILLEGIBLE, and there is a genuine DEAD ZONE at 55-70% where
+     NO ink choice reaches 4.5:1. So the pairing has to INVERT: a darker plate
+     carrying LIGHT text is the only way to get a real reduction and stay
+     legible. Measured (oklab -> WCAG, self-tested against white/black = 21.00,
+     #767676/#fff = 4.54, and sRGB alpha compositing checked against
+     50% white on black = #808080):
+
+       blue   #30526c  -44% luminance   label #c1eafe  6.46:1   AA
+       amber  #574f3a  -49% luminance   label #fdd37d  5.72:1   AA
+
+     35%, not lower: below ~25% the plate stops separating from the card it sits
+     on — at 22% it measured 1.35:1 and the bar the owner called GOOD would
+     effectively dissolve.
+
+     ⚠ That separation MOVED when P-005 adopted C3's card above. Measured on the
+     new #1c3146 card the plate reads 1.62:1, not the ~2.0:1 it held against the
+     old near-black one. The obvious repair — raise the mix to 45%, which
+     restores 2.12:1 — is the WRONG one: it is a brightness increase, and
+     brightness is the exact thing the owner asked to reduce. Raising it also
+     costs the label (6.42:1 -> 4.91:1, AA with almost no margin at 9px). So the
+     plate holds its owner-ratified value and the separation is repaid in FORM
+     instead: a hairline under the cap in the card's own edge colour (see
+     `.pc-orders__h` below), which is free in luminance. That is this rail's own
+     rule applied to itself — D-001: "do not reach for a lighter panel to
+     separate sections; reach for the border, the cap, and the type ladder."
+
+     Restated as file-local tokens because the css-tokens lint only resolves a
+     component-local token inside the file that DEFINES it, so naming
+     chat-controls.css's `--pc-zone-fill` here would fail the lint (and, worse,
+     compute to unset — an invisible cap rather than a loud failure). */
+  --pc-orders-cap-fill: color-mix(in oklab, var(--accent-strong) 35%, var(--bg-popover));
+  /* Derived from the theme's accent, not pinned to a sky-blue primitive: four
+     themes ship, and `black` (monochrome, --accent-strong #ffffff) and
+     `honeycomb` (honey) would both read as off-palette with a fixed blue.
+     Under `frost` this resolves to #c1eafe — the value measured above. */
+  --pc-orders-cap-label: color-mix(in oklab, var(--accent-strong), white 50%);
+  --pc-orders-cap-fill-warn: color-mix(in oklab, var(--warn) 35%, var(--bg-popover));
+  /* Lifted toward white rather than left as raw `--warn`: on the 35% amber
+     plate --warn itself measures 4.87:1 — over the line but with almost no
+     margin, and this is 9px uppercase text. At white 30% it is 5.72:1.
+     NOT `--amber-200`: that token does not exist in _brand-primitives.css
+     (only --amber-400 does) and an undefined var() computes to unset — an
+     INVISIBLE label rather than a loud failure. */
+  --pc-orders-cap-label-warn: color-mix(in oklab, var(--warn), white 30%);
+  /* Badges ride ON the cap. The veil stays BLACK — measured, against my own
+     first instinct: with the plate now dark and the label light, a WHITE veil
+     lightens the chip toward its own text and pushed the amber badge to
+     4.14:1 (sub-AA). A black veil moves the other way and holds both at
+     8.1:1 / 7.2:1, so the original value was already correct. */
+  --pc-orders-cap-veil: rgb(0 0 0 / 0.2);
+  --pc-orders-cap-veil-hot: rgb(0 0 0 / 0.28);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--pc-orders-text);
+  background: var(--bg-popover, #0d1829);
+}
+
+/* ── panel identity strip — the ZONE title ────────────────────────────────── */
+/* The filled bar itself is `.pc-zone-title` (chat-controls.css), shared with the
+   Activity rail so both columns are named in one vocabulary. Only the parts that
+   are this panel's own live here; anything that would fight the shared bar (its
+   own background, padding, ink) is deliberately NOT restated, because the two
+   files are single-class selectors and their load order is not guaranteed. */
+.pc-orders__tag {
+  gap: 6px;
+}
+.pc-orders__tag-name {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.pc-orders__tag-sub {
+  font-size: 10.5px;
+}
+.pc-orders__close {
+  cursor: pointer;
+}
+
+/* ── cluster labels + the quiet-empty line ────────────────────────────────── */
+/* Layout, the dot and the type scale are shared with the Activity rail
+   (chat-controls.css) so the popup's two edges cannot drift. Only the INK is
+   set here, because each rail lifts its own muted tier (P-008) and a shared
+   literal would fight that. Both sit OUTSIDE the cards, so they take the rail
+   ground, not the card: measured 7.68:1 on #0d1829 — quiet, still AAA. */
+.pc-orders > .pc-rail-cluster,
+.pc-orders > .pc-rail-quiet {
+  color: var(--pc-orders-mute);
+}
+/* The section NAME stays at the rail's normal ink even in the quiet form: the
+   line is dim, but the thing it names must still read as a label — that is the
+   half of "an empty section that NAMES what it would hold" this branch keeps. */
+.pc-orders > .pc-rail-quiet .pc-rail-quiet__label {
+  color: var(--pc-orders-dim);
+}
+
+/* ── sections — framed cards ──────────────────────────────────────────────── */
+/* Each section is its own bordered card rather than a slab separated by a
+   hairline. That is the Framed look's whole claim: a boundary you can SEE is
+   what stops six stacked sections reading as one wall of text. */
+.pc-orders__sec {
+  /* MEASURED, not defensive (live Tauri webview, 2026-08-02): `.pc-orders` is a
+     flex COLUMN, so every card is a flex item with the default `flex-shrink: 1`.
+     Once the cards' natural heights exceed the rail, the browser shrinks them
+     ALL proportionally — and because each card now has `overflow-y: auto`, that
+     shrink CLIPS content instead of overflowing visibly: Mission rendered 83px
+     tall against 173px of content, losing its `route` row and its explanation
+     with no scrollbar to say so. `flex: none` puts the scrolling back where it
+     belongs — the RAIL scrolls, each card keeps its natural height (bounded by
+     max-height below), and only a genuinely huge section scrolls internally. */
+  flex: none;
+  margin: 6px 8px;
+  border: 1px solid var(--pc-orders-edge);
+  border-radius: 4px;
+  background: var(--pc-orders-card);
+  padding: 0 8px 6px;
+  /* x-hidden keeps the card's rounded corners clipping a long unbroken token;
+     y-auto is the height bound below. Two axes, two reasons — never `overflow:
+     hidden` plus an override, which reads as one of them being a mistake. */
+  overflow-x: hidden;
+  /* ② of the two collapse mechanisms (rail-sections.tsx): an OPEN section still
+     cannot run away with the column. Its body scrolls inside its own card with
+     the cap pinned, so a 40-message Coord list costs the same vertical space as
+     a 2-message one — the fix for the reader who never clicks anything.
+     `44vh` rather than a pixel ceiling: on a short window two open sections
+     still both fit, which a fixed px cannot promise. */
+  max-height: 44vh;
+  overflow-y: auto;
+}
+/* Mission is emphasised because it is the only section that EXPLAINS the others
+   — the reader should land on it first without having to be told to.
+
+   That emphasis is a STROKE, not a tint, and this is a correction with a number
+   behind it. Mission used to carry a lighter fill; once P-005 raised the shared
+   card to C3's value, ANY further fill lift ate the edge's contrast with it —
+   measured live in the Tauri webview, the edge against a tinted mission card
+   reads 3.02 : 2.96 : 2.90 : 2.79 at 2/3/4/6% lift, i.e. the tint mission
+   actually shipped had already pushed its own frame BELOW the 3:1 non-text
+   floor. Emphasis by fill was quietly buying itself with the border's legibility.
+
+   So mission takes the shared card unchanged and spends a brighter edge
+   instead: #5895b7, 4.03:1 against the card versus the normal edge's 3.14:1 —
+   unmistakably the strongest frame in the rail, and rising instead of falling.
+   D-001's consequence, applied to the one card that had been exempt from it:
+   "do not reach for a lighter panel to separate sections. Reach for the
+   border, the cap, and the type ladder." */
+.pc-orders__sec--mission {
+  border-color: color-mix(in oklab, var(--accent-strong) 70%, var(--bg-popover));
+}
+/* The cap's hairline follows its own card's frame, here as everywhere. */
+.pc-orders__sec--mission > .pc-orders__h {
+  border-bottom-color: color-mix(in oklab, var(--accent-strong) 70%, var(--bg-popover));
+}
+/* A card whose contents are waiting on the READER (walls, open directives). */
+.pc-orders__sec[data-attn='true'] {
+  border-color: var(--warn);
+}
+
+/* The section CAP: a filled bar, full-bleed across the card's padding, pinned so
+   it stays legible while the body under it scrolls. */
+.pc-orders__h {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 -8px 6px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  font-weight: 700;
+  background: var(--pc-orders-cap-fill);
+  color: var(--pc-orders-cap-label);
+  /* The plate's separation from the card fell 1.99:1 -> 1.62:1 when P-005
+     adopted C3's lighter card. Repaid in FORM, not luminance: the same edge the
+     card already wears, so the cap reads as a bar bounded by the frame rather
+     than as a tinted region of it. Costs zero brightness, which is the whole
+     constraint — see the long note on --pc-orders-cap-fill. */
+  border-bottom: 1px solid var(--pc-orders-edge);
+}
+.pc-orders__sec[data-attn='true'] > .pc-orders__h {
+  background: var(--pc-orders-cap-fill-warn);
+  color: var(--pc-orders-cap-label-warn);
+  /* Follows the card's own border, which is --warn on an attention card. */
+  border-bottom-color: var(--warn);
+}
+/* ① Collapsed: everything but the cap folds away. The COUNT lives inside the
+   cap, so folding Coord/Walls away never hides that there is something in it. */
+.pc-orders__sec[data-collapsed='true'] {
+  max-height: none;
+  padding-bottom: 0;
+}
+.pc-orders__sec[data-collapsed='true'] > *:not(.pc-orders__h) {
+  display: none;
+}
+.pc-orders__sec[data-collapsed='true'] > .pc-orders__h {
+  margin-bottom: 0;
+}
+.pc-orders__n {
+  margin-left: auto;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--pc-orders-cap-veil);
+  color: var(--pc-orders-cap-label);
+}
+.pc-orders__n--hot {
+  background: var(--pc-orders-cap-veil-hot);
+  color: var(--pc-orders-cap-label-warn);
+}
+
+/* ── key/value rows ───────────────────────────────────────────────────────── */
+.pc-orders__kv {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+.pc-orders__kv .k {
+  flex: none;
+  width: 66px;
+  color: var(--pc-orders-mute);
+}
+.pc-orders__kv .v {
+  min-width: 0;
+  color: var(--pc-orders-text);
+  overflow-wrap: anywhere;
+}
+/* The authority value is the one field a reader scans for, so confirm-first
+   gets a distinct tone from act-and-report rather than reading as plain text. */
+.pc-orders__kv .v[data-authority='confirm-before-execution'] {
+  color: var(--warn);
+}
+.pc-orders__kv .v[data-wake='manual'] {
+  color: var(--warn);
+}
+
+/* ── list rows ────────────────────────────────────────────────────────────── */
+.pc-orders__row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 2.5px 0;
+  font-size: 12px;
+}
+.pc-orders__glyph {
+  flex: none;
+  width: 10px;
+  color: var(--pc-orders-mute);
+  text-align: center;
+}
+.pc-orders__glyph--owner {
+  color: var(--accent);
+}
+.pc-orders__glyph--off {
+  color: var(--pc-orders-mute);
+}
+.pc-orders__glyph--fact {
+  color: var(--accent);
+}
+.pc-orders__glyph--ok {
+  color: var(--good);
+}
+.pc-orders__txt {
+  min-width: 0;
+  flex: 1;
+  color: var(--pc-orders-text);
+  overflow-wrap: anywhere;
+}
+.pc-orders__reason {
+  display: block;
+  color: var(--pc-orders-mute);
+  font-size: 11.5px;
+  margin-top: 1px;
+}
+.pc-orders__reason--none {
+  font-style: italic;
+}
+.pc-orders__badge {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  font-weight: 660;
+  background: color-mix(in srgb, var(--accent), transparent 82%);
+  color: var(--accent-strong, var(--accent));
+  vertical-align: 1px;
+}
+.pc-orders__badge--self {
+  background: var(--pc-orders-surface);
+  color: var(--pc-orders-mute);
+}
+.pc-orders__badge--warn {
+  background: var(--pc-orders-warn-bg);
+  color: var(--warn);
+}
+
+/* ── verbatim quotes — owner directives + the carry-note ──────────────────── */
+/* A treatment no other rail uses, because these are the only places in the UI
+   showing someone's exact words rather than a rendered summary. */
+.pc-orders__verbatim {
+  margin: 5px 0 0;
+  padding: 6px 8px;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 3px 3px 0;
+  background: rgba(0, 0, 0, 0.24);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--pc-orders-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pc-orders__verbatim--note {
+  border-left-color: var(--accent);
+}
+.pc-orders__cite {
+  display: block;
+  margin-top: 4px;
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--pc-orders-mute);
+}
+
+/* popup-agent-state-coverage-2026-08-18 P-010 — the directive's PROVENANCE line.
+   Deliberately quieter than the quote it sits under: it is the falsifier, not
+   the content, and a provenance line loud enough to compete with the directive
+   would be read as part of the order. */
+.pc-orders__prov {
+  margin-top: 3px;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--pc-orders-mute);
+  overflow-wrap: anywhere;
+}
+.pc-orders__sep {
+  color: var(--pc-orders-mute);
+}
+/* An UNANCHORED quote is toned like the walls/attention surfaces, not like an
+   error: the anchor is missing, which is a fact about the record — it is not a
+   claim that the directive is false, and colouring it as a failure would say
+   exactly that about the many rows that simply predate the stamp. */
+.pc-orders__prov[data-verified='false'] .pc-orders__prov-mark {
+  color: var(--warn);
+}
+.pc-orders__prov[data-verified='true'] .pc-orders__prov-mark {
+  color: var(--good);
+}
+.pc-orders__prov-ref {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.pc-orders__sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 10.5px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--pc-orders-mute);
+}
+.pc-orders__note {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--pc-orders-mute);
+  line-height: 1.45;
+}
+
+/* ── age chips — graded, never a raw timestamp ────────────────────────────── */
+/* Tone is the VERDICT (fresh/aging/stale), computed against the agent's carry
+   mode, because the same age means different things for warm vs cold carry. */
+.pc-orders__age {
+  flex: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.pc-orders__age--fresh {
+  background: color-mix(in srgb, var(--good), transparent 86%);
+  color: var(--good);
+}
+.pc-orders__age--aging {
+  background: var(--pc-orders-warn-bg);
+  color: var(--warn);
+}
+.pc-orders__age--stale {
+  background: color-mix(in srgb, var(--bad), transparent 84%);
+  color: var(--bad);
+}
+.pc-orders__age--unknown {
+  background: var(--pc-orders-surface);
+  color: var(--pc-orders-mute);
+}
+
+/* ── walls ────────────────────────────────────────────────────────────────── */
+.pc-orders__wall {
+  display: block;
+  margin: 6px 0;
+  padding: 5px 0 5px 8px;
+  border-left: 2px solid var(--warn);
+  background: var(--pc-orders-warn-bg-soft);
+}
+.pc-orders__wall-ask {
+  display: block;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--pc-orders-text);
+}
+.pc-orders__wall-meta {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--pc-orders-mute);
+}
+
+/* ── the cited-ref drift tell ─────────────────────────────────────────────── */
+.pc-orders__drift {
+  margin-top: 6px;
+  padding: 5px 7px;
+  border-radius: 3px;
+  background: var(--pc-orders-warn-bg);
+  color: var(--warn);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+/* ── the three-state renderings (plan D-003) ──────────────────────────────── */
+/* "Couldn't read it" must never look like "there is none" — different border,
+   different tone, and it says so in words. */
+.pc-orders__unavailable {
+  padding: 5px 7px;
+  border-radius: 3px;
+  border: 1px dashed color-mix(in srgb, var(--bad), transparent 55%);
+  background: color-mix(in srgb, var(--bad), transparent 92%);
+  color: var(--bad);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.pc-orders__empty {
+  font-size: 11.5px;
+  font-style: italic;
+  color: var(--pc-orders-mute);
+}
+
+/* Disclosures rendered inside the orders board pick up the lightened orders
+   tint. The base color (--fg-mute) lives in Disclosures.css; the override sits
+   HERE because the css-tokens lint scopes component tokens to their defining
+   file — Disclosures.css may not reference --pc-orders-mute cross-file. */
+.pc-orders .pc-disclosures__line {
+  color: var(--pc-orders-mute);
+}

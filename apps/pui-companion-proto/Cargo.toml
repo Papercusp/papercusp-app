@@ -1,0 +1,17 @@
+[package]
+name = "pui-companion-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Shared JSON-line protocol between pui and its companion zellij plugin (SP-TUI P-004 / D-008)"
+license = "Apache-2.0"
+publish = false
+
+# Standalone crate (no Cargo workspace under papercup/, by design — see
+# apps/tui/Cargo.toml). This carries the wire types for the full-duplex
+# `zellij pipe` link, so BOTH sides (the native `pui` binary and the
+# `wasm32-wasip1` plugin) speak exactly one protocol. Pure serde: it compiles
+# unchanged for native and for wasm, which is the whole point of carving it out.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

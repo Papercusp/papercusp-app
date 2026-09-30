@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "_about": "Which installed-product acceptance tags prove each release commitment in PUBLIC_RELEASE_UX.md (P-012 / D-018). The ROWS are not curated here: they are parsed from that document, and the release check refuses every candidate when this file and the document name different platforms, backends or capability rows. A tag is satisfied only by a passing test that drove the PRODUCTION operator with the bin/pui installed from the candidate's own archive. A tag that no suite emits yet is a real gap and blocks release; do not remap a row to a weaker test to make it pass. Exclusions need approvedBy 'owner:<name>' plus the plan decision that records the approval.",
+  "platforms": {
+    "Linux x86_64": { "artifact": "linux-x86_64" },
+    "macOS arm64": { "artifact": "macos-aarch64" },
+    "macOS x86_64": { "artifact": "macos-x86_64" },
+    "Windows 11 via WSL2 x86_64": { "artifact": "linux-x86_64" }
+  },
+  "backends": {
+    "Claude": {
+      "engine": "claude",
+      "journeys": [
+        "PUI_INSTALLED_REAL_ENGINE_ACCEPTANCE",
+        "PUI_OPERATOR_PROCESS_ACCEPTANCE",
+        "PUI_INSTALLED_NATIVE_QUESTION_ACCEPTANCE"
+      ]
+    },
+    "Codex": {
+      "engine": "codex",
+      "journeys": [
+        "PUI_INSTALLED_REAL_ENGINE_ACCEPTANCE",
+        "PUI_OPERATOR_PROCESS_ACCEPTANCE"
+      ]
+    },
+    "OMP": {
+      "engine": "omp",
+      "journeys": [
+        "PUI_INSTALLED_REAL_ENGINE_ACCEPTANCE",
+        "PUI_OPERATOR_PROCESS_ACCEPTANCE",
+        "PUI_INSTALLED_NATIVE_QUESTION_ACCEPTANCE"
+      ]
+    }
+  },
+  "capabilities": {
+    "First prompt and streamed response": ["PUI_COMPOSER_ACCEPTANCE"],
+    "Persona, tools and permissions": ["PUI_R03_CONTEXT_ACCEPTANCE", "PUI_SETUP_ACCEPTANCE", "PUI_APPROVAL_ALLOW_ACCEPTANCE"],
+    "Editable task list": ["PUI_TASK_ACCEPTANCE"],
+    "Plans and work-item links": ["PUI_TASK_PROMOTE_ACCEPTANCE"],
+    "Multiline prompt editing": ["PUI_EDITOR_UNDO_ACCEPTANCE", "PUI_EDITOR_HISTORY_ACCEPTANCE", "AUTO_BAR_R_05_ACCEPTANCE"],
+    "Transcript navigation and copying": ["PUI_EDITOR_COPY_ACCEPTANCE"],
+    "Tool requests and command output": ["PUI_TOOLS_DIFF_ACCEPTANCE"],
+    "Code changes and diffs": ["PUI_TOOLS_DIFF_ACCEPTANCE"],
+    "Approvals and permission scope": ["PUI_APPROVAL_ALLOW_ACCEPTANCE", "PUI_APPROVAL_DENY_ACCEPTANCE"],
+    "Interactive questions": ["PUI_QUESTION_ACCEPTANCE"],
+    "New/switch/rename/archive sessions": ["PUI_SESSION_LIFECYCLE_ACCEPTANCE", "PUI_SETUP_ACCEPTANCE"],
+    "Legacy history continuation and fork": ["PUI_LEGACY_CONTINUATION_ACCEPTANCE"],
+    "Interrupt, end and recovery": ["PUI_R06_RECOVERY_ACCEPTANCE", "PUI_P009_END_ACCEPTANCE"],
+    "Model/account/effort/mode settings": ["PUI_SETUP_ACCEPTANCE", "PUI_SETTINGS_PICKERS_ACCEPTANCE"],
+    "Context, usage and compaction": ["PUI_USAGE_ACCEPTANCE", "PUI_R03_CONTEXT_ACCEPTANCE"],
+    "Commands, help, skills and plugins": ["PUI_COMMANDS_ACCEPTANCE"],
+    "Files and attachments": ["PUI_FILE_CONTEXT_ACCEPTANCE"],
+    "Authentication and first-run setup": ["PUI_EMPTY_REGISTRY_ONBOARDING_ACCEPTANCE", "PUI_SETUP_RECONNECT_ACCEPTANCE"],
+    "Installation, update and support": ["PUI_ABOUT_SUPPORT_ACCEPTANCE"]
+  },
+  "exclusions": []
+}

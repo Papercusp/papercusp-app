@@ -1,0 +1,108 @@
+# Cupboard server — public listing service for shared Papercusp harnesses.
+#
+# Plan: papercusp-dogfood-phase9-cupboard-discord-sync-2026-05-24 (P-051a/b).
+# v5 §10 — Cupboard server architecture.
+#
+# Served at https://cupboard.papercusp.com — the branded host is LIVE and bound
+# to this Worker, and is what the operator now defaults to
+# (packages/operator-core/lib/cupboard/base-url.ts). The desktop operator's
+# Cupboard UI (Phase 9 P-052, already shipped) reads PAPERCUSP_CUPBOARD_URL and
+# falls back to that same default.
+#
+# ⚠ EARLIER REVISIONS OF THIS FILE SAID THE OPPOSITE. They claimed the branded
+# hostnames were "ASPIRATIONAL, not live", that the papercusp.com zone was NOT on
+# Cloudflare, and that cupboard.papercusp.com resolved to a dead apex A record at
+# 18.204.152.241. That was measured from the papercusp dev box and is FALSE of
+# the world (WI-38321, 2026-09-05):
+#   - The zone IS on Cloudflare — NS itzel/john.ns.cloudflare.com — and cupboard,
+#     apex and www resolve ONLY to 104.21.73.140 / 172.67.145.145 via both
+#     Cloudflare-DoH and Google-DoH. 18.204.152.241 is in NO record of the zone.
+#   - Fetched from an EXTERNAL vantage, https://cupboard.papercusp.com/listings
+#     returns a body byte-identical in size to this Worker's own origin.
+# The dev box silently blackholes TLS to every papercusp-family hostname by SNI
+# (EI-16742; agent-insights/su-box-sni-tls-blackhole-not-outage), which fabricates
+# exactly the "connects but never completes TLS" symptom quoted above. Do NOT
+# re-derive this file's DNS claims from a curl run on that box: it cannot tell
+# "the host is down" from "this box blocks the name", and it fails toward "down".
+#
+# Bindings (run once before first deploy):
+#   wrangler d1 create papercusp-cupboard
+#   wrangler kv:namespace create papercusp-cupboard-counters
+# Then paste the returned ids into [[d1_databases]] and [[kv_namespaces]] below.
+#
+# Secrets (install via `wrangler secret put`):
+#   GITHUB_CLIENT_ID      — for OAuth app (future: web-flow login)
+#   GITHUB_CLIENT_SECRET  — same
+#   IP_HASH_PEPPER        — 32 random bytes, base64
+#   PAYMENT_CHANNEL_RPC_URL
+#   PAYMENT_CHANNEL_PRIVATE_KEY
+#     P-032 buyer-side channel rail. The private key must be faucet-funded on
+#     the configured testnet; bound-wallet funding additionally requires the
+#     derived signer address to equal the authenticated wallet binding.
+#
+# Domain setup — steps 1, 3 and 4 are DONE. The zone is on Cloudflare, the host
+# serves this Worker, and DEFAULT_CUPBOARD_URL is the branded host.
+#
+# Step 2 — the [[routes]] custom_domain block below — is still commented, and
+# that is a deliberate gap, not an oversight: the binding exists (proven by the
+# byte-identical response) but was made out-of-band, so it is not declarative and
+# nothing in this repo recreates it. Uncommenting is the durable fix AND is
+# unsafe to do blind, because `wrangler deploy` FAILS outright if the zone is not
+# in the same Cloudflare account as this Worker — which is exactly the fact that
+# cannot be checked from the dev box. Whoever has account access should confirm
+# the zone is in this account, then uncomment it and deploy; until then the
+# branded host depends on an out-of-band record nobody here can restore.
+name = "papercusp-cupboard"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "production"
+CUPBOARD_HOST = "cupboard.papercusp.com"
+# Comma-separated GitHub user ids allowed to use /admin operator surfaces
+# (moderation and artifact publication).
+# GitHub user ids are public (not secret), so this is a var. Empty ⇒ no
+# operators ⇒ /admin endpoints all 403. These are GitHub *user* ids (from
+# `gh api user --jq .id`), NOT repo ids. 279242982 = papercupai — the account
+# the desktop operator authenticates as via `gh auth token`. Add more
+# maintainer ids comma-separated, then redeploy.
+CUPBOARD_OPERATOR_GITHUB_IDS = "279242982"
+RATE_PER_USER_PUBLISH_HOURLY = "5"
+RATE_PER_USER_REPORT_HOURLY = "10"
+RATE_PER_IP_LIST_PER_MINUTE = "60"
+INDEXER_BATCH_SIZE = "100"
+# P-032 rail configuration. Install the RPC URL + private key as secrets above,
+# then set these three public values for the deployed pilot contract. Until all
+# five values are configured, the payment-channel door fails closed with 503.
+# PAYMENT_CHANNEL_CHAIN_ID = "84532"
+# PAYMENT_CHANNEL_SETTLEMENT_CONTRACT = "0x0000000000000000000000000000000000000000"
+# PAYMENT_CHANNEL_STABLECOIN = "0x0000000000000000000000000000000000000000"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "papercusp-cupboard"
+database_id = "cebe92a9-52c2-4f2e-81c4-d9d3a668d720"
+
+[[kv_namespaces]]
+binding = "COUNTERS"
+id = "4c9faf66981b4f3ca29f2bcc632d2504"
+
+# D-105/D-107 — reuse the existing marketplace bucket. Workspace-host
+# artifacts are isolated under artifacts/workspace-host/; incomplete uploads
+# stay private because public reads require a finalized marker.
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "papercusp-marketplace-tarballs"
+
+# Custom domain. Uncommenting this is how the branded host gets bound — wrangler
+# creates the DNS record and the route on deploy. KEEP IT COMMENTED until the
+# papercusp.com zone is actually on this Cloudflare account: `wrangler deploy`
+# hard-fails when the zone is absent, so enabling it early breaks the deploy for
+# everyone. Full sequence in the "Domain setup" note at the top of this file.
+# [[routes]]
+# pattern = "cupboard.papercusp.com"
+# custom_domain = true
+
+[triggers]
+crons = ["0 * * * *"]                          # hourly indexer refresh per P-076

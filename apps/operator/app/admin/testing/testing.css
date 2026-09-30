@@ -1,0 +1,370 @@
+/* /testing — admin tab-content helpers.
+ *
+ * The shell chrome (.pc-test-shell / .pc-test-left / .pc-test-tab* /
+ * .pc-test-main) moved to @papercusp/testing-shell/src/testing-shell.css
+ * (P-003, harness-tests-tab-and-tester-promotion-2026-05-26) and now travels
+ * with <TestingShell>. What remains below are the helpers the bespoke admin
+ * tabs render inside the panel (headers, cards, tables, stubs). */
+
+.pc-test-tab-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 16px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 12%, transparent), transparent 36%),
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-3) 58%, var(--bg-2)), var(--bg-2));
+}
+
+.pc-test-tab-header > div:first-child {
+  min-width: 0;
+}
+
+.pc-test-tab-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: 20px;
+  font-weight: 780;
+  line-height: 1.1;
+}
+
+.pc-test-tab-intro {
+  max-width: 72ch;
+  margin: 7px 0 0;
+  color: var(--fg-mute);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.pc-test-stub,
+.pc-test-loading {
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-2) 88%, transparent);
+  color: var(--fg-mute);
+}
+
+.pc-test-card,
+.pc-test-section {
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-2) 92%, var(--bg-3)), var(--bg-2));
+}
+
+.pc-test-card-title {
+  margin: 0 0 10px;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.pc-test-card-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin: 8px 0;
+}
+
+.pc-test-card-row:first-child {
+  margin-top: 0;
+}
+
+.pc-test-card-row:last-child {
+  margin-bottom: 0;
+}
+
+.pc-test-metric-table,
+.pc-test-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pc-test-metric-table th,
+.pc-test-table th {
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-3) 72%, var(--bg-2));
+  color: var(--fg-mute);
+  font-size: 10px;
+  font-weight: 800;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.pc-test-metric-table td,
+.pc-test-table td {
+  padding: 9px 11px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
+  color: var(--fg-dim);
+  vertical-align: top;
+}
+
+.pc-test-metric-table tr:last-child td,
+.pc-test-table tr:last-child td {
+  border-bottom: none;
+}
+
+.pc-test-metric-table tbody tr:hover,
+.pc-test-table tbody tr:hover {
+  background: color-mix(in srgb, var(--bg-3) 64%, transparent);
+}
+
+.pc-test-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 20px;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.pc-test-badge.is-good {
+  border-color: color-mix(in srgb, var(--good) 44%, transparent);
+  background: color-mix(in srgb, var(--good) 16%, transparent);
+  color: var(--good);
+}
+
+.pc-test-badge.is-needs {
+  border-color: color-mix(in srgb, var(--warn) 42%, transparent);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn);
+}
+
+.pc-test-badge.is-poor,
+.pc-test-badge.is-bad {
+  border-color: color-mix(in srgb, var(--bad) 44%, transparent);
+  background: color-mix(in srgb, var(--bad) 16%, transparent);
+  color: var(--bad);
+}
+
+.pc-test-badge.is-muted {
+  border-color: var(--border);
+  background: var(--bg-3);
+  color: var(--fg-mute);
+}
+
+.pc-test-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+
+.pc-test-input {
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-2) 88%, var(--bg-3));
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+
+textarea.pc-test-input,
+.pc-test-card textarea {
+  min-height: 86px;
+  border-radius: 12px;
+}
+
+.pc-test-input:focus,
+.pc-test-input:focus-visible,
+.pc-test-card input:focus,
+.pc-test-card textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  outline: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  outline-offset: 1px;
+}
+
+.pc-test-card.is-bad {
+  border-color: color-mix(in srgb, var(--bad) 42%, var(--border));
+}
+
+.pc-test-suite-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.pc-test-suite-card {
+  appearance: none;
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  min-height: 100%;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-2) 92%, var(--bg-3)), var(--bg-2));
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.pc-test-suite-card:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-3);
+  transform: translateY(-1px);
+}
+
+.pc-test-suite-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 56%, transparent);
+  outline-offset: 2px;
+}
+
+.pc-test-suite-card.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 12%, transparent), transparent 62%),
+    var(--bg-2);
+}
+
+.pc-test-suite-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pc-test-suite-title {
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 780;
+  line-height: 1.25;
+}
+
+.pc-test-suite-hint,
+.pc-test-suite-meta,
+.pc-test-suite-desc,
+.pc-test-suite-progress {
+  color: var(--fg-mute);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.pc-test-suite-desc {
+  min-height: 48px;
+  margin: 0;
+}
+
+.pc-test-suite-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.pc-test-suite-meta span {
+  display: inline-flex;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-3) 72%, transparent);
+}
+
+.pc-test-suite-progress {
+  margin-top: 0;
+}
+
+.pc-test-suite-actions {
+  margin-top: 0;
+}
+
+.pc-test-result-copy {
+  white-space: normal;
+  line-height: 1.45;
+}
+
+.pc-test-result-details {
+  padding: 10px 2px 4px;
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.pc-test-run-log {
+  max-height: 340px;
+  overflow: auto;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-3) 76%, var(--bg));
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.pc-test-run-log-line {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.pc-test-run-log-line.is-error {
+  color: var(--bad);
+}
+
+.pc-test-run-log-line.is-warn {
+  color: var(--warn);
+}
+
+.pc-test-run-log-ts,
+.pc-test-run-log-suite {
+  color: var(--fg-mute);
+}
+
+@media (max-width: 960px) {
+  .pc-test-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .pc-test-left {
+    position: static;
+    max-height: none;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .pc-test-left nav {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px;
+  }
+
+  .pc-test-tab-group {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+  }
+
+  .pc-test-main {
+    padding: 16px;
+  }
+
+  .pc-test-tab-header {
+    flex-direction: column;
+  }
+}

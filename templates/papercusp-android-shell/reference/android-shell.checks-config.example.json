@@ -1,0 +1,152 @@
+{
+  "$doc": "Neutral example for @papercusp/template-kit TemplateChecksConfig.androidShell. Replace every identity/path/command; signing values never belong here.",
+  "app": { "name": "harbor-mobile", "root": "." },
+  "androidShell": {
+    "namespace": "dev.harbor.mobile",
+    "applicationId": "dev.harbor.mobile",
+    "minSdk": 24,
+    "compileSdk": 36,
+    "targetSdk": 36,
+    "gradleVersion": "8.14.3",
+    "agpVersion": "8.13.2",
+    "kotlinVersion": "2.0.21",
+    "javaVersion": 17,
+    "ndkVersion": "27.0.12077973",
+    "abis": ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"],
+    "nativeLibrary": "libharbor.so",
+    "releaseVersionInput": "HARBOR_ANDROID_RELEASE_VERSION",
+    "signingPrefix": "HARBOR_ANDROID_RELEASE_",
+    "signingInputNames": [
+      "HARBOR_ANDROID_RELEASE_KEYSTORE",
+      "HARBOR_ANDROID_RELEASE_KEYSTORE_PASSWORD",
+      "HARBOR_ANDROID_RELEASE_KEY_ALIAS",
+      "HARBOR_ANDROID_RELEASE_KEY_PASSWORD"
+    ],
+    "debugCleartext": false,
+    "selectedCapabilities": [],
+    "allowedPermissions": ["android.permission.INTERNET"],
+    "paths": {
+      "settingsGradle": "android/settings.gradle.kts",
+      "projectGradle": "android/build.gradle.kts",
+      "appGradle": "android/app/build.gradle.kts",
+      "wrapperProperties": "android/gradle/wrapper/gradle-wrapper.properties",
+      "manifest": "android/app/src/main/AndroidManifest.xml",
+      "packageSourceRoot": "android/app/src/main/kotlin/dev/harbor/mobile",
+      "unitTestRoots": ["android/app/src/test/kotlin"],
+      "instrumentationTestRoots": ["android/app/src/androidTest/kotlin"],
+      "lintConfig": "android/app/lint.xml",
+      "proguardRules": "android/app/proguard-rules.pro",
+      "buildScript": "tools/build-android.sh",
+      "abiVerifier": "tools/verify-android-uniffi-abi.sh",
+      "provenanceScript": "tools/android-release-provenance.sh",
+      "udl": "crates/harbor_bindings/src/harbor.udl",
+      "uniffiConfig": "crates/harbor_bindings/uniffi.toml",
+      "cargoLock": "Cargo.lock",
+      "generatedKotlin": "android/app/src/main/kotlin/uniffi/harbor/harbor.kt",
+      "releaseApk": "android/app/build/outputs/apk/release/app-release.apk",
+      "releaseAab": "android/app/build/outputs/bundle/release/app-release.aab",
+      "provenanceFile": "android/app/build/outputs/android-release-provenance.json"
+    },
+    "evidenceDir": "android/app/build/template-checks/android-shell",
+    "assertions": [
+      {
+        "assertionId": "MOB-AND-001",
+        "leg": "toolchain-build",
+        "command": ["bash", "tools/check-android-toolchain-build.sh"],
+        "timeoutMs": 900000,
+        "hostConstraintPatterns": [
+          "Android SDK not found",
+          "cargo-ndk is required"
+        ]
+      },
+      {
+        "assertionId": "MOB-AND-002",
+        "leg": "binding-generation",
+        "command": [
+          "android/gradlew",
+          "-p",
+          "android",
+          ":app:generateUniFfiKotlin"
+        ],
+        "timeoutMs": 600000,
+        "hostConstraintPatterns": ["SDK location not found"]
+      },
+      {
+        "assertionId": "MOB-AND-003",
+        "leg": "package-abis",
+        "command": ["bash", "tools/check-android-packaged-abis.sh"],
+        "timeoutMs": 900000,
+        "hostConstraintPatterns": ["Android SDK not found"]
+      },
+      {
+        "assertionId": "MOB-AND-004",
+        "leg": "uniffi-alignment",
+        "command": ["bash", "tools/check-android-uniffi-alignment.sh"],
+        "timeoutMs": 900000,
+        "hostConstraintPatterns": ["llvm-objdump", "zipalign"]
+      },
+      {
+        "assertionId": "MOB-AND-005",
+        "leg": "lint",
+        "command": ["android/gradlew", "-p", "android", ":app:lintRelease"],
+        "timeoutMs": 600000,
+        "hostConstraintPatterns": ["SDK location not found"]
+      },
+      {
+        "assertionId": "MOB-AND-005",
+        "leg": "unit",
+        "command": [
+          "android/gradlew",
+          "-p",
+          "android",
+          ":app:testDebugUnitTest"
+        ],
+        "timeoutMs": 600000,
+        "hostConstraintPatterns": ["SDK location not found"]
+      },
+      {
+        "assertionId": "MOB-AND-005",
+        "leg": "instrumentation",
+        "command": [
+          "android/gradlew",
+          "-p",
+          "android",
+          ":app:connectedDebugAndroidTest"
+        ],
+        "timeoutMs": 900000,
+        "hostConstraintPatterns": [
+          "No connected devices",
+          "SDK location not found"
+        ]
+      },
+      {
+        "assertionId": "MOB-AND-005",
+        "leg": "manifest-privacy",
+        "command": ["bash", "tools/check-android-release-manifest.sh"],
+        "timeoutMs": 600000,
+        "hostConstraintPatterns": ["SDK location not found"]
+      },
+      {
+        "assertionId": "MOB-AND-006",
+        "leg": "release-provenance",
+        "command": ["bash", "tools/check-android-release-provenance.sh"],
+        "timeoutMs": 900000,
+        "hostConstraintPatterns": ["apkanalyzer", "Android SDK not found"]
+      },
+      {
+        "assertionId": "MOB-AND-006",
+        "leg": "signing-absence",
+        "command": ["bash", "tools/check-android-signing-preflight.sh"],
+        "unsetEnv": [
+          "HARBOR_ANDROID_RELEASE_KEYSTORE",
+          "HARBOR_ANDROID_RELEASE_KEYSTORE_PASSWORD",
+          "HARBOR_ANDROID_RELEASE_KEY_ALIAS",
+          "HARBOR_ANDROID_RELEASE_KEY_PASSWORD"
+        ],
+        "expectedExit": "nonzero",
+        "expectedOutputPattern": "signing|keystore|unsigned",
+        "hostConstraintPatterns": ["Android SDK not found"]
+      }
+    ]
+  }
+}

@@ -1,0 +1,89 @@
+/* Shared blue-frost theme for the /adv dockview docks (Harness + Git).
+ *
+ * dockview ships a flat grey dark theme (#1e1e1e); this re-skins it to the
+ * Papercusp blue-frost glass — var(--frost) over navy with sky accents — so
+ * panel headers and empty panels match the rest of the app. Scoped to
+ * `.pc-adv-dock` so the legacy /harness dock (no such class) is untouched.
+ *
+ * Flat colours go through dockview's --dv-* vars; the frosted surfaces
+ * (gradients can't be a var colour) are overridden on the element with
+ * !important to win over dockview's bundled vendor CSS. */
+
+.pc-adv-dock .dockview-theme-dark {
+  --dv-group-view-background-color: color-mix(in srgb, var(--bg), transparent 8%);
+  --dv-tabs-and-actions-container-background-color: transparent;
+  --dv-activegroup-visiblepanel-tab-background-color: transparent;
+  --dv-inactivegroup-visiblepanel-tab-background-color: transparent;
+  --dv-activegroup-hiddenpanel-tab-background-color: transparent;
+  --dv-inactivegroup-hiddenpanel-tab-background-color: transparent;
+  --dv-activegroup-visiblepanel-tab-color: var(--fg);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--fg-mute);
+  --dv-activegroup-hiddenpanel-tab-color: var(--fg-mute);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--fg-mute);
+  /* Tabs carry their own borders (below) — the built-in divider hairline
+   * between tabs is noise next to them. */
+  --dv-tab-divider-color: transparent;
+  --dv-separator-border: rgb(from var(--accent-strong) r g b / 0.14);
+}
+
+/* Empty panels + group surface + the empty-group watermark + the
+ * no-harness-selected page states. */
+.pc-adv-dock .dockview-theme-dark .dv-groupview,
+.pc-adv-dock .dockview-theme-dark .dv-watermark,
+.pc-adv-harnesses__empty,
+.pc-adv-git__empty {
+  background:
+    radial-gradient(ellipse at 50% -10%, color-mix(in srgb, var(--accent-cool), transparent 94%), transparent 60%),
+    var(--frost),
+    color-mix(in srgb, var(--bg-1), transparent 45%) !important;
+}
+
+/* Panel headers (every panel) — frosted glass strip + sky hairline. */
+.pc-adv-dock .dockview-theme-dark .dv-tabs-and-actions-container {
+  background:
+    radial-gradient(ellipse at 50% 0%, color-mix(in srgb, var(--accent-cool), transparent 91.5%), transparent 68%),
+    var(--frost),
+    color-mix(in srgb, var(--bg-1), transparent 38%) !important;
+  border-bottom: 1px solid rgb(from var(--accent-strong) r g b / 0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -1px 0 rgb(from var(--accent-strong) r g b / 0.06);
+}
+
+/* Create dock only: external top-bar buttons drive panel switching, so the
+ * per-group tab headers are dead weight — hide them. The dock is kept purely
+ * for its resizable, locked two-region split. Scoped to `.pc-adv-create` so
+ * the Harness/Git docks (which DO use their tabs) are untouched. */
+.pc-adv-create.pc-adv-dock .dockview-theme-dark .dv-tabs-and-actions-container {
+  display: none;
+}
+
+/* Tabs read as ACTUAL tabs: bordered, top-rounded chips seated on the strip's
+ * bottom hairline. Top padding on the container makes each tab shorter than
+ * the strip so the shape is visible; gap separates siblings (the built-in
+ * divider is disabled above). Flat per HR9 — borders + tinted fills, no
+ * elevation. */
+.pc-adv-dock .dockview-theme-dark .dv-tabs-container {
+  padding: 6px 8px 0;
+  gap: 4px;
+}
+.pc-adv-dock .dockview-theme-dark .dv-tab {
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 80%);
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  background: color-mix(in srgb, var(--bg-1), transparent 40%);
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.pc-adv-dock .dockview-theme-dark .dv-tab:hover {
+  background: color-mix(in oklab, var(--accent), transparent 90%);
+  border-color: color-mix(in srgb, var(--accent), transparent 65%);
+  color: var(--fg);
+}
+.pc-adv-dock .dockview-theme-dark .dv-tab.dv-active-tab {
+  background: color-mix(in oklab, var(--accent), transparent 84%);
+  border-color: color-mix(in srgb, var(--accent), transparent 50%);
+  /* Selection indicator: accent bar along the tab's top edge (the bottom
+   * edge sits on the strip hairline now, so the old underline is gone). */
+  box-shadow: inset 0 2px 0 var(--accent);
+  color: var(--fg);
+}

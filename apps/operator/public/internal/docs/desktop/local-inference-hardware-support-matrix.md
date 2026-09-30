@@ -1,0 +1,149 @@
+# Local-inference hardware support matrix (provisioner wizard)
+URL: /internal/docs/desktop/local-inference-hardware-support-matrix
+
+The certified hardware→backend/model recommendation matrix behind the desktop setup wizard's local-model step (NVIDIA≥24GB / smaller NVIDIA / Mac Metal / CPU-only / no-GPU→cloud) — and where it actually lives in code so a doc/code drift never happens.
+
+## What this is
+
+Decision **D-009** (plan `local-concurrent-inference-2026-07-02`) fixed the packaging story
+for local model inference and, as part of that, wrote down a **support matrix**: for a given
+piece of detected hardware, which backend + model combo the desktop setup wizard should
+recommend. This doc is that matrix, published where a human (or a future agent extending the
+catalog) can find it — **the code, not this doc, is the source of truth**; this page exists so
+the *policy* behind the code is legible in one place instead of buried in a plan decision body.
+
+If you are about to add a new hardware tier, a new catalog entry, or change a VRAM threshold —
+edit the code below, then update this doc's table. If they ever disagree, the code wins; file a
+doc-drift fix.
+
+## The matrix
+
+| Hardware tier                                                           | Recommendation                                                                                                        | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **NVIDIA, ≥24GB VRAM**                                                  | `vLLM` + AWQ/GPTQ (managed container) preferred for max concurrency; `llama-server` GGUF as the no-container fallback | The pipeline (`recommend.ts`/`provision.ts`/`vllm-container.ts`) is fully wired for the vLLM lane — including downgrading to `llama-server` when no working Docker/Podman runtime is found (D-009 #3) — but as of this writing `CERTIFIED_CATALOG` (catalog.ts) has only ONE entry for this tier, `llama-server`-backed. It cleared the P-006/P-007 certification battery on 2026-07-02 (`status: 'certified'`, 3/3 critical probes, 0% mangling) — see its `certification` record in catalog.ts. So today's actual recommendation at this tier is still `llama-server`, now CERTIFIED rather than provisional; the vLLM lane activates automatically the moment a `backend: 'vllm'` entry is added to the catalog — no wizard/recommend code changes needed |
+| **NVIDIA, \<24GB VRAM** (the `nvidia-mid` / `nvidia-low` tiers)         | `llama-server` GGUF only — a certified 7–14B quant sized to fit VRAM at a serviceable `num_ctx`                       | No vLLM lane at this tier (concurrency isn't the point; fitting in VRAM is). `nvidia-low` now has a CERTIFIED combo: `qwen3-8b-q4km-llama-server` (Qwen3-8B Q4\_K\_M, minVram 10GB, serve flags `--jinja --reasoning-budget 0`) — cleared the P-006 battery 2026-07-03, 3/3 critical probes, 0% mangling (WI-1596). `nvidia-mid` still has no entry (a 12–23GB card falls through with the honest "no combo yet" reason)                                                                                                                                                                                                                                                                                                                                     |
+| **Apple Silicon (Metal)**                                               | `llama-server` built with the Metal backend, single/low-stream concurrency                                            | No vLLM lane — vLLM is CUDA-only (D-004). A PROVISIONAL entry exists (`qwen3-8b-q4km-llama-server-metal`, same model+quant+flags combo as the certified nvidia-low entry) — it flips to `certified` once the battery runs against a real Metal serve (mac lane; WI-1596)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **CPU-only (no GPU)**                                                   | `llama-server` CPU build, smallest certified quant                                                                    | The wizard surfaces a warning about materially lower throughput rather than silently under-provisioning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **AMD GPU** (detected via `rocm-smi`, no catalog entry targets it yet)  | Route to the **cloud gateway** lane, same as CPU-only                                                                 | `hardware-detect.ts` DOES detect AMD (vendor + best-effort VRAM) — it is not lumped in with "detection failure". `recommend.ts`'s `tierOf()` has no AMD tier yet, so it falls through to `cpu-only`, but `recommendCombo()`'s `reason` string is honest about *why*: `"detected a amd GPU the catalog doesn't target yet"`, distinct from the plain "no GPU detected" case                                                                                                                                                                                                                                                                                                                                                                                   |
+| **No usable local hardware** (no GPU detected, detection failure, etc.) | Route to the **cloud gateway** lane (the existing Claude/Codex account pool)                                          | This is a *routing* decision the gateway abstraction (D-002) already covers — not a new local-backend kind                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+## Where this lives in code (the actual source of truth)
+
+The wizard's hardware-detection → recommendation step is wired straight through this chain —
+there is **no separate hardcoded copy of the matrix in the UI**:
+
+1. **`provisioner/hardware-detect.ts`** — read-only hardware probe (GPU vendor/VRAM via
+   `nvidia-smi` / `rocm-smi` (AMD) / Metal detection / CPU fallback) → a `DetectedHardware`
+   value. NVIDIA detection also captures `computeCap` (CUDA compute capability, e.g. `"8.6"`)
+   when `nvidia-smi` reports it — this doesn't feed the tier/recommendation matrix at all; it
+   only feeds `provisioner/llama-binary.ts`'s from-source build path (`computeCapToArch`,
+   WI-1617) when the headless CLI's `--provision-binary` flag is used. AMD is genuinely
+   *detected* (not treated as a probe failure) even though no catalog entry targets it yet —
+   see the AMD row above.
+2. **`provisioner/recommend-types.ts`** — the `HardwareTier` union
+   (`nvidia-24gb-plus | nvidia-mid | nvidia-low | apple-silicon | cpu-only`) that encodes the
+   matrix's row boundaries.
+3. **`provisioner/recommend.ts`** — `tierOf()` buckets `DetectedHardware` into a `HardwareTier`
+   (this is where the `>=24GB` / `>=12GB` thresholds actually live); `recommendCombo()` matches
+   the tier against the catalog and returns a `Recommendation` (entry + human-readable reason),
+   or an honest "nothing fits, route to cloud" answer when the tier is `cpu-only` or no catalog
+   entry targets it yet. Its `RecommendOptions.containerRuntimeAvailable` (D-009 #3) lets a
+   caller pass `false` to skip every `backend: 'vllm'` candidate and fall through to the
+   next-best (typically `llama-server`) entry for the same tier — the "downgrade when no
+   working Docker/Podman runtime" behavior; the default (`undefined`, used by every pre-P-013
+   call site) applies no filter.
+4. **`provisioner/catalog.ts`** — `CERTIFIED_CATALOG`: the actual list of hardware-tier →
+   backend/model combos (this is the table's *cell contents* — model ref, quant, VRAM
+   requirement, serve config). Each entry carries a `status` (`provisional` until it clears the
+   P-006/P-007 certification battery, then `certified`) and a `sourceRef` back to the decision
+   that produced it. **Add a new matrix row by adding a catalog entry here — never by hardcoding
+   a second table elsewhere.** As of this writing the catalog holds three entries:
+   `ornith-35b-iq3m-llama-server` (tier `nvidia-24gb-plus`, `certified` 2026-07-02, 3/3 critical
+   probes, 0% mangling), `qwen3-8b-q4km-llama-server` (tier `nvidia-low`, `certified` 2026-07-03,
+   3/3 critical probes, 0% mangling — WI-1596; its serve config carries the `--jinja --reasoning-budget 0` flags the certification depends on), and
+   `qwen3-8b-q4km-llama-server-metal` (tier `apple-silicon`, `provisional` until the battery runs
+   on a real Metal serve). No `backend: 'vllm'` entry exists yet, even though the rest of the
+   pipeline (below) already supports one.
+5. **`provisioner/provision.ts`** — `planProvision(opts?: { binPath?, vllmDeps?, vllmImage?,
+   hfCacheDir? })` composes 1–4 into a `ProvisionPlan` (plus the weights/image-download plan and
+   backend unit-file path). This is the single function the headless CLI (`provisioner/cli.ts`),
+   the Desktop status route, and the Desktop install route all call. For NVIDIA hardware it also
+   probes for a working container runtime (`vllm-container.ts`'s `detectContainerRuntime` — only
+   NVIDIA is probed, since vLLM is CUDA-only per D-004) and feeds that into `recommendCombo`'s
+   `containerRuntimeAvailable` gate; when the matched entry's `backend` is `'vllm'` it resolves
+   the pinned container image via `resolveVllmImage` and renders the unit with
+   `renderVllmContainerUnit` instead of `renderLlamaServerUnit`. `planProvision()`'s optional
+   `binPath` (an *already-resolved* `llama-server` binary path) threads straight through to
+   `renderLlamaServerUnit` — `planProvision()` itself deliberately does NOT resolve the binary or
+   pull the vLLM image (that would make this "fast, read-only" function do a network fetch /
+   from-source build); the *caller* resolves/pulls first and passes the result in.
+6. **`endpoint-route/routes/desktop/local-model-status.ts`** — `GET
+   /api/desktop/local-model-status`, a thin read-only `defineTool` wrapper over
+   `planProvision()` with **no** `binPath` (it's a status/display read, not an install — the
+   rendered `unitFilePath` in this response assumes a bare `llama-server` on `PATH` until an
+   install actually resolves one).
+7. **`endpoint-route/routes/desktop/local-model-install.ts`** — `POST
+   /api/desktop/local-model-install`, the write side: writes the backend's systemd unit and
+   registers it in the gateway's local-backend pool (`applyProvision()`), optionally
+   enable+starts it (`start`). Takes `{ start?, provisionBinary?, pullVllmImage? }`.
+   `provisionBinary:true` (WI-1617/D-009 #2 — mirrors the CLI's opt-in `--provision-binary`
+   flag, default **false**) calls `llama-binary.ts`'s `resolveLlamaBinary()` FIRST (cache-hit
+   fast; a cache-miss downloads a matching GitHub-release prebuilt or builds from source —
+   genuinely slow) and passes the resolved path into `planProvision({ binPath })` before
+   applying, so the rendered unit points at that real binary instead of assuming one is already
+   on `PATH`. `pullVllmImage:true` (WI-1618/D-009 #3 — mirrors the CLI's opt-in
+   `--provision-vllm-image` flag, default **false**) pulls the pinned vLLM container image
+   (`vllm-container.ts`'s `pullVllmImage`) FIRST when it isn't already cached locally — a real
+   multi-GB network fetch on a cache miss, same slow-request contract as `provisionBinary`; only
+   meaningful when a working Docker/Podman runtime is present and the recommended combo is a
+   `vllm` entry. Both resolve failures return `{ ok:false, error }` — no silent fallback for a
+   caller that explicitly opted into binary/image provisioning.
+8. **`apps/operator/app/_components/SetupWizard/StepLocalModel.tsx`** — the wizard step
+   (rendered by both the legacy Next tree and, via the `@/app/_components/...` alias, the active
+   `operator-vite` `/setup` route). It fetches `local-model-status` for display, renders
+   `plan.recommendation` verbatim (surfacing `provisional` vs `certified` status and the
+   `reason` string), and offers install/start actions gated on `plan.blocked`. Both its
+   Install and Start actions POST to `local-model-install` with `provisionBinary: true` — so
+   the wizard's own install path DOES resolve a real `llama-server` binary today (the item-5
+   "assumes PATH" caveat applies only to the read-only status display, not the actual install).
+   It does **not** yet pass `pullVllmImage: true` — moot today since the catalog has no
+   `backend: 'vllm'` entry (item 4), but worth revisiting once one is added.
+
+So "wire the wizard to the matrix as source of truth instead of a hardcoded duplicate" was, at
+the time this doc was written, **already true by construction** — the wizard has never had its
+own copy of the tiers/thresholds; it renders whatever `recommendCombo()` computes. The remaining
+piece D-009/P-014 asked for was this doc: the matrix written down somewhere a human reviewing
+the provisioner doesn't have to reverse-engineer it from `tierOf()`'s if/else chain.
+
+## Extending the matrix
+
+* **New VRAM threshold or a new tier** → edit `HardwareTier` (recommend-types.ts) +
+  `tierOf()` (recommend.ts), then add/update the corresponding row above.
+* **New certified combo for an existing tier** → add a `CatalogEntry` to `CERTIFIED_CATALOG`
+  (catalog.ts) with `status: 'provisional'` until it clears certification (P-006/P-007), then
+  flip to `'certified'`. `recommendCombo()` already picks the biggest model that fits a tier's
+  VRAM budget, so a new bigger-but-still-fitting entry is picked up automatically — no wizard
+  code changes needed.
+* **New backend kind** (beyond `llama-server` / `vllm`) → this is the case D-009 #3 flagged as
+  proving out: registration into `harness_shared.local_backends` is backend-agnostic (D-002's
+  gateway abstraction), so a third `LocalBackendKind` should need zero gateway-side changes,
+  only a new catalog entry + whatever backend-specific provisioning logic
+  (see `provisioner/backend-config.ts`).
+* **Give AMD its own tier** (today it detects and falls straight through to `cpu-only`/cloud —
+  see the AMD row above) → add an `'amd-*'` member to `HardwareTier` (recommend-types.ts), a
+  branch in `tierOf()` keyed on `gpu.vendor === 'amd'` (recommend.ts), and at least one
+  `CERTIFIED_CATALOG` entry targeting it (catalog.ts) — `hardware-detect.ts`'s `detectAmd()`
+  already supplies vendor + best-effort VRAM, so no probe-side work is needed, only the
+  tier/catalog wiring.
+
+## Related
+
+* Decision **D-009** on plan `local-concurrent-inference-2026-07-02` — the full packaging
+  rationale (OMP bundling, llama-server on-demand fetch, vLLM managed-container, resumable
+  checksummed downloads) this matrix is one part of.
+* Plan items this decision spawned: **P-012** (llama-server on-demand binary provisioning,
+  WI-1617) and **P-013** (vLLM container provisioning, WI-1618) have **landed**
+  (`llama-binary.ts` / `vllm-container.ts`, wired into `provision.ts` and both opt-in via
+  `local-model-install.ts`'s `provisionBinary` / `pullVllmImage`) — see items 5 and 7 above.
+  **P-011** (a resumable/checksummed downloader) is still open: `weights.ts` only resolves
+  already-present ollama blobs + returns a `pullHint`; it performs no download itself.

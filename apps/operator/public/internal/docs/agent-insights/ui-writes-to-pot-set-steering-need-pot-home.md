@@ -1,0 +1,105 @@
+# A UI write to pot:set-steering MUST pass pot:<home> — it defaults to '*' and silently rejects
+URL: /internal/docs/agent-insights/ui-writes-to-pot-set-steering-need-pot-home
+
+Any SPA caller of pot:set-steering (sidebar model overrides, Mug tab, throttles) must resolve the home pot and pass it; the tool's default pot '*' is not a real Pot, so setHiveSetting throws and the write is lost. Unit tests miss it because they pass pot explicitly.
+
+## The trap
+
+`pot:set-steering` (and its store `owner-steering.ts`) is **per-pot**:
+`setOwnerSteering(workspaceId, installSlug, patch)` → `setHiveSetting`, which
+**throws** when `installSlug` is not a real Pot:
+
+```
+setHiveSetting: no Pot '*' in workspace 'papercusp-workspace' — settings belong to a Pot
+```
+
+The tool resolves its pot from `resolveHiveHomeSlug(args.pot, ctx.harnessSlug)`.
+A browser `fetch('/api/agent-mcp/run-tool', …)` carries **no** `ctx.harnessSlug`,
+so when the SPA omits `pot` it defaults to **`'*'`** and the write is rejected.
+The HTTP call returns `200 { ok:true }` at the transport layer but the tool body
+is `{ ok:false, error:"… no Pot '*' …" }`, so the failure is easy to miss.
+
+## The rule
+
+**Every SPA caller of `pot:set-steering` must resolve the workspace's HOME pot
+and pass it as `pot`.** The proven helper is `resolveHomeHive(projects, rows)`
+(exported from `QueenTab.tsx`): first `harnessProjects.lite` row with
+`harness_kind === 'pot'`, else the first `pot.steering` row. Query both:
+
+```ts
+const steeringQ = useSyncQuery({ queryName: 'pot.steering', args: {} });
+const projectsQ = useSyncQuery({ queryName: 'harnessProjects.lite', args: { includeHiveHomes: true } });
+const home = resolveHomeHive(projectsQ.data ?? [], steeringQ.data ?? []);
+// …
+runSetSteering({ pot: home, /* …patch */ });
+```
+
+Two corollaries:
+
+1. **`pot.steering` returns MULTIPLE rows** (one per pot). Read the home row
+   with `rows.find(r => r.slug === home)`, **not** `rows[0]` — `[0]` is whatever
+   pot sorted first, not necessarily the home.
+2. **Guard the load race.** `home` is `''` until `harnessProjects.lite` resolves;
+   a click in that window sends `pot:''` (same rejection). Bail with a retry
+   message when `!home` (QueenTab does this; `useModelOverride` does too).
+
+## RECURRENCE 2026-07-12 (WI-4339): the same class, via a RENAME — and the fix that finally kills it
+
+This bug came back, owner-reported, in a nastier form. The `hive`→`pot` /
+`bee`→`cup` rename pass renamed the **tool's args** but not the **SPA callers**:
+
+| tool arg (renamed) | what the SPA kept sending |
+| ------------------ | ------------------------- |
+| `pot`              | `hive`                    |
+| `eligiblePots`     | `eligibleHives`           |
+| `maxCups`          | `maxBees`                 |
+
+zod's default `z.object()` **silently strips** unknown keys, so:
+
+* `hive` → stripped → `args.pot` undefined → `resolvePotHomeSlug()` → null →
+  the misleading **"Pass `pot` (or set PAPERCUSP\_POT\_HOME\_SLUG)"**, which points
+  at the *pot*, not at the real culprit (the *arg name*). Every Mug-tab steering
+  write failed.
+* `eligibleHives` / `maxBees` → stripped → **no error at all**: the placement-scope
+  picker and the max-concurrency knob silently did *nothing*. Worse than the first.
+
+**The tests stayed green because they asserted the SPA's own (stale) output shape**
+(`expect(args.hive)…`) instead of the shape the tool actually accepts. A test that
+only checks what you *sent* can never catch a contract drift — it just codifies it.
+
+**The durable fix (do this, not another one-off):**
+
+1. **`.strict()` on the tool args** (`set_steering.ts` + `get_steering.ts`), the
+   EI-8285 pattern already used by `plans:new` and `cup:spawn`. A stale/renamed/typo'd
+   key now fails LOUDLY at the point of the typo instead of vanishing. This is what
+   found `eligiblePots`/`maxCups` — they were still broken *after* the `pot` fix.
+   Guard: `pot/steering-unknown-key.test.ts`.
+2. **Translate at ONE wire boundary**, not per call site. The persisted store + the
+   `hive.steering` read row still legitimately use the old names; only the tool's
+   *args* were renamed. `MugTab.tsx` now maps patch→args in `toSteeringArgs()` so no
+   individual toggle/reset/knob can drift again.
+
+> Rule of thumb: when you rename a tool's args, `.strict()` it in the same commit —
+> otherwise every stale caller degrades to a silent no-op, and the unit tests that
+> assert the caller's own output shape will happily stay green.
+
+## Why unit tests didn't catch it
+
+The 99 store/tool unit tests all pass `pot` explicitly (they call
+`setOwnerSteering(ws, 'somehive', …)` directly), so they never exercise the
+default-`'*'` path. This bug was found only by driving the real Tauri webview
+(`tauri-agent-tools eval` → instrument `window.fetch` → read the captured body).
+The regression guard now lives in `useModelOverride.test.tsx` ("writes
+pot:set-steering WITH pot: `<home>`") — assert the **request body** carries
+`args.pot`, not just that a fetch happened.
+
+## Verifying a SPA steering write live
+
+The integration tree's fresh dist is served on **:3270** (not :3170, which runs
+the separate `papercup-staging` checkout and lags until staging-sync). Reload a
+:3270 Tauri webview, instrument `window.fetch` to capture `run-tool` bodies,
+drive the control via the native `HTMLSelectElement` value setter +
+`dispatchEvent(new Event('change',{bubbles:true}))`, then read back with
+`pot:get-steering { pot }`. For the Papercup override also confirm
+`~/.papercusp/papercup-model` materializes (the `materializeSentinelModelFile`
+projection the dock wrapper reads).

@@ -1,0 +1,121 @@
+---
+title: Using the app
+description: Install Papercusp, start your first harness, run a mission, and save your work.
+---
+
+> **Webapp retired (2026-05-14).** Any `localhost:3055` or `localhost:3070` URL on this page is only reachable while the **Tauri dev shell** is running. Start it with `cd papercusp-desktop && npm run dev`.
+
+
+This walkthrough takes you from a blank machine to a finished mission.
+
+## 1. Install
+
+Papercusp ships as a single CLI plus a desktop bundle. On macOS / Linux:
+
+```bash
+brew install papercupai/tap/papercusp
+```
+
+Or via the standalone tarball — download the latest from the
+[Papercusp homepage](https://papercuspai.com/download) and run the
+installer for your platform.
+
+After install, run the doctor to verify your environment is wired up:
+
+```bash
+papercusp doctor
+```
+
+You should see green checks for **Postgres**, **Node ≥ 20**, **git**,
+and the `papercusp` binary itself on `PATH`.
+
+> *(Screenshot: `papercusp doctor` terminal output with all green checks.)*
+
+## 2. Pick a template and create your first harness
+
+Open the operator UI:
+
+```bash
+open http://localhost:3055
+```
+
+Click **Templates** in the top nav. Each template is a pre-configured
+harness — for example, `coding` (build a feature in a repo), `briefings`
+(produce a daily news digest), or `org` (run a multi-department
+business). Pick the one that matches what you want to build.
+
+Click **Install** → **Fresh project**, give your harness a name, and
+press **Install**. The operator scaffolds the project directory, copies
+in the template's `.papercusp/` files, and registers the harness.
+
+> *(Screenshot: the Templates marketplace with the install dialog open.)*
+
+## 3. Set the goal
+
+Every harness needs a goal — the thing the agents are working toward.
+Edit `<your-project>/SPEC.md`:
+
+```markdown
+# Goal
+
+A working sheets-clone web app that lets a user create, edit, save,
+and reload spreadsheets. Cells support text, numbers, and basic
+formulas (SUM, AVG, A1+B2). One-page deploy on a free hosting tier.
+```
+
+Be specific about acceptance — the orchestrator role uses this file to
+decide when the mission is "done."
+
+## 4. Start the mission
+
+Back in the operator UI, click into your harness, then press **start**
+in the top toolbar. The mission loop begins: an orchestrator role
+decides what to do next, dispatches workers, and a validator checks
+each result.
+
+> *(Screenshot: harness dashboard with the "start" button highlighted.)*
+
+You'll see status update in real time — features moving through
+`todo → in_progress → validating → passed`, plus each role's output
+streaming into the **consoles** tab.
+
+## 5. Steer the mission
+
+Most missions don't need intervention. When they do, the operator UI
+gives you several places to push:
+
+- **Brainstorm tab** — drop in ideas mid-mission; the orchestrator
+  picks them up on its next tick.
+- **Proposals tab** — when the agent suggests an SPEC update, accept or
+  reject it. Accepted proposals are appended to `SPEC.md`.
+- **Issues tab** — when the validator finds a problem, you can mark
+  issues `closed`, reassign, or annotate them.
+
+> *(Screenshot: the brainstorm and proposals tabs side by side.)*
+
+## 6. Save your work
+
+When the mission is done — or just at a milestone you want to keep —
+click **save snapshot** in the toolbar. This captures every state file
+plus a manifest into a single `.tar.gz` you can reinstantiate later or
+share with a colleague.
+
+See the [Harness snapshots](/docs/harness-snapshots) page for the full
+snapshot lifecycle.
+
+## 7. Publish, share, retire
+
+Three buttons sit next to **Publish**:
+
+- **Publish** — pushes a snapshot or template to the public marketplace.
+- **Retract** — pulls a published version back (deprecate / withdraw / yank).
+- **Delete** — removes the local copy. Published copies on the marketplace
+  are unaffected.
+
+> *(Screenshot: the snapshots page with Publish / Retract / Delete buttons.)*
+
+## Where to go next
+
+- Make your harness reusable: [Harness templates](/docs/harness-templates).
+- Save and share state: [Harness snapshots](/docs/harness-snapshots).
+- Add new actions: [Plugins](/docs/plugins).

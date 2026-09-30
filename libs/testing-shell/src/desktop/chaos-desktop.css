@@ -1,0 +1,103 @@
+/**
+ * chaos-desktop.css — the pc-test-* classes ChaosDesktopPanel uses that aren't
+ * already in the lib's testing-shell.css (badge, metric-table, card-title/row,
+ * tab-header/title/intro). Token-based so it inherits the host's theme. Ported
+ * from the operator's testing.css for cross-project use
+ * (universal-testing-domains-generic-2026-06-03 Phase 4).
+ */
+
+.pc-test-tab-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.pc-test-tab-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0 0 4px;
+  color: var(--fg);
+}
+.pc-test-tab-intro {
+  font-size: 12px;
+  color: var(--fg-mute);
+  margin: 0;
+  max-width: 70ch;
+  line-height: 1.6;
+}
+
+.pc-test-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.pc-test-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 10px;
+  color: var(--fg);
+}
+.pc-test-card-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.pc-test-card-row:last-child { margin-bottom: 0; }
+.pc-test-card-row label { font-size: 12px; color: var(--fg-dim); }
+.pc-test-card-row input[type='text'],
+.pc-test-card-row input[type='number'],
+.pc-test-card-row textarea {
+  background: var(--bg-3, var(--bg-2));
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.pc-test-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg-mute) 16%, transparent);
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.pc-test-badge.is-good { background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good); }
+.pc-test-badge.is-poor { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+.pc-test-badge.is-needs { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.pc-test-badge.is-muted { background: color-mix(in srgb, var(--fg-mute) 16%, transparent); color: var(--fg-mute); }
+
+.pc-test-metric-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.pc-test-metric-table th {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-mute);
+  font-weight: 500;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.pc-test-metric-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.pc-test-metric-table code {
+  font-size: 11px;
+  color: var(--fg-mute);
+}

@@ -1,0 +1,230 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/social-instagram",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Instagram platform trigger pack: Watches an Instagram professional account for comments and replies on its media. Records each event and publishes nothing.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": {
+    "mode": "exact"
+  },
+  "capabilities": [],
+  "oauth": [
+    {
+      "provider": "facebook",
+      "scopes": [
+        "instagram_basic",
+        "instagram_content_publish",
+        "instagram_manage_comments",
+        "pages_show_list",
+        "pages_read_engagement"
+      ],
+      "fieldName": "facebookInstagram"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "facebookInstagram"
+    ],
+    "properties": {
+      "igUserId": {
+        "type": "string",
+        "title": "Instagram professional account id",
+        "shareable": true,
+        "description": "The IG professional account to watch. Public, so it travels with a share."
+      },
+      "facebookInstagram": {
+        "type": "string",
+        "title": "Instagram connection",
+        "secret": true,
+        "shareable": false,
+        "snapshotPolicy": "strip",
+        "description": "OAuth credential for the Instagram professional account, authorized through Facebook Login. Requires Meta app review.",
+        "oauth": {
+          "provider": "facebook",
+          "scopes": [
+            "instagram_basic",
+            "instagram_content_publish",
+            "instagram_manage_comments",
+            "pages_show_list",
+            "pages_read_engagement"
+          ]
+        }
+      }
+    }
+  },
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "escalationGuidance": {
+          "type": "string",
+          "title": "What needs a human",
+          "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said.",
+          "maxLength": 1000
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 1,
+      "windowSeconds": 300
+    },
+    "targets": [
+      {
+        "id": "record-instagram-event",
+        "kind": "plan",
+        "path": "plan.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "trigger"
+          ],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": [
+                "key",
+                "source",
+                "event",
+                "sourceId",
+                "externalId",
+                "dedupeKey",
+                "payload"
+              ],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "pattern": "^ext:instagram:(comment|reply)$"
+                },
+                "source": {
+                  "type": "string",
+                  "const": "instagram"
+                },
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "comment",
+                    "reply"
+                  ]
+                },
+                "sourceId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "externalId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dedupeKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "payload": {
+                  "type": "object",
+                  "datatype": "social-post",
+                  "additionalProperties": true,
+                  "required": [
+                    "id",
+                    "text"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "replyToId": {
+                      "type": "string"
+                    },
+                    "occurredAt": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "escalationGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said."
+            }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "instagram-comment",
+        "source": {
+          "kind": "external",
+          "sourceKind": "instagram",
+          "oauthField": "facebookInstagram"
+        },
+        "target": "record-instagram-event",
+        "eventPattern": "ext:instagram:comment",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      },
+      {
+        "id": "instagram-reply",
+        "source": {
+          "kind": "external",
+          "sourceKind": "instagram",
+          "oauthField": "facebookInstagram"
+        },
+        "target": "record-instagram-event",
+        "eventPattern": "ext:instagram:reply",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      }
+    ],
+    "edges": []
+  },
+  "icon": "Instagram"
+}

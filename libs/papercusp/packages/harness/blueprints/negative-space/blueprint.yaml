@@ -1,0 +1,65 @@
+# The `negative-space` blueprint — deterministic-blueprints-migration-2026-06-13 (P-110, pilot A).
+#
+# THE pure-deterministic pilot: the negative-space miner (SQL-only, no agent) as a
+# SCHEDULED DETERMINISTIC blueprint. It proves the deterministic step kind (P-010):
+# a program-mode spine whose single step fires a registered typed function
+# (`negative-space:scan`) wrapping the shipped miner logic — same flag, same
+# governor budget, same tick (behavior-neutral, D-004). No decision gate ⇒ a
+# DETERMINISTIC PIPELINE (the step runs to completion); a gated program would be a
+# decision program (vote/deliberate). The bespoke `system:negative-space-mine`
+# routine action is retired in P-130 (the lib LOGIC stays — the op calls it).
+#
+# Dark stays dark: the op runs the SAME `papercusp-negative-space-miner` flag +
+# learning-governor preflight the routine did — the loop is triple-gated
+# (inactive seed + dark flag + unbudgeted governor) until the self-learning-frontier
+# P-001 arming gate closes.
+id: negative-space
+extends: base
+version: 0.1.0
+description: >-
+  Deterministic learning loop: recompute the zero-hit-search demand map and file
+  the capped missing-knowledge candidates (the negative-space miner) on a cadence.
+  Pure-SQL, no agent — the simplest deterministic blueprint.
+
+# A descriptive work-item kind (the deterministic pipeline does not create rows —
+# it mines + files improvements directly); the schema requires the field.
+workItem:
+  kind: mining-run
+  idPrefix: NSM
+
+# Program-mode spine (P-010): one deterministic step, NO gate ⇒ deterministic
+# pipeline. `payload.*` are the demand fire-bars / window the routine's
+# payload_template carries (absent ⇒ the op's defaults). A whole-string
+# `{{ payload.x }}` that is unset interpolates to undefined → the op's optional
+# arg is omitted → its default applies.
+spine:
+  steps:
+    - id: scan
+      op: negative-space:scan
+      args:
+        minMisses: "{{ payload.minMisses }}"
+        minAgents: "{{ payload.minAgents }}"
+        maxPerTick: "{{ payload.maxPerTick }}"
+        windowDays: "{{ payload.windowDays }}"
+      bind: scan
+
+knobs:
+  harnessKind: learning
+  # SQL-only demand mining needs no repo.
+  requiresRepo: false
+
+# Scheduled trigger (D-004): the miner cadence, byte-identical to the bespoke
+# `system:negative-space-mine` routine (every 6h at :25, offset from the deploy
+# rhythm). The routine fires `system:blueprint-run` with `{ blueprintId: negative-space }`;
+# the handler detects program-mode and runs the steps inline. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 25 */6 * * *"
+      action: system:blueprint-run
+      singleton: true  # P-144/D-018: workspace-singleton cadence (frontier loop — dark until armed at P-001)
+
+# No agent roles (pure-deterministic) and no agent-tool deps — the step calls a
+# registered function, not an agent.
+dependencies:
+  tools: []
+  plugins: []

@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sidestage event activation and scheduling mockups</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f6f0e7;
+        color: #211b18;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        background:
+          radial-gradient(circle at top right, rgb(218 44 35 / 8%), transparent 34rem),
+          #f6f0e7;
+      }
+
+      main {
+        width: min(1800px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 44px 0 64px;
+      }
+
+      header {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 28px;
+      }
+
+      .eyebrow {
+        margin: 0 0 8px;
+        color: #d7241d;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        max-width: 880px;
+        font-size: clamp(30px, 4vw, 58px);
+        line-height: 0.98;
+        letter-spacing: -0.045em;
+      }
+
+      .summary {
+        max-width: 590px;
+        margin: 14px 0 0;
+        color: #725e51;
+        font-size: 16px;
+        line-height: 1.55;
+      }
+
+      .key {
+        flex: 0 0 auto;
+        border: 1px solid #decbb7;
+        border-radius: 999px;
+        background: rgb(255 255 255 / 70%);
+        padding: 10px 14px;
+        color: #725e51;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 24px;
+      }
+
+      figure {
+        margin: 0;
+        overflow: hidden;
+        border: 1px solid #decbb7;
+        border-radius: 20px;
+        background: #fffaf4;
+        box-shadow: 0 18px 52px rgb(60 39 24 / 10%);
+      }
+
+      figure a {
+        display: block;
+        background: #efe5d7;
+      }
+
+      img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      figcaption {
+        display: grid;
+        gap: 5px;
+        min-height: 96px;
+        padding: 18px 20px 20px;
+      }
+
+      figcaption strong {
+        font-size: 18px;
+      }
+
+      figcaption span {
+        color: #725e51;
+        font-size: 14px;
+        line-height: 1.45;
+      }
+
+      @media (max-width: 900px) {
+        main {
+          width: min(100% - 24px, 720px);
+          padding-top: 28px;
+        }
+
+        header {
+          align-items: start;
+          flex-direction: column;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">Sidestage Studio · Design review</p>
+          <h1>Event activation and scheduling</h1>
+          <p class="summary">
+            Four coordinated states for making an event active now, scheduling it for later,
+            and keeping the seller informed without conflating lifecycle activation with Live Console media controls.
+          </p>
+        </div>
+        <div class="key">Click any mockup to view it full size</div>
+      </header>
+
+      <section class="grid" aria-label="Sidestage event activation and scheduling mockups">
+        <figure>
+          <a href="sidestage-event-manager-actions.png" target="_blank" rel="noreferrer">
+            <img src="sidestage-event-manager-actions.png" alt="Event Manager with Schedule event and Start now actions" />
+          </a>
+          <figcaption>
+            <strong>1. Lifecycle actions in Event Manager</strong>
+            <span>The selected draft gets clear Schedule event and Start now actions at the point of management.</span>
+          </figcaption>
+        </figure>
+
+        <figure>
+          <a href="sidestage-start-now-confirmation.png" target="_blank" rel="noreferrer">
+            <img src="sidestage-start-now-confirmation.png" alt="Confirmation dialog for making an event active" />
+          </a>
+          <figcaption>
+            <strong>2. Start-now confirmation</strong>
+            <span>The confirmation explains that buyer visibility changes now while camera and microphone remain off.</span>
+          </figcaption>
+        </figure>
+
+        <figure>
+          <a href="sidestage-schedule-event-form.png" target="_blank" rel="noreferrer">
+            <img src="sidestage-schedule-event-form.png" alt="Schedule event form with date, time, and time zone" />
+          </a>
+          <figcaption>
+            <strong>3. Explicit scheduling form</strong>
+            <span>Date, time, and time zone are separate, labeled fields with clear activation semantics.</span>
+          </figcaption>
+        </figure>
+
+        <figure>
+          <a href="sidestage-active-event-scheduled-state.png" target="_blank" rel="noreferrer">
+            <img src="sidestage-active-event-scheduled-state.png" alt="Active Event screen showing a seller-visible scheduled event" />
+          </a>
+          <figcaption>
+            <strong>4. Seller-visible scheduled state</strong>
+            <span>The exact localized schedule appears in Up Next and Live Console, with Edit schedule and Start now available.</span>
+          </figcaption>
+        </figure>
+      </section>
+    </main>
+  </body>
+</html>

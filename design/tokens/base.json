@@ -1,0 +1,70 @@
+{
+  "$schema": "https://design-tokens.org/schemas/v1.json",
+  "$description": "Papercusp operator semantic token inventory for design-phase tools. Mirrors the live operator theme contract documented in /internal/docs/design/tokens and generated CSS variables under apps/operator/app/_semantic.css. Token ids are semantic; descriptions name the corresponding CSS custom property.",
+  "color": {
+    "bg": {
+      "deepest": { "$type": "color", "$value": "#02060C", "$description": "CSS var --bg-deepest: deepest surface depth for gradient bottoms and deep shadows" },
+      "deeper": { "$type": "color", "$value": "#030A14", "$description": "CSS var --bg-deeper: deep surface depth" },
+      "deep": { "$type": "color", "$value": "#050D18", "$description": "CSS var --bg-deep: sub-base surface depth" },
+      "page": { "$type": "color", "$value": "#07101D", "$description": "CSS var --bg: page/app background" },
+      "panel": { "$type": "color", "$value": "#0B1220", "$description": "CSS var --bg-1: panel background" },
+      "surface": { "$type": "color", "$value": "rgba(255, 255, 255, 0.045)", "$description": "CSS var --bg-2: input/chip/surface tier" },
+      "hover": { "$type": "color", "$value": "rgba(255, 255, 255, 0.075)", "$description": "CSS var --bg-3: hover/active surface tier" },
+      "raised": { "$type": "color", "$value": "rgba(255, 255, 255, 0.12)", "$description": "CSS var --bg-4: raised/high-emphasis translucent tier" },
+      "popover": { "$type": "color", "$value": "#0D1829", "$description": "CSS var --bg-popover: solid elevated menu/popover surface" },
+      "raisedSolid": { "$type": "color", "$value": "#112235", "$description": "CSS var --bg-raised: solid raised panel" },
+      "raisedHigh": { "$type": "color", "$value": "#143049", "$description": "CSS var --bg-raised-high: raised hover/emphasis panel" }
+    },
+    "fg": {
+      "primary": { "$type": "color", "$value": "#E7F7FF", "$description": "CSS var --fg: primary text" },
+      "secondary": { "$type": "color", "$value": "#B9D4E8", "$description": "CSS var --fg-dim: secondary text" },
+      "muted": { "$type": "color", "$value": "#7F9BB4", "$description": "CSS var --fg-mute: tertiary/metadata text" }
+    },
+    "border": {
+      "default": { "$type": "color", "$value": "rgba(125, 211, 252, 0.15)", "$description": "CSS var --border: default hairline" },
+      "strong": { "$type": "color", "$value": "rgba(125, 211, 252, 0.32)", "$description": "CSS var --border-strong: emphasized border" }
+    },
+    "accent": {
+      "default": { "$type": "color", "$value": "#38BDF8", "$description": "CSS var --accent: primary interactive accent" },
+      "strong": { "$type": "color", "$value": "#7DD3FC", "$description": "CSS var --accent-strong: stronger/lighter accent" },
+      "cool": { "$type": "color", "$value": "#D7F3FF", "$description": "CSS var --accent-cool: pale accent tint" },
+      "soft": { "$type": "color", "$value": "#BAE6FD", "$description": "CSS var --accent-soft: light accent tint for glows/highlights" },
+      "deep": { "$type": "color", "$value": "#0EA5E9", "$description": "CSS var --accent-deep: deeper accent tint" },
+      "deeper": { "$type": "color", "$value": "#0369A1", "$description": "CSS var --accent-deeper: deepest accent tint" },
+      "ink": { "$type": "color", "$value": "#051827", "$description": "CSS var --accent-ink: text on accent fills" }
+    },
+    "status": {
+      "good": { "$type": "color", "$value": "#34D399", "$description": "CSS var --good: success/healthy status" },
+      "warn": { "$type": "color", "$value": "#FBBF24", "$description": "CSS var --warn: warning/attention status" },
+      "bad": { "$type": "color", "$value": "#F87171", "$description": "CSS var --bad: error/danger status" },
+      "warnBg": { "$type": "color", "$value": "rgba(251, 191, 36, 0.1)", "$description": "CSS var --warn-bg: warning banner fill" },
+      "warnBorder": { "$type": "color", "$value": "rgba(251, 191, 36, 0.35)", "$description": "CSS var --warn-border: warning banner border" }
+    }
+  },
+  "space": {
+    "xs": { "$type": "dimension", "$value": "4px", "$description": "Compact gap/padding" },
+    "sm": { "$type": "dimension", "$value": "8px", "$description": "Small gap/padding" },
+    "md": { "$type": "dimension", "$value": "12px", "$description": "Default dense UI gap/padding" },
+    "lg": { "$type": "dimension", "$value": "16px", "$description": "Panel/card padding" },
+    "xl": { "$type": "dimension", "$value": "24px", "$description": "Section padding" },
+    "2xl": { "$type": "dimension", "$value": "32px", "$description": "Large layout spacing" }
+  },
+  "radius": {
+    "xs": { "$type": "dimension", "$value": "3px" },
+    "sm": { "$type": "dimension", "$value": "4px" },
+    "md": { "$type": "dimension", "$value": "6px" },
+    "lg": { "$type": "dimension", "$value": "8px" },
+    "full": { "$type": "dimension", "$value": "9999px" }
+  },
+  "duration": {
+    "fast": { "$type": "duration", "$value": "120ms", "$description": "CSS var --dur-fast" },
+    "md": { "$type": "duration", "$value": "200ms", "$description": "Default short UI motion" },
+    "slow": { "$type": "duration", "$value": "320ms", "$description": "Longer entrance/exit motion" }
+  },
+  "fontWeight": {
+    "regular": { "$type": "fontWeight", "$value": 400 },
+    "medium": { "$type": "fontWeight", "$value": 500 },
+    "semibold": { "$type": "fontWeight", "$value": 600 },
+    "bold": { "$type": "fontWeight", "$value": 700 }
+  }
+}

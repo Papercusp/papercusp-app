@@ -1,0 +1,99 @@
+{
+  "name": "@papercupai/cloudflare-pages",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "Publish the harness's static export to Cloudflare Pages on mission-done. Demonstrates the action primitive + capability-gated secrets + http:fetch.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "versionPin": { "mode": "exact" },
+  "license": "MIT",
+  "capabilities": [
+    "secrets:read:CLOUDFLARE_API_TOKEN",
+    "http:fetch:api.cloudflare.com",
+    "ui:dashboard-tab",
+    "events:listen:mission-done"
+  ],
+  "actions": [
+    {
+      "name": "publish",
+      "label": "Publish to Cloudflare",
+      "icon": "Cloud",
+      "surfaces": [
+        "mission-done",
+        "harness-toolbar"
+      ],
+      "capabilities": [
+        "secrets:read:CLOUDFLARE_API_TOKEN",
+        "http:fetch:api.cloudflare.com"
+      ],
+      "serverHandler": {
+        "timeoutSec": 120
+      },
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "required": [
+      "accountId",
+      "projectName"
+    ],
+    "properties": {
+      "accountId": {
+        "type": "string",
+        "shareable": false,
+        "minLength": 4,
+        "pattern": "^[a-f0-9]{32}$",
+        "description": "Cloudflare account UUID. Different per forker — must be re-supplied at fork time."
+      },
+      "projectName": {
+        "type": "string",
+        "shareable": false,
+        "minLength": 1,
+        "description": "The Pages project to deploy to. Distinct per forker."
+      },
+      "byoCloudflareToken": {
+        "type": "string",
+        "secret": true,
+        "snapshotPolicy": "strip",
+        "description": "Cloudflare API token with Pages:Edit scope. Stored per-harness; never travels with snapshots."
+      },
+      "exportDir": {
+        "type": "string",
+        "default": "out",
+        "description": "Static export directory under the harness's project root."
+      },
+      "branch": {
+        "type": "string",
+        "default": "main",
+        "description": "Branch label for the deployment."
+      }
+    }
+  },
+  "provision": {
+    "verify": {
+      "path": "provision/verify.sh",
+      "timeoutSec": 30
+    },
+    "cloudProvider": { "id": "cloudflare" },
+    "allowedHosts": ["api.cloudflare.com"]
+  },
+  "uiSchema": {
+    "accountId": {
+      "ui:help": "Find at dash.cloudflare.com \u2192 right sidebar."
+    },
+    "projectName": {
+      "ui:help": "Must already exist in your Cloudflare account."
+    }
+  },
+  "icon": "Cloud"
+}

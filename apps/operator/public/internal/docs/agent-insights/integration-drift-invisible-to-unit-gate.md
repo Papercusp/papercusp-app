@@ -1,0 +1,98 @@
+# Integration tests drift red on deliberate prod changes — and the unit-only green gate never catches it
+URL: /internal/docs/agent-insights/integration-drift-invisible-to-unit-gate
+
+A whole class of Tests-tab reds that are NOT DDL/column drift and NOT load flakes: a deliberate, correct production change (a workspace-constant flip, a new create-side scope gate with a PG dependency, a new flag-gated request clamp) shifts behavior in lockstep with NO fixture update — and because the green-checkpoint deploy gate runs UNIT tests only (`test:affected`), the integration suite rots invisibly while deploys stay green. Symptom: integration-only `*.integration.test.ts` files that last passed days ago surface red one-at-a-time as the runner slowly cycles them; a 60-min-window scan misses them entirely. Triage windowless (latest-row-per-file), re-run isolated to prove determinism, then `git log` the regression window for the prod change. Nine such reds cleared on 2026-06-19; recipes below.
+
+## Symptom
+
+`*.integration.test.ts` files go red days after a deliberate, *correct*
+production change — but each failing suite has nothing to do with the lane that
+made the change, and the **unit** suite (`test:affected`) is fully green. They
+surface **one or two at a time** as the autoloop runner cycles them, so a
+recency-windowed scan (`finished_at > now() - 60 min`) reports "fully green"
+while the real tab carries a growing backlog. Errors are deterministic and
+fast (not timeouts), e.g. `plan_not_found`, `hive_required`,
+`scoped_superuser_workspace_unresolved`, `expected [] to equal [...]`,
+`invalid input syntax for type json`.
+
+## Cause
+
+A change lands that shifts behavior in lockstep — and the integration FIXTURES,
+which hand-roll their own setup, are not updated with it. Because the
+green-checkpoint that gates `main` runs **unit-only**, nothing red-flags the
+drift; staging/main stay "green" and the integration reds accumulate silently
+until someone scans windowless.
+
+This is NOT the DDL/column class (see
+[integration-fixture-ddl-drift](/internal/docs/agent-insights/integration-fixture-ddl-drift));
+it is *behavioral/config* drift. The recurring sub-recipes (all seen
+2026-06-15→06-18, all cleared 06-19):
+
+* **Workspace-constant flip.** `PAPERCUSP_WORKSPACE_ID` flipped
+  `'default'` → `'papercusp-workspace'` (WI-148 part-B / migration 295). A
+  reader resolving the papercup scope now looks in `papercusp-workspace`, but a
+  fixture seeded under the literal `'default'` → `plan_not_found` / empty reads.
+  Fix: seed under the resolved workspace (import `PAPERCUSP_WORKSPACE_ID`, or
+  seed under `activeWorkspaceId()` so seed and a F-C3-scoped read agree).
+* **New create-side scope gate with a PG dependency.** `work_items:create`
+  gained a pot-scope gate; the priority path gained a P-021 mug-home gate.
+  Both call a PG read (`hiveHomeSlugForHarness`, `getQueenHomePubkey`) the
+  throwaway DB lacks → the gate errors or **fails open**, producing the wrong
+  result in the test (`hive_required`, or a non-holder steer that wrongly
+  commits). Fix: inject/mock the gate's resolver the way the test already mocks
+  its other out-of-scope registries (it is the documented DI seam).
+* **New flag-gated request clamp.** `scoped-superuser-workspace-clamp`
+  (`FLAGS.SCOPED_SUPERUSER_CLAMP`, default-on) rejects a bare
+  `?superuser=1` whose workspace can't resolve with
+  `scoped_superuser_workspace_unresolved`. A live HTTP e2e that hit
+  `/api/mcp?superuser=1` now gets rejected before reaching the tool. Fix: make
+  the request carry workspace intent — `&all_workspaces=1` for a deliberately
+  unscoped god-mode e2e, or register the `?client=<owner>` in
+  `harness_shared.adv_sessions` (what `workspaceForCoordOwner` reads) so the
+  spawned hook scripts resolve too, exactly as a live agent is registered.
+* **Stale assertion on an intentional contract change.** `locks:acquire`
+  `wait.max_sec > 300` changed from *reject* to *clamp* (documented in the zod
+  describe). The test still asserted rejection. Fix: assert the new clamp
+  contract (the call succeeds), not the old reject string.
+* **A genuine code bug hiding in the same wave.** One of the nine was real:
+  `_mcp-result-replay.ts`'s hand-rolled JSON builder (a P1-4 "avoid
+  `JSON.stringify`" optimization) emitted invalid JSON — closing `}` placed
+  before `_meta`/`isError`, and `${typed.text}` embedded a plain string
+  unquoted — silently breaking replay idempotency (EI-68) in production. The
+  integration test was the only thing that caught it. Don't assume every
+  integration red is a fixture problem; isolate and read the real error first.
+
+## Triage
+
+1. **Scan windowless** — latest row per file, NO time filter:
+   ```
+   testing:runs { status: ["fail","error"] }
+   ```
+   `latestPerFile` defaults ON when you do not name a `filePath`, and is the
+   same `DISTINCT ON (file_path) … finished_at DESC NULLS LAST, id DESC`
+   collapse this step used to hand-write; omitting `since`/`sinceHours` is what
+   keeps it WINDOWLESS, which is the whole point here. Then apply on the rows
+   the two filters the verb does not express: drop files that no longer exist on
+   disk, and drop `papercupai-workspace/*` mirror paths.
+   A 60-min window is a steady-state watchdog only; it is BLIND to this class.
+2. **Re-run isolated** to prove determinism (a fixture/contract bug fails the
+   same way alone at low load; a load flake greens):
+   `npx vitest run --config vitest.integration.config.ts <file> --no-coverage`
+   (no `--reporter` flag — it replaces the auto-recorder, so a manual run never
+   records its green row).
+3. **`git log --since=<last-pass> -- <prod paths>`** for the deliberate change.
+   The commit is often a broad git-sync "tick" (rename sweep, dark-pipeline
+   backlog), so grep the change INTO the create/read path, not just the test.
+
+## The durable fix
+
+**Give the green-checkpoint an integration leg** (or a periodic integration
+gate). As long as the deploy gate is unit-only, every behavioral/config change
+can rot the integration suite with zero signal — which is exactly how nine
+reds piled up unnoticed. Until then: scan windowless, not windowed.
+
+## Related
+
+* [integration-fixture-ddl-drift](/internal/docs/agent-insights/integration-fixture-ddl-drift) — the schema/column sibling of this class.
+* [tests-tab-reds-under-load-flake-vs-defect](/internal/docs/agent-insights/tests-tab-reds-under-load-flake-vs-defect) — the load-flake class to rule out first.
+* [workspace-id-pin-and-harness-membership](/internal/docs/agent-insights/workspace-id-pin-and-harness-membership) — `activeWorkspaceId()` resolution.

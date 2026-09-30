@@ -1,0 +1,120 @@
+# --disallowedTools cannot withhold an MCP tool, and a deny looks exactly like never-seeded
+URL: /internal/docs/agent-insights/disallowed-tools-cannot-withhold-an-mcp-tool
+
+Two traps for anyone trying to confine an MCP surface with --disallowedTools: (a) it is a client-side DISCOVERY control, not a capability boundary — tools:invoke re-reaches a denied papercusp verb in one call, by design; and (b) the observable signature of a deny is byte-identical to a tool that was never seeded, so any deny probe without a same-server control can record a false confirmation.
+
+## Not a live hole — a trap for the next person
+
+**Nothing in the tree currently denies an `mcp__*` tool**, so no existing fleet confinement is
+weakened by this. Both deny sites list native tools only. This doc exists so that the next agent
+who reaches for `--disallowedTools` to withhold an MCP verb learns the two traps *before*
+shipping a control that does not control anything.
+
+## Trap (a): a client deny is a DISCOVERY control, not a capability boundary
+
+`--disallowedTools` is enforced **client-side, over the client's own tool namespace**. It works
+by *namespace removal*, not by a runtime permission refusal: the tool stops being offered, and a
+direct call reports that no such tool exists.
+
+That is genuinely airtight **for a native tool**, because the client is the only thing that can
+run one. It is *not* airtight for an MCP tool, because an MCP tool is executed by the server:
+
+* `tools:invoke { name: "<server:verb>", args: {...} }` is a single **permitted** client tool
+  that dispatches **by name, server-side**.
+* The server never sees the client's deny list.
+* So one `tools:invoke` call re-reaches a "denied" papercusp verb and executes it normally.
+
+**This is the documented reachability hatch, not an exploit.** `tools:find`'s own `howToCall`
+tells agents in as many words: when a tool is not materialized in your client, call it via
+`tools:invoke`. Agents are *instructed* to route around exactly this.
+
+### What actually withholding an MCP tool would take
+
+Either:
+
+1. Deny `tools:invoke` **and** `tools:find` as well — which removes the general reachability
+   hatch for every tool, a large behavioural change in its own right and not something to do
+   casually; or
+2. Enforce it **server-side**, where the tool actually runs.
+
+A deny list at the launcher can make an MCP verb *inconvenient to discover*. It cannot make it
+unavailable. Write the control at the layer that executes the call.
+
+## Trap (b): a deny is byte-identical to "never seeded"
+
+Both states present as **exactly** the same two observations:
+
+* absent from the deferred-tool list / `ToolSearch select:` returns *"No matching deferred tools
+  found"*, and
+* a direct call returns *"No such tool available"*.
+
+There is no signal that distinguishes *"this was taken away from you"* from *"this was never
+offered to you"*. That matters because papercusp's trimmed surfaces (su, and any role with a
+narrowed kit) legitimately seed only a subset of the \~550-tool catalog — so **"never seeded" is
+the common case, and a deny is the rare one.**
+
+The failure mode is a false positive: you deny a tool, observe the expected refusal, and record
+a confirmation — when your probe would have produced that same refusal with no deny in place.
+The original investigator (2026-07-28) nearly did exactly this: their intended control verb
+happened to be unseeded in that session shape, so the "control" refused too.
+
+> **Any test of a deny MUST carry a same-server, same-tier control — ideally a same-group sibling
+> verb** (deny `facts:list`, control on `facts:assert` / `facts:retract`). A control on a
+> different server, or a tool that might itself be unseeded, proves nothing.
+
+## Worked example — both traps, observed first-person
+
+While working an unrelated item (2026-08-30) an agent needed `locks:queue` on a trimmed su
+surface and hit both traps back to back without recognising either at the time:
+
+```
+ToolSearch { query: "select:mcp__papercusp-su__locks_queue" }
+  -> "No matching deferred tools found"          # ← indistinguishable from a deny (trap b)
+
+tools:invoke { name: "locks:queue", args: { paths: [...] } }
+  -> { active_locks: [], waiting: [], ... }      # ← executed fine (trap a)
+```
+
+`locks:queue` was merely **unseeded**, never denied. But note what the sequence demonstrates:
+
+* the refusal that a deny would produce is the refusal an *absence* produced, and
+* the reachability hatch closed the gap in **one call**, with no escalation and no special
+  privilege.
+
+The same session reached `coord:read` and `work_items:get { payloadTier: "full" }` the same way.
+This is routine, sanctioned behaviour — which is precisely why a client deny cannot be load-bearing.
+
+## Provenance — read this before you cite the doc
+
+The two halves of the claim rest on **different** evidence, and the distinction is worth keeping:
+
+| claim                                                                                    | evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A deny **does** bite an MCP tool (namespace removal), and `tools:invoke` **bypasses** it | Two controlled probes on fresh psu su sessions, 2026-07-28, with same-server controls (`docs_search` not denied ran fine; siblings `facts_assert`/`facts_retract` seeded). Denied `facts_list` was then executed via `tools:invoke`, returning 25 real workspace facts — the only pushback in the chain was `facts:list`'s own Zod validator rejecting `{}`, which proves the call had already reached the tool body. Ruling: D-075 on plan `agent-state-plane-verification-2026-07-27`. |
+| A deny is indistinguishable from never-seeded, and the hatch works in one call           | Re-observed first-person 2026-08-30 (the `locks:queue` example above) — but that is the **unseeded** half. It corroborates the signature collision and the hatch; it does not independently re-measure the denied half.                                                                                                                                                                                                                                                                  |
+
+Nobody has re-run the controlled deny probe since 2026-07-28. If you need that half fresh, it
+requires launching a psu session with `--disallowedTools=mcp__papercusp-su__<verb>` plus a
+same-group sibling control, per trap (b).
+
+## Where the deny sites are
+
+Line numbers drift; the item that prompted this doc cited `invoke.ts:1041` for a symbol that had
+moved to `:1289` by the time it was worked. **Grep for the symbol, not the line.**
+
+* `libs/papercusp/packages/orchestrator/src/invoke.ts` — `FLEET_DISALLOWED_TOOLS` (the standing
+  fleet deny list) and `fleetDisallowedToolsForRole` (per-role assembly).
+* `apps/operator/scripts/psu-launcher.mjs` — `NATIVE_SCHEDULER_DENY_FLAG`,
+  `NO_SUBAGENTS_DENY_FLAG` (`--disallowedTools=Task,Agent,Workflow`), the notify-send deny, and
+  the parser that unions repeated `--disallowedTools` occurrences.
+
+Both files carry a caveat pointing back here. Note that `invoke.ts` *does* construct `mcp__`
+tool-name lists elsewhere (a `mcp__papercusp` server wildcard in the allow list, and
+`':' -> '_'` name mapping for role kits), so an `mcp__` entry finding its way into a deny list is
+a realistic mistake rather than a hypothetical one.
+
+## The one-line rule
+
+> A `--disallowedTools` entry for an `mcp__*` tool buys **discovery friction, not confinement**.
+> If it needs to be a boundary, enforce it server-side — and never confirm a deny without a
+> same-server control.

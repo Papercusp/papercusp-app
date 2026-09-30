@@ -1,0 +1,73 @@
+# Scout 'ran' ticks with 0 ideas / $0 mean transport death, not a quiet muse
+URL: /internal/docs/agent-insights/scout-ran-no-ideas-is-transport-death
+
+A scout_ticks row with status=ran, ideas_generated=0, budget_used_usd=0 and stop:'no-ideas' means every ideator LLM call failed SILENTLY (per-stage null absorption is pinned behavior). Two proven causes (2026-06-11): the long-lived operator's Claude-token cache outliving the ~2h on-disk rotation (every anthropic-direct call 401s, fixed under EI-281 with a self-healing expiry-aware cache + rotated-token 401 retry), and raw-OAuth-bucket 429 saturation (see llm-429-check-the-transport-not-the-account). Deploy-restarts of the operator mask the cache bug intermittently — that's why it looks flaky.
+
+## The mistake this prevents
+
+The papercup Learning tab's Scout view sat empty after the scout-cycle routine
+was enabled, while `scout_ticks` showed `ran` rows. An agent (or owner) reads
+`status=ran` as "the loop works, it just didn't find anything". Wrong: the
+Scout cycle **absorbs failed LLM calls as nulls by design** (pinned in
+`lib/scout/cycle-failure-modes.test.ts`), so a cycle whose every ideator call
+dies looks identical to a cycle that generated nothing — `ran`, `stop:
+"no-ideas"`, `ideas_generated: 0`, `budget_used_usd: 0`.
+
+**The tell is `$0 spend`.** A real cycle that genuinely produced no keepable
+ideas still spends on the ideator calls. `ran` + `0 ideas` + `$0` = no LLM
+call ever succeeded.
+
+## Where to look
+
+1. `SELECT * FROM harness_shared.scout_ticks ORDER BY tick_at DESC` — the
+   `detail` jsonb carries `stop` + `cycleId` (the cycleId's epoch-ms suffix is
+   the cycle START; the row lands at completion).
+2. The operator host's journal for `[anthropic-direct]` warn lines during the
+   cycle window (`[meridian]` in logs before 2026-06-12 — EI-399 renamed the
+   backend). **Transient errors (429/529) log retries; non-transient failures
+   (401, transport-resolution failure) are SILENT** — a cycle window with no
+   such lines at all points at the auth/cache class, not rate limits.
+3. Probe the exact path the cycle uses, from a FRESH process:
+   `llmCall` in `packages/operator-core/lib/llm-testing/llm-client.ts`
+   (one haiku call ≈ $0.00002). Fresh-process-green + long-lived-host-dead =
+   the token-cache class.
+
+## The two proven causes
+
+* **Stale in-process Claude token (EI-281, fixed 2026-06-11).** Claude OAuth
+  tokens rotate \~2-hourly on disk (`~/.claude/.credentials.json`,
+  `claudeAiOauth.expiresAt`), but `readClaudeOauthToken` in
+  `libs/papercusp-shared/src/agent/chat-stream.ts` cached the boot-time token
+  forever. Any operator host older than the token 401'd on every
+  anthropic-direct call. Fixed with an expiry-aware self-healing cache
+  (re-reads disk when the cached token passes `expiresAt`) plus an
+  invalidate-and-retry on 401/403 when the on-disk token has rotated.
+  Auto-deploy restarts refresh the cache, which made this look intermittent.
+  * **The self-heal lives in the SHARED path only — a HAND-ROLLED loop doesn't
+    inherit it.** The cache + invalidate-on-401 above is in `chat-stream.ts`
+    (`readClaudeOauthToken` / `invalidateClaudeTokenCache`, used by `runAgentChat`
+    * the one-shot `llmCall`). A hand-rolled in-process Anthropic loop that reads
+      `~/.claude/.credentials.json` itself — e.g. the `su` llm-test target's tool
+      loop (`llm-testing/targets/su.ts`), which can't use the one-shot `llmCall`
+      because it needs tool-calling — does NOT get it. Under fleet load the shared
+      credential rotates often, so such a loop **401-cascades** the instant a rotation
+      lands mid-run (every later call uses the stale cached token — observed
+      2026-06-18: a su-target run died at scenario 3, all 9 remaining scenarios 401).
+      Fix: on a 401/403, re-read the file + rebuild the client + retry (its own
+      budget, separate from the 429 backoff). The su target's `callWithRetry` does
+      this since 2026-06-18.
+* **Raw-OAuth bucket 429 saturation.** The stateless anthropic-direct path has
+  its own rate bucket, separate from claude-CLI clients on the same Max
+  account — see
+  [llm-429-check-the-transport-not-the-account](/internal/docs/agent-insights/llm-429-check-the-transport-not-the-account).
+  Escape for a manual cycle: `LLM_TEST_BACKEND=claude-code`.
+
+## Operational notes
+
+* The Learning tab Scout view reads `harness_shared.scout_routed_ideas` +
+  the newest `scout_ticks` row (`learning-scout-read.ts`); ledger writes
+  push `notifySyncInvalidate('learning.scout')` since 2026-06-11.
+* The scout-cycle routine self-gates on idle/friction; for a forced bring-up
+  cycle set the routine's `payload_template.cadence` to
+  `{ idleThreshold: 0, minIntervalSec: 0 }` (restore `0.5`/`3600` after) —
+  `seed-scout-routine.ts --active` reseeds the defaults.

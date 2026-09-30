@@ -1,0 +1,127 @@
+# `mem0_unavailable` can be a swallowed bug, not just an outage
+URL: /internal/docs/agent-insights/mem0-unavailable-outage-or-swallowed-bug
+
+The memory:* tools return { ok:false, reason:'mem0_unavailable' } whenever getMemoryClient() returns null — which happens for env gaps (no LLM key / no embedder / unreachable PG) AND when the mem0 Memory constructor throws and is caught. Don't read it as "not a regression"; check the warning, or round-trip the store.
+
+import { Aside } from '@astrojs/starlight/components';
+
+## The symptom
+
+Every `memory:*` tool (`remember` / `search` / `list` / `forget` /
+`update`) can return:
+
+```json
+{ "ok": false, "reason": "mem0_unavailable" }
+```
+
+It is tempting to treat this as a benign environmental outage. **Do
+not.** It means exactly one thing — `getMemoryClient()` returned
+`null` — and one of the ways that happens is a **real bug that got
+swallowed**.
+
+A real defect (a mem0ai version incompatibility) made the memory
+subsystem **100% non-functional** while showing only this same clean
+`mem0_unavailable`. The fix is commit `879fc733`. An earlier version of
+this very insight wrongly claimed the symptom is "almost always an
+outage, not a regression." It isn't. Treat `mem0_unavailable` as
+unknown until you've read the reason.
+
+## What actually produces it
+
+The verb wrappers (`packages/operator-core/lib/agent-tools/memory/*.ts`) are simple:
+
+```ts
+const client = await getMemoryClient();
+if (!client) return { /* reason: 'mem0_unavailable' */ };
+```
+
+So the real question is **why `getMemoryClient()` (→ `tryLoad()` in
+`libs/generic/memory/src/mem0-client.ts`) returns `null`.** Four causes,
+and only the first three are "outages":
+
+| # | Cause                                                                                                                                        | Outage or bug? |
+| - | -------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| 1 | `resolveEmbedder()` → `{ mode:'disabled' }` (user disabled, or `auto` found no OpenAI key and `@huggingface/transformers` absent)            | outage         |
+| 2 | `pgFields()` throws — admin URL unreachable/unparseable                                                                                      | outage         |
+| 3 | No Anthropic **and** no OpenAI key (mem0 needs an LLM for `add()` fact-extraction; creds are encrypted in `operator_credentials.payload_ct`) | outage         |
+| 4 | **`new Memory(...)` THREW and was caught** (`tryLoad`'s try/catch) — a mem0ai API/version mismatch, a bad config, a missing patch            | **bug**        |
+
+Cause 4 is the trap: a genuine construction failure is caught and
+folded into the *same* `null` → `mem0_unavailable` as the benign cases.
+**The symptom alone cannot tell an outage from a regression.**
+
+## The decisive diagnostic: read the warning
+
+`tryLoad()` calls `warnOnce(<reason>)` before every `null`. That string
+is the diagnosis:
+
+* `embedder unavailable: …` / `no Anthropic or OpenAI API key …` /
+  `couldn't resolve PG connection: …` → **outage** (cause 1–3).
+* `Unsupported embedder provider: custom`, `fn is not a function`,
+  `require is not defined`, or any other constructor error → **bug**
+  (cause 4). Investigate, don't shrug.
+
+A thrown **MCP error** (not a structured `mem0_unavailable`) — e.g.
+`@papercusp/memory is not configured…` — is a *third* category: broken
+seam wiring (`configureMemory()` never ran / a bad import). That one is
+unambiguously a regression.
+
+## The mem0ai 3.x bug this insight was born from
+
+Two defects, both hidden behind `mem0_unavailable` (fixed in `879fc733`):
+
+1. **Custom embedder unsupported.** The store builds mem0 with
+   `embedder: { provider: 'custom', config: { embed } }`, but mem0ai
+   3.0.3's `EmbedderFactory` only knows openai/ollama/lmstudio/google/
+   azure\_openai/langchain — it throws `Unsupported embedder provider:
+   custom`. We patched `VectorStoreFactory` (for the `canonical` store)
+   but never `EmbedderFactory`. Both are exported from `mem0ai/oss`, so
+   patch both. **Gotcha:** the `custom` embedder must read a
+   module-level fn, **not** `config.embed` — mem0's
+   `ConfigManager.mergeConfig` strips function-valued config fields
+   during Zod validation (you'll see `fn is not a function` at
+   dimension auto-detect).
+2. **`require('pg')` under ESM.** `@papercusp/memory` runs as ESM (not
+   in Next's `transpilePackages`), where `require` is undefined — the
+   pgvector probe threw `require is not defined`, silently downgrading
+   the store to mem0's **volatile in-process** provider. Use
+   `await import('pg')`.
+
+A **third** patched factory landed since (`mem0-client.ts` `patchLlmFactory`,
+same shape as the two above): mem0ai 3.x's `LLMFactory.create` is also a
+hard-coded provider switch with no `custom` case, needed so session-backed
+extraction can route through the host's own Claude/Anthropic session instead
+of a separately-configured LLM. It follows the identical module-level-fn
+pattern (`_currentExtractionLlm`, not `config`-carried, same Zod-stripping
+reason) and the identical swallow risk — `patchLlmFactory` failing throws
+`warnOnce('mem0 LLMFactory not patchable…')` down the same cause-4 path, not a
+loud error. Pinned against the real `mem0ai` module by
+`extraction-llm.test.ts` so an upstream interface change fails a test, not
+production silently. If you're auditing "which mem0 internals does this repo
+monkey-patch", it's now three: `VectorStoreFactory`, `EmbedderFactory`,
+`LLMFactory` — check all three when mem0ai bumps its version.
+
+## Prove the full path actually works
+
+Don't trust a passing tsc or a mocked unit test — round-trip the real
+store. Decrypt the OpenAI key from `operator_credentials` via pgcrypto
+(`pgp_sym_decrypt(payload_ct, <~/.papercusp/db-encryption-key>)`),
+`configureMemory()` with `getAdminUrl`/`getCredentials`/`resolveEmbedder`,
+then `getMemoryClient()` → `add()` → `search()` → `getAll()` →
+`delete()`. A real OpenAI-backed round-trip against the canonical
+pgvector store takes seconds and is the only thing that proves cause 4
+is clear.
+
+To exercise just the storage layer **without** an LLM, drive
+`CanonicalVectorStore` directly (it needs only PG + a pre-computed
+384-dim vector) — see
+[`embedded-pg-discovery`](/internal/docs/agent-insights/embedded-pg-discovery/)
+for how `getHarnessAdminUrl()` resolves (the native fallback PG may be
+fully provisioned even with the desktop down). `memory_canonical.id` is
+a UUID column — use a valid UUID, scope to a throwaway `user_id`, delete
+after.
+
+## See also
+
+* [`live-pg-regression-papercup`](/internal/docs/agent-insights/live-pg-regression-papercup/) — the broader "verify against live PG, not just unit tests" pattern.
+* [`embedded-pg-discovery`](/internal/docs/agent-insights/embedded-pg-discovery/) — PG URL resolution + the native fallback.

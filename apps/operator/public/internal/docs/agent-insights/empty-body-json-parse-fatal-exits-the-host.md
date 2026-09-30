@@ -1,0 +1,67 @@
+# A 200 with an empty body passes res.ok but fatal-exits :3070 — wrap host-side loopback .json() in readJsonBody
+URL: /internal/docs/agent-insights/empty-body-json-parse-fatal-exits-the-host
+
+A host-side `await res.json()` on an EMPTY or truncated body rejects with a frame-less `SyntaxError: Unexpected end of JSON input` (stack = `at parse (<anonymous>)` + processTicksAndRejections, ZERO user frames). On the shared :3070 host the deliberate fail-fast unhandledRejection guard then exits the WHOLE process — unattributably, so it recurs unfixably. `if (!res.ok) return` does NOT protect you: a 200 with a zero-byte body (host restarting mid-stream) passes res.ok and still throws in .json(). Fix: parse host-side loopback responses with `readJsonBody(res, ctx)` from loopback-fetch.ts, which reads text first and rethrows an error naming the URL/status/byte-length.
+
+## The mistake this prevents
+
+The shared `:3070` host dies with a fatal `unhandledRejection`:
+`SyntaxError: Unexpected end of JSON input`, and the stack is only
+`at parse (<anonymous>)` + `processTicksAndRejections` — **zero user frames**.
+You cannot grep your way to the offending line, and because the host is shared
+across the whole fleet, the same crash recurs every time the box is under load
+(EI-20: :3070 fatal-exited at 03:46:57 under the agent-briefs wave, \~20 sessions
+hammering it).
+
+## What it actually is
+
+An `await res.json()` somewhere is parsing an **empty or truncated body**. The
+host has no hot-reload, so it RESTARTS on every deploy (≤15min) and on the
+memory-watchdog recycle; an in-flight loopback self-fetch can get a `200` whose
+body is zero bytes or cut off mid-stream. `JSON.parse('')` throws the frame-less
+SyntaxError, it bubbles as an unhandled rejection, and the **deliberate**
+fail-fast guard in `apps/operator/bin/hono-host.ts` calls `process.exit(1)`.
+
+The trap: **`if (!res.ok) return` does NOT save you.** A `200` with an empty
+body passes the `res.ok` check and still rejects in `.json()`. Guarding on
+status alone is the bug.
+
+## The fix
+
+Parse host-side loopback responses with `readJsonBody<T>(res, context?)` from
+`packages/operator-core/lib/loopback-fetch.ts` instead of bare `res.json()`. It
+reads the body as text first, then `JSON.parse`s; on failure it rethrows an
+Error naming the **URL** (explicit `context` or `res.url`), **HTTP status**, and
+**body byte length** (plus a snippet, or `(empty body)`), preserving the
+original `SyntaxError` as `cause`. The frame-less crash becomes attributable to a
+route — and most empty-body cases become a handled error instead of a host kill.
+
+```ts
+import { loopbackFetch, readJsonBody } from './loopback-fetch';
+
+const r = await loopbackFetch(`${base}/api/harness/projects`);
+if (!r.ok) return [];
+// NOT `await r.json()` — an empty 200 during a restart would fatal-exit the host.
+const data = await readJsonBody<{ projects?: { slug: string }[] }>(r);
+```
+
+## Scope / what NOT to change
+
+* This is about **host-side** (`:3070`) parses. A `.json()` in the browser
+  webview can throw without killing the host — lower stakes.
+* Do **not** touch the fail-fast policy in `bin/hono-host.ts`. Exiting on a real
+  unhandled rejection is a deliberate choice (EI-11 night-recovery); a small,
+  explicitly-classified set of client-caused/transient-infra errors is already
+  swallowed instead of exiting (`isBenignHostError()` in
+  `apps/operator/bin/host-benign-errors.ts` — the `ERR_INVALID_STATE`
+  stream-close class plus four others; see
+  `agent-insights/mcp-handler-enqueue-after-close-crash`). A frame-less
+  `SyntaxError: Unexpected end of JSON input` is **not** one of them, so it
+  still fatal-exits — the fix here is to stop *generating* an unattributable
+  rejection in the first place, not to add it to that swallow-list.
+* Sibling sites that already do `.json().catch(() => null)` are fine. The danger
+  is the ones guarded only by `res.ok`.
+
+Related: the EI-390 insight on bare `fetch failed` loopback retries
+(`describeFetchError`) — same file, same "make loopback failures self-diagnosing"
+philosophy.

@@ -1,0 +1,75 @@
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; color: #ddd; background: #111; }
+  textarea { width: 100%; height: 30vh; background: #1a1a1a; color: #eee; border: 1px solid #333; padding: 8px; font-family: ui-monospace, monospace; }
+  .preview { margin-top: 16px; padding: 16px; background: #0a0a0a; border: 1px solid #222; min-height: 30vh; }
+  h1, h2, h3 { margin: 8px 0; }
+  code { background: #222; padding: 2px 4px; border-radius: 2px; }
+  .err { color: #f66; margin-top: 8px; }
+</style>
+<textarea id="src" placeholder="Type Markdown here…"></textarea>
+<div class="preview" id="out"></div>
+<div class="err" id="err"></div>
+
+<script nonce="__PAPERCUP_NONCE__">
+  // Inlined postMessage bridge to the operator. The SDK isn't loaded
+  // as an ESM here because the operator-templated wrapper's CSP
+  // restricts script-src to 'self' + nonce-tagged inline scripts, and
+  // mounting the SDK as a module from a separate origin would
+  // require an extra route. Inline keeps this smoke plugin self-
+  // contained.
+  (function () {
+    const nonce = document.querySelector('meta[name="papercup-nonce"]')?.content || '';
+    let nextId = 1;
+    const pending = new Map();
+
+    window.addEventListener('message', function (event) {
+      if (event.source !== window.parent) return;
+      const msg = event.data;
+      if (!msg || typeof msg !== 'object') return;
+      if (nonce && msg.nonce !== nonce) return;
+      if (msg.kind === 'rpc-response') {
+        const cb = pending.get(msg.id);
+        if (cb) { pending.delete(msg.id); cb(msg); }
+      }
+    });
+
+    function callAction(name, payloadBytes) {
+      const id = 'rpc-' + (nextId++);
+      const b64 = btoa(String.fromCharCode.apply(null, payloadBytes));
+      return new Promise(function (resolve, reject) {
+        pending.set(id, function (resp) {
+          if (resp.ok) {
+            const bin = atob(resp.payloadB64 || '');
+            const out = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+            resolve(out);
+          } else {
+            reject(new Error(resp.error || 'unknown'));
+          }
+        });
+        window.parent.postMessage({ kind: 'rpc-request', id: id, action: name, payloadB64: b64, nonce: nonce }, '*');
+      });
+    }
+
+    const src = document.getElementById('src');
+    const out = document.getElementById('out');
+    const err = document.getElementById('err');
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+
+    let token = 0;
+    src.addEventListener('input', async function () {
+      const myToken = ++token;
+      const payload = enc.encode(JSON.stringify({ markdown: src.value }));
+      try {
+        const bytes = await callAction('render', payload);
+        if (myToken !== token) return;
+        const result = JSON.parse(dec.decode(bytes));
+        out.innerHTML = result.html || '';
+        err.textContent = '';
+      } catch (e) {
+        err.textContent = String(e);
+      }
+    });
+  })();
+</script>

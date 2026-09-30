@@ -1,0 +1,17 @@
+ornith COMPREHENSION-test fixture RC-C4 — throwaway, safe to overwrite between runs.
+
+BUG: sumTo(n) must return the sum of all integers from 1 to n INCLUSIVE, but right
+now it stops one short and excludes n. Read it, understand why the loop misses the
+last value, and fix it so the expectations below all pass. Change ONLY what is
+needed.
+
+function sumTo(n) {
+  let total = 0;
+  for (let i = 1; i < n; i++) total += i;
+  return total;
+}
+
+EXPECTED after fix:
+  sumTo(5) === 15
+  sumTo(1) === 1
+  sumTo(3) === 6

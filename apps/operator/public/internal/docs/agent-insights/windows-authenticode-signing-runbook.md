@@ -1,0 +1,245 @@
+# Windows Authenticode code signing — the turnkey public-release runbook
+URL: /internal/docs/agent-insights/windows-authenticode-signing-runbook
+
+For a PUBLIC Windows release the Inno Setup installer + bundled .exe MUST be Authenticode-signed, or Windows SmartScreen/Defender flags it ('Windows protected your PC — unknown publisher') on every fresh machine and most users abandon at that screen. The build pipeline (papercusp-desktop/bin/build-windows-cross.sh, cross-compiled on Linux; osslsigncode) signs automatically WHEN an Authenticode cert is present in env — so this is gated only on the OWNER supplying a code-signing certificate: an OV cert (a .pfx + password, importable) or — strongly preferred — an EV cert (hardware token / cloud HSM) which grants INSTANT SmartScreen trust. An agent cannot obtain either. Mirrors the macOS Developer ID runbook. The VM/signtool pipeline was retired by WI-5651: this page leads with the current cross-build path and marks all VM-era material as historical.
+
+import { Aside } from '@astrojs/starlight/components';
+
+This runbook was written against the VM-based pipeline: `bin/build-windows-on-vm.sh`
+running `tauri build --bundles nsis` inside the QEMU Windows VM, signed via Windows
+`signtool` against a thumbprint in the VM's `CurrentUser\My` cert store. WI-5651
+retired that VM entirely — Windows is now cross-compiled on Linux by
+`papercusp-desktop/bin/build-windows-cross.sh` (cargo-xwin + Inno Setup under wine),
+which signs via **`osslsigncode`** directly (no Windows cert store, no `signtool`),
+gated on `WINDOWS_CERT_BASE64` (a base64 PKCS#12 cert, **renamed** from this doc's
+`WINDOWS_CERT_PFX_BASE64`) + `WINDOWS_CERT_PASSWORD`. `WINDOWS_SIGN_DIGEST`
+(default `sha256`) and `WINDOWS_SIGN_TIMESTAMP_URL` (default digicert, RFC3161)
+carry the same names/defaults. Unset the cert var ⇒ unsigned build, same
+fail-open behavior as before. **Not re-verified under the new script:** the
+EV/hardware-token/cloud-HSM (`signCommand`/`azuresigntool`) path below —
+`osslsigncode` signs from a PKCS#12 blob and may not support a non-exportable
+HSM key the same way `signtool` did; confirm with the owner's actual EV
+provisioning before assuming it carries over unchanged. The OV/PFX mechanics,
+the SmartScreen/Defender rationale, and the "what the owner must provide" list
+below are otherwise still accurate — only the *build-side* signing procedure
+changed. See `papercusp-desktop/bin/build-windows-cross.sh`'s own header comment
+(Gate 3) for the current authoritative env contract.
+
+The desktop build scripts live under `papercusp-desktop/bin/`, so the signing
+producer is `papercusp-desktop/bin/build-windows-cross.sh` — **not**
+`bin/build-windows-cross.sh`. This is spelled out because the dropped-prefix
+shorthand previously produced a false *"all cited files are gone — supersede"*
+verdict against this runbook (EI-18188293962898203): a real search run over too
+narrow a scope reported a file one directory down as an absolute absence, and
+superseding would have deleted a live, still-accurate runbook.
+
+Two paths below are kept as history only and are marked RETIRED where they
+appear: `bin/build-windows-on-vm.sh` (the VM lane, retired by WI-5651) and
+`bin/omp` (no longer exists at that path).
+
+The one **owner-action** blocker between the current Windows build and a
+confident **public** release — the exact parallel of the macOS Developer ID
+blocker ([macos-signing-notarization-runbook](/internal/docs/agent-insights/macos-signing-notarization-runbook)).
+Everything else (the never-trap setup gate WI-791, the dismissible dogfood
+banner, the build pipeline) is done in code; this needs an Authenticode
+certificate an agent cannot obtain.
+
+The alpha installer is **unsigned** (plan
+`windows-desktop-release-readiness-2026-06-11` D-004 — accepted-as-known for a
+handful of insiders). For the public it is not acceptable: an unsigned NSIS
+installer downloaded from the internet triggers **SmartScreen** — a full-screen
+*"Windows protected your PC … unknown publisher"* with only a buried *More info
+→ Run anyway* escape — plus Defender SmartScreen friction. A large fraction of
+users click *Don't run* / delete rather than dig for the override. (Plan
+`windows-public-release-readiness-2026-06-25` **D-001** retires the alpha
+deferral.)
+
+## OV vs EV — pick before buying (it changes the SmartScreen experience)
+
+|                | OV (Organization Validation)                                                                              | EV (Extended Validation)                                                                                           |
+| -------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| SmartScreen    | reputation builds **slowly** — early downloaders still see the warning until enough clean installs accrue | **instant** trust — no warning from the first download                                                             |
+| Key storage    | a `.pfx`/`.p12` file you can import (exportable)                                                          | **hardware token (FIPS 140-2) or cloud HSM** — key is non-exportable (CA requirement since June 2023)              |
+| Cost / vetting | cheaper, lighter org vetting                                                                              | pricier, stricter org vetting                                                                                      |
+| Automation     | sign with the `.pfx` directly (or import → thumbprint)                                                    | sign via the token's CSP or a cloud-HSM signer (e.g. `azuresigntool` against Azure Key Vault / DigiCert KeyLocker) |
+
+**Recommendation: EV** if the budget allows — it removes the SmartScreen wall
+entirely on day one, which is the whole point of signing for a public launch.
+OV still works and is far better than unsigned, but warn the first wave of users
+the warning may appear until reputation builds.
+
+## The good news: the pipeline signs automatically — when a cert is present
+
+**Current — the cross build.** `papercusp-desktop/bin/build-windows-cross.sh`
+Authenticode-signs the produced PEs with `osslsigncode` **iff** a cert is supplied
+in env. Verified against the script itself:
+
+* The gate is `WINDOWS_CERT_BASE64` (+ `WINDOWS_CERT_PASSWORD`). With it set, the
+  script decodes the base64 PKCS#12 to a temp `.pfx` and requires `osslsigncode` on
+  PATH; **with it unset it logs `Authenticode signing DISABLED … UNSIGNED build` and
+  continues** — the same fail-open behaviour as the VM era.
+* It signs at **two** call sites: the app `papercusp-desktop.exe` **and** the Inno
+  `*-setup.exe`.
+* Timestamping is applied whenever `WINDOWS_SIGN_TIMESTAMP_URL` is non-empty
+  (default `http://timestamp.digicert.com`); set it to the empty string to sign
+  without a timestamp. Digest is `WINDOWS_SIGN_DIGEST` (default `sha256`).
+
+So **no script edit is needed at release time** — the gate is purely the credentials
+in env (mirrors the macOS `APPLE_SIGNING_IDENTITY` gate).
+
+**RETIRED — the VM lane (WI-5651).** The removed `bin/build-windows-on-vm.sh` ran
+`tauri build --bundles nsis` inside the Windows VM and let Tauri sign the bundled
+`.exe` and the NSIS `*-setup.exe` via `signtool`, given a cert in the VM's store. The
+env-gated, no-edit-at-release-time property was the same; only the mechanism changed.
+The `signtool` / thumbprint material further down is retained for that history and for
+anyone reading an old build log — it is **not** the current path.
+
+The existing `TAURI_SIGNING_PRIVATE_KEY` / `tauri signer sign` step produces the
+**updater** `.sig` (minisign — proves an update came from us). That is unrelated
+to **Authenticode** (proves the publisher to Windows/SmartScreen). Both are
+needed for a public release; this runbook is about the Authenticode half.
+
+## Pipeline capability — VERIFIED end-to-end (self-signed dry-run, 2026-07-05, VM era)
+
+Every link the pipeline OWNED was exercised on the Windows VM with a throwaway
+self-signed code-signing cert (WI-2749; the cert + PFX were deleted after) — so
+the owner's real cert-drop is a credentials swap, not a debugging session. This
+dry-run predates WI-5651 and describes the retired `signtool` path; the
+SmartScreen/CA conclusions carry over, the tooling specifics do not:
+
+* **`signtool` present** — Windows SDK `10.0.26100` (`…\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe`).
+* **Our actual installer signs** — a self-signed cert signed the real 611 MB
+  `Papercusp GUI_…-setup.exe`: `Successfully signed`, signature attaches
+  (`Get-AuthenticodeSignature` → SignerCertificate populated). (A self-signed cert
+  fails `verify /pa` trust-chain — expected; a real OV/EV cert chains to a public CA.)
+* **RFC3161 timestamping works** — `signtool /tr … /td sha256` succeeded against
+  `timestamp.digicert.com`, `timestamp.sectigo.com`, and `timestamp.comodoca.com`.
+* **The config glue is exact** — the in-VM PFX-import → thumbprint-readback → JSON
+  patch produced precisely `bundle.windows.{certificateThumbprint, timestampUrl,
+  digestAlgorithm:"sha256", tsp:true}` (valid JSON, round-trips).
+* **The final link is confirmed in tauri's source** — `tauri-bundler`
+  `windows/sign.rs::sign_command_default` reads exactly those fields and runs
+  `signtool sign /fd <digest> /sha1 <thumbprint> /d <product>` plus, when `tsp:true`,
+  `/tr <url> /td <digest>` — i.e. the exact invocation proven above.
+
+**Fix shipped from the dry-run:** the VM pipeline defaulted **`tsp:true`**
+(`WINDOWS_SIGN_TSP`, RFC3161). Previously `tsp` was unset, so tauri emitted the
+**legacy `/t` timestamp** — which RFC3161-only CAs (SSL.com eSigner, common for EV)
+reject. (Under the cross build this knob is gone: `osslsigncode` timestamps via
+`WINDOWS_SIGN_TIMESTAMP_URL`, RFC3161 by default.)
+
+Not exercised (needs the owner's cert): a real public CA trust-chain, and a full
+build that actually emits the signed bundle. A full signed rebuild is one command
+once the cert lands — see below.
+
+## What the OWNER must provide (one-time)
+
+**OV path** — a code-signing `.pfx`/`.p12` (from DigiCert, Sectigo, SSL.com, …)
+
+* its password. That's it.
+
+**EV path** — an EV code-signing cert provisioned on a **hardware token** or a
+**cloud HSM**. Cloud-HSM is the automatable option:
+
+* **Azure Key Vault + `azuresigntool`**: the vault URL, a cert name, and a
+  service-principal (tenant/client id + secret), **or**
+* **DigiCert KeyLocker / SSL.com eSigner**: the vendor's signing-tool creds.
+
+A physical USB token can't be used by a headless build — choose cloud-HSM (or
+EV via a vendor cloud-signing service) for automation.
+
+## Per-build env — current (cross build)
+
+```sh
+# ── OV path: a PFX + password, base64-encoded into env ───────────────────────
+export WINDOWS_CERT_BASE64="$(base64 -w0 codesign.pfx)"   # the .pfx, base64
+export WINDOWS_CERT_PASSWORD='<pfx-password>'
+# optional (defaults shown):
+export WINDOWS_SIGN_DIGEST='sha256'
+export WINDOWS_SIGN_TIMESTAMP_URL='http://timestamp.digicert.com'  # '' ⇒ no timestamp
+```
+
+Unset `WINDOWS_CERT_BASE64` ⇒ the build runs and emits an **unsigned** installer.
+See `papercusp-desktop/bin/build-windows-cross.sh`'s header (Gate 3) for the
+authoritative contract.
+
+## Per-build env — VM-era shape (RETIRED; see the callout above for current var names)
+
+The removed VM script read these host-side and threaded the signing config into the
+in-VM build. Kept for reading old build logs:
+
+```sh
+# ── OV path: a PFX + password (importable) ───────────────────────────────────
+export WINDOWS_CERT_PFX_BASE64="$(base64 -w0 codesign.pfx)"   # the .pfx, base64
+export WINDOWS_CERT_PASSWORD='<pfx-password>'
+# optional (sensible defaults shown):
+export WINDOWS_SIGN_TIMESTAMP_URL='http://timestamp.digicert.com'
+export WINDOWS_SIGN_DIGEST='sha256'
+export WINDOWS_SIGN_TSP='true'   # RFC3161 timestamp (default). Set false ONLY for a
+                                 # legacy server that lacks RFC3161. tsp=true is required
+                                 # by RFC3161-only CAs like SSL.com eSigner (common for EV).
+
+# ── EV / already-in-store path: sign by thumbprint (cert already in the VM's
+#    CurrentUser\My store — e.g. installed by the token CSP / cloud-HSM connector)
+export WINDOWS_CERTIFICATE_THUMBPRINT='<40-hex-sha1-thumbprint>'
+export WINDOWS_SIGN_TIMESTAMP_URL='http://timestamp.digicert.com'
+export WINDOWS_SIGN_TSP='true'
+```
+
+What that build did with them (no manual steps in the VM):
+
+* **OV/PFX**: decoded the PFX in the VM, `Import-PfxCertificate` into
+  `Cert:\CurrentUser\My`, read back its thumbprint.
+* Patched the in-VM `src-tauri/tauri.windows.conf.json` →
+  `bundle.windows.{certificateThumbprint, timestampUrl, digestAlgorithm, tsp}` so
+  `tauri build` signed every produced binary + the installer.
+* **Timestamping** was always set when signing — a timestamped signature stays
+  valid after the cert expires.
+
+For some cloud-HSM/EV setups the key can't be reached by plain `signtool`
+thumbprint signing. In that case use Tauri's
+`bundle.windows.signCommand` (a custom command template, `%1` = file) pointed at
+`azuresigntool sign … %1` (or the vendor tool). Set
+`WINDOWS_SIGN_COMMAND='azuresigntool sign -kvu <vault> -kvc <cert> -kvt <tenant> -kvi <client> -kvs <secret> -tr http://timestamp.digicert.com -td sha256 %1'`
+and the build injects it as `signCommand` instead of a thumbprint. (Verify the
+exact `azuresigntool`/`AzureSignTool` invocation against your vault.) ⚠ This path
+is **not re-verified** under `osslsigncode` — see the superseded-mechanism callout.
+
+## Verify the result (on any Windows box)
+
+```powershell
+# Authenticode present + chains to a trusted CA, and is timestamped:
+signtool verify /pa /v "Papercusp_<ver>_x64-setup.exe"
+Get-AuthenticodeSignature "Papercusp_<ver>_x64-setup.exe" | Format-List
+#   Status         : Valid
+#   SignerCertificate / TimeStamperCertificate populated
+```
+
+From the Linux build box, `osslsigncode verify <pe>` answers the same question for
+each signed PE.
+
+A truly fresh Windows machine downloading the signed installer should then:
+
+* **EV**: launch with **no** SmartScreen warning.
+* **OV**: show no warning once reputation builds; until then, *More info → Run
+  anyway* (document this for the first wave).
+
+## Caveats specific to this app
+
+* **Payload trimming.** The Windows payload is trimmed (`code-server` excluded — see
+  `papercusp-desktop/bin/build-desktop-sidecar.sh`) to control installer size; signing
+  doesn't change that, but keep an eye on payload growth. (This point originally also
+  named `bin/omp`; that path is RETIRED — nothing exists at `bin/omp` and the sidecar
+  build no longer references omp at all. The VM-era \~2 GiB makensis datablock cap it
+  cited no longer applies either, now that Inno Setup, not NSIS, produces the installer
+  — Inno's own span-slicing handles a large payload instead.)
+* **Sign the inner `.exe` too, not just the installer.**
+  `papercusp-desktop/bin/build-windows-cross.sh` Authenticode-signs the app `.exe` and
+  the Inno `*-setup.exe` separately (`authenticode_sign`, called at both sites); confirm
+  both are signed (`osslsigncode verify` each) — an unsigned inner binary still triggers
+  Defender on first run.
+* **Don't run `release-local.sh` (tag/push/GitHub-release) from an agent** — the
+  outward publish is owner-authority. This runbook covers building a *signed
+  installer*; distribution is a separate owner step.
+* **Updater `.sig` stays minisign-signed** (host-side, separate from
+  Authenticode) — that already works.

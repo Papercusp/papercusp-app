@@ -1,0 +1,21 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Swarm icon">
+  <g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 34c9-12 21-17 36-15M19 47c10-10 21-13 33-9" stroke-opacity=".55"/>
+    <g transform="translate(19 23) rotate(-28)">
+      <path d="M0-5c4 3 6 7 6 12 0 6-2 10-6 10S-6 13-6 7c0-5 2-9 6-12Z"/>
+      <path d="M-5 1c-5-4-9-3-12 1 4 2 8 1 12-1ZM5 1c5-4 9-3 12 1-4 2-8 1-12-1Z"/>
+    </g>
+    <g transform="translate(38 17) rotate(28) scale(.74)">
+      <path d="M0-5c4 3 6 7 6 12 0 6-2 10-6 10S-6 13-6 7c0-5 2-9 6-12Z"/>
+      <path d="M-5 1c-5-4-9-3-12 1 4 2 8 1 12-1ZM5 1c5-4 9-3 12 1-4 2-8 1-12-1Z"/>
+    </g>
+    <g transform="translate(33 43) rotate(-8) scale(.82)">
+      <path d="M0-5c4 3 6 7 6 12 0 6-2 10-6 10S-6 13-6 7c0-5 2-9 6-12Z"/>
+      <path d="M-5 1c-5-4-9-3-12 1 4 2 8 1 12-1ZM5 1c5-4 9-3 12 1-4 2-8 1-12-1Z"/>
+    </g>
+    <g transform="translate(49 32) rotate(34) scale(.62)">
+      <path d="M0-5c4 3 6 7 6 12 0 6-2 10-6 10S-6 13-6 7c0-5 2-9 6-12Z"/>
+      <path d="M-5 1c-5-4-9-3-12 1 4 2 8 1 12-1ZM5 1c5-4 9-3 12 1-4 2-8 1-12-1Z"/>
+    </g>
+  </g>
+</svg>

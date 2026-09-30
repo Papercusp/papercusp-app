@@ -1,0 +1,57 @@
+-- Cupboard migration 013 — requires_events: the CONSUMER half of the event axis.
+-- (cupboard-public-release-2026-07-12 P-008 / D-003; manifest schema from P-005.)
+--
+-- WHY
+-- ---
+-- Migration 012 stored what a unit PROVIDES. This stores what it REQUIRES —
+-- the manifest's `dependencies.events`, the other end of the same axis.
+--
+-- The listing row already carried `provides_tools` (006) and `provides_events`
+-- (012), but NOTHING about what a unit needs. That gap has a sharp edge, because
+-- P-007 made a required event dep a HARD install failure, exactly like an
+-- unresolvable tool dep: the install gate refuses a unit whose required family
+-- nothing on the host provides. Without this column that refusal is the FIRST
+-- time the user learns the unit needed anything — a surprise toast after the
+-- click, with no way to have seen it coming from the listing.
+--
+-- So the requirement has to travel WITH the listing, not be discoverable only by
+-- attempting the install. The detail page reads it ("Requires events") and the
+-- resolver can pre-answer, per family, whether it is already satisfied here.
+--
+-- WHAT CHANGES
+-- ------------
+--   requires_events — NEW nullable TEXT: a JSON array of the event-key FAMILIES
+--                     the unit depends on, each
+--                       { family, optional? }
+--                     e.g. [{"family":"deploy:done"},
+--                           {"family":"canary:flipped","optional":true}]
+--                     `optional: true` is a listen-if-present soft dep — it never
+--                     blocks an install. Absent `optional` means REQUIRED, which
+--                     is the safe reading of an under-specified declaration: fail
+--                     loudly rather than install a unit whose reactions silently
+--                     never fire.
+--                     Meaningful for the installable kinds (plugin|pack) only —
+--                     POST-validated, same posture as provides_tools/012.
+--                     NULL elsewhere and for every listing published before this
+--                     migration, which reads correctly as "declares no event deps".
+--
+-- WHY NOT A TABLE REBUILD
+-- -----------------------
+-- Same reasoning as 012, which spells it out in full: 006/008/010/011 rebuilt
+-- ONLY because each changed the `listing_kind` CHECK constraint and SQLite cannot
+-- ALTER a CHECK. This changes no constraint — it adds one nullable column, which
+-- SQLite does natively and atomically. A rebuild here would DROP + recreate a
+-- production table to add a single nullable field, and re-open the column-list
+-- reconciliation hazard 011's header warns about. Use the cheap form.
+--
+-- ⚠ NOT IDEMPOTENT: SQLite has no `ADD COLUMN IF NOT EXISTS`. Re-applying errors
+--   with "duplicate column name: requires_events" — a SAFE failure (nothing is
+--   mutated), not corruption. If you hit it the column is already there:
+--     wrangler d1 execute papercusp-cupboard --remote \
+--       --command "SELECT sql FROM sqlite_master WHERE name='harnesses';"
+--
+-- Apply once (release plan P-013 owns the prod apply, alongside 011 + 012):
+--     wrangler d1 execute papercusp-cupboard --remote \
+--       --file migrations/013_requires_events.sql
+
+ALTER TABLE harnesses ADD COLUMN requires_events TEXT;

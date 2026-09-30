@@ -1,0 +1,31 @@
+-- 788: CONTRACT half of the 782 goal_projects -> goal_pots rename.
+--
+-- Migration 782 EXPANDED: it renamed the table to harness_shared.goal_pots and left
+-- `goal_projects` behind as an auto-updatable security_invoker VIEW, because the
+-- release serving :3070 at that moment still read and wrote the old name. The view
+-- is a deploy-window SHIM, not a permanent alias, and this is its scheduled removal
+-- (plan goal-mode-hardening-2026-08-10, P-010; vocabulary decision D-001 — "NO
+-- aliases and no deprecation shims").
+--
+-- FORWARD-COMPAT: the currently-deployed release does not use goal_projects. The
+-- release checkout (papercup-release, HEAD 22cb50d21a — the same build the running
+-- operator reports) contains exactly ONE occurrence of the name outside sql/: a
+-- generated Drizzle view DECLARATION in the bundled apps/operator/dist-host/hono-host.mjs
+-- (`harnessShared.view("goal_projects", …)`). A Drizzle view declaration is inert —
+-- it emits no SQL unless a query selects from it — and the exported symbol
+-- `goalProjectsInHarnessShared` has ZERO non-declaration references in either the
+-- release or the staging tree, with no raw SQL (FROM/INTO/UPDATE/JOIN) naming the
+-- view anywhere. So dropping it cannot break the live release; it only removes an
+-- object nothing reads.
+--
+-- Verified immediately before writing this migration:
+--   * pg_class: goal_projects is relkind 'v' with 0 dependent rewrite objects,
+--     while goal_pots is the real relkind 'r' table carrying the 11 dependents.
+--     Nothing in the database depends on the view either.
+--
+-- IF ANYTHING STILL NEEDED THE OLD NAME this would fail loudly at its next query
+-- (relation does not exist) rather than silently returning wrong rows — which is the
+-- correct failure direction for a contract step, and the reason this is a DROP
+-- rather than a rename-back-and-forth.
+
+DROP VIEW IF EXISTS harness_shared.goal_projects;

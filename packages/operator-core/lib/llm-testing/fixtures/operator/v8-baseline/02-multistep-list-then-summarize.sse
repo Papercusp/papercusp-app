@@ -1,0 +1,23 @@
+event: heartbeat
+data: {"tsMs":1778741191994}
+
+event: heartbeat
+data: {"tsMs":1778741207456}
+
+event: heartbeat
+data: {"tsMs":1778741222715}
+
+event: heartbeat
+data: {"tsMs":1778741238868}
+
+id: 1
+event: delta
+data: {"text":"<say"}
+
+id: 2
+event: delta
+data: {"text":">Checking sheets for open issues.</say>"}
+
+event: done
+data: {"costUsd":0}
+

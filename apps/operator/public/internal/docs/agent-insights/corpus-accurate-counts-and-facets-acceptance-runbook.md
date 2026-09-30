@@ -1,0 +1,160 @@
+# Acceptance grading runbook — corpus-accurate counts and facets
+URL: /internal/docs/agent-insights/corpus-accurate-counts-and-facets-acceptance-runbook
+
+Copy-runnable grading procedure for the corpus-accurate counts/facets acceptance rubric: independent inventory, exact test matrices, cost units, isolated Tauri evidence, release lineage, and predecessor resolution.
+
+# Acceptance grading runbook: corpus-accurate counts and facets
+
+This is the rubric-level method for acceptance-corpus-accurate-counts-and-facets-2026-08-21. Read the current rubric from the store before grading; this page supplies the one shared, copy-runnable procedure. The rubric criteria remain authoritative for the model, failure markers, and rating.
+
+Canonical delivery for a workspace-scoped grader is the Postgres-authored document id agent-insights/corpus-accurate-counts-and-facets-acceptance-runbook.mdx. Read it with harness\_docs:list for harness papercusp and that exact docId. The generated projection is the authorized filesystem fallback at apps/operator-docs/src/content/docs/agent-insights/corpus-accurate-counts-and-facets-acceptance-runbook.mdx. A docs:get miss before the new projection is committed/deployed does not make the canonical row absent; never duplicate or hand-edit the generated file.
+
+A passing scorecard is one complete current-revision observation by a non-implementer. Healthy means every required observation below is present and green. Degraded means the outcome is partially proven but a required population, client, or lineage leg is missing. Broken means a required behavior is false or a deterministic check fails. Unknown means the evidence cannot be obtained without guessing. Never substitute an old run, a page length, or an implementation claim for a fresh observation.
+
+## 1. Pin the subject and evidence window
+
+1. Read the active rubric and plan decisions D-001 through D-009.
+2. Record the working-tree commit containing the acceptance changes. The known implementation baseline is cacf744382a80879aaeee03579c6c533532f12a8, but grade the current tree and record its actual containing commit.
+3. Read WI-40590 and the predecessor plan learning-tab-filters-are-page-scoped-2026-08-17. Treat checkpoints as leads, not proof; rerun the commands below.
+4. Record start/end timestamps, current commit, test results, Tauri bundle identity, checkpoint green pin, and deployed pin on WI-40590. A scorecard without those identities is incomplete.
+
+## 2. Renew the inventory independently
+
+Build the candidate universe before consulting COUNT\_SURFACE\_DECLARATIONS. From the repository root, run both searches:
+
+```bash
+rg -n --glob '*.{ts,tsx}' --glob '!*.{test,spec}.{ts,tsx}' 'useColumnFilters\(|countEvidence|\.length\b|\b(total|matched|count|facets|kind_facets|next_cursor|has_more)\b|Showing\s+.*\s+of\s+|latest\s+.*(events|commits|matches)' apps/operator/app apps/operator-vite/src apps/operator-public/src packages/operator-core/lib/endpoint-route/routes packages/operator-core/lib/agent-tools/cupboard packages/operator-core/lib/cupboard
+
+rg -n --glob '*.tsx' --glob '!*.{test,spec}.tsx' '(aria-label|aria-live|title=).*(count|total|showing|latest)|formatCountEvidence|countEvidence' apps/operator/app apps/operator-vite/src apps/operator-public/src packages/operator-core/lib/endpoint-route/routes packages/operator-core/lib/agent-tools/cupboard packages/operator-core/lib/cupboard
+
+rg -n --glob '*.rs' '\.len\(\)|\b(total|matched|count|facets|kind_facets|next_cursor|has_more)\b|Showing|latest' apps/tui/src
+
+```
+
+Review every positive. Attach a renewed-inventory table to WI-40590 with: candidate path and line; visible count copy; data writer; active-defect, latent-defect, window-disclosure, control, or false-positive disposition; COUNT\_SURFACE\_DECLARATIONS id when applicable; evidence variant; cap; and the exact semantic test name that proves the disposition. Record every false positive with a reason so absence is not inferred from omission.
+
+Only after the independent table exists, compare it with:
+
+```bash
+apps/operator/app/harness/filters/count-surface-contract.ts
+apps/operator/app/harness/filters/count-surface-contract.guard.test.ts
+
+```
+
+The inventory criterion is healthy only when every true candidate maps exactly once, active/latent rows use corpus evidence with a behavior guard, deliberate histories use named window evidence, controls name a semantic no-change assertion, and UNARMED\_COUNT\_BEHAVIOR\_BASELINE is exactly empty. A test-path existence check is insufficient; cite the exact it/test case and its passing result.
+
+Run the executable guard:
+
+```bash
+npm run test:file -- apps/operator/app/harness/filters/count-surface-contract.guard.test.ts
+
+```
+
+## 3. Core real-Postgres matrix
+
+Run this exact command from the repository root:
+
+```bash
+npm run test:file -- packages/operator-core/lib/sync-resolver/count-contract-testkit.test.ts packages/operator-core/lib/sync-resolver/companion-summary.integration.test.ts packages/operator-core/lib/sync-resolver/work-items-list-query.integration.test.ts packages/operator-core/lib/sync-resolver/learning-observations-query.integration.test.ts packages/operator-core/lib/sync-resolver/learning-improve-view-query.integration.test.ts packages/operator-core/lib/sync-resolver/learning-retain-query.integration.test.ts packages/operator-core/lib/sync-resolver/agent-runs-list-query.integration.test.ts packages/operator-core/lib/scorecards.integration.test.ts packages/operator-core/lib/sync-resolver/adv-sessions-list-query.integration.test.ts packages/operator-core/lib/sync-resolver/design-features-list-query.integration.test.ts
+
+```
+
+Map results to these required semantic assertions:
+
+* Shared testkit: seed the distinguished match strictly beyond the cap; one normalized predicate feeds rows/totals/drill-down facets; adjacent snapshots converge after one paired invalidation and non-convergence fails.
+* Companion summary: one aggregate round trip; OR-within and AND-across parity; exact zero/reset; beyond-page match; keyset termination; one-cycle convergence; index-backed search/JSONB predicates.
+* Work Items and Dependency Graph: OR-within/AND-across parity, beyond-page reachability, exact zero/facets, cursor termination, the 31,133-vs-500 reproduction, and an index-backed plan.
+* Observations: OR-within/AND-across parity, exact zero/facets, beyond-page text/plan matches, and bounded paired page+summary cost.
+* Learning Improve: the tierReason/rail-only match beyond row 500 and exact facets within budget.
+* Learning Retain: the only match beyond the first 500, exact scoped facets, and no-skip/no-duplicate active-filter cursor termination.
+* Agent Runs: active runs beyond page one, exact total/running aggregates, mutable-history exact-once pagination across inserts/status flips, and exact zero-running.
+* Rubric history: exact corpus truth independent of the 500-row trend sample, keyset pagination of every row, and exact empty-history zero.
+* Sessions: beyond-ceiling plan/harness match and facets, exact zero with selected empty option, and an exact-once walk beyond 15,000 immutable births while started\_at mutates.
+* Design: beyond-500 search/status reachability, exact buckets/zero, OR multi-status including NULL-as-pending, and exact-once immutable-birth pagination while updated\_ts mutates.
+
+Healthy requires all listed assertions, not merely a green file count.
+
+## 4. Payload-size and latency definitions
+
+The two cost measurements intentionally differ and must be reported honestly:
+
+* Work Items: the 500-row page only is measured as JSON.stringify(page.rows).length, a JavaScript character count, and must be below 512,000. The paired page+summary wall-clock interval must be below LIST\_READ\_BUDGET\_MS, currently 6,000 ms. The summary must report the exact seeded corpus (31,205 rows, explicitly above the historical 31,133 reproduction), never 500.
+* Observations: the paired page+summary JSON is measured with Buffer.byteLength(..., 'utf8') and must be below PAYLOAD\_BUDGET\_BYTES, currently 250,000 bytes. The same paired wall-clock interval must be below LIST\_READ\_BUDGET\_MS, currently 6,000 ms.
+
+Read the constants from packages/operator-core/lib/sync-resolver/bounded-list-read.ts and sync-read-audit.ts on every grading pass. If a constant changes, cite the new value; do not keep grading against remembered numbers. A widened limit without a plan decision is drift.
+
+## 5. UI and control matrix
+
+Run this exact 26-file command from the repository root:
+
+```bash
+npm run test:file -- apps/operator/app/harness/filters/ColumnFilterBar.test.tsx apps/operator/app/harness/filters/filter-count-label.test.ts apps/operator/app/harness/filters/useColumnFilters.test.tsx apps/operator/app/harness/filters/count-surface-contract.guard.test.ts apps/operator/app/adv/harnesses/WorkItemsPanel.test.tsx apps/operator/app/adv/create/ObservationsPanel.test.tsx apps/operator-vite/src/components/adv/LearningTab.test.tsx apps/operator/app/adv/harnesses/AdvAgentsPanel.test.tsx apps/operator/app/_components/RubricDetailPanel.test.tsx apps/operator/app/adv/sessions/AdvSessionsClient.test.tsx 'apps/operator/app/design/[slug]/DesignDashboard.test.tsx' apps/operator/app/cupboard/__tests__/CupboardClient.test.tsx apps/operator/app/adv/harnesses/AdvLogsPanel.test.tsx apps/operator/app/adv/harnesses/AdvGitGraphPanel.test.tsx apps/operator/app/coord/CoordHistory.test.tsx apps/operator-vite/src/components/adv/AdvConversationsTab.test.tsx apps/operator/app/adv/harnesses/MemberWorkPanel.component.test.tsx apps/operator/app/admin/plans/PlansClient.test.tsx apps/operator/app/_components/RubricsPanel.test.tsx apps/operator-vite/src/components/adv/MemoryHealthCard.test.tsx apps/operator/app/adv/harnesses/DetailPanel.workitem-dedup.test.tsx apps/operator/app/admin/testing/_components/CoverageTab.test.ts apps/operator/app/adv/hud/HudEntityColumns.test.tsx apps/operator/app/admin/_components/TableAdmin.test.tsx apps/operator/app/adv/sessions/__tests__/AgentDossier.test.tsx apps/operator/app/adv/harnesses/PotContentPanel.component.test.tsx
+
+```
+
+For each migrated client, cite the exact test names proving that visual copy and accessible text identify the same population; exact corpus, explicit window, floor, and unknown/updating states are distinguishable; and mixed paired-query refetches never render stale combinations. For the no-change controls, cite the semantic count/population assertion from each regressionGuardPaths file. A broad file that passes without exercising the claimed count semantics is not evidence.
+
+Run Cupboard worker and TUI legs separately:
+
+```bash
+cd apps/operator-public && bash ../../scripts/pc-heavy.sh npx vitest run
+
+cd apps/tui && bash ../../scripts/pc-heavy.sh cargo test cupboard
+
+cd apps/tui && bash ../../scripts/pc-heavy.sh cargo check
+
+```
+
+Cupboard must preserve cursor, total, and kind facets through worker, proxy, web, and TUI; exclude banned publishers before LIMIT; render Showing N of M; stop on exhaustion or no growth; and never infer corpus kind counts from page one.
+
+## 6. Isolated live desktop
+
+Use only the canonical isolated verifier against the current frozen bundle. Existing Tauri PIDs are not evidence because they may predate the acceptance commit or belong to another operator.
+
+Set VERIFY\_TAURI\_AGENT\_TOOLS\_BIN to the explicit managed tauri-agent-tools executable, then run:
+
+```bash
+VERIFY_TAURI_AGENT_TOOLS_BIN="$HOME/.local/node25/bin/tauri-agent-tools" scripts/verify-tauri-headless.sh -- scripts/verify-count-surfaces-tauri.sh
+
+```
+
+The checked-in assertion script is the decisive probe, not a placeholder. It uses the read-only papercusp harness and live authoritative writers as its deterministic dataset precondition; records the exact values observed during the run; navigates /adv?tab=harnesses\&slug=papercusp for Work items and Run log, /adv?tab=learning\&lview=observations, /adv?tab=learning\&lview=improvements, /adv?tab=learning\&lview=learnings, /adv?tab=git\&slug=papercusp, /coord?panel=history, and /cupboard; asserts \[data-testid=wi-count], \[data-testid=observations-count], exact-zero Improve/Retain companion counts under a unique impossible-match query, .pc-adv-gitgrid\_\_count, the latest-300 log scope, the latest-matches-up-to-200 coordination window, Cupboard kind facets, and Showing N of M; compares visible and accessible population copy; refuses loaded/page-only substitutions; captures route-specific screenshot/DOM/state/log/error manifests; and prints exactly one P014\_TAURI\_ACCEPTANCE\_OK marker only after all assertions and console checks pass. Any selector, copy, facet-sum, console, provenance, or tool failure exits nonzero. Its source contract is pinned by apps/operator/lib/verify-tauri-headless-quoting.test.ts.
+
+The assertion command must navigate and prove all of the following in the Tauri webview, not a browser-only page:
+
+* Work tab: Work Items mounts and the visible plus accessible count evidence identifies corpus/window/updating state.
+* Learning: Observations and Learning Improve/Retain mount, filters do not rewrite a loaded-page length as corpus truth, and unknown/updating appears during a mixed refetch if observable.
+* History disclosure: Git visibly and accessibly says latest N commits for the selected limit; logs say latest 300 events; coordination says latest matches up to 200.
+* Cupboard route: authoritative kind counts are present and the row label reads Showing N of M; pagination/appending does not replace the total with the loaded page size.
+* Capture: timestamped screenshots plus an accessibility/DOM capture, current commit SHA, verifier PID/provenance, bundle identity, routes visited, exact observed labels/counts, and a console report with zero new errors.
+
+Every assertion must exit nonzero on mismatch. The verifier must tear down successfully. A browser-only capture, stale bridge, missing current-bundle identity, non-exit-coded visual impression, or unexamined console is not acceptable live evidence.
+
+## 7. Type and release lineage
+
+Type-clean in this rubric means every named command exits zero with no ratchet regression; it does not mean the repository has zero historical diagnostics unless the bare command itself reports that. Run:
+
+```bash
+npm run lint:tsc -- --files=packages/operator-core/lib/agent-tools/plans/get.ts,packages/operator-core/lib/format-check-script.test.ts,packages/operator-core/lib/scheduler/get-next.ts,packages/operator-core/lib/check-assert-integrity.test.ts,packages/operator-core/lib/agent-tools/cupboard/search.ts,packages/operator-core/lib/cupboard/browse-listings.ts,packages/operator-core/lib/endpoint-route/routes/cupboard.ts
+
+npm run lint:tsc:operator -- --files=apps/operator/app/harness/filters/count-surface-contract.ts,apps/operator/app/harness/filters/count-surface-contract.guard.test.ts
+
+cd apps/operator-public && npm run typecheck
+
+npm run lint:tsc:operator-vite -- --files=apps/operator-vite/src/components/adv/LearningTab.tsx,apps/operator-vite/src/components/adv/AdvConversationsTab.tsx
+
+npm run lint:tsc
+
+```
+
+After all acceptance bytes are committed by git-sync, trigger a fresh release:checkpoint-run for the touched paths. Record the containing commit C, the candidate commit judged by the checkpoint G, the terminal green verdict, and the deployed pin D from release:deploy status. Acceptance requires C to be an ancestor of or equal to G and D to equal G. If the gate is red, fix its actual failures, rerun the verdict, then trigger the green deploy; never grade an older green pin or force past red.
+
+## 8. Predecessor resolution map
+
+This criterion grades only durable resolution of learning-tab-filters-are-page-scoped-2026-08-17; it does not re-grade predicate, UI, or live-desktop behavior already owned above.
+
+Read the predecessor Decisions and every nonterminal item. Attach a map to WI-40590 containing each still-relevant unresolved item or decision; the exact evidence reference from criteria predicate-parity, client-accessibility, or live-desktop that absorbs it, or an explicit no-longer-applicable rationale; and the canonical terminal/superseded write. Preserve completed historical measurements and D-010/D-011 authority. Do not mark the predecessor superseded until every still-relevant correctness row has evidence and the canonical plan/item state records the disposition.
+
+## 9. Emit the independent grade
+
+The non-implementer reruns or reads every required current result, then uses scorecards:evaluate followed by scorecards:emit against the current rubric revision. Evidence for each rating must name command/result, commit, and artifact or ledger reference. A healthy overall ship verdict requires all nine criteria healthy. Any degraded, broken, or unknown criterion is a no-ship verdict until resolved.

@@ -1,0 +1,22 @@
+{
+  "$comment": "WI-6826 — the third and last package in the libs/papercusp typecheck-coverage sweep (EI-19302566985147894 = libs/db, EI-19305781578043773 = the six siblings). Before this file, the 155 TS sources here were typechecked by NOTHING: no tsconfig meant `build:typecheck` refused the package with project_not_found, `lint:tsc` covers only packages/operator-core, and vitest transforms via esbuild without ever typechecking. Options mirror libs/papercusp/libs/db/tsconfig.json (itself mirroring packages/operator-core) so behaviour matches what agents already expect; `types` adds vitest for the 85 test files that use its globals.",
+  "$comment_allowJs": "allowJs TRUE / checkJs FALSE, as in libs/db: the package ships scripts/audit-harness-fs.mjs, so a .mjs neighbour is RESOLVED but not error-checked. This is deliberately preferred over a per-import @ts-expect-error, which rots into the very failure it hides (an UNUSED @ts-expect-error is itself a hard tsc error, and three had already gone stale in libs/db). NOTE: a $comment key must live at the TOP level — inside compilerOptions tsc rejects unknown options with TS5023.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src/**/*.ts", "bin/**/*.ts", "vitest.config.ts", "vitest.integration.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

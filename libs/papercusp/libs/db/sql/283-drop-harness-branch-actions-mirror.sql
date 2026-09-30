@@ -1,0 +1,24 @@
+-- Migration 283 — drop the harness_branch_actions mirror table.
+-- Part of fs-watcher-retirement-2026-05-10 step 4.
+--
+-- harness_shared.harness_branch_actions was an fs-watcher mirror (Mirror 7k):
+-- the watcher recomputed the per-branch enriched action list (from .sh action
+-- scripts + plugin manifests + per-run audit JSON) and upserted it here on
+-- changes under .papercusp/actions|action-runs.
+--
+-- It was an UNCONSUMED mirror on both ends:
+--   • CONSUMER: nothing read this table. The live path is the on-demand REST
+--     route GET /api/harness/:slug/branch/:branch/actions (branch-actions.ts),
+--     which recomputes the SAME payload with a 1s in-process cache and does
+--     NOT read this table. The sync query harnessBranchActions.byHarnessAndBranch
+--     had no UI subscriber.
+--   • It is NOT git-synced (it's the canonical "local fs-watcher projection"
+--     example in table-registry — a churny last_check_ms heartbeat), so no
+--     git-export document depends on it.
+--
+-- The watcher Mirror 7k leg + the sync resolver + the table-to-query-names
+-- mapping are removed. Dropping the table loses no source-of-truth data (the
+-- REST route is the producer of record, recomputed from the FS on demand).
+-- Idempotent.
+
+DROP TABLE IF EXISTS harness_shared.harness_branch_actions CASCADE;

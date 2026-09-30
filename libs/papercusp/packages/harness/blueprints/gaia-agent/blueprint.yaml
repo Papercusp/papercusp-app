@@ -1,0 +1,79 @@
+# The `gaia-agent` blueprint — benchmark-suite-gaia-2026-06-17 (the REAL-orchestration GAIA arms).
+#
+# A GENERAL-ASSISTANT single agent for the GAIA benchmark, run as ONE bee placed by the
+# su-independent pool or the real Queen (NOT the coding spine). It is the GAIA analog of
+# `coding-solo`: ONE decider role (`gaia-worker`) that runs a research task end-to-end and
+# emits DONE — but its work surface is web research + file output, NOT a code diff.
+#
+# WHY `extends: single-agent` (mirrors coding-solo's reasoning): the loader DEEP-MERGES
+# `spine.edges`, so `extends: coding`/`external-bench` would leak the coding decision verbs
+# (NEXT_WORKER / NEXT_VALIDATOR / …) and the coding worker persona into a single-role research
+# spine. `single-agent` gives the clean DONE/ESCALATE/IDLE spine + `planner: inline` (no
+# decomposition) + the governed/durable launch contract every fleet spawn rides.
+#
+# TOOL SURFACE — the load-bearing point: a `claude-code` fleet spawn runs under the default
+# `FLEET_ALLOWED_TOOLS` allow-list (orchestrator/invoke.ts) which GRANTS the native
+# `WebSearch`, `WebFetch`, `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep` tools (the B-18
+# capability-only cutover that would strip them is DEFAULT-OFF). So this blueprint needs to
+# declare NO web/code tools — the agent already has them natively. The `gaia-worker` researches
+# the question with `WebSearch`/`WebFetch`/`Bash` and writes its final answer to `answer.txt`
+# in its cwd (the cloned scratch dir), which the bench driver's `extractOutput` reads as the
+# qa-modality submission. `dependencies.tools` lists only the minimal papercusp MCP surface a
+# placed bee needs to read its assigned work-item + recall.
+#
+# repo-less in spirit, but `requiresRepo: true` — the bench driver hands each task a fresh git
+# scratch dir as the cwd (so `Write answer.txt` lands somewhere stable + the fleet cwd resolution
+# is satisfied); the dir has no benchmark repo, just the optional GAIA attachment staged in.
+id: gaia-agent
+extends: single-agent
+version: 0.1.0
+description: >-
+  General-assistant GAIA solver: one agent researches a question with native
+  web_search/fetch/bash/file tools and writes its FINAL ANSWER to answer.txt. The
+  non-coding single-agent bench unit placed by the su-independent pool or the real Queen.
+
+# A GAIA task = one `feature` work_item whose brief is the question + the answer.txt instruction.
+workItem:
+  kind: feature
+  idPrefix: F
+
+# Single-role spine: the gaia-worker IS the decider and runs the research end-to-end, emitting
+# DONE once it has written answer.txt. DONE/ESCALATE/IDLE edges + `planner: inline` inherited
+# from `single-agent`; we only name the decider + lift maxTurns so a multi-hop L3 question isn't
+# strangled before the iso-budget cap (the tokens/$ budget is the true fairness bound).
+spine:
+  decider: gaia-worker
+  maxTurns: 60
+
+roles:
+  - id: gaia-worker
+    description: >-
+      The single GAIA solver: read the question (the problem_statement on the work_item),
+      research it with your native web_search / fetch / bash(python) / file tools, and write
+      ONLY your final answer to a file named answer.txt in your current working directory, in
+      the GAIA normalized format. Emit DONE when answer.txt is written. No hand-off, no
+      decomposition, no peer review — you are the entire pipeline. Persona:
+      blueprints/gaia-agent/prompts/gaia-worker.md (resolved via BLUEPRINT_ID=gaia-agent).
+
+# Trace = the written answer file (the qa submission), NOT a git diff — there is no code change.
+gym:
+  collectTrace: work-item-output
+  signals: []
+
+knobs:
+  harnessKind: gaia-agent
+  # The bench driver hands a fresh git scratch dir as the cwd so `Write answer.txt` has a stable
+  # home + the fleet cwd resolution is satisfied; not a benchmark repo.
+  requiresRepo: true
+
+# Minimal papercusp MCP surface: read the assigned work-item brief + recall. The web/code/file
+# tools the GAIA research actually uses are the agent's NATIVE tools (granted by the fleet
+# allow-list), NOT declared here — exactly the research-blueprint pattern (roles gather via
+# their client-native web/fetch tools).
+dependencies:
+  tools:
+    - agent_tools:list
+    - memory:search
+    - work_items:get
+    - work_items:list
+  plugins: []

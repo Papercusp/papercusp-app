@@ -1,0 +1,283 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    :root{
+      --bg:#07101d;--bg-1:#0b1220;--bg-2:rgba(255,255,255,0.045);--bg-3:rgba(255,255,255,0.075);
+      --bg-popover:#0d1829;--bg-raised:#112235;--bg-raised-high:#143049;
+      --fg:#e7f7ff;--fg-dim:#b9d4e8;--fg-mute:#7f9bb4;
+      --border-muted:rgba(125,211,252,0.08);--border:rgba(125,211,252,0.15);--border-strong:rgba(125,211,252,0.32);
+      --accent:#38bdf8;--accent-strong:#7dd3fc;--accent-soft:#bae6fd;
+      --good:#34d399;--warn:#fbbf24;--bad:#fb7185;
+      --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    }
+    body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:12.5px;-webkit-font-smoothing:antialiased;}
+    a{color:var(--accent-strong);text-decoration:none}a:hover{color:var(--accent-soft)}
+    .ic{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+    .appbar{display:flex;align-items:center;gap:18px;height:38px;padding:0 16px;border-bottom:1px solid var(--border-muted);background:var(--bg-1)}
+    .brand{font-family:var(--mono);font-size:12px;color:var(--fg-dim);display:flex;align-items:center;gap:7px}
+    .brand-dot{width:8px;height:8px;border-radius:999px;background:var(--accent)}
+    .tabs{display:flex;align-items:center;gap:2px;height:100%}
+    .tab{padding:0 11px;height:100%;display:flex;align-items:center;font-size:12px;color:var(--fg-mute);border-bottom:2px solid transparent}
+    .tab.on{color:var(--fg);border-bottom-color:var(--accent)}
+    .scope{margin-left:auto;display:flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;border:1px solid var(--border);font-size:11px;color:var(--fg-dim)}
+    .viewbar{display:flex;align-items:center;gap:14px;padding:12px 16px 8px}
+    .viewbar h1{margin:0;font-size:15px;font-weight:650;letter-spacing:.01em}
+    .seg{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+    .seg span{padding:4px 11px;font-size:11px;color:var(--fg-mute);border-right:1px solid var(--border-muted)}
+    .seg span:last-child{border-right:0}
+    .seg span.on{background:rgba(56,189,248,0.14);color:var(--accent-soft)}
+    .live-sum{margin-left:auto;font-size:11px;color:var(--fg-mute);font-variant-numeric:tabular-nums;display:flex;gap:12px}
+    .live-sum b{color:var(--fg-dim);font-weight:600}
+    .toolbar{display:flex;align-items:center;gap:8px;padding:4px 16px 10px}
+    .search{display:flex;align-items:center;gap:6px;width:250px;padding:4px 9px;border-radius:8px;background:var(--bg-3);border:1px solid var(--border);color:var(--fg-mute);font-size:12px}
+    .chip{padding:2px 9px;border-radius:999px;border:1px solid var(--border);font-size:10.5px;font-weight:650;color:var(--fg-mute);text-transform:lowercase}
+    .chip.on{color:var(--accent-soft);border-color:rgba(56,189,248,0.45);background:rgba(56,189,248,0.12)}
+    .chip.work-on{color:#bbf7d0;border-color:color-mix(in srgb,var(--good) 50%,transparent);background:color-mix(in srgb,var(--good) 14%,transparent)}
+    .sort{margin-left:auto;display:flex;align-items:center;gap:5px;font-size:11px;color:var(--fg-mute);padding:3px 9px;border:1px solid var(--border);border-radius:8px}
+    .grid-head,.prow{display:grid;grid-template-columns:minmax(0,1fr) 138px 158px 100px 100px 108px 40px;align-items:center;column-gap:12px;padding:0 16px 0 13px}
+    .grid-head{font-size:9.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-mute);padding-top:4px;padding-bottom:6px;border-bottom:1px solid var(--border-muted)}
+    .prow{min-height:46px;border-bottom:1px solid var(--border-muted);border-left:3px solid transparent;position:relative}
+    .prow:hover{background:var(--bg-2)}
+    .prow.needs{border-left-color:color-mix(in srgb,var(--bad) 70%,transparent)}
+    .prow.live{border-left-color:color-mix(in srgb,var(--good) 55%,transparent)}
+    .prow.sel{background:var(--bg-2)}
+    .pcell{min-width:0;display:flex;flex-direction:column;gap:1px;padding:6px 0}
+    .ptitle{display:flex;align-items:center;gap:7px;min-width:0}
+    .ptitle b{font-size:12.5px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .bucket{flex:0 0 auto;padding:0 5px;border-radius:999px;font-size:8.5px;font-weight:650;text-transform:uppercase;color:var(--fg-mute);border:1px solid var(--border)}
+    .bucket.draft{color:#c4b5fd;border-color:rgba(139,92,246,0.4)}
+    .bucket.ready{color:#93c5fd;border-color:rgba(96,165,250,0.4)}
+    .bucket.run{color:#bae6fd;border-color:rgba(56,189,248,0.4)}
+    .psub{font-size:10px;color:var(--fg-mute);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .prog{display:flex;align-items:center;gap:8px}
+    .prog-track{flex:1;height:5px;border-radius:999px;background:color-mix(in srgb,var(--fg-mute) 14%,transparent);overflow:hidden}
+    .prog-fill{display:block;height:100%;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,transparent)}
+    .prog-n{font-size:10.5px;color:var(--fg-mute);font-variant-numeric:tabular-nums;min-width:34px;text-align:right}
+    .avs{display:flex;align-items:center}
+    .av{width:20px;height:20px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:8.5px;font-weight:700;font-family:var(--mono);color:#051827;border:2px solid var(--bg);margin-left:-6px}
+    .av:first-child{margin-left:0}
+    .liven{margin-left:7px;display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:999px;font-size:10px;font-weight:700;font-variant-numeric:tabular-nums;color:#bbf7d0;border:1px solid color-mix(in srgb,var(--good) 50%,transparent);background:color-mix(in srgb,var(--good) 14%,transparent)}
+    .dotg{width:5px;height:5px;border-radius:999px;background:var(--good)}
+    .t{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--fg-dim);font-variant-numeric:tabular-nums}
+    .t .ic{width:11px;height:11px;color:var(--fg-mute)}
+    .t.hot{color:var(--fg)} .t.hot .ic{color:var(--good)}
+    .t.dim{color:var(--fg-mute);opacity:.55}
+    .needs-pill{display:inline-flex;align-items:center;padding:1px 7px;border-radius:999px;font-size:10px;font-weight:700;color:#fecaca;border:1px solid color-mix(in srgb,var(--bad) 55%,transparent);background:color-mix(in srgb,var(--bad) 16%,transparent)}
+    .mdash{color:var(--fg-mute);opacity:.5}
+    .chev{color:var(--fg-mute);display:flex;justify-content:flex-end}
+    .xpanel{margin:0 16px 10px 13px;border:1px solid var(--border);border-left:3px solid color-mix(in srgb,var(--bad) 70%,transparent);border-radius:0 0 10px 10px;background:var(--bg-raised);padding:10px 14px 12px}
+    .xhead{font-size:9.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-mute);margin-bottom:8px}
+    .sess{display:grid;grid-template-columns:24px 92px 64px 74px minmax(0,1fr) 90px 96px;align-items:center;column-gap:10px;padding:5px 0;border-bottom:1px solid var(--border-muted)}
+    .sess:last-of-type{border-bottom:0}
+    .sav{width:22px;height:22px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;font-family:var(--mono);color:#051827}
+    .sid{font-family:var(--mono);font-size:11.5px;color:var(--fg-dim)}
+    .backend{font-size:9.5px;font-weight:650;padding:1px 6px;border-radius:999px;border:1px solid var(--border);color:var(--fg-mute);text-align:center}
+    .state{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:650}
+    .state.live{color:#bbf7d0}.state.parked{color:var(--fg-mute)}
+    .dot-p{width:5px;height:5px;border-radius:999px;background:var(--fg-mute)}
+    .sintent{font-size:11px;color:var(--fg-mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .slast{font-size:10.5px;color:var(--fg-mute);font-variant-numeric:tabular-nums;text-align:right}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:3px 10px;border-radius:8px;border:1px solid rgba(56,189,248,0.45);background:rgba(56,189,248,0.10);color:var(--accent-soft);font-size:11px;font-weight:600;white-space:nowrap}
+    .btn.ghost{border-color:var(--border);background:transparent;color:var(--fg-dim)}
+    .xactions{display:flex;gap:8px;margin-top:10px}
+    .foot{display:flex;align-items:center;gap:14px;padding:8px 16px;font-size:10.5px;color:var(--fg-mute);border-top:1px solid var(--border-muted);margin-top:auto}
+  </style>
+</helmet>
+<div style="display:flex;flex-direction:column;width:1440px;height:878px;overflow:hidden">
+  <div class="appbar">
+    <span class="brand"><span class="brand-dot"></span>papercusp</span>
+    <div class="tabs">
+      <span class="tab">Overview</span><span class="tab">Work</span><span class="tab">HUD</span>
+      <span class="tab on">Plans</span><span class="tab">Git</span><span class="tab">More ▾</span>
+    </div>
+    <span class="scope">All Pots<svg class="ic" viewBox="0 0 24 24" style="width:10px;height:10px"><path d="m6 9 6 6 6-6"/></svg></span>
+  </div>
+
+  <div class="viewbar">
+    <h1>Plans — Mission Control</h1>
+    <div class="seg"><span class="on">Mission control</span><span>List</span><span>Board</span></div>
+    <span class="live-sum"><span><b>466</b> plans</span><span><b>14</b> running</span><span><b>12</b> agents live</span></span>
+  </div>
+
+  <div class="toolbar">
+    <span class="search"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>Search plans…</span>
+    <span class="chip on">all</span><span class="chip">draft</span><span class="chip">ready</span><span class="chip">running</span><span class="chip">finished</span>
+    <span class="chip work-on">● working now</span>
+    <span class="sort"><svg class="ic" viewBox="0 0 24 24" style="width:11px;height:11px"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg>Sort: Last work</span>
+  </div>
+
+  <div class="grid-head">
+    <span>Plan</span><span>Progress</span><span>Agents</span><span>Last edit</span><span>Last work</span><span>Needs you</span><span></span>
+  </div>
+
+  <!-- Row 1 — expanded -->
+  <div class="prow needs sel">
+    <span class="pcell">
+      <span class="ptitle"><span class="bucket run">plan</span><b>EI-100 security posture closure</b></span>
+      <span class="psub">papercusp · ei-100-security-posture-closure-2026-08-23</span>
+    </span>
+    <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:33%"></span></span><span class="prog-n">3/9</span></span>
+    <span class="avs">
+      <span class="av" style="background:#7dd3fc">76</span><span class="av" style="background:#a78bfa">6e</span><span class="av" style="background:#fbbf24">82</span><span class="av" style="background:#f9a8d4">f4</span>
+      <span class="liven"><span class="dotg"></span>4</span>
+    </span>
+    <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>2m</span>
+    <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>41s</span>
+    <span><span class="needs-pill">1 decision</span></span>
+    <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span>
+  </div>
+  <div class="xpanel">
+    <div class="xhead">Agent sessions · EI-100 security posture closure</div>
+    <div class="sess">
+      <span class="sav" style="background:#7dd3fc">76</span><span class="sid">su-76a83</span><span class="backend">claude</span>
+      <span class="state live"><span class="dotg"></span>live</span>
+      <span class="sintent">Recording D-001 — reuse route-tier + remote-listener auth</span>
+      <span class="slast">tool call 41s</span><span class="btn">Open session</span>
+    </div>
+    <div class="sess">
+      <span class="sav" style="background:#a78bfa">6e</span><span class="sid">su-6e294</span><span class="backend">claude</span>
+      <span class="state live"><span class="dotg"></span>live</span>
+      <span class="sintent">P-045 verification sweep</span>
+      <span class="slast">tool call 3m</span><span class="btn">Open session</span>
+    </div>
+    <div class="sess">
+      <span class="sav" style="background:#f9a8d4">f4</span><span class="sid">su-f4df4</span><span class="backend">claude</span>
+      <span class="state live"><span class="dotg"></span>live</span>
+      <span class="sintent">WI-40086 claim-hold reconcile</span>
+      <span class="slast">tool call 12m</span><span class="btn">Open session</span>
+    </div>
+    <div class="sess">
+      <span class="sav" style="background:#fbbf24">82</span><span class="sid">su-82be7</span><span class="backend">codex</span>
+      <span class="state parked"><span class="dot-p"></span>parked</span>
+      <span class="sintent">Holds WI-40971 open — owner-directed pause</span>
+      <span class="slast">1h</span><span class="btn">Open session</span>
+    </div>
+    <div class="xactions">
+      <span class="btn"><svg class="ic" viewBox="0 0 24 24" style="width:11px;height:11px"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Launch agent</span>
+      <span class="btn ghost">Open plan</span>
+      <span class="btn ghost">Search transcripts</span>
+    </div>
+  </div>
+
+  <!-- Row 2 -->
+  <div class="prow live">
+    <span class="pcell">
+      <span class="ptitle"><span class="bucket run">plan</span><b>P2P git public release</b></span>
+      <span class="psub">papercusp · p2p-git-public-release-2026-08-10</span>
+    </span>
+    <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:70%"></span></span><span class="prog-n">21/30</span></span>
+    <span class="avs">
+      <span class="av" style="background:#34d399">7f</span><span class="av" style="background:#fda4af">50</span><span class="av" style="background:#7dd3fc">c9</span>
+      <span class="liven"><span class="dotg"></span>3</span>
+    </span>
+    <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>12m</span>
+    <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>2m</span>
+    <span><span class="mdash">—</span></span>
+    <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></span>
+  </div>
+
+  <!-- Row 3 -->
+  <div class="prow live">
+    <span class="pcell">
+      <span class="ptitle"><span class="bucket run">plan</span><b>Agent launch unification</b></span>
+      <span class="psub">papercusp · agent-launch-unification-2026-05-30</span>
+    </span>
+    <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:98%"></span></span><span class="prog-n">44/45</span></span>
+    <span class="avs">
+      <span class="av" style="background:#a78bfa">6e</span>
+      <span class="liven"><span class="dotg"></span>1</span>
+    </span>
+    <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>3m</span>
+    <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>3m</span>
+    <span><span class="mdash">—</span></span>
+    <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></span>
+  </div>
+
+  <!-- Row 4 -->
+  <div class="prow live">
+    <span class="pcell">
+      <span class="ptitle"><span class="bucket run">plan</span><b>Owner plans single pane</b></span>
+      <span class="psub">papercusp · owner-plans-single-pane-2026-07-17</span>
+    </span>
+    <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:82%"></span></span><span class="prog-n">9/11</span></span>
+    <span class="avs">
+      <span class="av" style="background:#7dd3fc">5a</span><span class="av" style="background:#fbbf24">82</span>
+      <span class="liven"><span class="dotg"></span>2</span>
+    </span>
+    <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>1h</span>
+    <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>18m</span>
+    <span><span class="mdash">—</span></span>
+    <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></span>
+  </div>
+
+  <!-- Row 5 -->
+  <div class="prow needs">
+    <span class="pcell">
+      <span class="ptitle"><span class="bucket ready">ready</span><b>Event system drift to derived</b></span>
+      <span class="psub">papercusp · event-system-drift-to-derived-2026-08-21</span>
+    </span>
+    <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:13%"></span></span><span class="prog-n">2/16</span></span>
+    <span class="avs"><span class="mdash">—</span></span>
+    <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>9h</span>
+    <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>9h</span>
+    <span><span class="needs-pill">2 decisions</span></span>
+    <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></span>
+  </div>
+
+  <!-- Row 6 -->
+  <div class="prow">
+    <span class="pcell">
+      <span class="ptitle"><span class="bucket run">plan</span><b>Queue authorization redesign</b></span>
+      <span class="psub">papercusp · queue-authorization-redesign-2026-06-14</span>
+    </span>
+    <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:86%"></span></span><span class="prog-n">12/14</span></span>
+    <span class="avs"><span class="mdash">—</span></span>
+    <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>5h</span>
+    <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>2d</span>
+    <span><span class="mdash">—</span></span>
+    <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></span>
+  </div>
+
+  <!-- Row 7 -->
+  <div class="prow">
+    <span class="pcell">
+      <span class="ptitle"><span class="bucket ready">ready</span><b>Desktop workbench shell</b></span>
+      <span class="psub">papercusp · desktop-workbench-shell-2026-06-05</span>
+    </span>
+    <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:33%"></span></span><span class="prog-n">4/12</span></span>
+    <span class="avs"><span class="mdash">—</span></span>
+    <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>2d</span>
+    <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>6h</span>
+    <span><span class="mdash">—</span></span>
+    <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></span>
+  </div>
+
+  <!-- Row 8 -->
+  <div class="prow">
+    <span class="pcell">
+      <span class="ptitle"><span class="bucket draft">draft</span><b>System health tab</b></span>
+      <span class="psub">papercusp · system-health-tab-2026-06-15</span>
+    </span>
+    <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:0%"></span></span><span class="prog-n">0/8</span></span>
+    <span class="avs"><span class="mdash">—</span></span>
+    <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>3d</span>
+    <span class="t dim"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>—</span>
+    <span><span class="mdash">—</span></span>
+    <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></span>
+  </div>
+
+  <div class="foot">
+    <span>Showing 8 of 466 · rows virtualized</span>
+    <span style="margin-left:auto;display:inline-flex;align-items:center;gap:5px"><span class="dotg"></span>live via SSE</span>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

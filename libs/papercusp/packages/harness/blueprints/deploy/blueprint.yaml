@@ -1,0 +1,75 @@
+# The `deploy` launch blueprint — unify-agent-launches-as-blueprints-2026-06-04 (P1, D-003).
+#
+# A SINGLE-ROLE LAUNCH BLUEPRINT (D-007): the degenerate "one role, one trigger"
+# case, *declared*. The release-gate's deploy chokepoint — the release-manager
+# agent (Claude Opus 4.8 @ xhigh effort, the model pinned in role-models.ts
+# because the blast radius is the whole running fleet) gathers the deploy plan,
+# reviews the diff + staged migrations, makes the go/no-go call, runs the scripted
+# deploy mechanics, then reads health and decides rollback.
+#
+# Before this plan the launch was a hand-wired invoke-caller: the
+# `system:release-trigger` routine action hardcoded `loopbackFetch(/invoke?role=
+# release-manager)`. Now the LAUNCH is declarative — the routine fires THIS
+# blueprint via `fireLaunchBlueprint('deploy')`, which resolves the role + model
+# from here. The trigger (release cadence) + the cheap "is anything green to
+# deploy" precheck stay in the routine (legitimately the trigger's concern); the
+# go/no-go + rollback gate lives INSIDE the release-manager agent (the brain).
+#
+# Single-role = inline-agent (D-007): the decider IS the release-manager; the
+# DONE/ESCALATE/IDLE edges make the decider spine well-formed (validate.ts requires
+# a reachable terminal) without modelling a fake multi-role pipeline.
+id: deploy
+extends: single-agent
+version: 0.1.0
+description: >-
+  The release-gate deploy launch: the release-manager agent reviews the gathered
+  deploy plan + staged migrations, makes the go/no-go call, runs the deploy, reads
+  health, and decides rollback. Opus-4.8 @ xhigh — the blast radius is the fleet.
+
+# Nominal work-item kind. A single-role launch fired via `system:blueprint-run`
+# mode='run' invokes the decider once and touches no work-item table — the kind is
+# declared for schema completeness + so a future mode='work-item' is well-defined.
+workItem:
+  kind: deploy-run
+  idPrefix: DEP
+
+# Spine edges + planner inherited from the `single-agent` parent. The
+# release-manager emits its terminal verb; there is no second role to dispatch
+# (single-role launch) — go/no-go + rollback are the agent's own gate, and it
+# plans within its own turn (no plans→features import). Override the decider role
+# + turn budget only.
+spine:
+  decider: release-manager
+  maxTurns: 20
+
+roles:
+  - id: release-manager
+    # Committed default in role-models.ts (ROLE_MODEL_DEFAULTS) — declared here too
+    # so the blueprint is self-describing; AGENT_MODELS/config still override.
+    model: opus:xhigh
+    description: >-
+      The deploy chokepoint's judgment half: review the deploy plan + staged
+      migrations, decide go/no-go, run the deploy, read health, decide rollback.
+
+knobs:
+  harnessKind: deploy
+  # The deploy operates on the integration tree, not a per-feature checkout.
+  requiresRepo: true
+
+# Scheduled trigger (D-004): the release cadence. SEEDED INACTIVE
+# (seed-release-routines.ts) — bring-up is human-confirmed (release-gate D-010).
+# The routine fires `system:blueprint-run` with payload `{ blueprintId: deploy }`.
+triggers:
+  schedule:
+    - cron: "0 */15 * * * *"
+      action: system:blueprint-run
+
+# Dependencies (official-blueprints-cupboard-publish D-002): derived from the
+# release-manager persona (scripts/derive-blueprint-deps.mjs). The deploy
+# mechanics are scripted (deploy-cli) — the agent-tool surface it needs is the
+# health/notification readback.
+dependencies:
+  tools:
+    - dev:service_health
+    - notifications:recent
+  plugins: []

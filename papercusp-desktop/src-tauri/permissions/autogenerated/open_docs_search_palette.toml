@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-docs-search-palette"
+description = "Enables the open_docs_search_palette command without any pre-configured scope."
+commands.allow = ["open_docs_search_palette"]
+
+[[permission]]
+identifier = "deny-open-docs-search-palette"
+description = "Denies the open_docs_search_palette command without any pre-configured scope."
+commands.deny = ["open_docs_search_palette"]

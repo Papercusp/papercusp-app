@@ -1,0 +1,52 @@
+# In-repo lib tests — JSX runtime + which vitest runs
+URL: /internal/docs/agent-insights/in-repo-lib-test-jsx-and-vitest-resolution
+
+Why a component test in an in-repo lib throws "React is not defined" from root vitest, and how the affected-tests walker actually runs workspace tests.
+
+Adding a Vitest test to an **in-repo lib/package** (e.g. `libs/flags`,
+`libs/marketplace-public-ui`, `packages/plugin-sdk`) has two non-obvious traps.
+Both cost real debugging time when adding the production-readiness test-coverage
+suites (2026-05-31).
+
+## 1. Component (`.tsx`) tests throw `ReferenceError: React is not defined`
+
+The component itself has **no `import React`** (line 1 is `'use client'` then
+`import { useState } from 'react'`) — it relies on the **automatic JSX runtime**,
+which its production build configures. Under Vitest the transform defaults to the
+**classic** runtime (`React.createElement`), so the component's own JSX blows up
+with `React is not defined` *inside `renderWithHooks`* — not in your test file.
+
+**Fix:** give the lib a `vitest.config.ts` that forces the automatic runtime:
+
+```ts
+import { defineVitestConfig } from '@papercusp/test-config';
+import { mergeConfig } from 'vitest/config';
+// defineVitestConfig alone does NOT set jsx:automatic — merge it in.
+export default mergeConfig(defineVitestConfig({ layer: 'unit' }), {
+  esbuild: { jsx: 'automatic', jsxImportSource: 'react' },
+});
+```
+
+Pure-logic tests (no JSX) never hit this — `libs/flags/src/client.test.ts` and
+`packages/plugin-sdk/src/iframe.test.ts` run fine without any of the above.
+
+## 2. Which vitest runs — and why `npx vitest run <path>` from root lies
+
+There is no root vitest project-map, so:
+
+* `npx vitest run libs/foo/src/x.test.tsx` **from the repo root** uses the *root*
+  transform (classic JSX) → the component test fails even when the lib's config
+  is correct. **Don't trust a root-level run of a lib test.**
+* `npm run test:affected` runs each affected workspace's **`test` script in that
+  workspace's dir**, so the package's `vitest.config.ts` (automatic JSX) applies.
+  That's the real CI path — so add a `"test": "vitest run"` script and verify
+  with **`cd libs/foo && npm test`**, not a root `vitest run`.
+
+Caveat: if a lib pins its **own** vitest at a *different major* than the
+v4 `@papercusp/test-config` setup, `cd lib && npx vitest` picks that local
+version and dies with *"Vitest failed to find the runner"*. (This bit
+`libs/flags` when it pinned `vitest: ^3`; it has since been bumped to
+`vitest: ^4.1.7`, so flags is no longer an example of the trap.) Either run a
+mismatched lib from root (it collects under v4) or bump it to vitest 4. Libs
+with **no** local vitest (marketplace-public-ui, plugin-sdk) resolve the
+root-hoisted v4 and are unaffected.

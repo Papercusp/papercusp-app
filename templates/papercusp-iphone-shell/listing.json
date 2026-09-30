@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-iphone-shell",
+  "id": "papercusp-iphone-shell",
+  "title": "Papercusp Official: iPhone Shell",
+  "description": "Aspect template: the SwiftUI/XcodeGen/XCFramework chassis, iPhone-native acceptance, privacy, signing, and archive/export preflight contract used by the official iPhone app root.",
+  "category": "shell",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

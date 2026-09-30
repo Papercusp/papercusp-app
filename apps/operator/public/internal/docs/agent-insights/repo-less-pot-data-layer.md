@@ -1,0 +1,98 @@
+# Repo-less pot data layer: member-repo resolution, per-pot outbox-drain, dead-executor reaper
+URL: /internal/docs/agent-insights/repo-less-pot-data-layer
+
+A kind:'pot' harness can be repo-LESS — its code lives in a MEMBER repo (e.g. papercusp's member is papercup). Three facets must resolve that correctly or the pot looks broken: (1) repo-backed surfaces (Docs/Tests) must read the member repo, not the empty pot dir; (2) the pot must arm its OWN cross-pot-outbox-drain on create or its substrate_outbox grows unbounded; (3) the DBOS routine scheduler must survive dead-executor dedup wedges (the reaper) or NOTHING fires — including the drain. All three were the root of papercusp looking half-broken on 2026-06-19.
+
+## The shape
+
+A `kind:'pot'` harness can be **repo-less**: it has no git working tree of its
+own; its code/docs/tests live in a **member** repo. Anything that resolves a
+harness to on-disk files or runs its automation must account for this, or the
+pot looks broken even though its data is intact. Three facets, all fixed
+2026-06-19:
+
+> **Update (2026-06-20 — Option-B merge):** papercusp itself is no longer the
+> running example of a repo-less pot. The operator-home pot and its dogfood
+> repo (`papercup`) were merged into **ONE** registry entry, marked
+> `self_repo: true` (`ProjectEntry.self_repo` in `harness-registry.ts`) — the
+> home pot now IS its own checkout, not a repo-less state dir borrowing a
+> separate member. `resolveHarnessContentPath` short-circuits for a
+> `self_repo` hive: it returns the harness's **own** `project.path` and never
+> looks for a member, so a stray project that set `hive_slug` to the home pot
+> can't hijack its docs/tests/source reads. Everything below (facets #1-3)
+> still applies in full to a genuinely repo-less pot (a fresh `pot:create`
+> without `linkExisting`/`requiresRepo`) — papercusp is just no longer that
+> example.
+
+## 1. Repo-backed surfaces resolve the MEMBER repo
+
+Docs and Tests read a harness's on-disk repo. For a repo-less pot the registry
+`project.path` is the (near-empty) pot state dir → blank tabs.
+
+**Fix:** `resolveHarnessContentPath(reg, slug)` in
+`packages/operator-core/lib/harness-registry.ts` returns, for a `kind:'pot'`
+harness, its **member repo's** path — UNLESS the pot itself is `self_repo`
+(the Option-B merge case above), in which case it returns the pot's own
+`project.path` directly and skips the member lookup entirely. For a normal
+repo harness (not a pot at all) it likewise falls straight through to
+`project.path`. Applied at every repo-backed resolver:
+
+* docs MCP tools — `agent-tools/docs/{outline,search,get}.ts`
+* docs HTTP endpoint — `harness/docs/harness-repo.ts` `resolveHarnessRepoRoot`
+  (feeds `buildMergedDocs` / the Docs tab)
+* testing endpoints — `endpoint-route/routes/harness/testing.ts` `resolveCtx`
+  (Tests tab + `/file-status`, `/health-strip`, `/domain-detail`)
+
+Result: papercusp's Docs (426 pages) + Tests (36 domains) now match papercup. The
+fallback is exact for non-pot harnesses, so this is additive.
+
+## 2. A pot arms its OWN cross-pot-outbox-drain on create
+
+Every federated-table write enqueues a `harness_shared.substrate_outbox` row, drained
+per-install by the `cross-pot-outbox-drain` routine. `pot:create` provisioned the
+learning loop but **never armed the drain**, so a new pot's outbox grew unbounded
+(papercusp hit \~24k undrained before this was caught — only the operator-home install
+had ever been seeded, via a manual script).
+
+**Fix:** `harness/routines/arm-pot-cross-pot-drain.ts` (`armHiveCrossHiveDrainRoutine`),
+called from `agent-tools/pot/_create.ts` step 6d and mirrored in
+`teardownHiveLearningLoop` (dissolve). The manual `seed-cross-pot-drain-routine.ts`
+now delegates to it so the seeded row can't drift. (Clearing an existing inert backlog
+is lossless **only if** the pot has no remote replicas — check `contributors=0` AND
+`cross_hive_outbox=0`; mark `drained_at` rather than delete.)
+
+## 3. The dead-executor reaper keeps the scheduler alive (EI-455)
+
+The deepest one — and the shared root of BOTH the deploy-pipeline stalls and the
+outbox not draining. A `routineFire` workflow stuck `PENDING` on a **dead** DBOS
+executor pins its `deduplication_id` forever (the `uq_workflow_status_dedup_id`
+unique index is status-INDEPENDENT; DBOS frees a dedup only on dequeue). Every future
+fire of that routine then collapses on the held dedup, and the routine scheduler
+silently halts — no routine fires at all, including the drain.
+
+**Fix:** `dbos/dbos-executor-reaper.ts` (`reapDeadExecutorWorkflows` +
+`startExecutorReaper`), started from `dbos/bootstrap.ts` right after `DBOS.launch()`:
+a boot reap + a **2-min process-level `setInterval`**. It is deliberately a
+process-level interval, **NOT** a DBOS scheduled routine — a scheduled reaper would
+queue on the very executor that wedges and so couldn't fire when most needed; the
+process-level loop un-wedges even a frozen routine engine. It NULLs the
+`deduplication_id` and CANCELs `PENDING`/`ENQUEUED` rows on any executor with no
+`workflow_status` activity in >5 min. Kill-switch `PAPERCUSP_DBOS_EXECUTOR_REAPER=0`.
+The deeper diagnosis + the manual-clear runbook is
+[the dead-executor dedup wedge](/internal/docs/agent-insights/deploy-pipeline-silent-stall-dead-executor-dedup);
+`dbos-workflow-gc` (default-on) prunes terminal rows so the table stays small. A
+sibling process-level sweep, `release/green-stall-watchdog.ts` (started right after the
+reaper in `dbos/bootstrap.ts`), closes the DETECTION half: it alarms when an `active`
+green-checkpoint routine stops firing (`last_fired_at` > 3h) or stops greening
+(`lastGreenAt` > 12h), independent of the routine itself — the in-routine `trackGateStall`
+is blind to "the routine never fired." EI-455 bug #2.
+
+## Operational invariant
+
+For any shared/repo-less pot: it must resolve its member repo for repo-backed reads
+(#1), arm its own outbox-drain (#2, now automatic at create), and the operator must
+run the dead-executor reaper (#3). Miss any one and the pot looks broken — blank
+tabs, an unbounded outbox, or a silently dead scheduler — while its data is perfectly
+intact. Still open under EI-455: only an optional dedup-TTL safety valve for a
+hung-but-live executor (the "no-green-verdict-in-N-hours" alarm, EI-455 bug #2, is now
+shipped — see facet #3 above).

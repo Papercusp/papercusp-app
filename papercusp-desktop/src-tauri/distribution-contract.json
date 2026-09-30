@@ -1,0 +1,362 @@
+{
+  "schemaVersion": 1,
+  "contract": "papercusp-gui-server-distribution-v1",
+  "decisions": [
+    "linux-desktop-split-server-like-mac-win-2026-07-19#D-001",
+    "linux-desktop-split-server-like-mac-win-2026-07-19#D-002",
+    "linux-desktop-split-server-like-mac-win-2026-07-19#D-003",
+    "linux-desktop-split-server-like-mac-win-2026-07-19#D-004",
+    "linux-desktop-split-server-like-mac-win-2026-07-19#D-005"
+  ],
+  "sharedSpa": {
+    "source": "apps/operator-vite/dist",
+    "guiResourceGlob": "sidecar/spa/**/*",
+    "serverResourceGlob": "sidecar/spa/**/*",
+    "browserTransport": [
+      "http",
+      "sse"
+    ],
+    "desktopTransport": [
+      "tauri-endpoint-ipc",
+      "http-fallback",
+      "sse-adapter"
+    ],
+    "nativeOnlySeams": [
+      "tauri-command",
+      "binary-transfer",
+      "native-pty",
+      "websocket"
+    ],
+    "rule": "One generated SPA and one client API. The browser keeps native HTTP/SSE; Tauri installs adapters without forking UI code."
+  },
+  "gui": {
+    "productName": "Papercusp GUI",
+    "identifier": "com.papercusp.gui",
+    "packageNames": {
+      "linux": "papercusp-gui",
+      "macos": "Papercusp GUI.app",
+      "windows": "Papercusp GUI"
+    },
+    "installedIdentities": {
+      "linuxExecutable": "/usr/bin/papercusp-desktop",
+      "linuxDesktopEntry": "Papercusp GUI.desktop",
+      "linuxIcon": "papercusp-desktop",
+      "linuxResourceRoot": "/usr/lib/Papercusp GUI",
+      "macosInstallRoot": "/Applications/Papercusp GUI.app",
+      "windowsInstallRoot": "%LOCALAPPDATA%\\Papercusp GUI"
+    },
+    "resourceAllowlist": [
+      {
+        "glob": "sidecar/spa/**/*",
+        "owner": "shared-generated-ui",
+        "platforms": [
+          "linux",
+          "macos",
+          "windows"
+        ]
+      },
+      {
+        "glob": "resources/libPapercuspTermShim.dylib",
+        "owner": "gui-shell",
+        "platforms": [
+          "macos"
+        ],
+        "optional": true
+      }
+    ],
+    "forbiddenResourcePrefixes": [
+      "seed/",
+      "sidecar/apps/",
+      "sidecar/bin/",
+      "sidecar/db-sql/",
+      "sidecar/env-sidecars/",
+      "sidecar/harness/",
+      "sidecar/internal-docs/",
+      "sidecar/node_modules/",
+      "sidecar/prompts/",
+      "sidecar/rubrics/",
+      "sidecar/scripts/",
+      "sidecar/source.tar.zst",
+      "sidecar/templates/",
+      "sidecar/serve.mjs",
+      "resources/papercup-bootstrap.sh",
+      "resources/papercup-rootfs-recipe",
+      "resources/papercup-runtime.tar.gz"
+    ],
+    "requiredCapabilities": [
+      "render-shared-spa-before-server-ready",
+      "discover-running-server",
+      "launch-installed-server",
+      "show-install-server-guidance",
+      "negotiate-server-version",
+      "preserve-browser-http-sse",
+      "install-desktop-ipc-adapters"
+    ],
+    "connection": {
+      "discoveryRecord": "~/.papercusp/operator.json",
+      "readinessProbe": "/api/health",
+      "versionProbe": "/api/desktop/version",
+      "missingServerState": "install-papercusp-server",
+      "missingServerChoices": [
+        "install-or-start-local-server",
+        "connect-remote-or-hosted-server"
+      ],
+      "remoteTransport": "credential-free-https-origin-with-browser-http-sse",
+      "rule": "Never self-host. Attach to a healthy Server or render explicit install/start/retry guidance without looping silently."
+    },
+    "versionNegotiation": {
+      "serverFields": [
+        "appVersion",
+        "sidecarSha"
+      ],
+      "releaseRule": "gui-and-server-must-share-release-version",
+      "sourceRule": "same-source-build-sha-required-when-both-shas-are-known",
+      "unknownRule": "unknown provenance is diagnostic and cannot satisfy release verification"
+    },
+    "budgets": {
+      "unit": "bytes",
+      "initialDownloadCeiling": 262144000,
+      "measurement": [
+        "compressed-artifact-bytes",
+        "unpacked-unique-inode-bytes",
+        "unpacked-logical-bytes",
+        "archive-member-bytes"
+      ],
+      "hardlinks": "count-each-inode-once-and-report-logical-bytes-separately",
+      "archives": "inspect-members-and-report-container-bytes-separately",
+      "tighteningRule": "A platform with a fresh artifact must pin exact measured bytes plus explicit compressed and unpacked ceilings; pending platforms retain the 250 MiB download safety ceiling but cannot pass distribution census until measured.",
+      "platforms": {
+        "linux": {
+          "status": "fresh-0.0.18-exact-source-artifacts",
+          "formats": {
+            "deb": {
+              "downloadBytes": 49561648,
+              "unpackedBytes": 259870182,
+              "downloadCeilingBytes": 67108864,
+              "unpackedCeilingBytes": 268435456,
+              "sourceArtifactSha256": "dc092e0bb13cc19faf1e282f448da58fb21e02b7093faa821c607dfc7ed548a3"
+            },
+            "appimage": {
+              "downloadBytes": 145484280,
+              "unpackedBytes": 532806788,
+              "downloadCeilingBytes": 157286400,
+              "unpackedCeilingBytes": 536870912,
+              "sourceArtifactSha256": "1c373f53c64afb6f348600dbcced32dd6193671fcf272474274ff47cdaab0958"
+            }
+          },
+          "mustRemeasureFreshArtifact": true
+        },
+        "macos": {
+          "status": "pending-fresh-artifact",
+          "mustRemeasureFreshArtifact": true
+        },
+        "windows": {
+          "status": "pending-fresh-artifact",
+          "mustRemeasureFreshArtifact": true
+        }
+      }
+    }
+  },
+  "server": {
+    "productName": "Papercusp Server",
+    "identifier": "com.papercusp.server",
+    "packageNames": {
+      "linux": "papercusp-server",
+      "macos": "Papercusp Server.app",
+      "windows": "Papercusp Server"
+    },
+    "installedIdentities": {
+      "linuxExecutable": "/usr/bin/papercusp-server",
+      "linuxDesktopEntry": "Papercusp Server.desktop",
+      "linuxIcon": "papercusp-server",
+      "linuxResourceRoot": "/usr/lib/Papercusp Server",
+      "linuxUserUnit": "/usr/lib/systemd/user/papercusp-server.service",
+      "macosInstallRoot": "/Applications/Papercusp Server.app",
+      "macosServiceDaemon": "/Library/LaunchDaemons/com.papercusp.server.plist",
+      "linuxBootStartHelper": "systemd/enable-boot-start.sh",
+      "windowsInstallRoot": "%LOCALAPPDATA%\\Papercusp Server"
+    },
+    "requiredResources": [
+      "sidecar/serve.mjs",
+      "sidecar/sidecar-preload.js",
+      "sidecar/spa/index.html",
+      "sidecar/bin/node",
+      "sidecar/db-sql/",
+      "sidecar/harness/",
+      "sidecar/internal-docs/",
+      "sidecar/node_modules/",
+      "sidecar/prompts/",
+      "sidecar/rubrics/",
+      "sidecar/scripts/",
+      "sidecar/templates/"
+    ],
+    "requiredCapabilities": [
+      "operator-health",
+      "embedded-postgres",
+      "workspace-host",
+      "browser-spa-http-sse",
+      "desktop-endpoint-ipc",
+      "mcp",
+      "agent-runtime",
+      "local-embedding",
+      "docs-search",
+      "environment-sidecars"
+    ],
+    "optionalPacks": [
+      {
+        "name": "local-models",
+        "required": true,
+        "manifestPath": "sidecar/node_modules/@huggingface/transformers/models/papercusp-model-assets.json",
+        "installRoot": "sidecar/node_modules/@huggingface/transformers/models/onnx-community",
+        "cachePolicy": {
+          "mode": "installed-local-only",
+          "remoteFetch": "forbidden-on-vm-release",
+          "readyWhen": "every-declared-file-matches-size-and-sha256",
+          "missingOrCorrupt": "refuse-startup",
+          "recovery": "replace-with-a-signed-runtime-containing-the-declared-pack"
+        },
+        "compatibility": {
+          "transformersPackage": "4.2.0",
+          "executionProvider": "cpu",
+          "runtimeDefaults": [
+            "harrier",
+            "gemma"
+          ]
+        },
+        "paths": [
+          "sidecar/node_modules/@huggingface/transformers/models/onnx-community/harrier-oss-v1-0.6b-ONNX/",
+          "sidecar/node_modules/@huggingface/transformers/models/onnx-community/embeddinggemma-300m-ONNX/"
+        ],
+        "forbidden": [
+          "*.tmp.*",
+          "*.partial",
+          "*.part"
+        ],
+        "models": [
+          {
+            "mode": "harrier",
+            "runtimeId": "onnx-community/harrier-oss-v1-0.6b-ONNX",
+            "revision": "e4daffa011e666dcd2ff2a3c6c05084090ac314d",
+            "nativeDimensions": 1024,
+            "files": [
+              {
+                "path": "config.json",
+                "bytes": 1530,
+                "sha256": "c55e075ac57223f7442ef1755051e9bd212e0d4ff2ed68694037f5a21dba7eeb"
+              },
+              {
+                "path": "onnx/model.onnx",
+                "bytes": 299981,
+                "sha256": "46e6d18455f25b2ebe9bccdc0fe3bf2a36442796ecc0991141c12c1f098f27b9"
+              },
+              {
+                "path": "onnx/model.onnx_data",
+                "bytes": 2094723072,
+                "sha256": "1f936ece1604ac0117e808f9db9959e3e8b6b860d44d1a6ecf55a5353ee2d55c"
+              },
+              {
+                "path": "onnx/model.onnx_data_1",
+                "bytes": 306225152,
+                "sha256": "5b2a43d2df8ba4706d44769c023f2627309a8e48ec0fea70e92afc1a974e169f"
+              },
+              {
+                "path": "tokenizer.json",
+                "bytes": 9117473,
+                "sha256": "2320ebaed2032c36f5c539cb8531d0642a10024e164f1d81ebbe163b259e3ba5"
+              },
+              {
+                "path": "tokenizer_config.json",
+                "bytes": 4650,
+                "sha256": "e1c8a5341a350885510d652a3a303beabf3a76ef745af6c6b4c3f0d815ccfb5c"
+              }
+            ]
+          },
+          {
+            "mode": "gemma",
+            "runtimeId": "onnx-community/embeddinggemma-300m-ONNX",
+            "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+            "nativeDimensions": 768,
+            "files": [
+              {
+                "path": "config.json",
+                "bytes": 1765,
+                "sha256": "6e1f06404b7163e0325ed2ea3e6781cde50f4a50b31780a95ad0d30e8404d77b"
+              },
+              {
+                "path": "onnx/model.onnx",
+                "bytes": 479932,
+                "sha256": "ea91fd315a7c152d427d231746f0f811a1ac93beaba656abfdf2b24e091265e4"
+              },
+              {
+                "path": "onnx/model.onnx_data",
+                "bytes": 1234521088,
+                "sha256": "ef835ae565d8695236652475903078e8ed794c7c35faf1164d78ec3238e8a88d"
+              },
+              {
+                "path": "tokenizer.json",
+                "bytes": 20323312,
+                "sha256": "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47"
+              },
+              {
+                "path": "tokenizer_config.json",
+                "bytes": 1156830,
+                "sha256": "3ca953eea6c3c9fcda9cf3df22949ff18b216f7c74bd6459230f3f1013953f3a"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "dev-source",
+        "paths": [
+          "sidecar/source.tar.zst"
+        ]
+      },
+      {
+        "name": "bootstrap-seed",
+        "paths": [
+          "seed/**/*"
+        ]
+      },
+      {
+        "name": "windows-wsl-runtime",
+        "platforms": [
+          "windows"
+        ],
+        "paths": [
+          "resources/papercup-bootstrap.sh",
+          "resources/papercup-rootfs-recipe",
+          "resources/papercup-runtime.tar.gz"
+        ]
+      }
+    ],
+    "capabilitySmoke": {
+      "health": "/api/health",
+      "version": "/api/desktop/version",
+      "spa": "/",
+      "stream": "endpoint-ipc-or-sse-round-trip",
+      "database": "embedded-postgres-ready",
+      "agent": "mcp-initialize-and-read-only-tool"
+    }
+  },
+  "coinstall": {
+    "conflicts": [],
+    "replaces": [],
+    "sharedExecutablePaths": [],
+    "singleInstanceScope": "bundle-identifier",
+    "updaterProducts": [
+      "gui",
+      "server"
+    ],
+    "uninstallRule": "Each product may remove only files and processes proven to belong to its own package/bundle identifier."
+  },
+  "verification": {
+    "freshSameSourceArtifactsRequired": true,
+    "archiveAware": true,
+    "installedTreeAware": true,
+    "browserTransportParityRequired": true,
+    "desktopTransportParityRequired": true,
+    "guiOnlyFailureMustBeGraceful": true,
+    "serverOnlyOperationMustBeSupported": true
+  }
+}

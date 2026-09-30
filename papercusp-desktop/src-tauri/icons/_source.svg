@@ -1,0 +1,35 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Papercup app icon</title>
+  <desc id="desc">A rounded charcoal tile holding a steaming cup — the Papercup mark.</desc>
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="38%" r="68%">
+      <stop offset="0%" stop-color="#17324a"/>
+      <stop offset="58%" stop-color="#0b1624"/>
+      <stop offset="100%" stop-color="#07101d"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#b9efff"/>
+      <stop offset="52%" stop-color="#57d8ff"/>
+      <stop offset="100%" stop-color="#178db8"/>
+    </linearGradient>
+    <linearGradient id="cup" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#f3eef9" stop-opacity="0.97"/>
+      <stop offset="100%" stop-color="#d7d2e2" stop-opacity="0.84"/>
+    </linearGradient>
+    <linearGradient id="coffee" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#c8a57b"/>
+      <stop offset="100%" stop-color="#8b5e3d"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bg)" stroke="url(#ring)" stroke-width="3.2"/>
+  <path d="M64 19c0 7.5-8.5 12-16 18" fill="none" stroke="#d9a977" stroke-width="3.2" stroke-linecap="round"/>
+  <path d="M64 19c0 7.5 8.5 12 16 18" fill="none" stroke="#d9a977" stroke-width="3.2" stroke-linecap="round"/>
+  <g transform="translate(0 8)">
+    <path d="M34 39h60l-4.5 45c0 6-9.5 10.5-25.5 10.5S38.5 90 38.5 84z" fill="url(#cup)" fill-opacity="0.16" stroke="#d8f4ff" stroke-opacity="0.88" stroke-width="2.35" stroke-linejoin="round"/>
+    <ellipse cx="64" cy="39" rx="30" ry="6.2" fill="url(#cup)" fill-opacity="0.2" stroke="#d8f4ff" stroke-opacity="0.88" stroke-width="2.35"/>
+    <ellipse cx="64" cy="39" rx="23.5" ry="3.8" fill="url(#coffee)" fill-opacity="0.9"/>
+    <path d="M44.5 58c11.2-3 27.8-3 39 0" fill="none" stroke="#d9a977" stroke-opacity="0.74" stroke-width="2.15" stroke-linecap="round"/>
+    <rect x="60.75" y="55" width="6.5" height="21" rx="3" fill="#7ce2ff" fill-opacity="0.84"/>
+    <path d="M54.5 86c2.4 3 5.6 4.5 9.5 4.5s7.1-1.5 9.5-4.5" fill="none" stroke="#7ce2ff" stroke-opacity="0.84" stroke-width="2.05" stroke-linecap="round"/>
+  </g>
+</svg>

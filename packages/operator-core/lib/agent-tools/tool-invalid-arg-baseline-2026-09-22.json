@@ -1,0 +1,3254 @@
+{
+  "schemaVersion": "papercusp.tool-invalid-arg-baseline/v1",
+  "capturedAt": "2026-09-22T09:54:28.531Z",
+  "capturedBy": "su-77b3a99d-e271-43fc-9ab1-7daf214767b8",
+  "plan": "deterministic-tool-definition-delivery-2026-09-21",
+  "bar": "R-9",
+  "cutover": {
+    "at": "2026-09-21T23:46:45Z",
+    "what": "compact tool-definition tier went live (PAPERCUSP_TOOLS_COMPACT introduced in apps/operator/scripts/psu-launcher.mjs)"
+  },
+  "ledgerWindow": {
+    "oldestRow": "2026-09-08 04:03:51.017-04",
+    "newestRow": "2026-09-22 05:54:25.194-04",
+    "totalRowsAllScopes": 1942639
+  },
+  "scope": {
+    "workspaceId": "papercusp-workspace",
+    "note": "all roles and harnesses within the workspace"
+  },
+  "totals": {
+    "postChange": {
+      "calls": 83673,
+      "invalidInput": 581,
+      "invalidArgs": 0
+    },
+    "preChange": {
+      "calls": 1707459,
+      "invalidInput": 12040,
+      "invalidArgs": 4
+    }
+  },
+  "status": "SECONDARY / CONFOUNDED — corroboration only, never a gate",
+  "caveats": [
+    "CONFOUNDED BY CONSTRUCTION: a chronological before/after comparison cannot separate the tier change from model, scenario and harness drift over the same period. R-9s PRIMARY instrument is a contemporaneous randomized split for exactly this reason; this artifact is demoted to corroboration.",
+    "NOISY PROXY: error_code=invalid_input conflates a model emitting malformed arguments with ordinary API misuse by a caller who simply used the wrong argument name. It is not a clean comprehension signal.",
+    "CAPTURED RETROSPECTIVELY, but the DATA is genuinely pre-change: every row counted in preChange was written before the cutover timestamp. A measurement is valid by when its data was generated, not by when the query ran.",
+    "NOT A SUBSTITUTE for the randomized split. If this artifact is ever cited as satisfying R-9 on its own, that is a misuse."
+  ],
+  "perTool": [
+    {
+      "tool": "accounts:get-session-override",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "accounts:link-start",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "accounts:link-status",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "accounts:list",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "accounts:pin",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "accounts:probe-capacity",
+      "preCalls": 8,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "accounts:status",
+      "preCalls": 311071,
+      "preInvalidArgs": 1,
+      "postCalls": 14621,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "activity:bash-substitution-report",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "activity:mix",
+      "preCalls": 21,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "activity:recent",
+      "preCalls": 378,
+      "preInvalidArgs": 3,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "activity:report",
+      "preCalls": 589989,
+      "preInvalidArgs": 3853,
+      "postCalls": 24571,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "activity:tool-log",
+      "preCalls": 249,
+      "preInvalidArgs": 18,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "agent_chats:send_message",
+      "preCalls": 1,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "agents:list",
+      "preCalls": 8,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "agent_tools:list",
+      "preCalls": 76,
+      "preInvalidArgs": 4,
+      "postCalls": 3,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "audit:list",
+      "preCalls": 33,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "autoloop:status",
+      "preCalls": 4,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "backup:restore",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "backup:settings_get",
+      "preCalls": 16,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "backup:snapshot_create",
+      "preCalls": 12,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "backup:snapshot_list",
+      "preCalls": 86,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "blender:attach-goal-evidence",
+      "preCalls": 17,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "blender:goal-drafts",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "blender:grade-idea",
+      "preCalls": 53,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "blender:ideate-pass-record",
+      "preCalls": 23,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "blender:ideation-feedback",
+      "preCalls": 17,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "blender:route-idea",
+      "preCalls": 8,
+      "preInvalidArgs": 4,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "blueprint:catalog",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "blueprint:publish",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "build:typecheck",
+      "preCalls": 137,
+      "preInvalidArgs": 5,
+      "postCalls": 10,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:bash",
+      "preCalls": 11281,
+      "preInvalidArgs": 26,
+      "postCalls": 2450,
+      "postInvalidArgs": 3
+    },
+    {
+      "tool": "capability:bash_kill",
+      "preCalls": 19,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:bash_output",
+      "preCalls": 1907,
+      "preInvalidArgs": 1,
+      "postCalls": 177,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "capability:computer",
+      "preCalls": 12,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:edit",
+      "preCalls": 376,
+      "preInvalidArgs": 3,
+      "postCalls": 26,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:fetch",
+      "preCalls": 91,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:git",
+      "preCalls": 133,
+      "preInvalidArgs": 0,
+      "postCalls": 40,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:inspect",
+      "preCalls": 25,
+      "preInvalidArgs": 0,
+      "postCalls": 4,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:launch-agent",
+      "preCalls": 229,
+      "preInvalidArgs": 24,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:list",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:notebook_edit",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:patch",
+      "preCalls": 5,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:pty_kill",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:pty_open",
+      "preCalls": 9,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:pty_read_screen",
+      "preCalls": 15,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:pty_resize",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:pty_write_stdin",
+      "preCalls": 9,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:read",
+      "preCalls": 7660,
+      "preInvalidArgs": 95,
+      "postCalls": 377,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:terminal",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "capability:write",
+      "preCalls": 27,
+      "preInvalidArgs": 0,
+      "postCalls": 12,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "chat:ask_choice",
+      "preCalls": 4,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "checkpoint:await",
+      "preCalls": 37,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "code:run",
+      "preCalls": 10743,
+      "preInvalidArgs": 75,
+      "postCalls": 1769,
+      "postInvalidArgs": 8
+    },
+    {
+      "tool": "code:tools",
+      "preCalls": 287,
+      "preInvalidArgs": 18,
+      "postCalls": 67,
+      "postInvalidArgs": 9
+    },
+    {
+      "tool": "computer:list_desktops",
+      "preCalls": 10,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "computer:observe",
+      "preCalls": 7,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "computer:provision_desktop",
+      "preCalls": 6,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "computer:release_desktop",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "config:role-launch",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "config:set-compaction-limit",
+      "preCalls": 308,
+      "preInvalidArgs": 29,
+      "postCalls": 20,
+      "postInvalidArgs": 7
+    },
+    {
+      "tool": "config:terminal-emulator",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "config:tiers-get",
+      "preCalls": 4514,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "consult:close",
+      "preCalls": 34,
+      "preInvalidArgs": 4,
+      "postCalls": 3,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "consult:decline",
+      "preCalls": 11,
+      "preInvalidArgs": 1,
+      "postCalls": 7,
+      "postInvalidArgs": 3
+    },
+    {
+      "tool": "consult:get_feedback",
+      "preCalls": 156,
+      "preInvalidArgs": 20,
+      "postCalls": 10,
+      "postInvalidArgs": 2
+    },
+    {
+      "tool": "consult:reply",
+      "preCalls": 75,
+      "preInvalidArgs": 26,
+      "postCalls": 10,
+      "postInvalidArgs": 4
+    },
+    {
+      "tool": "conversations:answer",
+      "preCalls": 7,
+      "preInvalidArgs": 3,
+      "postCalls": 4,
+      "postInvalidArgs": 3
+    },
+    {
+      "tool": "conversations:get",
+      "preCalls": 468,
+      "preInvalidArgs": 4,
+      "postCalls": 54,
+      "postInvalidArgs": 2
+    },
+    {
+      "tool": "conversations:list",
+      "preCalls": 19,
+      "preInvalidArgs": 1,
+      "postCalls": 3,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "conversations:post",
+      "preCalls": 25,
+      "preInvalidArgs": 0,
+      "postCalls": 11,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "conversations:resolve",
+      "preCalls": 13,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:ack",
+      "preCalls": 452,
+      "preInvalidArgs": 2,
+      "postCalls": 4,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:ask-owner",
+      "preCalls": 81,
+      "preInvalidArgs": 13,
+      "postCalls": 3,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "coord:await-inbox",
+      "preCalls": 142,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:catch-up",
+      "preCalls": 1189,
+      "preInvalidArgs": 1,
+      "postCalls": 71,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:conditions",
+      "preCalls": 7,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:couple",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:declare-intent",
+      "preCalls": 10792,
+      "preInvalidArgs": 22,
+      "postCalls": 190,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:dispatch",
+      "preCalls": 114,
+      "preInvalidArgs": 31,
+      "postCalls": 3,
+      "postInvalidArgs": 2
+    },
+    {
+      "tool": "coord:emit",
+      "preCalls": 16549,
+      "preInvalidArgs": 0,
+      "postCalls": 321,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:escalate",
+      "preCalls": 116,
+      "preInvalidArgs": 6,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:escalations",
+      "preCalls": 43,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:feed",
+      "preCalls": 791,
+      "preInvalidArgs": 13,
+      "postCalls": 16,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:focus-window",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:glance",
+      "preCalls": 119051,
+      "preInvalidArgs": 3,
+      "postCalls": 15456,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:goal",
+      "preCalls": 17,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:inbox",
+      "preCalls": 10204,
+      "preInvalidArgs": 100,
+      "postCalls": 282,
+      "postInvalidArgs": 12
+    },
+    {
+      "tool": "coord:mark-terminal",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:message-agent",
+      "preCalls": 6,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:orient",
+      "preCalls": 5398,
+      "preInvalidArgs": 42,
+      "postCalls": 151,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:plan-events",
+      "preCalls": 4059,
+      "preInvalidArgs": 6,
+      "postCalls": 137,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:presence",
+      "preCalls": 2624,
+      "preInvalidArgs": 99,
+      "postCalls": 121,
+      "postInvalidArgs": 9
+    },
+    {
+      "tool": "coord:read",
+      "preCalls": 1221,
+      "preInvalidArgs": 4,
+      "postCalls": 36,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:rebind-identity",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:resolve",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:retract",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:roster",
+      "preCalls": 140,
+      "preInvalidArgs": 2,
+      "postCalls": 4,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:send",
+      "preCalls": 12686,
+      "preInvalidArgs": 1216,
+      "postCalls": 553,
+      "postInvalidArgs": 128
+    },
+    {
+      "tool": "coord:thread",
+      "preCalls": 106,
+      "preInvalidArgs": 18,
+      "postCalls": 8,
+      "postInvalidArgs": 5
+    },
+    {
+      "tool": "coord:thread-post",
+      "preCalls": 6,
+      "preInvalidArgs": 0,
+      "postCalls": 5,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:wake",
+      "preCalls": 95,
+      "preInvalidArgs": 0,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:wake-mode",
+      "preCalls": 12,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:wake-queue",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:walls",
+      "preCalls": 481,
+      "preInvalidArgs": 0,
+      "postCalls": 17,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:watermark",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "coord:whoami",
+      "preCalls": 10772,
+      "preInvalidArgs": 1,
+      "postCalls": 192,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "cross_harness:docs_get",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "cross_harness:docs_search",
+      "preCalls": 1,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "cross_harness:plans_get",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "cross_harness:plans_search",
+      "preCalls": 7,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "cupboard:install-blueprint",
+      "preCalls": 21,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "cupboard:publish-plan",
+      "preCalls": 7,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "cupboard:publish-recipe",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "cupboard:search",
+      "preCalls": 39,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "curation:state-of-pot",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "db:check_drift",
+      "preCalls": 26,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "db:migrate",
+      "preCalls": 34,
+      "preInvalidArgs": 5,
+      "postCalls": 2,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "db:migrations",
+      "preCalls": 89,
+      "preInvalidArgs": 0,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "db:next-migration",
+      "preCalls": 17,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "deploy:await",
+      "preCalls": 7,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "deploy:status",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "deploys:vintage",
+      "preCalls": 25,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "design-phase.get_accepted_spec",
+      "preCalls": 18,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "design-phase.get_design_spec",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "design-phase.get_registry_component",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "design-phase.lint_spec",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "design-phase.list_tokens",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "design-phase.search_registry",
+      "preCalls": 25,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "design-phase.submit_spec",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "design-phase.validate_spec",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:activity",
+      "preCalls": 11,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:audit",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:build_status",
+      "preCalls": 110,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:cache_stats",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:claude_session",
+      "preCalls": 37,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:dogfood_substrate_status",
+      "preCalls": 18,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:embed_latency",
+      "preCalls": 21,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:harnesses",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:listening_ports",
+      "preCalls": 115,
+      "preInvalidArgs": 0,
+      "postCalls": 3,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:omp_session",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:pg_active_queries",
+      "preCalls": 65,
+      "preInvalidArgs": 2,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:pg_health",
+      "preCalls": 42,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:pg_hot_queries",
+      "preCalls": 10,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:pg_mutate",
+      "preCalls": 27,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:pg_query",
+      "preCalls": 8766,
+      "preInvalidArgs": 30,
+      "postCalls": 723,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:pg_table_sizes",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:pipeline_position",
+      "preCalls": 25361,
+      "preInvalidArgs": 0,
+      "postCalls": 287,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:processes",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:rate_governor_status",
+      "preCalls": 23,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:resolve_owner",
+      "preCalls": 171,
+      "preInvalidArgs": 0,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:restart",
+      "preCalls": 763,
+      "preInvalidArgs": 3,
+      "postCalls": 76,
+      "postInvalidArgs": 2
+    },
+    {
+      "tool": "dev:service_health",
+      "preCalls": 512,
+      "preInvalidArgs": 9,
+      "postCalls": 4,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:session_detail",
+      "preCalls": 38,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:sessions",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:stall_waker_status",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:telemetry",
+      "preCalls": 15,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "dev:why",
+      "preCalls": 9,
+      "preInvalidArgs": 1,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "docs:author",
+      "preCalls": 23,
+      "preInvalidArgs": 1,
+      "postCalls": 4,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "docs:get",
+      "preCalls": 479,
+      "preInvalidArgs": 8,
+      "postCalls": 4,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "docs:outline",
+      "preCalls": 27,
+      "preInvalidArgs": 8,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "docs:search",
+      "preCalls": 519,
+      "preInvalidArgs": 10,
+      "postCalls": 13,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "events:await",
+      "preCalls": 1931,
+      "preInvalidArgs": 11,
+      "postCalls": 6,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "events:cancel",
+      "preCalls": 416,
+      "preInvalidArgs": 4,
+      "postCalls": 10,
+      "postInvalidArgs": 2
+    },
+    {
+      "tool": "events:catalog",
+      "preCalls": 243,
+      "preInvalidArgs": 1,
+      "postCalls": 9,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "events:emit",
+      "preCalls": 78,
+      "preInvalidArgs": 0,
+      "postCalls": 9,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "events:lost-wake-check",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "events:status",
+      "preCalls": 1874,
+      "preInvalidArgs": 2,
+      "postCalls": 32,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "facts:assert",
+      "preCalls": 3143,
+      "preInvalidArgs": 799,
+      "postCalls": 60,
+      "postInvalidArgs": 23
+    },
+    {
+      "tool": "facts:list",
+      "preCalls": 60310,
+      "preInvalidArgs": 20,
+      "postCalls": 2449,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "facts:retract",
+      "preCalls": 169,
+      "preInvalidArgs": 62,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fetch_plus.fetch_clean",
+      "preCalls": 525,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "flags:attest",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "flags:get",
+      "preCalls": 2011,
+      "preInvalidArgs": 0,
+      "postCalls": 167,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "flags:list",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:assignments",
+      "preCalls": 5967,
+      "preInvalidArgs": 0,
+      "postCalls": 148,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:audit",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:bench",
+      "preCalls": 7,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:capacity",
+      "preCalls": 9,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:create",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:cup_mail",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:headcount-target",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:invariant",
+      "preCalls": 7,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:join",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:kill",
+      "preCalls": 9,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:launch-on-plan",
+      "preCalls": 34,
+      "preInvalidArgs": 1,
+      "postCalls": 30,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "fleet:leader-brief",
+      "preCalls": 713,
+      "preInvalidArgs": 0,
+      "postCalls": 20,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:leave",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:list",
+      "preCalls": 29,
+      "preInvalidArgs": 2,
+      "postCalls": 3,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:pause",
+      "preCalls": 47,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:require-checkpoint",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:respawn-member",
+      "preCalls": 8,
+      "preInvalidArgs": 3,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:resume",
+      "preCalls": 223,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:status",
+      "preCalls": 424,
+      "preInvalidArgs": 3,
+      "postCalls": 13,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "fleet:take-leadership",
+      "preCalls": 21,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:tree",
+      "preCalls": 1,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "fleet:wind-down",
+      "preCalls": 10,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "gates:degenerate-check",
+      "preCalls": 85,
+      "preInvalidArgs": 50,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "gateway:owner_report",
+      "preCalls": 47,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "gateway:status",
+      "preCalls": 10,
+      "preInvalidArgs": 0,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "gitnexus.context",
+      "preCalls": 35,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "gitnexus.list_repos",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "git-sync:await",
+      "preCalls": 204,
+      "preInvalidArgs": 1,
+      "postCalls": 2,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "git-sync:run",
+      "preCalls": 1028,
+      "preInvalidArgs": 2,
+      "postCalls": 31,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "goals:get",
+      "preCalls": 103,
+      "preInvalidArgs": 5,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "goals:list",
+      "preCalls": 19,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "goals:pots",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "goals:set-property",
+      "preCalls": 2,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "goals:start",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "goals:start-from-package",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "goals:update",
+      "preCalls": 9,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "governor:state_snapshot",
+      "preCalls": 16,
+      "preInvalidArgs": 0,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "graph:query",
+      "preCalls": 9,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "gym:judge",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "harness_docs:anchor",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "harness_docs:list",
+      "preCalls": 2,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "harness:escalation",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "harness:generate-from-repo",
+      "preCalls": 1,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "harness:get",
+      "preCalls": 17,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "harness:list",
+      "preCalls": 46,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "harness:phase_path",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "harness:status",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "hive:store_breakdown",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "host:memory_pressure",
+      "preCalls": 30,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "identities:get",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "identities:list",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "improvements:agent-review",
+      "preCalls": 20,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "improvements:capture",
+      "preCalls": 14597,
+      "preInvalidArgs": 351,
+      "postCalls": 127,
+      "postInvalidArgs": 20
+    },
+    {
+      "tool": "improvements:digest",
+      "preCalls": 12,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "improvements:learning_loops",
+      "preCalls": 74,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "improvements:resolve",
+      "preCalls": 10,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "improvements:triage",
+      "preCalls": 8,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "improvements:watchdog-status",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "inbox:bulk-run-manifest",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "intel:spawn_tree",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "issues:list",
+      "preCalls": 68,
+      "preInvalidArgs": 5,
+      "postCalls": 13,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "journal:recent",
+      "preCalls": 8,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "journal:record-turn",
+      "preCalls": 4548,
+      "preInvalidArgs": 0,
+      "postCalls": 340,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "learning:set-pot-scope",
+      "preCalls": 28,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "locks:acquire",
+      "preCalls": 10919,
+      "preInvalidArgs": 9,
+      "postCalls": 500,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "locks:acquire_resource",
+      "preCalls": 54,
+      "preInvalidArgs": 2,
+      "postCalls": 4,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "locks:cancel_wait",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "locks:check_command",
+      "preCalls": 25980,
+      "preInvalidArgs": 0,
+      "postCalls": 2627,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "locks:heartbeat",
+      "preCalls": 24,
+      "preInvalidArgs": 0,
+      "postCalls": 2,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "locks:heartbeat_resource",
+      "preCalls": 32,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "locks:list",
+      "preCalls": 389,
+      "preInvalidArgs": 5,
+      "postCalls": 15,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "locks:queue",
+      "preCalls": 1871,
+      "preInvalidArgs": 0,
+      "postCalls": 18,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "locks:release",
+      "preCalls": 6777,
+      "preInvalidArgs": 21,
+      "postCalls": 496,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "locks:release_resource",
+      "preCalls": 39,
+      "preInvalidArgs": 0,
+      "postCalls": 4,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "logs:read",
+      "preCalls": 555,
+      "preInvalidArgs": 1,
+      "postCalls": 10,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "loop:arm",
+      "preCalls": 2064,
+      "preInvalidArgs": 22,
+      "postCalls": 54,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "loop:checkpoint",
+      "preCalls": 12461,
+      "preInvalidArgs": 162,
+      "postCalls": 394,
+      "postInvalidArgs": 2
+    },
+    {
+      "tool": "loop:end",
+      "preCalls": 1604,
+      "preInvalidArgs": 42,
+      "postCalls": 18,
+      "postInvalidArgs": 5
+    },
+    {
+      "tool": "loop:session-audit",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "loop:soak-report",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "loop:standdown-all",
+      "preCalls": 10,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "loop:status",
+      "preCalls": 3177,
+      "preInvalidArgs": 2,
+      "postCalls": 86,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "lsp:query",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "mail:draft",
+      "preCalls": 9,
+      "preInvalidArgs": 3,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "mail:reply",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "mail:send",
+      "preCalls": 329,
+      "preInvalidArgs": 11,
+      "postCalls": 54,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "mail:send-draft",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "memory:forget",
+      "preCalls": 1,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "memory:list",
+      "preCalls": 12,
+      "preInvalidArgs": 7,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "memory:remember",
+      "preCalls": 158,
+      "preInvalidArgs": 27,
+      "postCalls": 13,
+      "postInvalidArgs": 2
+    },
+    {
+      "tool": "memory:search",
+      "preCalls": 3468,
+      "preInvalidArgs": 3,
+      "postCalls": 72,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "mode:get",
+      "preCalls": 36,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "mode:set",
+      "preCalls": 252,
+      "preInvalidArgs": 0,
+      "postCalls": 5,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "notifications:recent",
+      "preCalls": 19,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "notifications:send_owner",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "omp:sessions",
+      "preCalls": 4,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "operator:converse",
+      "preCalls": 11,
+      "preInvalidArgs": 11,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "operator:credentials_status",
+      "preCalls": 11,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "orchestrate:inspect",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "orchestrate:run",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "orchestrate:search",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "orders:capture-pending",
+      "preCalls": 8,
+      "preInvalidArgs": 0,
+      "postCalls": 44,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "orders:disposition",
+      "preCalls": 15,
+      "preInvalidArgs": 0,
+      "postCalls": 28,
+      "postInvalidArgs": 3
+    },
+    {
+      "tool": "orders:get",
+      "preCalls": 93,
+      "preInvalidArgs": 2,
+      "postCalls": 98,
+      "postInvalidArgs": 4
+    },
+    {
+      "tool": "orders:list",
+      "preCalls": 25,
+      "preInvalidArgs": 4,
+      "postCalls": 60,
+      "postInvalidArgs": 8
+    },
+    {
+      "tool": "orders:record",
+      "preCalls": 14,
+      "preInvalidArgs": 5,
+      "postCalls": 2,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "orders:resolve-pending",
+      "preCalls": 8,
+      "preInvalidArgs": 0,
+      "postCalls": 75,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "p2p:trace",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "personal:search",
+      "preCalls": 26,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plan_items:assign",
+      "preCalls": 8,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plan_items:claim",
+      "preCalls": 26,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plan_items:convert",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plan_items:release",
+      "preCalls": 287,
+      "preInvalidArgs": 0,
+      "postCalls": 34,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plan_items:status",
+      "preCalls": 43,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plan_items:unassign",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:acceptance-bar-census",
+      "preCalls": 28,
+      "preInvalidArgs": 8,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:add-decision",
+      "preCalls": 554,
+      "preInvalidArgs": 59,
+      "postCalls": 125,
+      "postInvalidArgs": 20
+    },
+    {
+      "tool": "plans:add-item",
+      "preCalls": 91,
+      "preInvalidArgs": 30,
+      "postCalls": 4,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "plans:audit",
+      "preCalls": 515,
+      "preInvalidArgs": 68,
+      "postCalls": 23,
+      "postInvalidArgs": 5
+    },
+    {
+      "tool": "plans:backfill-revisions",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:bind-spec-evidence",
+      "preCalls": 822,
+      "preInvalidArgs": 153,
+      "postCalls": 161,
+      "postInvalidArgs": 39
+    },
+    {
+      "tool": "plans:edit",
+      "preCalls": 138,
+      "preInvalidArgs": 3,
+      "postCalls": 3,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:evaluate-spec-quality",
+      "preCalls": 499,
+      "preInvalidArgs": 5,
+      "postCalls": 69,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:evaluate-spec-test-adequacy",
+      "preCalls": 3492,
+      "preInvalidArgs": 243,
+      "postCalls": 309,
+      "postInvalidArgs": 16
+    },
+    {
+      "tool": "plans:export",
+      "preCalls": 112,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:get",
+      "preCalls": 5987,
+      "preInvalidArgs": 48,
+      "postCalls": 324,
+      "postInvalidArgs": 3
+    },
+    {
+      "tool": "plans:get-input-schema",
+      "preCalls": 32,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:get-item",
+      "preCalls": 179,
+      "preInvalidArgs": 3,
+      "postCalls": 4,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:get-output-schema",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:get-properties",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:get-spec-evidence",
+      "preCalls": 2048,
+      "preInvalidArgs": 160,
+      "postCalls": 82,
+      "postInvalidArgs": 6
+    },
+    {
+      "tool": "plans:get-specs",
+      "preCalls": 1093,
+      "preInvalidArgs": 29,
+      "postCalls": 67,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "plans:get-template-data",
+      "preCalls": 43,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:items",
+      "preCalls": 534,
+      "preInvalidArgs": 3,
+      "postCalls": 124,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "plans:lint",
+      "preCalls": 13,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:list",
+      "preCalls": 359,
+      "preInvalidArgs": 22,
+      "postCalls": 26,
+      "postInvalidArgs": 2
+    },
+    {
+      "tool": "plans:migrate-acceptance-bars",
+      "preCalls": 67,
+      "preInvalidArgs": 5,
+      "postCalls": 3,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:new",
+      "preCalls": 159,
+      "preInvalidArgs": 7,
+      "postCalls": 3,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "plans:revision-diff",
+      "preCalls": 13,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:revisions",
+      "preCalls": 22,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:revision-transcript",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:runs",
+      "preCalls": 2,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:search",
+      "preCalls": 166,
+      "preInvalidArgs": 0,
+      "postCalls": 2,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:set-archived",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:set-content",
+      "preCalls": 28,
+      "preInvalidArgs": 1,
+      "postCalls": 2,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:set-content-chunk",
+      "preCalls": 107,
+      "preInvalidArgs": 3,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:set-decision-body",
+      "preCalls": 105,
+      "preInvalidArgs": 36,
+      "postCalls": 29,
+      "postInvalidArgs": 7
+    },
+    {
+      "tool": "plans:set-frontmatter",
+      "preCalls": 1,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:set-input-schema",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:set-item-blocked-by",
+      "preCalls": 6,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:set-now",
+      "preCalls": 131,
+      "preInvalidArgs": 12,
+      "postCalls": 4,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "plans:set-plan-status",
+      "preCalls": 199,
+      "preInvalidArgs": 11,
+      "postCalls": 41,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:set-specs",
+      "preCalls": 171,
+      "preInvalidArgs": 46,
+      "postCalls": 23,
+      "postInvalidArgs": 5
+    },
+    {
+      "tool": "plans:set-status",
+      "preCalls": 486,
+      "preInvalidArgs": 14,
+      "postCalls": 74,
+      "postInvalidArgs": 9
+    },
+    {
+      "tool": "plans:set-template-data",
+      "preCalls": 12,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:spec-reconciliation",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plans:start",
+      "preCalls": 285,
+      "preInvalidArgs": 2,
+      "postCalls": 12,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "plugins:runtime_status",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "pot:get",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "pot_git:secrets_exemptions",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "pot:list",
+      "preCalls": 7,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "pot:pause",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "pot:status",
+      "preCalls": 2,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "processes:freeze",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "processes:kill",
+      "preCalls": 252,
+      "preInvalidArgs": 56,
+      "postCalls": 30,
+      "postInvalidArgs": 6
+    },
+    {
+      "tool": "processes:limit",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "processes:list",
+      "preCalls": 574,
+      "preInvalidArgs": 9,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "prompt:role_override",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "rationale:reproject",
+      "preCalls": 7496,
+      "preInvalidArgs": 0,
+      "postCalls": 219,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "recipes:get",
+      "preCalls": 85,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "recipes:list",
+      "preCalls": 7,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "recipes:revise",
+      "preCalls": 10,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "recipes:run",
+      "preCalls": 56,
+      "preInvalidArgs": 3,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "recipes:search",
+      "preCalls": 3101,
+      "preInvalidArgs": 0,
+      "postCalls": 67,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "recipes:sweep",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "release:checkpoint-cancel",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "release:checkpoint-run",
+      "preCalls": 59,
+      "preInvalidArgs": 1,
+      "postCalls": 5,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "release:cut",
+      "preCalls": 321,
+      "preInvalidArgs": 29,
+      "postCalls": 23,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "release:deploy",
+      "preCalls": 413,
+      "preInvalidArgs": 6,
+      "postCalls": 21,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "release:repair-queue",
+      "preCalls": 2737,
+      "preInvalidArgs": 66,
+      "postCalls": 317,
+      "postInvalidArgs": 5
+    },
+    {
+      "tool": "release:trace",
+      "preCalls": 246,
+      "preInvalidArgs": 5,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "reports:get",
+      "preCalls": 21,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "reports:list",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "reports:publish",
+      "preCalls": 13,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "reports:search",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "roles:get",
+      "preCalls": 1,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "roles:known",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "roles:list",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "routines:fire",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "routines:list",
+      "preCalls": 918,
+      "preInvalidArgs": 1,
+      "postCalls": 30,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "routines:revert",
+      "preCalls": 16,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "routines:set",
+      "preCalls": 55,
+      "preInvalidArgs": 3,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "rubrics:amend",
+      "preCalls": 564,
+      "preInvalidArgs": 45,
+      "postCalls": 119,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "rubrics:get",
+      "preCalls": 3216,
+      "preInvalidArgs": 46,
+      "postCalls": 187,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "rubrics:list",
+      "preCalls": 361,
+      "preInvalidArgs": 49,
+      "postCalls": 32,
+      "postInvalidArgs": 8
+    },
+    {
+      "tool": "rubrics:propose",
+      "preCalls": 46,
+      "preInvalidArgs": 18,
+      "postCalls": 13,
+      "postInvalidArgs": 5
+    },
+    {
+      "tool": "rubrics:repair",
+      "preCalls": 10,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "rubrics:retire",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "rubrics:search",
+      "preCalls": 63,
+      "preInvalidArgs": 1,
+      "postCalls": 3,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "rubrics:trend",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "schedule:inventory",
+      "preCalls": 17,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "scheduler:get_claim_spec",
+      "preCalls": 775,
+      "preInvalidArgs": 27,
+      "postCalls": 24,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "scheduler:get_next",
+      "preCalls": 8009,
+      "preInvalidArgs": 3,
+      "postCalls": 59,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "scheduler:preview_spec_delta",
+      "preCalls": 10,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "scheduler:pull_ledger",
+      "preCalls": 90,
+      "preInvalidArgs": 4,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "scheduler:running",
+      "preCalls": 42,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "scheduler:set_claim_spec",
+      "preCalls": 28,
+      "preInvalidArgs": 6,
+      "postCalls": 6,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "scorecards:emit",
+      "preCalls": 1694,
+      "preInvalidArgs": 104,
+      "postCalls": 98,
+      "postInvalidArgs": 11
+    },
+    {
+      "tool": "scorecards:evaluate",
+      "preCalls": 425,
+      "preInvalidArgs": 27,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "scorecards:freshness",
+      "preCalls": 20,
+      "preInvalidArgs": 2,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "scorecards:get",
+      "preCalls": 4872,
+      "preInvalidArgs": 122,
+      "postCalls": 135,
+      "postInvalidArgs": 5
+    },
+    {
+      "tool": "scorecards:list",
+      "preCalls": 3621,
+      "preInvalidArgs": 61,
+      "postCalls": 121,
+      "postInvalidArgs": 6
+    },
+    {
+      "tool": "scorecards:repair",
+      "preCalls": 89,
+      "preInvalidArgs": 0,
+      "postCalls": 10,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "scorecards:retract",
+      "preCalls": 42,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "search:fulltext",
+      "preCalls": 618,
+      "preInvalidArgs": 24,
+      "postCalls": 2,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "search:query",
+      "preCalls": 2,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "search:semantic",
+      "preCalls": 23,
+      "preInvalidArgs": 0,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "service:await-up",
+      "preCalls": 14,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "session:carry-drill",
+      "preCalls": 23,
+      "preInvalidArgs": 4,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "session:request-compaction",
+      "preCalls": 9499,
+      "preInvalidArgs": 32,
+      "postCalls": 164,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "sessions:digest",
+      "preCalls": 66,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "sessions:ingest-gate-event",
+      "preCalls": 5218,
+      "preInvalidArgs": 0,
+      "postCalls": 387,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "sessions:list",
+      "preCalls": 237,
+      "preInvalidArgs": 3,
+      "postCalls": 4,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "sessions:list-pending-gates",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "sessions:read",
+      "preCalls": 5635,
+      "preInvalidArgs": 133,
+      "postCalls": 49,
+      "postInvalidArgs": 4
+    },
+    {
+      "tool": "sessions:record-prompt-origin",
+      "preCalls": 1101,
+      "preInvalidArgs": 0,
+      "postCalls": 57,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "sessions:search",
+      "preCalls": 5089,
+      "preInvalidArgs": 42,
+      "postCalls": 45,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "sessions:timeline",
+      "preCalls": 930,
+      "preInvalidArgs": 2,
+      "postCalls": 5,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "setup:save_integration_key",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "setup:status",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "state:read",
+      "preCalls": 19876,
+      "preInvalidArgs": 3,
+      "postCalls": 88,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "state:subscribe",
+      "preCalls": 19,
+      "preInvalidArgs": 5,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "storage:prune",
+      "preCalls": 75,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "storage:usage",
+      "preCalls": 35,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "tasks:get",
+      "preCalls": 17,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "tasks:list",
+      "preCalls": 17,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "tasks:ops",
+      "preCalls": 10,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "tasks:update_plan",
+      "preCalls": 48,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "templates:list",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "testing:coverage",
+      "preCalls": 63,
+      "preInvalidArgs": 0,
+      "postCalls": 5,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "testing:flakiness",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 3,
+      "postInvalidArgs": 2
+    },
+    {
+      "tool": "testing:record-run",
+      "preCalls": 34,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "testing:run",
+      "preCalls": 2955,
+      "preInvalidArgs": 77,
+      "postCalls": 263,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "testing:runs",
+      "preCalls": 1321,
+      "preInvalidArgs": 58,
+      "postCalls": 69,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "testing:run-status",
+      "preCalls": 1037,
+      "preInvalidArgs": 5,
+      "postCalls": 47,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "tools:find",
+      "preCalls": 53926,
+      "preInvalidArgs": 69,
+      "postCalls": 158,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "tools:invoke",
+      "preCalls": 113823,
+      "preInvalidArgs": 80,
+      "postCalls": 6321,
+      "postInvalidArgs": 29
+    },
+    {
+      "tool": "turn:interrupt",
+      "preCalls": 111,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "ui:get_state",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "ui:list_clients",
+      "preCalls": 3,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "watch:create",
+      "preCalls": 70,
+      "preInvalidArgs": 3,
+      "postCalls": 18,
+      "postInvalidArgs": 2
+    },
+    {
+      "tool": "watchdog:status",
+      "preCalls": 4,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work-item:await",
+      "preCalls": 36,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:amend",
+      "preCalls": 15,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:bulk_dedup",
+      "preCalls": 41,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:burn_down",
+      "preCalls": 29,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:checkpoint",
+      "preCalls": 16149,
+      "preInvalidArgs": 309,
+      "postCalls": 293,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "work_items:claim",
+      "preCalls": 792,
+      "preInvalidArgs": 2,
+      "postCalls": 38,
+      "postInvalidArgs": 2
+    },
+    {
+      "tool": "work_items:claimable",
+      "preCalls": 1993,
+      "preInvalidArgs": 13,
+      "postCalls": 7,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "work_items:claim_next",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:comment",
+      "preCalls": 1607,
+      "preInvalidArgs": 8,
+      "postCalls": 178,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:complete",
+      "preCalls": 7795,
+      "preInvalidArgs": 1033,
+      "postCalls": 141,
+      "postInvalidArgs": 45
+    },
+    {
+      "tool": "work_items:completion_stats",
+      "preCalls": 5,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:create",
+      "preCalls": 876,
+      "preInvalidArgs": 75,
+      "postCalls": 71,
+      "postInvalidArgs": 10
+    },
+    {
+      "tool": "work_items:export",
+      "preCalls": 184,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:get",
+      "preCalls": 36910,
+      "preInvalidArgs": 577,
+      "postCalls": 598,
+      "postInvalidArgs": 3
+    },
+    {
+      "tool": "work_items:hold_open",
+      "preCalls": 44,
+      "preInvalidArgs": 4,
+      "postCalls": 1,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:link",
+      "preCalls": 273,
+      "preInvalidArgs": 48,
+      "postCalls": 20,
+      "postInvalidArgs": 8
+    },
+    {
+      "tool": "work_items:links",
+      "preCalls": 26,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:list",
+      "preCalls": 7352,
+      "preInvalidArgs": 20,
+      "postCalls": 252,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:observe",
+      "preCalls": 3921,
+      "preInvalidArgs": 0,
+      "postCalls": 146,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:park",
+      "preCalls": 10,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:pickup",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:rehome",
+      "preCalls": 5,
+      "preInvalidArgs": 3,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:release",
+      "preCalls": 323,
+      "preInvalidArgs": 1,
+      "postCalls": 9,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:request_release",
+      "preCalls": 21,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:search",
+      "preCalls": 1819,
+      "preInvalidArgs": 14,
+      "postCalls": 17,
+      "postInvalidArgs": 1
+    },
+    {
+      "tool": "work_items:set_blocker",
+      "preCalls": 255,
+      "preInvalidArgs": 44,
+      "postCalls": 17,
+      "postInvalidArgs": 7
+    },
+    {
+      "tool": "work_items:set_priority",
+      "preCalls": 2,
+      "preInvalidArgs": 1,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:set_state",
+      "preCalls": 288,
+      "preInvalidArgs": 83,
+      "postCalls": 35,
+      "postInvalidArgs": 15
+    },
+    {
+      "tool": "work_items:subscribe",
+      "preCalls": 2,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:update",
+      "preCalls": 175,
+      "preInvalidArgs": 7,
+      "postCalls": 3,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "work_items:withdraw_release_request",
+      "preCalls": 1,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "workspace:work_scope",
+      "preCalls": 30,
+      "preInvalidArgs": 3,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    },
+    {
+      "tool": "workspace:work_scope_status",
+      "preCalls": 4,
+      "preInvalidArgs": 0,
+      "postCalls": 0,
+      "postInvalidArgs": 0
+    }
+  ]
+}

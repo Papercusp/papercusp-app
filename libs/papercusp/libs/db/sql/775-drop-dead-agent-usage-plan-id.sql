@@ -1,0 +1,54 @@
+-- 775: drop the dead agent_usage_samples.plan_id column + its dead partial index
+-- (EI-19969257626696510).
+--
+-- WHY: migration 330 added plan_id + a dedicated partial index so "the Tokens
+-- dashboard (B-TOK-1) can sum spend by the plan a run served". That dashboard
+-- was never built against it, and the write side never materialized either:
+--   - measured 2026-08-09: 0 of 33,084 agent_usage_samples rows (all time,
+--     this workspace) have plan_id set.
+--   - zero SELECT anywhere in the codebase reads agent_usage_samples.plan_id
+--     (verified by repo-wide grep — packages/, apps/, libs/papercusp/).
+--   - only 3 of the 9 call sites of spawnAgentInHarness ever pass planSlug at
+--     all (bee-instance.ts's IQ battery, fleet/spawn-relaunch.ts's relaunch
+--     preserving a prior spawn's slug, and fleet/supervision.ts's restart);
+--     the primary work-dispatch chokepoints (cup:spawn, operator/converse,
+--     p2p/offer-executor, wake-executor-fresh-context, papercup-deep-delegate)
+--     never thread a plan slug into the spawn at all.
+--   - the ACTUAL goal->spend attribution (sync-resolver/goals.ts
+--     resolveGoalsList/resolveGoalDetail) sums agent_usage_samples.cost_usd
+--     keyed by harness_slug via goal_projects, not by plan_id — so this bug
+--     never affected that read path; it only ever affected a query that does
+--     not exist.
+--   - per-plan SCHEDULED-RUN cost attribution (harness/routines/plan-run-cost.ts,
+--     the real, live, working per-plan cost cap enforcement) already keys off
+--     run_id (work_items.payload.plan_run.runId -> spawned_agents.run_id ->
+--     agent_usage_samples.run_id), independent of this column entirely.
+--
+-- A declared + indexed-but-always-NULL column is worse than an absent one: the
+-- index is an affirmative signal that a plan_id-keyed query is supported, so
+-- each investigator re-derives the same dead end (this is EI-19969257626696510's
+-- own framing). Dropping it makes the dead end visible instead of inferred, per
+-- that item's own accepted fix option (b). The corresponding writer code
+-- (agent-usage-telemetry.ts, usage-sample-pg.ts, invoke.ts, operator-spawn.ts's
+-- PAPERCUSP_PLAN_SLUG env stamp) is removed in the same change.
+--
+-- FORWARD-COMPAT: the live release (:3070, papercup-release checkout) still
+-- writes `plan_id` via the two INSERT sites above at deploy time this migration
+-- lands, ahead of its own deploy — but every write is `sample.planId ?? null` /
+-- `run.planId ?? null`, i.e. a plain nullable column write. Dropping the column
+-- makes that INSERT throw ("column plan_id does not exist") until the release
+-- carrying the matching code drop reaches :3070 — a real but narrow window
+-- (this repo's release cadence is <=15min after a green gate), and the insert
+-- is wrapped in try/catch (recordUsageSample) or best-effort (recordUsageSamplePg
+-- logs+swallows), so a failure here drops one telemetry row rather than breaking
+-- the agent run it describes. Acceptable given the column has never once been
+-- populated in production.
+--
+-- The migration runner wraps each file in its own transaction (and strips psql
+-- metacommands), so this file carries NO top-level BEGIN;/COMMIT;/\set
+-- (migration-runner.js contract; lint:migrations).
+
+DROP INDEX IF EXISTS harness_shared.agent_usage_samples_ws_plan_ts_idx;
+
+ALTER TABLE harness_shared.agent_usage_samples
+  DROP COLUMN IF EXISTS plan_id;

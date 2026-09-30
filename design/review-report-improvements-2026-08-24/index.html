@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Plans + Inbox review-flow mockups</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #02060c;
+        color: #e7f7ff;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at 50% -20%, rgba(56, 189, 248, 0.13), transparent 34rem),
+          #02060c;
+      }
+
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 1.5rem;
+        padding: 1.25rem 1.5rem;
+        border-bottom: 1px solid rgba(125, 211, 252, 0.16);
+        background: rgba(2, 6, 12, 0.92);
+        backdrop-filter: blur(18px);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(1.15rem, 1.8vw, 1.6rem);
+        letter-spacing: -0.02em;
+      }
+
+      header p {
+        max-width: 52rem;
+        margin: 0.35rem 0 0;
+        color: #7f9bb4;
+        font-size: 0.9rem;
+      }
+
+      .hint {
+        flex: 0 0 auto;
+        color: #b9d4e8;
+        font-size: 0.8rem;
+      }
+
+      main {
+        overflow-x: auto;
+        padding: 1.25rem;
+      }
+
+      .gallery {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(700px, 1fr));
+        gap: 1rem;
+        min-width: 2180px;
+      }
+
+      article {
+        overflow: hidden;
+        border: 1px solid rgba(125, 211, 252, 0.18);
+        border-radius: 14px;
+        background: #0b1220;
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.32);
+      }
+
+      .meta {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+        min-height: 6.5rem;
+        padding: 1rem 1rem 0.9rem;
+        border-bottom: 1px solid rgba(125, 211, 252, 0.14);
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 1rem;
+      }
+
+      .meta p {
+        margin: 0.35rem 0 0;
+        color: #7f9bb4;
+        font-size: 0.82rem;
+        line-height: 1.45;
+      }
+
+      .tag {
+        flex: 0 0 auto;
+        padding: 0.25rem 0.55rem;
+        border: 1px solid rgba(56, 189, 248, 0.38);
+        border-radius: 999px;
+        color: #7dd3fc;
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      figure { margin: 0; }
+
+      a {
+        display: block;
+        color: inherit;
+        text-decoration: none;
+      }
+
+      img {
+        display: block;
+        width: 100%;
+        height: auto;
+        background: #02060c;
+      }
+
+      figcaption {
+        padding: 0.75rem 1rem;
+        border-top: 1px solid rgba(125, 211, 252, 0.12);
+        color: #b9d4e8;
+        font-size: 0.78rem;
+      }
+
+      a:focus-visible {
+        outline: 2px solid #38bdf8;
+        outline-offset: -2px;
+      }
+
+      @media (max-width: 800px) {
+        header { align-items: flex-start; flex-direction: column; }
+        .gallery { grid-template-columns: repeat(3, minmax(560px, 1fr)); min-width: 1744px; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Plans cleanup + Inbox bulk-resolve review</h1>
+        <p>Three redesign directions using the same paired workloads. Scroll horizontally to compare; click any board to open the full-resolution image.</p>
+      </div>
+      <span class="hint">3 concepts · paired Plans / Inbox screens</span>
+    </header>
+
+    <main>
+      <section class="gallery" aria-label="Review-flow mockup comparison">
+        <article>
+          <div class="meta">
+            <div>
+              <h2>01 · Guided command center</h2>
+              <p>Scan at volume with group navigation, central review lists, selection summaries, and persistent actions.</p>
+            </div>
+            <span class="tag">Recommended base</span>
+          </div>
+          <figure>
+            <a href="concept-01-guided-command-center.png" aria-label="Open Guided command center at full resolution">
+              <img src="concept-01-guided-command-center.png" alt="Guided command center mockups for Plans cleanup and Inbox bulk resolve" />
+            </a>
+            <figcaption>Best shared shell for both flows.</figcaption>
+          </figure>
+        </article>
+
+        <article>
+          <div class="meta">
+            <div>
+              <h2>02 · Focused decision desk</h2>
+              <p>Work one item at a time while keeping the queue visible; richer evidence and an editable Inbox reply stay in context.</p>
+            </div>
+            <span class="tag">Best drill-in</span>
+          </div>
+          <figure>
+            <a href="concept-02-focused-decision-desk.png" aria-label="Open Focused decision desk at full resolution">
+              <img src="concept-02-focused-decision-desk.png" alt="Focused decision desk mockups for Plans cleanup and Inbox bulk resolve" />
+            </a>
+            <figcaption>Best for ambiguous or consequential recommendations.</figcaption>
+          </figure>
+        </article>
+
+        <article>
+          <div class="meta">
+            <div>
+              <h2>03 · Outcome lanes</h2>
+              <p>Separate safe changes, owner decisions, and manual follow-up into clear triage lanes.</p>
+            </div>
+            <span class="tag">Fastest scan</span>
+          </div>
+          <figure>
+            <a href="concept-03-outcome-lanes.png" aria-label="Open Outcome lanes at full resolution">
+              <img src="concept-03-outcome-lanes.png" alt="Outcome lanes mockups for Plans cleanup and Inbox bulk resolve" />
+            </a>
+            <figcaption>Strong overview, with more permanent horizontal space.</figcaption>
+          </figure>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

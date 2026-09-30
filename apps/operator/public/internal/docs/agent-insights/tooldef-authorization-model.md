@@ -1,0 +1,34 @@
+# tooldef authorization model (gotchas)
+URL: /internal/docs/agent-insights/tooldef-authorization-model
+
+The non-obvious parts of the RFC tooldef-auth layer — the narrow dispatch principal, the audited break-glass, why default-deny is safe to flip for built-ins, and the two distinct "roles" axes.
+
+The full gate stack and error codes live in [Gating](/internal/docs/endpoint-system/gating). This page is just the parts that bit during implementation — read it before touching `libs/generic/tooldef/src/{dispatch-stack,authz,types,tool-projection}.ts`.
+
+## The dispatch-layer principal is NARROW — not the route `Principal`
+
+There are two principal shapes and they are not the same:
+
+* `Principal` (`types.ts`) — the full route-layer identity: `kind`, `slug`, `workspaceId`, `authMethod`, `trust`, `capabilities`, `roles`. Produced by `requirePrincipal()` at the HTTP/MCP edge.
+* `UnifiedToolContext.principal` (`tool-projection.ts`) — the **narrow** thing the dispatcher actually carries: `{ slug, workspaceId, capabilities, roles? }`. No `kind`/`authMethod`/`trust`.
+
+An `authorize` hook and the audit event run at **dispatch**, so they only get the narrow principal. That's why `AuthAuditEvent.principal` is `{ slug, workspaceId? } | null` (not kind/trust), and why `Authorizer<TInput, TCtx, TPrincipal>` binds `TPrincipal = UnifiedToolContext['principal']` rather than the full `Principal`. If you try to read `ctx.principal.kind` in a dispatch step, tsc will stop you — that's the bug this split prevents. A host that wants richer identity in the audit enriches it in its own `deps.auditAuth` sink.
+
+## The break-glass bypass MUST be audited (it's not optional)
+
+`GateBypass.policy` (default off) is the only thing that skips the resource-`authorize` gate, and it is deliberately **not** implied by `GateBypass.role`/`capability`/`quota` — resource ownership is a separate decision a host opts out of explicitly, per call. When it does skip, the dispatcher still emits an `AuthAuditEvent` recording the bypass. That emit is load-bearing: break-glass best practice is "policy-governed **and** mandatorily logged"; a bypass that isn't logged is the silent super-admin the standard forbids. If you ever "optimize" the bypass path to skip the audit emit, you've reintroduced the hole.
+
+## Default-deny is safe to flip for built-ins, risky for plugins
+
+`deps.defaultDeny` (off by default) denies any tool that declares **no** gate (no capabilities/roles/requireRoles/authorize) and isn't `public: true`. The key fact: **`defineTool` requires a `capability`**, so every first-party built-in already declares a gate and can never be `ungated`. The only tools at risk are plugin / direct `registerProjectedTool` registrations. Before flipping it on, run `listUngatedProjectedTools()` with the full registry loaded — empty result = safe. Don't flip it blind; an ungated tool gets a hard `ungated` (403) and the gate is **not** bypassable (it's a declaration gap, not a caller-authz question).
+
+## Two "roles" axes — do not conflate them
+
+* **Agent roles** — `tool.roles` (worker/scoper/architect/…), checked against `ctx.role` by the `role-allowlist` gate. This is *orchestration* gating: which agent role may invoke the tool.
+* **RBAC roles** — `principal.roles` (staff/admin/…), checked against `tool.requireRoles` by the `role-requirement` gate. This is *authorization*: the typed replacement for `requireAdminKey`/`requireStaff`.
+
+They live on different objects (`tool` vs `principal`) and answer different questions. The RFC deliberately did **not** rename `tool.roles`→`tool.agentRoles` (a 189-callsite churn) because the new `requireRoles` field doesn't collide — but the conceptual overload is real, so name your variables carefully.
+
+## tooldef + tooldef-http are libs/generic submodules (shared with another internal app)
+
+In papercup, `libs/generic/tooldef` and `libs/generic/tooldef-http` are **git submodules** of `Papercusp/tooldef` and `Papercusp/tooldef-http` — the same shared repos another internal app consumes. They are no longer in-tree (the in-tree-vs-mirror fork is resolved as of the P-054 conversion, 2026-05-31): edit tooldef in the submodule and push to the shared repo as usual; there is no separate in-tree copy to keep in sync.

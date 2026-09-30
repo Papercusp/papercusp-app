@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wsl-bootstrap"
+description = "Enables the wsl_bootstrap command without any pre-configured scope."
+commands.allow = ["wsl_bootstrap"]
+
+[[permission]]
+identifier = "deny-wsl-bootstrap"
+description = "Denies the wsl_bootstrap command without any pre-configured scope."
+commands.deny = ["wsl_bootstrap"]

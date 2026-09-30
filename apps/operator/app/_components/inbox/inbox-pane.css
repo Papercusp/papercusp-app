@@ -1,0 +1,1514 @@
+/* InboxPane — the human inbox as the op-chat sidebar's third view
+   (EI-13037 + owner placement correction 2026-07-16: it lives with the
+   Papercup chat in the far-left "live running stuff" sidebar).
+   Ported from the retired left-sidebar Inbox tab (pclsb-inbox__*). */
+.op-inbox {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  min-height: 0;
+  /* The LIST scrolls (WI-5339 virtualization), not the whole pane — so the
+     filter chips stay pinned on top and the "Open full queue" foot on the
+     bottom while only the row list scrolls. */
+  overflow: hidden;
+  padding: 12px;
+  /* LIST FLOOR (inbox-three-column-resolver-states-2026-09-06 P-001 / D-001).
+     Measured 2026-09-05 (EI-22478177553828828): at 1280×720 the split page
+     rendered the list at 0px — zero of 77 rows — because every chrome sibling
+     in `.op-inbox__master` is rigid and only the list flexes, so the column's
+     whole vertical shortfall lands on the rows. The floor is two single-line
+     rows: a rendered row is ~98px of pitch at 1280 wide (the 82px
+     `.op-inbox__rowbtn` minimum plus border, the 4px inter-row gap and real
+     content — measured in e2e/inbox-list-floor.spec.ts 2026-09-06, where 176px
+     fit only one whole row). Declared ONCE here so stack (chat sidebar) and
+     split (portal /inbox) share it. `.op-inbox__list` holds it;
+     `.op-inbox__controls` is the chrome that yields instead. */
+  --op-inbox-list-floor: 200px;
+  background:
+    radial-gradient(
+      circle at 50% -10%,
+      color-mix(in srgb, var(--accent, #38bdf8) 8%, transparent),
+      transparent 36%
+    ),
+    color-mix(in srgb, var(--bg, #06111f) 96%, transparent);
+}
+.op-inbox__master {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 11px;
+}
+.op-inbox__masthead {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 12px;
+  overflow: hidden;
+  border: 1px solid
+    color-mix(in srgb, var(--accent, #38bdf8) 24%, var(--border, transparent));
+  border-radius: 14px;
+  background:
+    radial-gradient(
+      circle at 12% 0%,
+      color-mix(in srgb, var(--accent, #38bdf8) 18%, transparent),
+      transparent 48%
+    ),
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--bg-3, #112235) 88%, transparent),
+      color-mix(in srgb, var(--bg-1, #0b1220) 96%, transparent)
+    );
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--fg, #fff) 5%, transparent),
+    0 10px 28px rgba(0, 0, 0, 0.14);
+}
+.op-inbox__masthead-icon {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 46%, transparent);
+  border-radius: 11px;
+  color: var(--accent-soft, #bfdbfe);
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--accent, #38bdf8) 72%, transparent),
+    color-mix(in srgb, var(--accent, #38bdf8) 60%, var(--bg-1, #0b1220))
+  );
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--accent, #38bdf8) 22%, transparent);
+}
+.op-inbox__masthead-copy {
+  min-width: 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+}
+.op-inbox__masthead-eyebrow {
+  color: var(--accent-strong, #7dd3fc) !important;
+  font-size: 9.5px !important;
+  font-weight: 760;
+  line-height: 1.1 !important;
+  text-transform: uppercase;
+}
+.op-inbox__masthead-copy strong {
+  color: var(--fg, #e7f7ff);
+  font-size: 24px;
+  line-height: 1.05;
+  letter-spacing: 0;
+}
+.op-inbox__masthead-copy .op-inbox__masthead-subtitle {
+  color: var(--fg-mute, #8a8a91);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: normal;
+}
+.op-inbox__masthead-count {
+  min-width: 48px;
+  min-height: 44px;
+  padding: 5px 8px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 38%, transparent);
+  border-radius: 10px;
+  color: var(--fg, #e7f7ff);
+  background: color-mix(in srgb, var(--accent, #38bdf8) 9%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+.op-inbox__masthead-count-value {
+  font-size: 16px;
+  font-weight: 780;
+  line-height: 1;
+}
+.op-inbox__masthead-count-label {
+  margin-top: 3px;
+  color: var(--fg-mute, #8a8a91);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.op-inbox__controls {
+  display: flex;
+  /* CHROME CAP (P-001): the one chrome block allowed to shrink. When the
+     column is shorter than chrome + the list floor, the shortfall lands HERE
+     — this block scrolls internally — never on the rows. The masthead, window
+     strip and foot stay rigid (`flex: 0 0 auto`): they are one to three lines
+     and clipping them reads as breakage, whereas a scrolling filter block
+     reads as a filter block. 62px = its own padding + the 44px search field,
+     so the search box is always reachable. */
+  flex: 0 1 auto;
+  min-height: 62px;
+  overflow-y: auto;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid
+    color-mix(
+      in srgb,
+      var(--border, rgba(255, 255, 255, 0.14)) 82%,
+      transparent
+    );
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-3, #112235) 72%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg, #fff) 3%, transparent);
+}
+.op-inbox__controls-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.op-inbox__controls-label {
+  color: var(--fg, #e7e7ea);
+  font-size: 10.5px;
+  font-weight: 740;
+  text-transform: uppercase;
+}
+.op-inbox__controls-scope {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-mute, #8a8a91);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.op-inbox__chips {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.op-inbox__chip {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 11px;
+  border-radius: 9px;
+  font-size: 11.5px;
+  font-weight: 680;
+  cursor: pointer;
+  color: var(--fg-mute, #c2c2c9);
+  background: transparent;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+}
+.op-inbox__chip:hover {
+  color: var(--fg, #e7e7ea);
+  border-color: var(--fg-mute, #a6a6ad);
+}
+/* P-010 (inbox-three-column-resolver-states-2026-09-06): the active pill, the
+   masthead/rail icons, the row icons and the selected row all take the app
+   ACCENT token. The hardcoded royal-blue gradient family they carried rendered
+   as an off-palette blue against the portal's sage-teal accent (the 31 Aug
+   board's "Off-palette blue" note); the pane test pins that no such literal
+   returns to this file. */
+.op-inbox__chip.is-active {
+  color: #eff6ff;
+  border-color: color-mix(in srgb, var(--accent, #38bdf8) 70%, transparent);
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--accent, #38bdf8) 84%, transparent),
+    color-mix(in srgb, var(--accent, #38bdf8) 62%, var(--bg-1, #0b1220))
+  );
+  box-shadow: 0 5px 18px color-mix(in srgb, var(--accent, #38bdf8) 18%, transparent);
+}
+.op-inbox__chip-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+/* ── Search + kind-facet filter (inbox-pane-active-scope-dates-filters-2026-07-19
+   P-3xx) — mimics the Queue's QueueFilterBar: a text search plus a collapsed
+   "Filter" trigger revealing per-kind facet chips. ── */
+.op-inbox__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.op-inbox__search {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 44px;
+  padding: 0 11px;
+  border-radius: 10px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+  background: var(--bg-3, rgba(255, 255, 255, 0.04));
+}
+.op-inbox__search:focus-within {
+  border-color: color-mix(in srgb, var(--accent, #8b5cf6) 55%, transparent);
+}
+.op-inbox__search-icon {
+  flex: 0 0 auto;
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 13px;
+  color: var(--fg, #e7e7ea);
+}
+.op-inbox__search-input::placeholder {
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__search-clear {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--fg-mute, #8a8a91);
+  background: transparent;
+}
+.op-inbox__search-clear:hover {
+  color: var(--fg, #e7e7ea);
+  background: var(--bg-1, #0b1220);
+}
+/* Sort picker (WI-40982) — the Radix Select trigger, in the slot the retired
+   "Kinds" toggle held. Matched to the search field beside it (44px min-height,
+   10px radius); `flex: 0 1 auto` + max-width means a long order name yields to
+   the search box instead of squeezing it, and the label ellipsises. */
+.op-inbox__sort {
+  min-height: 44px;
+  flex: 0 1 auto;
+  max-width: 48%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+  color: var(--fg-mute, #c2c2c9);
+  background: transparent;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+}
+.op-inbox__sort:hover {
+  color: var(--fg, #e7e7ea);
+  border-color: var(--fg-mute, #a6a6ad);
+}
+/* Radix stamps data-state="open" on the trigger while the menu is up. */
+.op-inbox__sort[data-state="open"] {
+  color: var(--accent, #8b5cf6);
+  border-color: color-mix(in srgb, var(--accent, #8b5cf6) 50%, transparent);
+  background: color-mix(in srgb, var(--accent, #8b5cf6) 10%, transparent);
+}
+.op-inbox__sort:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent, #8b5cf6) 70%, transparent);
+  outline-offset: 1px;
+}
+.op-inbox__sort-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.op-inbox__facets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.op-inbox__facet {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 620;
+  cursor: pointer;
+  color: var(--fg-mute, #c2c2c9);
+  background: transparent;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+}
+.op-inbox__facet:hover {
+  color: var(--fg, #e7e7ea);
+  border-color: var(--fg-mute, #a6a6ad);
+}
+.op-inbox__facet.is-active {
+  color: var(--accent, #8b5cf6);
+  border-color: color-mix(in srgb, var(--accent, #8b5cf6) 55%, transparent);
+  background: color-mix(in srgb, var(--accent, #8b5cf6) 12%, transparent);
+}
+.op-inbox__facet-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+.op-inbox__facet--clear {
+  color: var(--fg-mute, #8a8a91);
+  font-style: italic;
+}
+
+.op-inbox__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--bad, #f87171) 40%, transparent);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--bad, #f87171);
+  background: color-mix(in srgb, var(--bad, #f87171) 7%, transparent);
+}
+.op-inbox__error button {
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  padding: 2px 7px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+.op-inbox__loading {
+  font-size: 11.5px;
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__window {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 30%, transparent);
+  border-radius: 8px;
+  color: var(--fg-mute, #aab5c2);
+  background: color-mix(in srgb, var(--accent, #38bdf8) 7%, transparent);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.op-inbox__window-button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 48%, transparent);
+  border-radius: 7px;
+  color: var(--accent-strong, #7dd3fc);
+  background: color-mix(in srgb, var(--accent, #38bdf8) 12%, transparent);
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.op-inbox__window-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+/* WI-5365 design pass 2: empty state reads as a deliberate, centered moment —
+   not a stray line of text hugging the top-left. */
+.op-inbox__empty {
+  margin: 22px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  text-align: center;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__empty-icon {
+  opacity: 0.4;
+}
+.op-inbox__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  /* `flex-basis: 0`, not `auto`, is load-bearing for the floor guard: with
+     `auto` the virtualizer's TOTAL height (thousands of px) is the basis, and
+     the flex algorithm shrinks siblings in proportion to basis — so the
+     controls block would collapse on any long list, tall viewport or not.
+     From zero, chrome is measured first and the list takes what remains,
+     never less than the floor (see `--op-inbox-list-floor` on `.op-inbox`). */
+  flex: 1 1 0;
+  min-height: var(--op-inbox-list-floor, 176px);
+  overflow-y: auto;
+}
+/* WI-5365: rows carry a tier-colored left accent so "does this need me?" is
+   answerable from the row silhouette alone — the 7px dot was the only tier
+   signal and vanished at a glance. Selection outranks tier (full ring). */
+.op-inbox__row {
+  position: relative;
+  min-width: 0;
+  border-radius: 12px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.09));
+  border-left-width: 2px;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--bg-3, #112235) 82%, transparent),
+    color-mix(in srgb, var(--bg-1, #0b1220) 95%, transparent)
+  );
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.12);
+  transition:
+    border-color 0.12s ease,
+    background-color 0.12s ease;
+}
+.op-inbox__row--decision {
+  border-left-color: color-mix(in srgb, var(--bad, #f87171) 70%, transparent);
+}
+.op-inbox__row--alert {
+  border-left-color: color-mix(in srgb, var(--warn, #fbbf24) 60%, transparent);
+}
+.op-inbox__row--handled {
+  border-left-color: color-mix(in srgb, var(--good, #34d399) 45%, transparent);
+}
+.op-inbox__row.is-selected {
+  border-color: color-mix(in srgb, var(--accent, #38bdf8) 78%, transparent);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent, #38bdf8) 13%, var(--bg-3, #112235)),
+    color-mix(in srgb, var(--bg-1, #0b1220) 92%, transparent)
+  );
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent, #38bdf8) 18%, transparent),
+    0 10px 28px color-mix(in srgb, var(--accent, #38bdf8) 12%, transparent);
+}
+.op-inbox__row-summary {
+  position: relative;
+}
+.op-inbox__rowbtn {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  min-height: 82px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px 34px 12px 56px;
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  border-radius: inherit;
+  color: var(--fg, #e7e7ea);
+}
+.op-inbox__rowbtn:hover {
+  background: var(--bg-3, rgba(255, 255, 255, 0.05));
+}
+.op-inbox__row-icon {
+  position: absolute;
+  z-index: 1;
+  left: 12px;
+  top: 50%;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 48%, transparent);
+  border-radius: 9px;
+  color: var(--accent-soft, #bfdbfe);
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--accent, #38bdf8) 66%, transparent),
+    color-mix(in srgb, var(--accent, #38bdf8) 55%, var(--bg-1, #0b1220))
+  );
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.op-inbox__row--alert .op-inbox__row-icon {
+  border-color: color-mix(in srgb, #f59e0b 55%, transparent);
+  color: #fde68a;
+  background: color-mix(in srgb, #b76b00 58%, transparent);
+}
+.op-inbox__row--handled .op-inbox__row-icon {
+  border-color: color-mix(in srgb, var(--good, #34d399) 48%, transparent);
+  color: #a7f3d0;
+  background: color-mix(in srgb, #047857 52%, transparent);
+}
+.op-inbox__rowbtn:focus-visible,
+.op-inbox__chip:focus-visible,
+.op-inbox__chat-button:focus-visible,
+.op-inbox__queue-link:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent, #8b5cf6) 70%, transparent);
+  outline-offset: 1px;
+}
+/* 9.5px was below comfortable legibility for the row's who/where line. */
+.op-inbox__rowhead {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 10.5px;
+}
+.op-inbox__tierdot {
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--fg-mute, #8a8a91);
+}
+.op-inbox__tierdot--decision {
+  background: var(--bad, #f87171);
+}
+.op-inbox__tierdot--alert {
+  background: var(--warn, #fbbf24);
+}
+.op-inbox__tierdot--handled {
+  background: var(--good, #34d399);
+}
+.op-inbox__kind {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-weight: 650;
+  text-transform: uppercase;
+  font-size: 9px;
+  color: var(--fg-mute, #c2c2c9);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  background: var(--bg-1, #0b1220);
+}
+.op-inbox__meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-mute, #8a8a91);
+}
+/* Pushes the date + chat affordance to the right edge of the row header. */
+.op-inbox__rowhead-spacer {
+  flex: 1 1 auto;
+  min-width: 4px;
+}
+/* Relative "how long ago" the underlying event happened
+   (inbox-pane-active-scope-dates-filters-2026-07-19 P-2xx). Tabular so a column
+   of dates stays aligned; muted so it never competes with the title. */
+.op-inbox__date {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-mute, #8a8a91);
+  white-space: nowrap;
+}
+/* P-007: per-row "open live chat with the originating agent" affordance —
+   sits in the row header, so it must not shrink/grow with .op-inbox__meta's
+   ellipsis and must not trigger .op-inbox__rowbtn's row-select (stopPropagation
+   in the click handler; this is a real nested <button> now that the row is a
+   `div[role=button]`, not a <button> — see InboxPane.tsx). */
+.op-inbox__chat-button {
+  /* The .op-inbox__rowhead-spacer now right-aligns the date + chat cluster, so
+     this no longer needs margin-left:auto (which would split it from the date). */
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--fg-mute, #8a8a91);
+  background: transparent;
+  border: 1px solid transparent;
+}
+.op-inbox__chat-button:hover {
+  color: var(--accent, #8b5cf6);
+  border-color: color-mix(in srgb, var(--accent, #8b5cf6) 45%, transparent);
+  background: color-mix(in srgb, var(--accent, #8b5cf6) 10%, transparent);
+}
+.op-inbox__title {
+  min-width: 0;
+  font-size: 14.5px;
+  font-weight: 720;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.op-inbox__status {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-mute, #8a8a91);
+  font-size: 11px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.op-inbox__row-chevron {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  color: var(--fg-mute, #8a8a91);
+  transform: translateY(-50%);
+  transition:
+    color 0.12s ease,
+    transform 0.12s ease;
+}
+.op-inbox__rowbtn:hover .op-inbox__row-chevron {
+  color: var(--accent-strong, #7dd3fc);
+  transform: translate(2px, -50%);
+}
+.op-inbox__row.is-selected .op-inbox__row-chevron {
+  color: var(--accent-strong, #7dd3fc);
+  transform: translateY(-50%) rotate(90deg);
+}
+.op-inbox__detail {
+  padding: 0 6px 8px;
+  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  /* Slightly recessed vs the (orange-tinted) selected row header, so the
+     expanded card reads as the row's own drawer rather than more list. */
+  background: color-mix(
+    in srgb,
+    var(--bg-2, rgba(0, 0, 0, 0.18)) 55%,
+    transparent
+  );
+  border-radius: 0 0 7px 7px;
+}
+/* The Queue detail card, compacted for an expanded chat-sidebar row. */
+.op-inbox__detail .pc-items__detail {
+  min-width: 0;
+  padding: 6px 0 0;
+}
+.op-inbox__detail .pc-items__detail-toolbar {
+  flex-wrap: wrap;
+  row-gap: 3px;
+}
+.op-inbox__detail .pc-items__detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: visible;
+  padding: 8px 10px 4px;
+}
+/* The chat shell line-clamps compact decision cards to three lines. An Inbox
+   disclosure is the inspection surface, so D-012 requires the complete body. */
+.op-chat-sidebar .op-inbox__detail .ask-choice-question {
+  display: block;
+  -webkit-box-orient: initial;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+.op-inbox__detail .pc-items__detail-actions {
+  width: 100%;
+  margin: 0;
+}
+.op-inbox__detail .pc-items__action {
+  flex: 1 1 110px;
+  justify-content: center;
+  min-height: 34px;
+}
+.op-inbox__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 2px 0;
+  color: var(--fg-mute, #8a8a91);
+  font-size: 10.5px;
+  border-top: 1px solid
+    color-mix(in srgb, var(--border, rgba(255, 255, 255, 0.1)) 72%, transparent);
+}
+.op-inbox__queue-link {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--accent, #8b5cf6) 46%, transparent);
+  border-radius: 8px;
+  color: var(--accent-strong, #7dd3fc);
+  background: color-mix(in srgb, var(--accent, #8b5cf6) 10%, transparent);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: none;
+}
+.op-inbox__queue-link:hover {
+  border-color: color-mix(in srgb, var(--accent, #8b5cf6) 70%, transparent);
+  background: color-mix(in srgb, var(--accent, #8b5cf6) 17%, transparent);
+  transform: translateY(-1px);
+}
+
+/* ── layout="split" (portal-work-two-pane-2026-09-01 D-001) ───────────────
+   List left, the selected item's detail in a right-hand aside. Used ONLY by
+   the operator-vite /inbox full-page route the cloud portal embeds; the chat
+   sidebar stays in stack mode. In stack mode the column wrapper is
+   display:contents, so the sidebar's box tree is exactly what it was. */
+.op-inbox__column {
+  display: contents;
+}
+.op-inbox--split {
+  display: grid;
+  /* COLUMN 1 the rail (P-002) · COLUMN 2 the list · COLUMN 3 the aside. The
+     rail is the board's fixed 210px; the list keeps its 380px–37% band. */
+  grid-template-columns: 210px minmax(380px, 37%) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  padding: 0;
+}
+.op-inbox--split .op-inbox__column {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 12px;
+  border-right: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+}
+
+/* ── Split rows: the spec's compact three-line silhouette
+   (inbox-three-column-resolver-states-2026-09-06 D-004; split only, D-001) ──
+   State 1 of the merged spec draws EIGHT rows in the 1280×720 list. The stack
+   row — 14.5px title clamped to two lines, 12px padding, an 82px minimum —
+   sits at ~108px of pitch and showed five (measured 2026-09-06 on real data:
+   the column had 597px, the spec's 586px, so the SPACE was right and only the
+   density was not). In split the title is ONE line, ellipsised — the aside's
+   h2 (P-008) carries it in full — and the row tightens to 64px (6px padding,
+   a 16px head line, 18px title, 14px status, 2px gaps) so eight whole rows fit
+   with ~37px to spare at a 70px pitch. Measured 2026-09-06: with the head left
+   free to grow, an "owner wall" row's head wrapped to 26px and the count fell
+   to seven at 1366×768 — so the head is PINNED to one line here, its chip
+   nowrap and its chat button 16px. The stack row is untouched. */
+.op-inbox--split .op-inbox__rowbtn {
+  min-height: 0;
+  gap: 2px;
+  padding: 6px 30px 6px 48px;
+}
+.op-inbox--split .op-inbox__rowhead {
+  height: 16px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.op-inbox--split .op-inbox__kind {
+  white-space: nowrap;
+}
+.op-inbox--split .op-inbox__chat-button {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+}
+.op-inbox--split .op-inbox__row-icon {
+  left: 10px;
+  width: 30px;
+  height: 30px;
+}
+.op-inbox--split .op-inbox__rowbtn .op-inbox__title {
+  display: block;
+  font-size: 13.5px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-line-clamp: unset;
+}
+
+/* ── COLUMN 1 · the rail (inbox-three-column-resolver-states-2026-09-06 P-002;
+   split only, D-001) ─────────────────────────────────────────────────────
+   The masthead (collapsed to `Inbox` + count), the tier scopes, the kind
+   facets and — P-003 — the bulk card, OUT of the list's column: their height
+   used to be the shortfall that landed on the rows. Scrolls internally; never
+   grows the page. */
+.op-inbox__rail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 11px;
+  border-right: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: color-mix(
+    in srgb,
+    var(--bg-2, rgba(0, 0, 0, 0.18)) 40%,
+    transparent
+  );
+}
+.op-inbox__rail-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+}
+.op-inbox__rail-icon {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 46%, transparent);
+  border-radius: 8px;
+  color: var(--accent-soft, #bfdbfe);
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--accent, #38bdf8) 72%, transparent),
+    color-mix(in srgb, var(--accent, #38bdf8) 60%, var(--bg-1, #0b1220))
+  );
+}
+.op-inbox__rail-title {
+  color: var(--fg, #e7f7ff);
+  font-size: 14.5px;
+  font-weight: 700;
+}
+/* The count collapses from the masthead's 48×44 tile to a pill. */
+.op-inbox__rail .op-inbox__masthead-count {
+  margin-left: auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 2px 8px;
+  flex-direction: row;
+  gap: 4px;
+  border-radius: 999px;
+}
+.op-inbox__rail .op-inbox__masthead-count-value {
+  font-size: 11.5px;
+}
+.op-inbox__rail .op-inbox__masthead-count-label {
+  margin-top: 0;
+}
+.op-inbox__rail-label {
+  margin: 0 0 -6px;
+  color: var(--fg-mute, #8a8a91);
+  font-size: 9px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+/* Scopes stack as full-width rows with the count on the right (the board's
+   `.f-sc`), not the sidebar's wrapped chip row. The active scope keeps the
+   chip's own filled treatment. */
+.op-inbox__rail .op-inbox__chips {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+.op-inbox__rail .op-inbox__chip {
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  justify-content: flex-start;
+}
+.op-inbox__rail .op-inbox__chip:not(.is-active) {
+  border-color: transparent;
+}
+.op-inbox__rail .op-inbox__chip:not(.is-active):hover {
+  border-color: var(--border, rgba(255, 255, 255, 0.14));
+}
+.op-inbox__rail .op-inbox__chip-count {
+  margin-left: auto;
+  font-size: 10.5px;
+}
+.op-inbox__rail .op-inbox__facets {
+  gap: 5px;
+}
+/* The bulk card (P-003) sits at the FOOT of the rail — `margin-top: auto`
+   parks it there when the rail has room and lets it follow the facets when
+   it does not; the rail scrolls rather than clipping it. */
+.op-inbox__rail-bulk {
+  flex: 0 0 auto;
+  margin-top: auto;
+  min-width: 0;
+}
+.op-inbox__aside {
+  display: flex;
+  flex-direction: column;
+  container: inbox-detail / inline-size;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 22px 22px;
+  outline: none;
+  background: color-mix(
+    in srgb,
+    var(--bg-2, rgba(0, 0, 0, 0.18)) 40%,
+    transparent
+  );
+}
+/* The aside hosts the same drawer subtree a stack row does; flatten the
+   drawer chrome — here it IS the page's detail column, not a row's drawer.
+   ── The detail pane (P-008 / D-003) ───────────────────────────────────────
+   Measured live 2026-09-05: no heading, and the body ran the full 1055px
+   pane width with the six chips strewn across the top, the last of them
+   washed out at the far edge. Now a grid: the title heading + meta line
+   span the top; the card's body is held to a ~58ch measure; the chips are
+   re-homed as a labelled metadata rail beside it (the head + rail render in
+   split ONLY, so the stack disclosure is untouched); the discussion spans
+   beneath both. */
+.op-inbox__aside .op-inbox__detail {
+  display: grid;
+  grid-template-columns: minmax(0, 58ch) 190px;
+  grid-template-areas:
+    "head head"
+    "body rail"
+    "discussion discussion";
+  align-items: start;
+  column-gap: 28px;
+  row-gap: 14px;
+  padding: 0;
+  border-top: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.op-inbox__detail-head {
+  grid-area: head;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+.op-inbox__detail-eyebrow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 0 5px;
+  color: var(--fg-mute);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+.op-inbox__detail-eyebrow strong {
+  color: var(--accent-strong);
+  font: inherit;
+}
+.op-inbox__detail-eyebrow-sep {
+  opacity: 0.65;
+}
+.op-inbox__detail-title {
+  margin: 0 0 6px;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.op-inbox__detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__detail-meta-sep {
+  color: var(--fg-mute, #8a8a91);
+  opacity: 0.6;
+}
+.op-inbox__detail-why {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 9px;
+  padding: 3px 11px;
+  border: 1px solid var(--warn-border);
+  border-radius: 999px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+.op-inbox__aside .pc-items__detail {
+  grid-area: body;
+  max-width: 58ch;
+  padding-top: 0;
+}
+.op-inbox__aside .pc-items__detail-body {
+  padding: 8px 0 4px;
+}
+.op-inbox__aside .ask-choice-question {
+  max-width: 58ch;
+  padding-left: 13px;
+  border-left: 2px solid var(--border-strong);
+}
+.op-inbox__detail-copy {
+  display: grid;
+  gap: 12px;
+  color: var(--fg);
+  /* The host's question-card heading is bold. Item bodies are reading text,
+     so they own their typography instead of inheriting that heading style. */
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.op-inbox__detail-copy p {
+  margin: 0;
+}
+.op-inbox__detail-copy code {
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--fg);
+  font-size: 0.92em;
+}
+.op-inbox__detail-facts {
+  display: grid;
+  gap: 6px;
+  margin: 2px 0 0;
+}
+.op-inbox__detail-fact {
+  display: grid;
+  grid-template-columns: minmax(120px, 35%) minmax(0, 1fr);
+  gap: 8px;
+}
+.op-inbox__detail-fact dt {
+  color: var(--fg-mute);
+  font-weight: 600;
+}
+.op-inbox__detail-fact dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.op-inbox__detail-rail {
+  grid-area: rail;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 14px 15px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  border-radius: 10px;
+  background: var(--bg-2, rgba(0, 0, 0, 0.18));
+}
+.op-inbox__detail-rail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.op-inbox__detail-rail dt {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--fg, #e5e7eb);
+}
+.op-inbox__detail-rail dd {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg, #e5e7eb);
+}
+/* The chip classes ride along for their colour coding; at full contrast in a
+   190px column they must truncate rather than overflow the rail. */
+.op-inbox__detail-rail dd > span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.op-inbox__detail-discussion {
+  grid-area: discussion;
+  min-width: 0;
+}
+.op-inbox__aside .pc-items__detail-actions {
+  flex-wrap: nowrap;
+  width: 100%;
+  min-height: 34px;
+}
+.op-inbox__aside .pc-items__detail-loading {
+  display: inline-flex;
+  align-items: center;
+  width: 100%;
+  min-height: 34px;
+}
+.op-inbox__aside .pc-items__action {
+  flex: 1 1 0;
+  min-width: 0;
+  padding-inline: 8px;
+  justify-content: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* ── The briefing (P-005): the aside's unselected state ──────────────────
+   Headline count, the four tiles, the last run's readout with its grouped
+   disposition rows and the primary action, then the feed block (P-004).
+   Left-aligned prose at a readable measure; counts in the mono face so the
+   numbers line up. Replaces the centered "select an item" prompt. */
+.op-inbox__briefing {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  max-width: 640px;
+  color: var(--fg, #e5e7eb);
+  text-align: left;
+}
+.op-inbox__briefing-title {
+  margin: 0 0 5px;
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.op-inbox__briefing-lead {
+  margin: 0;
+  max-width: 52ch;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__briefing-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--border, rgba(255, 255, 255, 0.1));
+}
+.op-inbox__briefing-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 11px 12px;
+  background: var(--bg-2, rgba(0, 0, 0, 0.18));
+}
+.op-inbox__briefing-tile strong {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.1;
+}
+.op-inbox__briefing-tile span {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__briefing-tile.is-em strong {
+  color: var(--warn, #fbbf24);
+}
+.op-inbox__briefing-run {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 14px 16px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  border-radius: 11px;
+  background: var(--bg-2, rgba(0, 0, 0, 0.18));
+}
+.op-inbox__briefing-run-head {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  font-size: 10px;
+}
+.op-inbox__briefing-run-head em {
+  font-style: normal;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--accent-strong, #7dd3fc);
+}
+.op-inbox__briefing-run-phase {
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__briefing-run-elapsed {
+  margin-left: auto;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__briefing-run-line {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.op-inbox__briefing-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.op-inbox__briefing-row {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 7px 0;
+  border-top: 1px solid
+    color-mix(in srgb, var(--border, rgba(255, 255, 255, 0.1)) 72%, transparent);
+  font-size: 11.5px;
+}
+.op-inbox__briefing-row-name {
+  font-weight: 600;
+}
+.op-inbox__briefing-row.is-umbrella .op-inbox__briefing-row-name {
+  color: var(--accent-strong, #7dd3fc);
+}
+.op-inbox__briefing-row-desc {
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__briefing-row-count {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: 600;
+}
+.op-inbox__briefing-review {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 48%, transparent);
+  border-radius: 8px;
+  color: var(--accent-strong, #7dd3fc);
+  background: color-mix(in srgb, var(--accent, #38bdf8) 12%, transparent);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.op-inbox__briefing-review:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/* P-006: the live run in the aside — a spinner in the run head, the three-tile
+   run grid in place of the four-tile glance, the launch receipt with Restart,
+   and the danger Stop beneath. The bar, the spinner and the ghost buttons
+   reuse the bulk strip's grammar (inbox-bulk.css) so the aside and the rail
+   card read as the same run. */
+.op-inbox__briefing-run--live {
+  border-color: color-mix(in srgb, var(--accent, #38bdf8) 40%, transparent);
+}
+.op-inbox__briefing-run-head .op-inbox__bulk-spin {
+  align-self: center;
+}
+.op-inbox__briefing-grid--run {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.op-inbox__briefing-tile.is-good strong {
+  color: var(--good, #34d399);
+}
+.op-inbox__briefing-launch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding-top: 10px;
+  border-top: 1px solid
+    color-mix(in srgb, var(--border, rgba(255, 255, 255, 0.1)) 72%, transparent);
+  font-size: 11px;
+}
+.op-inbox__briefing-launch-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__briefing-launch-receipt {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+.op-inbox__briefing-launch-fixed,
+.op-inbox__briefing-launch-hint {
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__briefing-launch-hint {
+  flex: 1 0 100%;
+  font-size: 10px;
+}
+.op-inbox__briefing-launch-stale {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1 0 100%;
+  color: var(--warn, #fbbf24);
+  font-weight: 600;
+}
+.op-inbox__briefing-restart {
+  margin-left: auto;
+}
+.op-inbox__briefing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.op-inbox__briefing-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--bad, #f87171) 55%, transparent);
+  border-radius: 8px;
+  color: var(--bad, #f87171);
+  background: color-mix(in srgb, var(--bad, #f87171) 12%, transparent);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.op-inbox__briefing-stop:hover {
+  background: color-mix(in srgb, var(--bad, #f87171) 20%, transparent);
+}
+/* P-007: the resume block under the review's grouped rows — the scope
+   statement and "Continue N retryable" together, so the gesture and what it
+   touches are never separated. The button is the strip's own. */
+.op-inbox__briefing-resume {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px dashed color-mix(in srgb, #7dd3fc 45%, transparent);
+  border-radius: 9px;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.op-inbox__briefing-resume p {
+  margin: 0;
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__briefing-resume .op-inbox__bulk-continue {
+  align-self: flex-start;
+}
+/* P-004: the feed's window strip + foot, in the aside's unselected state
+   instead of the list column; the strip and foot keep their own styling. */
+.op-inbox__aside-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  font-size: 11px;
+}
+.op-inbox__aside-feed .op-inbox__foot {
+  padding-top: 10px;
+}
+.op-inbox__aside-back {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  min-height: 30px;
+  margin-bottom: 12px;
+  padding: 0 10px 0 6px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg, #e5e7eb);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.op-inbox__aside-back:hover {
+  background: color-mix(in srgb, var(--fg, #e5e7eb) 6%, transparent);
+}
+/* Narrow: one column at a time. With a selection the detail fills the page
+   (and the Back button appears); without one the list does. */
+@media (max-width: 900px) {
+  .op-inbox--split {
+    grid-template-columns: minmax(0, 1fr);
+    /* The rail becomes a strip above the list; the list row takes the rest. */
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .op-inbox--split[data-has-selection] {
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .op-inbox--split .op-inbox__rail {
+    max-height: 40vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  }
+  .op-inbox--split .op-inbox__rail .op-inbox__chips {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .op-inbox--split .op-inbox__column {
+    border-right: 0;
+  }
+  /* With a selection the detail fills the page: the rail hides WITH the list
+     column, never on its own — it is the list's filter, not the detail's. */
+  .op-inbox--split[data-has-selection] .op-inbox__rail,
+  .op-inbox--split[data-has-selection] .op-inbox__column {
+    display: none;
+  }
+  .op-inbox--split:not([data-has-selection]) .op-inbox__aside {
+    display: none;
+  }
+  .op-inbox--split .op-inbox__aside-back {
+    display: inline-flex;
+  }
+  /* The detail pane stacks: head, then the rail as a wrapping strip of
+     labelled facts, then the body at its measure, then the discussion. */
+  .op-inbox__aside .op-inbox__detail {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "head"
+      "rail"
+      "body"
+      "discussion";
+  }
+  .op-inbox__detail-rail {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+  }
+}
+
+/* Portal chrome and open docks reduce the host box independently of the
+   viewport. Stack metadata before it can squeeze the reading column. */
+@container inbox-detail (max-width: 540px) {
+  .op-inbox__aside .op-inbox__detail {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "head"
+      "rail"
+      "body"
+      "discussion";
+  }
+  .op-inbox__detail-rail {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+  }
+}
+
+@container inbox-detail (max-width: 360px) {
+  .op-inbox__detail-fact {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
+
+@container op-chat (max-width: 420px) {
+  .op-inbox__chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .op-inbox__chips::-webkit-scrollbar {
+    display: none;
+  }
+  .op-inbox__chip {
+    flex: 0 0 auto;
+  }
+}

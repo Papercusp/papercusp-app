@@ -1,0 +1,8 @@
+{
+  "id": "security-reviewer",
+  "whenUseful": "Consult when SPEC additions touch authentication, authorisation, user input handling (XSS/SQLi/SSRF/path traversal vectors), secret/credential handling, CORS or other cross-origin surfaces, file uploads, or new dependency introductions on packages that could carry CVEs. Do NOT consult for pure-product features without those surfaces. Like infra-reviewer, most replans should NOT consult this.",
+  "output": { "kind": "features", "featureKind": "security" },
+  "alwaysFireOn": [],
+  "budgetCents": 50,
+  "featureSize": "small"
+}

@@ -1,0 +1,69 @@
+# papercusp-data-sync — 'Papercusp Official: Data Sync' (scope: aspect,
+# category: data; owner directive 2026-07-04 / P-017). Integrates the sync
+# generic-library family into a composed app: live state sync (client+server),
+# event-maintained projections, burst control, and resumable large-asset
+# transfer. Machine twin: @papercusp/template-kit src/reference-templates.ts
+# PAPERCUSP_DATA_SYNC_TEMPLATE — the kit's suite pins this file to it.
+id: papercusp-data-sync
+version: "0.1.0"
+scope: aspect
+category: data
+summary: >-
+  The live data-sync plane for a papercusp-composed app: @papercusp/sync
+  (client transports with reconnect/backpressure) paired with @papercusp/sse
+  (server SSE primitives + PG NOTIFY bridge), @papercusp/projection-index for
+  event-maintained read models, @papercusp/debounce-coalesce for wake-floor +
+  burst-coalesce delivery, and @papercusp/resumable-download for interrupted
+  large-asset transfer. Compose into any app whose UI must track server state
+  live without polling.
+components:
+  - { id: sync, version: 0.0.1 }
+  - { id: sse, version: 0.0.1 }
+  - { id: projection-index, version: 0.1.0 }
+  - { id: debounce-coalesce, version: 0.1.0 }
+  - { id: resumable-download, version: 0.1.0 }
+contracts: []
+decisionPoints:
+  - id: sync-transport
+    prompt: >-
+      Which sync transport fits the app — SSE (simplest, one-directional
+      server push over the sidecar) or Zero (bidirectional)? Default SSE
+      unless the app needs client-originated sync.
+  - id: synced-surfaces
+    prompt: >-
+      Which app tables/views must sync live to the UI, and which stay
+      request/response? Wire the PG NOTIFY bridge only for the live set.
+  - id: projection-set
+    prompt: >-
+      Which derived read models does the UI query (feed projection-index from
+      the change stream), and what burst policy per subscriber (wake floor /
+      coalesce window via debounce-coalesce)?
+  - id: large-assets
+    prompt: >-
+      Does the app move large files (models, media, archives)? If so, route
+      them through resumable-download with streaming checksums; if not, drop
+      the component from the composition.
+composesWith:
+  - papercusp-tauri-desktop-shell
+  - papercusp-search
+  - papercusp-data-layer
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+checks:
+  - id: components-integrated
+    run: checks/components-integrated.test.ts
+    summary: >-
+      every pinned component package is a declared dependency of the composed
+      app (config section: components)
+musts:
+  - id: sidecar-host-streams
+    rule: "Live surfaces stream over the sidecar host — never a second server for sync"
+    enforcedBy: prose-only
+  - id: burst-policy
+    rule: "Every synced surface has a burst policy (wake floor / coalesce window) — an unbounded change stream into a UI is a self-inflicted outage"
+    enforcedBy: prose-only
+  - id: deps-declared
+    rule: "Every kept component is a real package dependency — not wired on paper"
+    enforcedBy: components-integrated

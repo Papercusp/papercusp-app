@@ -1,0 +1,212 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    :root{
+      --bg:#07101d;--bg-1:#0b1220;--bg-2:rgba(255,255,255,0.045);--bg-3:rgba(255,255,255,0.075);
+      --bg-raised:#112235;--fg:#e7f7ff;--fg-dim:#b9d4e8;--fg-mute:#7f9bb4;
+      --border-muted:rgba(125,211,252,0.08);--border:rgba(125,211,252,0.15);--border-strong:rgba(125,211,252,0.32);
+      --accent:#38bdf8;--accent-soft:#bae6fd;--good:#34d399;--warn:#fbbf24;--bad:#fb7185;
+      --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    }
+    body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:12px;-webkit-font-smoothing:antialiased;}
+    a{color:#7dd3fc}a:hover{color:#bae6fd}
+    .tabs{display:flex;gap:2px;padding:8px 14px 0;border-bottom:1px solid var(--border-muted)}
+    .tab{padding:5px 12px;font-size:12px;color:var(--fg-mute);border-bottom:2px solid transparent}
+    .tab.on{color:var(--fg);border-bottom-color:var(--accent)}
+    .top{display:flex;align-items:center;gap:8px;padding:9px 14px 0}
+    .count{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:8px;border:1px solid var(--border);font-size:11px;color:var(--fg-mute)}
+    .count b{color:var(--fg);font-variant-numeric:tabular-nums;font-weight:650}
+    .count.hot{border-color:var(--warn);color:var(--warn)}.count.hot b{color:var(--warn)}
+    .search{margin-left:8px;display:flex;align-items:center;gap:6px;width:210px;padding:4px 9px;border-radius:8px;background:var(--bg-3);border:1px solid var(--border);color:var(--fg-mute);font-size:11.5px}
+    .cols{display:grid;grid-template-columns:repeat(5,minmax(190px,1fr));gap:8px;padding:10px 14px 14px}
+    .col-h{display:flex;align-items:center;gap:6px;padding:7px 9px;border:1px solid var(--border);border-bottom:0;border-radius:4px 4px 0 0;background:var(--bg-2);font-size:11px;font-weight:760;color:var(--fg-mute)}
+    .col-h .n{margin-left:auto;color:var(--fg);font-variant-numeric:tabular-nums}
+    .col-h.needs{color:var(--warn);border-color:rgba(251,191,36,0.35);background:rgba(251,191,36,0.08)}.col-h.needs .n{color:var(--warn)}
+    .col-h.blocked{color:var(--bad)}
+    .col-h.done{color:var(--fg-mute)}
+    .col-b{border:1px solid var(--border);border-radius:0 0 4px 4px;background:var(--bg-2);padding:7px;display:flex;flex-direction:column;gap:6px;min-height:0}
+    .card{display:block;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);overflow:hidden}
+    .card.needs{border-color:rgba(251,191,36,0.45)}
+    .card.blocked{border-color:rgba(251,113,133,0.35)}
+    .ch{display:flex;align-items:center;gap:6px}
+    .dot{width:6px;height:6px;border-radius:999px;background:var(--fg-mute);flex:0 0 auto}
+    .dot.needs{background:var(--warn)}.dot.working{background:var(--good)}.dot.blocked{background:var(--bad)}
+    .handle{font-family:var(--mono);font-size:10px;color:var(--fg-mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+    .age{margin-left:auto;font-size:10px;color:var(--fg-mute);font-variant-numeric:tabular-nums;flex:0 0 auto}
+    .rsn{display:block;font-size:11.5px;font-weight:550;line-height:1.35;margin-top:3px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    .why{display:block;font-size:10.5px;color:var(--fg-mute);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .chips{display:flex;gap:4px;margin-top:5px;flex-wrap:wrap}
+    .chip{padding:0 6px;border-radius:999px;font-size:9.5px;font-weight:650;color:var(--fg-mute);border:1px solid var(--border);background:var(--bg-3)}
+    .chip.warn{color:#fde68a;border-color:rgba(251,191,36,0.4)}
+    .chip.bad{color:#fecaca;border-color:rgba(251,113,133,0.4)}
+    .chip.good{color:#bbf7d0;border-color:rgba(52,211,153,0.4)}
+    .more{font-size:11px;color:var(--fg-mute);text-align:center;padding:8px 6px;line-height:1.5}
+    .callout{position:absolute;z-index:5;display:flex;align-items:flex-start;gap:7px;max-width:250px}
+    .cnum{width:20px;height:20px;border-radius:999px;background:#fb7185;color:#02060c;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;flex:0 0 auto;box-shadow:0 0 0 3px rgba(251,113,133,0.25)}
+    .ctext{background:#1c0f16;border:1px solid rgba(251,113,133,0.5);border-radius:8px;padding:5px 8px;font-size:10.5px;line-height:1.4;color:#fecdd3}
+  </style>
+</helmet>
+<div style="position:relative;width:1440px;height:718px;overflow:hidden;display:flex;flex-direction:column">
+  <div class="tabs">
+    <span class="tab">Goals</span><span class="tab">Sessions</span><span class="tab on">Plans</span><span class="tab">Work items</span>
+  </div>
+  <div class="top">
+    <span class="count hot"><b>3</b> needs you</span>
+    <span class="count"><b>14</b> working</span>
+    <span class="count"><b>2</b> blocked</span>
+    <span class="count"><b>87</b> ready</span>
+    <span class="count"><b>244</b> done</span>
+    <span class="search">Filter plans…</span>
+  </div>
+
+  <div class="cols">
+    <!-- NEEDS YOU -->
+    <div>
+      <div class="col-h needs">Needs you<span class="n">3</span></div>
+      <div class="col-b">
+        <div class="card needs">
+          <span class="ch"><span class="dot needs"></span><span class="handle">ei-100-security-postu…</span><span class="age">2m</span></span>
+          <span class="rsn">EI-100 security posture closure</span>
+          <span class="why">1 decision waiting: route-tier reuse</span>
+          <span class="chips"><span class="chip warn">ask</span><span class="chip">3/9</span><span class="chip">papercusp</span></span>
+        </div>
+        <div class="card needs">
+          <span class="ch"><span class="dot needs"></span><span class="handle">event-system-drift-to…</span><span class="age">9h</span></span>
+          <span class="rsn">Event system drift to derived</span>
+          <span class="why">2 decisions waiting</span>
+          <span class="chips"><span class="chip warn">ask ×2</span><span class="chip">2/16</span></span>
+        </div>
+        <div class="card needs">
+          <span class="ch"><span class="dot needs"></span><span class="handle">rem-dream-recombinat…</span><span class="age">4h</span></span>
+          <span class="rsn">Rem dream recombination</span>
+          <span class="why">approval gate: plan is draft</span>
+          <span class="chips"><span class="chip warn">ask</span><span class="chip">2/9</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- WORKING -->
+    <div>
+      <div class="col-h">Working<span class="n">14</span></div>
+      <div class="col-b">
+        <div class="card">
+          <span class="ch"><span class="dot working"></span><span class="handle">p2p-git-public-releas…</span><span class="age">2m</span></span>
+          <span class="rsn">P2P git public release</span>
+          <span class="why">21 of 30 items done</span>
+          <span class="chips"><span class="chip good">3 live</span><span class="chip">21/30</span></span>
+        </div>
+        <div class="card">
+          <span class="ch"><span class="dot working"></span><span class="handle">agent-launch-unificat…</span><span class="age">3m</span></span>
+          <span class="rsn">Agent launch unification</span>
+          <span class="why">44 of 45 items done</span>
+          <span class="chips"><span class="chip good">1 live</span><span class="chip">44/45</span></span>
+        </div>
+        <div class="card">
+          <span class="ch"><span class="dot working"></span><span class="handle">owner-plans-single-pa…</span><span class="age">18m</span></span>
+          <span class="rsn">Owner plans single pane</span>
+          <span class="why">9 of 11 items done</span>
+          <span class="chips"><span class="chip good">2 live</span><span class="chip">9/11</span></span>
+        </div>
+        <div class="card">
+          <span class="ch"><span class="dot working"></span><span class="handle">ei-100-security-postu…</span><span class="age">41s</span></span>
+          <span class="rsn">EI-100 security posture closure</span>
+          <span class="why">4 sessions active</span>
+          <span class="chips"><span class="chip good">4 live</span><span class="chip">3/9</span></span>
+        </div>
+        <p class="more">+10 more — narrow with the filter</p>
+      </div>
+    </div>
+
+    <!-- BLOCKED -->
+    <div>
+      <div class="col-h blocked">Blocked<span class="n">2</span></div>
+      <div class="col-b">
+        <div class="card blocked">
+          <span class="ch"><span class="dot blocked"></span><span class="handle">focused-gui-server-sp…</span><span class="age">2d</span></span>
+          <span class="rsn">Focused GUI server split</span>
+          <span class="why">gate: D-035 proofs incomplete</span>
+          <span class="chips"><span class="chip bad">gate</span><span class="chip">7/11</span></span>
+        </div>
+        <div class="card blocked">
+          <span class="ch"><span class="dot blocked"></span><span class="handle">byoc-cloud-capacity-2…</span><span class="age">5d</span></span>
+          <span class="rsn">BYOC cloud capacity</span>
+          <span class="why">blocked-by: focused-gui-server-split</span>
+          <span class="chips"><span class="chip bad">dep</span><span class="chip">0/12</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- READY -->
+    <div>
+      <div class="col-h">Ready<span class="n">87</span></div>
+      <div class="col-b">
+        <div class="card">
+          <span class="ch"><span class="dot"></span><span class="handle">desktop-workbench-sh…</span><span class="age">2d</span></span>
+          <span class="rsn">Desktop workbench shell</span>
+          <span class="chips"><span class="chip">4/12</span></span>
+        </div>
+        <div class="card">
+          <span class="ch"><span class="dot"></span><span class="handle">event-system-drift-t…</span><span class="age">9h</span></span>
+          <span class="rsn">Event system drift to derived</span>
+          <span class="chips"><span class="chip">2/16</span></span>
+        </div>
+        <div class="card">
+          <span class="ch"><span class="dot"></span><span class="handle">queue-authorization-…</span><span class="age">5h</span></span>
+          <span class="rsn">Queue authorization redesign</span>
+          <span class="chips"><span class="chip">12/14</span></span>
+        </div>
+        <p class="more">+84 more — narrow with the filter</p>
+      </div>
+    </div>
+
+    <!-- DONE -->
+    <div>
+      <div class="col-h done">Done<span class="n">244</span></div>
+      <div class="col-b">
+        <div class="card" style="opacity:.65">
+          <span class="ch"><span class="dot"></span><span class="handle">native-terminal-desk…</span><span class="age">11w</span></span>
+          <span class="rsn">Native terminal desktop</span>
+          <span class="chips"><span class="chip">9/9</span></span>
+        </div>
+        <div class="card" style="opacity:.65">
+          <span class="ch"><span class="dot"></span><span class="handle">system-health-tab-20…</span><span class="age">9w</span></span>
+          <span class="rsn">System health tab</span>
+          <span class="chips"><span class="chip">8/8</span></span>
+        </div>
+        <p class="more">+242 more — narrow with the filter</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pain-point callouts -->
+  <div class="callout" style="left:270px;top:96px">
+    <span class="cnum">1</span>
+    <span class="ctext">5 equal columns: "Done" (244) gets the same width as the work that matters. Titles truncate at ~275px.</span>
+  </div>
+  <div class="callout" style="left:560px;top:330px">
+    <span class="cnum">2</span>
+    <span class="ctext">No agents on plan cards — "who is working this?" lives in the Sessions tab. The join you actually want is missing.</span>
+  </div>
+  <div class="callout" style="left:1130px;top:46px">
+    <span class="cnum">3</span>
+    <span class="ctext">Counts double as filter buttons but read as stats; the filter box is the only real navigation for ~900 plans.</span>
+  </div>
+  <div class="callout" style="left:900px;top:520px">
+    <span class="cnum">4</span>
+    <span class="ctext">Columns cap at 60 cards → "+84 more". No sort, no grouping, 5 separate scrollbars. Recency is one ambiguous age number.</span>
+  </div>
+  <div class="callout" style="left:150px;top:480px">
+    <span class="cnum">5</span>
+    <span class="ctext">Clicking opens a modal that covers the board — drill-in costs your place.</span>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

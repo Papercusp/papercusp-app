@@ -1,0 +1,347 @@
+/**
+ * The ONE builder for a psu model picker's rows — WI-126377.
+ *
+ * WHY THIS FILE EXISTS (owner ask 2026-08-27: "this should give a full list of
+ * all available, not require the user to put in the model effort string" …
+ * "HOW DOES OUR SYSTEM GET IT WE SHOULD ALREADY HAVE A PLACE WHERE IT CONSTRUCTS
+ * THE MODEL LIST WHERE IT DISPLAYS IT IN THE GUI").
+ *
+ * We DID already have every ingredient; nothing assembled them for the terminal:
+ *   • claude → the bare aliases (CLOUD_MODEL_MENU / psu's RESUME_MODEL_MENU).
+ *     The claude CLI resolves aliases itself and ships no local registry, so
+ *     four rows plus the open-set escape is genuinely the whole list.
+ *   • codex  → `~/.codex/models_cache.json`, the Codex CLI's OWN installed-model
+ *     registry. `model-context-budget.mjs` has been reading it per-model since
+ *     the 1M-window work (codexModelRecord); it was never LISTED. It is what
+ *     makes gpt-5.5 / gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex-spark reachable
+ *     without typing them, and it publishes each model's OWN effort set.
+ *   • omp    → `ompCatalog.models` on GET /api/agent-mcp/console/bootstrap-su/
+ *     options — the same field, from the same endpoint, that the GUI's New
+ *     Session launcher already renders (su-launch-option-entries.ts). psu
+ *     already calls that endpoint for workspace / harness / plan / accounts /
+ *     fleets, so this is one more field off a response it was fetching anyway,
+ *     not a second source of truth.
+ *
+ * WHY PLAIN .mjs: same reason as `local-model-spec.mjs` and `su-tier-roles.mjs`
+ * beside it — `apps/operator/scripts/psu-launcher.mjs` is exec'd by bare node and
+ * cannot import TypeScript, while the operator side is TS. A third hand-kept copy
+ * of the catalog→rows rules is the thing this prevents. Keep it free of Node and
+ * DOM imports (the browser bundle must be able to adopt it): callers pass the
+ * already-read registries in.
+ *
+ * ⚠ THE EFFORT INTERSECTION IS THE LOAD-BEARING RULE HERE, not decoration.
+ * Both registries publish effort levels psu's `<model>[:<effort>]` grammar cannot
+ * encode — codex advertises `ultra` on gpt-5.6-sol/terra, and OMP advertises
+ * `minimal` on the Claude 4.5 families. Offering one builds a spec whose effort
+ * suffix is not recognized as an effort, so it rides into the MODEL ID and the
+ * launch either fails or silently runs at the model default. Every effort row
+ * therefore comes from `encodableEfforts()`, never from a registry array
+ * directly. Widening psu's grammar is the way to offer `ultra`/`minimal` — not
+ * widening this.
+ */
+
+/**
+ * A picker row's value is a DISCRIMINATED UNION, not a bare model string.
+ *
+ * The string sentinel it replaced (`'<custom-model>'`) sat in the same slot a real
+ * model id occupies, so "the escape row" and "a model literally named that" were
+ * one `===` apart. A `kind` tag also makes the three outcomes exhaustive at the
+ * call site: pick a backend and stop, pick a model and choose an effort, or type
+ * an id — the caller cannot silently forget one.
+ *
+ * @typedef {{ kind: 'backend-default', targetAgent: string }} BackendDefaultChoice
+ * @typedef {{ kind: 'custom', targetAgent: string }} CustomSpecChoice
+ * @typedef {{ kind: 'model', targetAgent: string, model: string, alias: boolean,
+ *             efforts: readonly string[] | null }} ModelChoice
+ * @typedef {BackendDefaultChoice | CustomSpecChoice | ModelChoice} ResumeModelChoice
+ * @typedef {{ name: string, value: ResumeModelChoice }} ResumeModelRow
+ */
+
+/** The row a picker shows first so "no effort suffix" stays one keystroke away. */
+export const EFFORT_DEFAULT_ROW = Object.freeze({
+  name: 'default (model default — no effort suffix)',
+  value: '',
+});
+
+/** Group captions. Exported so a test can assert grouping without matching prose. */
+export const NATIVE_ALIAS_GROUP = 'papercusp aliases';
+export const CODEX_REGISTRY_GROUP = 'codex installed models';
+export const OMP_REGISTRY_GROUP = 'OMP installed models';
+
+/**
+ * Human token count for a model's context window. Mirrors the GUI's private
+ * `formatTokenCount` (su-launch-option-entries.ts) so the two surfaces describe
+ * the same model identically.
+ *
+ * @param {number | null | undefined} tokens
+ * @returns {string | null}
+ */
+export function formatContextWindow(tokens) {
+  if (tokens == null || !Number.isFinite(Number(tokens))) return null;
+  const n = Number(tokens);
+  if (n >= 1_000_000) return `${Math.round((n / 1_000_000) * 10) / 10}M ctx`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k ctx`;
+  return `${n} ctx`;
+}
+
+/**
+ * A registry's published effort levels, narrowed to the ones the launcher's spec
+ * grammar can actually encode, in the launcher's own order.
+ *
+ * Order comes from `encodable` (psu's menu order), NOT from the registry, so two
+ * models never present the same levels in a different sequence. An empty or
+ * absent `published` means "the registry did not say" → every encodable level is
+ * offered, which is the pre-registry behavior.
+ *
+ * @param {readonly string[] | null | undefined} published  levels the model advertises
+ * @param {readonly string[]} encodable  levels the launcher's `:<effort>` suffix accepts
+ * @returns {string[]}
+ */
+export function encodableEfforts(published, encodable) {
+  const allowed = (encodable ?? []).map((e) => String(e));
+  if (!Array.isArray(published) || published.length === 0) return [...allowed];
+  const advertised = new Set(published.map((e) => String(e).toLowerCase()));
+  return allowed.filter((e) => advertised.has(e.toLowerCase()));
+}
+
+/**
+ * The effort rows for one selected model: the model-default row, then every
+ * encodable level the model supports.
+ *
+ * A model that supports NOTHING encodable still gets the default row alone —
+ * a one-row prompt is honest ("this model has no effort you can set from here")
+ * where silently reusing the generic list would produce an unlaunchable spec.
+ *
+ * @param {{ published?: readonly string[] | null, encodable: readonly string[],
+ *           describe?: (level: string) => string | null }} args
+ * @returns {Array<{ name: string, value: string }>}
+ */
+export function effortRowsFor({ published, encodable, describe }) {
+  const levels = encodableEfforts(published, encodable);
+  return [
+    { name: EFFORT_DEFAULT_ROW.name, value: EFFORT_DEFAULT_ROW.value },
+    ...levels.map((level) => {
+      const detail = describe ? describe(level) : null;
+      return { name: detail ? `${level} — ${detail}` : level, value: level };
+    }),
+  ];
+}
+
+/** @param {readonly (string | null | undefined)[]} parts */
+function detailSuffix(parts) {
+  const kept = parts.filter((p) => p != null && String(p).trim() !== '');
+  return kept.length > 0 ? `  (${kept.join(' · ')})` : '';
+}
+
+/**
+ * One row per allowed backend meaning "resume on this backend, pass no --model
+ * flag at all" — the owner's second directive 2026-08-27 ("it shouldnt require
+ * the model string it should just take in claude or omp or [codex]").
+ *
+ * These come FIRST in the menu: picking a backend is a complete answer, so it
+ * must not look like a fallback buried under a model list.
+ *
+ * @param {{ backends: readonly string[], sourceAgent: string }} args
+ * @returns {Array<{ name: string, value: BackendDefaultChoice }>}
+ */
+export function backendDefaultRows({ backends, sourceAgent }) {
+  return (backends ?? []).map((agent) => ({
+    name: `${agent === sourceAgent ? 'Native' : 'Port to'} ${agent}: backend default (no model flag)`,
+    value: { kind: 'backend-default', targetAgent: agent },
+  }));
+}
+
+/**
+ * Rows for the bare cloud aliases the launcher recognizes, scoped to the
+ * backends this resume may target.
+ *
+ * `alias: true` on the value is what tells the caller to keep composing the spec
+ * through its EXISTING alias path (`composeResumeModelSpec` → `normalizeModelSpec`,
+ * which appends the `[1m]` window marker). Registry rows below deliberately do
+ * not carry it — see `ompModelRows`.
+ *
+ * @param {{ aliases: ReadonlyArray<{ name: string, value: string, backend: string }>,
+ *           backends: readonly string[], sourceAgent: string }} args
+ * @returns {Array<{ name: string, value: ModelChoice }>}
+ */
+export function aliasModelRows({ aliases, backends, sourceAgent }) {
+  return (aliases ?? [])
+    .filter((row) => (backends ?? []).includes(row.backend))
+    .map((row) => ({
+      name: `${row.backend === sourceAgent ? 'Native' : 'Port to'} ${row.backend}: ${row.name}`,
+      value: {
+        kind: 'model',
+        targetAgent: row.backend,
+        model: row.value,
+        alias: true,
+        efforts: null,
+      },
+    }));
+}
+
+/**
+ * Rows for the Codex CLI's own installed models (`~/.codex/models_cache.json`).
+ *
+ * `alias` is false: these are native ids, so the caller must NOT run them through
+ * the claude-shaped alias normalizer. Each row carries the model's OWN advertised
+ * effort levels for `effortRowsFor` to narrow.
+ *
+ * `skipIds` drops registry rows an ALIAS row already covers. `sol` and
+ * `gpt-5.6-sol` are the same model — the alias is just what psu's own flags and
+ * docs call it — so listing both is a duplicate that makes the menu look like it
+ * holds a choice it does not. The alias row wins because it is the documented
+ * spelling; nothing is lost, since the two normalize to one launch. The CALLER
+ * supplies the normalized ids rather than this module computing them: the
+ * normalizer lives in a module that imports `node:fs`, and this one must stay
+ * importable by the browser bundle.
+ *
+ * @param {ReadonlyArray<{ id: string, label?: string | null, description?: string | null,
+ *          efforts?: readonly string[] | null, contextWindow?: number | null }>} models
+ * @param {{ sourceAgent: string, skipIds?: readonly string[], deniedIds?: readonly string[] }} args
+ * @returns {Array<{ name: string, value: ModelChoice }>}
+ */
+export function codexModelRows(models, { sourceAgent, skipIds = [], deniedIds = [] }) {
+  const prefix = sourceAgent === 'codex' ? 'Native' : 'Port to';
+  const covered = new Set((skipIds ?? []).map((id) => String(id).toLowerCase()));
+  const denied = new Set((deniedIds ?? []).map((id) => String(id).toLowerCase()));
+  return (models ?? [])
+    .filter((model) => {
+      const id = String(model?.id ?? '').toLowerCase();
+      return !covered.has(id) && !denied.has(id);
+    })
+    .map((model) => ({
+    name:
+      `${prefix} codex: ${model.id}` +
+      detailSuffix([model.label && model.label !== model.id ? model.label : null, formatContextWindow(model.contextWindow)]),
+    value: {
+      kind: 'model',
+      targetAgent: 'codex',
+      model: model.id,
+      alias: false,
+      efforts: model.efforts ?? null,
+    },
+  }));
+}
+
+/**
+ * Rows for the host-local OMP registry (`omp models --json`, served as
+ * `ompCatalog.models`). This is the group that turns a 4-row menu into the real
+ * catalog — measured 2026-08-27 on this box: 499 models.
+ *
+ * `alias` is false, and that is load-bearing rather than cosmetic. psu's
+ * `DEFAULT_1M_FAMILY_RE` is UNANCHORED (`/fable|opus|sonnet-?5|…/`), so an OMP
+ * selector such as `google-vertex/claude-fable-5@default` matches it, and running
+ * one through the alias path would append a Claude-Code-private `[1m]` marker to a
+ * provider-qualified id that has no such syntax. The caller keeps registry specs
+ * raw and lets `normalizeModelSpecForAgent('omp', …)` — which is already a no-op
+ * for omp on purpose — have the last word.
+ *
+ * @param {ReadonlyArray<{ selector: string, name?: string | null, provider?: string | null,
+ *          contextWindow?: number | null, reasoning?: boolean | null,
+ *          thinking?: readonly string[] | null }>} models
+ * @param {{ sourceAgent: string }} args
+ * @returns {Array<{ name: string, value: ModelChoice }>}
+ */
+export function ompModelRows(models, { sourceAgent }) {
+  const prefix = sourceAgent === 'omp' ? 'Native' : 'Port to';
+  return (models ?? []).map((model) => ({
+    // provider + id ride in the NAME because the launcher's picker filters rows
+    // by name alone (filterRows) — a detail kept out of the string would not be
+    // searchable, which is the whole point of a 499-row list.
+    name:
+      `${prefix} omp: ${model.selector}` +
+      detailSuffix([
+        model.name && model.name !== model.selector ? model.name : null,
+        formatContextWindow(model.contextWindow),
+        model.reasoning ? 'reasoning' : null,
+      ]),
+    value: {
+      kind: 'model',
+      targetAgent: 'omp',
+      model: model.selector,
+      alias: false,
+      efforts: model.thinking ?? null,
+    },
+  }));
+}
+
+/**
+ * The open-set escape, one row PER allowed backend.
+ *
+ * Per-backend on purpose. A single generic "type a custom spec…" row cannot know
+ * which CLI the id is for, so it had to be followed by a second "Target backend"
+ * select — an extra prompt that existed only because the row was ambiguous.
+ * Naming the backend in the row answers both questions at once.
+ *
+ * The escape survives the registries because model ids are genuinely an OPEN set:
+ * the claude CLI ships no local list at all, and a registry read can fail. What
+ * changed is that it is now the exception rather than the only way to reach a
+ * model the four hardcoded aliases did not name.
+ *
+ * @param {{ backends: readonly string[], sourceAgent: string }} args
+ * @returns {Array<{ name: string, value: CustomSpecChoice }>}
+ */
+export function customModelRows({ backends, sourceAgent }) {
+  return (backends ?? []).map((agent) => ({
+    name: `${agent === sourceAgent ? 'Native' : 'Port to'} ${agent}: type a custom model id / full spec…`,
+    value: { kind: 'custom', targetAgent: agent },
+  }));
+}
+
+/**
+ * The whole base-model menu for a resume, in presentation order:
+ *   backend defaults → native aliases → codex registry → OMP registry → escapes.
+ *
+ * Ordering is the contract. The backend defaults answer the owner's "just take in
+ * claude or omp or codex" directly, and the free-text escape sits LAST because it
+ * is now the exception (an id no registry lists) rather than the only route to a
+ * model the hardcoded four did not name.
+ *
+ * Rows whose backend this resume cannot launch are never built: a `psu --resume`
+ * is hard-bound to the session's backend by `resumeArgsFor` (WI-4891), so offering
+ * a codex model on a claude resume produced `claude -m sol`, a broken launch.
+ *
+ * @param {{ backends: readonly string[], sourceAgent: string,
+ *           aliases?: ReadonlyArray<{ name: string, value: string, backend: string }>,
+ *           codexModels?: readonly any[], ompModels?: readonly any[],
+ *           codexSkipIds?: readonly string[], codexDeniedIds?: readonly string[], includeCustomRows?: boolean }} args
+ * @returns {ResumeModelRow[]}
+ */
+export function buildResumeModelRows({
+  backends,
+  sourceAgent,
+  aliases = [],
+  codexModels = [],
+  ompModels = [],
+  codexSkipIds = [],
+  codexDeniedIds = [],
+  includeCustomRows = true,
+}) {
+  const allowed = backends ?? [];
+  return [
+    ...backendDefaultRows({ backends: allowed, sourceAgent }),
+    ...aliasModelRows({ aliases, backends: allowed, sourceAgent }),
+    ...(allowed.includes('codex')
+      ? codexModelRows(codexModels, { sourceAgent, skipIds: codexSkipIds, deniedIds: codexDeniedIds })
+      : []),
+    ...(allowed.includes('omp') ? ompModelRows(ompModels, { sourceAgent }) : []),
+    ...(includeCustomRows ? customModelRows({ backends: allowed, sourceAgent }) : []),
+  ];
+}
+
+/**
+ * Compose the `--model` spec for a chosen registry row + effort.
+ *
+ * ALIAS rows are not composed here — the caller keeps using its own
+ * `composeResumeModelSpec`, so the alias path stays byte-identical to what it
+ * launched before this menu existed.
+ *
+ * @param {{ model: string, effort?: string | null }} args
+ * @returns {string | null}
+ */
+export function composeRegistryModelSpec({ model, effort }) {
+  const id = String(model ?? '').trim();
+  if (!id) return null;
+  const e = String(effort ?? '').trim();
+  return e ? `${id}:${e}` : id;
+}

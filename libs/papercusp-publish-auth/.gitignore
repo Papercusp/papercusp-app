@@ -1,0 +1,4 @@
+# Stryker mutation testing artifacts (per testing-spec §1.12).
+# Reports are HTML (don't commit binary diffs); incremental cache rebuilds.
+.stryker-tmp/
+reports/

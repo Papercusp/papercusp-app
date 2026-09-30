@@ -1,0 +1,213 @@
+# Linux-VM desktop testing — the test VM already exists, plus the seeded-.deb recipe
+URL: /internal/docs/agent-insights/linux-vm-desktop-testing-workflow
+
+The Linux clean-room test VM already exists at /mnt/data/offload/papercup-linux-test-vm (do NOT provision a new one). How to boot it, SSH/SPICE in, install and launch a seeded release .deb, and drive its GUI headlessly on DISPLAY=:0 via SPICE — plus the E2E findings from the first seeded-.deb run (2026-07-05).
+
+## The one thing to know first: the Linux test VM ALREADY EXISTS
+
+**Do NOT provision or download a fresh Ubuntu image.** A ready, provisioned
+Linux clean-room test VM lives **outside** the repo (the heavy disk images are
+never committed) at:
+
+* **`/mnt/data/offload/papercup-linux-test-vm/`** (symlinked as
+  `~/papercup-linux-test-vm`), on the 7.3T `/mnt/data` disk — **not** under
+  `/home`, `/var/lib/libvirt`, `/tmp`, or `/srv`. A name-filtered search of the
+  usual dirs misses it; this cost su-bf97d a wrong "no VM exists, I'll provision
+  one" conclusion on 2026-07-05 until the owner corrected it. If you're about to
+  provision a Linux VM, **stop and look here first.**
+
+Layout: `images/golden.qcow2` (the provisioned desktop image) +
+`images/ubuntu-24.04-base.img`; `run/<instance>/` holds each running instance's
+`overlay.qcow2`, `qemu.pid`, `serial.log`. The default instance is **`clean`**.
+
+## Boot / access
+
+* **Launcher**: `papercusp-desktop/scripts/linux-test-vm/boot-vm.sh <instance>`
+  (helpers in `lib/common.sh`). Raw QEMU/KVM, headless (`-display none`), SPICE
+  for pixels, slirp `hostfwd` for SSH — the same box convention as the Mac/Windows
+  build VMs. It no-ops if the instance is already running.
+* **Per-instance ports** (`ports_for()` in `common.sh`): instance `clean` →
+  **SSH `2224`, SPICE `127.0.0.1:5932`, operator-forward `3090`**. (`fed-a`/`fed-b`
+  are +1/+2 for federation runs, each on a distinct slirp subnet so hyperswarm
+  holepunching doesn't dial itself.) The operator-forward base moved off `3072`→`3090`
+  (EI-495): `3072-3074` sat inside the green release operator's own `:3070`/`:3073`
+  listener neighborhood, so fed-a's default forward (`3073`) collided with it and
+  FATAL'd `vm-federation.sh` boots whenever a green operator was running.
+* **SSH**: user **`tester`** (`VM_USER` default), key
+  **`~/.ssh/papercup-vm-linux`**. One-liner:
+  `ssh -i ~/.ssh/papercup-vm-linux -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2224 tester@127.0.0.1`
+  (host keys are intentionally unpinned — a fresh overlay re-presents golden's key).
+  Passwordless `sudo` works.
+* **Show it on the owner's real desktop**: the guest renders to qxl → SPICE 5932.
+  From the host, on the owner's X display: `DISPLAY=:1 nohup remote-viewer
+  spice://127.0.0.1:5932 &`. Whatever is on the guest's `:0` is what the owner
+  sees.
+
+## Driving the GUI headlessly (no owner needed)
+
+The guest runs an Xorg on **`:0`** (tty1, user `tester`). Its auth file is the
+`-auth /tmp/serverauth.XXXX` from the Xorg cmdline (grep
+`ps -eo args | grep -oE '\-auth /tmp/serverauth[^ ]*'`). With `DISPLAY=:0
+XAUTHORITY=<that file>` you can, over SSH:
+
+* launch the app detached: `setsid env DISPLAY=:0 XAUTHORITY=$XA
+  '/usr/bin/papercusp-desktop' >/tmp/app.log 2>&1 </dev/null &`
+* screenshot: **`scrot /tmp/shot.png`** (ImageMagick `import` is NOT installed;
+  `scrot` is). `scp` it out and view it.
+* click / type: `xdotool` (install via `sudo apt-get install -y xdotool` — the
+  VM has slirp outbound internet).
+
+`/usr/bin/papercusp-desktop` is the Tauri binary. `/usr/bin/papercusp` is only a
+thin `setup`/`tutorial` onboarding wrapper — not the app.
+
+## Installing + testing a seeded release .deb
+
+1. **Build the .deb on Tower** (the owner box — the seed cut MUST happen there;
+   see below). Output lands at `${CARGO_TARGET_DIR:-~/.cargo-target}/release/bundle/deb/`
+   named `Papercusp GUI_<ver>_amd64.deb` (note the **space** in the productName —
+   the old in-tree `Papercusp_*` glob silently resolved 18-day-stale artifacts;
+   `default_deb()` in `common.sh` now searches both locations + name shapes and
+   warns on a stale mtime).
+2. **Copy in** (loopback scp is fast — 4GB in \~20s):
+   `scp -i ~/.ssh/papercup-vm-linux -P 2224 "<deb>" tester@127.0.0.1:~/`.
+3. **Clean first-boot**: stop any lingering services
+   (`sudo pkill -f 'Papercusp GUI/sidecar'; pkill -f 'papercusp-desktop|embedded-postgres|code-server'`)
+   and **wipe `~/.papercusp` + `~/.papercusp-workspaces`** — otherwise the fresh
+   seed-restore path is skipped. (No systemd/autostart supervises the sidecar —
+   it daemonizes with ppid 1, so a `pkill` sticks.)
+4. **Install**: `sudo dpkg -i ~/<deb>` (works even reinstalling the same version;
+   extracting the \~3.6GB seed takes \~2 min).
+5. **Verify the seed bundled** at `/usr/lib/Papercusp GUI/seed/`: expect
+   `manifest.json` + `git/super.bundle` (\~1.86GB) + `git/submodules/` +
+   `corestore/` (\~1.8GB). A seed dir with only `.gitignore`+`README.md` means you
+   installed the **non-seeded** build.
+6. **Launch** on `:0` (per above) and watch
+   `~/.papercusp-workspaces/default/.papercusp/logs/gui.log` +
+   `~/.papercusp/logs/serve.log`.
+
+### Querying the guest's embedded Postgres
+
+**Builds since 2026-07-07 ship real, self-contained client tools** at
+`/usr/lib/Papercusp GUI/sidecar/bin/` — `psql`, `pg_dump`, `pg_dumpall`,
+`pg_restore`, wrapper-wired to the embedded libpq (+ its own openssl), so they
+run on a clean machine with no host PostgreSQL packages. Just use them
+(`fed.sh <a|b> sql` does automatically):
+
+```
+"/usr/lib/Papercusp GUI/sidecar/bin/psql" \
+  'postgresql://harness_admin:harness_admin_pwd@127.0.0.1:<port>/papercusp'
+# conn URL is in ~/.papercusp/embedded-pg.json
+```
+
+**Installs from builds BEFORE 2026-07-07** shipped a broken `bin/psql` (a
+Debian `pg_wrapper` perl shim that dies with `Can't locate PgCommon.pm` — root
+cause below). On those, reinstall a fresh .deb, or fall back to the bundled
+`node` + `pg` module:
+
+```
+NODE="/usr/lib/Papercusp GUI/sidecar/bin/node"
+PG="/usr/lib/Papercusp GUI/sidecar/node_modules/@papercusp/embedded-postgres-server/node_modules/pg"
+```
+
+Write a tiny `.cjs` that `require(PG)`, connect with that URL, run your SELECTs.
+
+**Root cause of the old breakage (traced + FIXED 2026-07-07):**
+`papercusp-desktop/bin/build-desktop-sidecar.sh` needs client tools for the
+snapshot subsystem, but embedded-postgres ships server-only — so it fell back
+to copying whatever `command -v psql` resolved to on the **build host**. On
+Debian/Ubuntu that is `/usr/bin/psql` = postgresql-common's **perl
+`pg_wrapper` dispatcher**, not a real binary. It works on the build host
+(wrapper + versioned client both installed there), so every build-time probe
+passed — then died on any clean machine. All FOUR tools shipped as the same
+\~9.5K wrapper (see `sidecar/bin/.pg-tools-source`), which also silently
+disabled the PG half of the **snapshot subsystem** —
+`packages/backup/src/hook.ts` degrades to a dump-less snapshot on spawn
+failure, so backups "succeeded" with no DB state. The fix vendors the real
+`/usr/lib/postgresql/<major>/bin/` binaries (major matched to the embedded
+server) behind LD\_LIBRARY\_PATH wrappers pointing at the bundled libpq, and
+the build now hard-fails if any vendored tool is a `#!`-script or fails a
+`--version` probe as-installed. The lesson that generalizes: **a tool copied
+off the build host can be a dispatcher/shim that only works there — verify
+what a copied binary IS, not just that it runs on the host that built it.**
+
+## Seed-cut identity rule (do not violate)
+
+The seed's git half is encrypted with `deriveEpochKey(pot, epoch)` — deterministic
+per the pot's PRIVATE key, held only in **Tower's live pot keychain** (Tower =
+the owner box that owns the Papercusp GitHub identity). `cut-seed-cli` fails-closed
+off-Tower (`--allow-mint-epoch-key` is the only bootstrap hatch). **Never cut a
+seed on a build VM** — get-or-CREATE would mint a divergent, unwrappable key and
+the installed app could never decrypt the seed post-admission.
+
+## E2E findings from the first seeded-.deb run (2026-07-05, WI-2902)
+
+What the seeded Linux GUI .deb actually does on a clean first boot:
+
+* ✅ **Installs + boots cleanly.** Self-hosts the operator sidecar
+  (`no Server reachable — self-hosting … (single-bundle Linux)`), applies the
+  pre-migrated PG snapshot (`pg: seed applied — skipping … full migration replay`),
+  spawns code-server + ghostty terminal + embedded Postgres. The PUI terminal
+  (Zellij `network`/`plans` tabs) renders and shows the expected pre-sign-in empty
+  network board.
+* ⏸️ **Pot seed git-restore is gated on GitHub sign-in.**
+  `[papercusp-pot] not created this boot: join awaiting GitHub sign-in`. The
+  encrypted git half only decrypts **post-admission**, so a fully-offline first
+  boot cannot restore the repo until the owner signs in (an interactive,
+  owner-gated step — do not attempt to enter credentials).
+* 🐛 **A release .deb built before a migration lands ships the pre-fix schema.**
+  This run's .deb predated migrations 505/506 (`db-sql/` + the baked
+  `db-seed.tar.gz` both stop at `503`), so `agent_facts` shipped with
+  `REPLICA IDENTITY FULL` + a stored generated column (`fed_key`) + membership in
+  the `zero_harness` publication and **no primary key** → every 30s the sweep
+  fails with `cannot delete from table "agent_facts": Replica identity must not
+  contain unpublished generated columns` (the WI-2914 bug that mig 505 fixes). The
+  db-seed snapshot and the shipped migration SQL are internally *consistent* (both
+  503\) — this is **staleness, not a runtime migration bug**. **Cut releases from a
+  tree that includes every intended migration**, and treat the on-VM sweep log as
+  a schema-freshness check. **Now guarded (WI-3047):** `release-local.sh` fetches
+  and compares the `libs/papercusp` submodule against `origin/<branch>` before
+  cutting — a stale (behind-remote) submodule **fails the build on stable/beta**
+  and **warns on alpha** (mirroring the dirty-tree channel split). That closes the
+  exact root cause here: `build-desktop-sidecar.sh` bakes `db-seed.tar.gz` from
+  whatever is checked out under `libs/papercusp/libs/db/sql/`, so a lagging
+  submodule pointer silently shipped pre-505/506 SQL.
+* ⚠️ **`native-terminal: could not establish X11 glue session`** → the ghostty
+  terminal floats as a separate window instead of embedding in the webview.
+  Suspected to be a VM-environment artifact: this barebones test VM runs an Xorg
+  with **no window manager** (only `at-spi2-registryd`; no mutter/gnome-shell), so
+  X11 reparenting/embedding can't work. Verify on a full DE before filing as an
+  app bug.
+* ℹ️ The first webview frame briefly hit a React error boundary worded for dev
+  ("the app was rebuilt underneath the page — the dev build watcher rewrote the
+  bundle"); a reload cleared it. That copy is misleading in a release build and
+  should be conditioned on dev mode.
+
+## Build-speed notes (release-local.sh)
+
+* The deb already uses **gzip** (`data.tar.gz`), not xz — that lever is pulled;
+  Tauri 2's deb bundler exposes no compression knob to tune further.
+
+* The dominant, **re-incurred** cost is `cut_release_seed()` (runs
+  *unconditionally* at every build, line \~224): full-history git bundle
+  (superproject + \~40 submodules) + 1.8GB corestore snapshot + chacha20 encryption
+  of the \~1.86GB git half. For **iterative rebuilds where HEAD/seed is unchanged**,
+  `PAPERCUSP_SKIP_SEED_CUT=1` reuses the existing `src-tauri/seed` and is the single
+  biggest time saver. (A real *release* cut still needs a fresh seed matching HEAD.)
+
+* `PAPERCUSP_BUILD_ROLES="gui"` builds only the GUI role (skips the server bundle);
+  cargo incremental compile is \~3 min. The AppImage is built separately via
+  `bin/build-appimage.sh` (Tauri's appimage target crashes linuxdeploy on the
+  sidecar tree — WI-2918). That script also **overwrites linuxdeploy's compiled
+  `AppRun` with a robust shell `AppRun`** (WI-2902): the ELF AppRun NULL-derefs in
+  libc on some hosts (`segfault at 0 … in libc.so.6`) and crashes the launch
+  before the app starts, even though the binary runs fine given `LD_LIBRARY_PATH`
+  * the WebKitGTK env; the shell AppRun sets that env off `$APPDIR` (pixbuf/gio/
+    gstreamer/webkit helper paths) and execs `usr/bin/papercusp-desktop`.
+
+* `scripts/linux-test-vm/boot-vm.sh` now guards the `reset→up` / port-collision
+  race (WI-2902): qemu treats a SPICE **or** hostfwd bind failure as FATAL and
+  boots no VM. It waits (bounded) for a just-killed VM to release the deterministic
+  SSH/SPICE ports, and **drops just the operator hostfwd** (`host:$OP_PORT →
+  guest:3070`) when that port is held by a live host service, booting anyway — the
+  in-guest tests (SSH + in-guest curl + screendump) never use the forward. Set
+  `VM_OP_BASE` to a free base to reclaim it; `VM_VGA` overrides the default `qxl`.

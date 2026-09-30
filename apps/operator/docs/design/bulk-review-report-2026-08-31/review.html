@@ -1,0 +1,1014 @@
+<title>Review Report Redesign</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@600;700;800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+/* ═══ tokens: document chrome (theme-aware) ═══════════════════════════ */
+:root {
+  --ground:      #eef2f6;
+  --surface:     #ffffff;
+  --surface-sunk:#e6ecf2;
+  --ink:         #0d1922;
+  --ink-soft:    #38505f;
+  --ink-mute:    #62798a;
+  --rule:        #d5e0e8;
+  --rule-soft:   #e4ebf1;
+  --doc-accent:  #17708f;
+  --doc-accent-w:#daeef5;
+  --good:        #0b7f5c;
+  --warn:        #9a6b00;
+  --bad:         #b8354f;
+  --good-w:      #dff3ea;
+  --warn-w:      #f8eed3;
+  --bad-w:       #f8dfe4;
+  --shadow:      0 1px 2px rgb(13 25 34 / 7%), 0 12px 32px -18px rgb(13 25 34 / 30%);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:      #070e16;
+    --surface:     #0c1622;
+    --surface-sunk:#08111b;
+    --ink:         #dcebf6;
+    --ink-soft:    #a9c3d6;
+    --ink-mute:    #7d97ab;
+    --rule:        rgba(125, 211, 252, 0.16);
+    --rule-soft:   rgba(125, 211, 252, 0.09);
+    --doc-accent:  #5cc4e8;
+    --doc-accent-w:rgba(92, 196, 232, 0.15);
+    --good:        #34d399;
+    --warn:        #fbbf24;
+    --bad:         #fb7185;
+    --good-w:      rgba(52, 211, 153, 0.14);
+    --warn-w:      rgba(251, 191, 36, 0.14);
+    --bad-w:       rgba(251, 113, 133, 0.14);
+    --shadow:      0 1px 2px rgb(0 0 0 / 40%), 0 16px 40px -20px rgb(0 0 0 / 70%);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ground:      #070e16;
+  --surface:     #0c1622;
+  --surface-sunk:#08111b;
+  --ink:         #dcebf6;
+  --ink-soft:    #a9c3d6;
+  --ink-mute:    #7d97ab;
+  --rule:        rgba(125, 211, 252, 0.16);
+  --rule-soft:   rgba(125, 211, 252, 0.09);
+  --doc-accent:  #5cc4e8;
+  --doc-accent-w:rgba(92, 196, 232, 0.15);
+  --good:        #34d399;
+  --warn:        #fbbf24;
+  --bad:         #fb7185;
+  --good-w:      rgba(52, 211, 153, 0.14);
+  --warn-w:      rgba(251, 191, 36, 0.14);
+  --bad-w:       rgba(251, 113, 133, 0.14);
+  --shadow:      0 1px 2px rgb(0 0 0 / 40%), 0 16px 40px -20px rgb(0 0 0 / 70%);
+  color-scheme: dark;
+}
+
+/* ═══ tokens: the artboards — pinned to the operator's own dark theme ══
+   These frames are pictures OF the app, so they keep the app's palette in
+   both document themes. Values lifted from apps/operator/app/_semantic.css. */
+.frame {
+  --bg:           #07101d;
+  --bg-1:         #0b1220;
+  --bg-2:         rgba(255,255,255,.045);
+  --bg-3:         rgba(255,255,255,.075);
+  --bg-raised:    #112235;
+  --fg:           #e7f7ff;
+  --fg-dim:       #b9d4e8;
+  --fg-mute:      #7f9bb4;
+  --border:       rgba(125,211,252,.15);
+  --border-strong:rgba(125,211,252,.32);
+  --accent:       #38bdf8;
+  --accent-soft:  #bae6fd;
+  --a-good:       #34d399;
+  --a-warn:       #fbbf24;
+  --a-bad:        #fb7185;
+  --review:       #8f9bf2;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+  font-size: 17px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ═══ layout ══════════════════════════════════════════════════════════ */
+.page { --measure: 65ch; --wide: 1180px; }
+.band { padding: 0 24px; }
+.col { max-width: var(--measure); margin-inline: auto; }
+.col-wide { max-width: var(--wide); margin-inline: auto; }
+
+/* ═══ typography ══════════════════════════════════════════════════════ */
+h1, h2, h3, h4, .eyebrow, .kicker { font-family: Chivo, "Helvetica Neue", Arial, sans-serif; }
+h1 { font-size: clamp(34px, 5.2vw, 52px); line-height: 1.02; font-weight: 800; letter-spacing: -.022em; margin: 0; text-wrap: balance; }
+h2 { font-size: clamp(25px, 3.2vw, 33px); line-height: 1.1; font-weight: 700; letter-spacing: -.016em; margin: 0; text-wrap: balance; }
+h3 { font-size: 19px; line-height: 1.25; font-weight: 700; letter-spacing: -.008em; margin: 0; text-wrap: balance; }
+h4 { font-size: 14px; line-height: 1.3; font-weight: 700; margin: 0; }
+p { margin: 0; }
+.lede { font-size: 20px; line-height: 1.52; color: var(--ink-soft); }
+.eyebrow {
+  font-size: 11px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--doc-accent); margin: 0;
+}
+.mute { color: var(--ink-mute); }
+.stack { display: flex; flex-direction: column; }
+.stack-6  > * + * { margin-top: 6px; }
+.stack-10 > * + * { margin-top: 10px; }
+.stack-16 > * + * { margin-top: 16px; }
+.stack-24 > * + * { margin-top: 24px; }
+.stack-40 > * + * { margin-top: 40px; }
+code, .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+code {
+  font-size: .86em; background: var(--surface-sunk); color: var(--ink-soft);
+  padding: .1em .38em; border-radius: 4px; border: 1px solid var(--rule-soft);
+}
+a { color: var(--doc-accent); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--doc-accent); outline-offset: 3px; border-radius: 3px; }
+
+/* ═══ masthead ════════════════════════════════════════════════════════ */
+.masthead {
+  padding: 64px 24px 44px;
+  border-bottom: 1px solid var(--rule);
+  background:
+    radial-gradient(120% 100% at 12% -30%, var(--doc-accent-w), transparent 62%),
+    var(--surface);
+}
+.masthead .col { display: flex; flex-direction: column; gap: 18px; }
+.masthead-meta {
+  display: flex; flex-wrap: wrap; gap: 8px 22px;
+  font-family: "IBM Plex Mono", monospace; font-size: 11.5px; letter-spacing: .04em;
+  color: var(--ink-mute); padding-top: 6px; border-top: 1px solid var(--rule-soft);
+}
+
+/* ═══ the three-ask spine ═════════════════════════════════════════════ */
+.ask-index { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
+@media (min-width: 720px) { .ask-index { grid-template-columns: repeat(3, 1fr); } }
+.ask-index > * { background: var(--surface); padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; text-decoration: none; color: inherit; }
+.ask-index > *:hover { background: var(--surface-sunk); }
+.ask-index .n { font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .12em; color: var(--doc-accent); font-weight: 600; }
+.ask-index .t { font-family: Chivo, sans-serif; font-weight: 700; font-size: 15.5px; line-height: 1.25; }
+.ask-index .s { font-size: 13.5px; line-height: 1.4; color: var(--ink-mute); }
+
+/* ═══ sections ════════════════════════════════════════════════════════ */
+section { padding: 56px 0; border-top: 1px solid var(--rule); }
+section:first-of-type { border-top: 0; }
+.sec-head { display: flex; flex-direction: column; gap: 12px; }
+
+/* ═══ artboard frame ══════════════════════════════════════════════════ */
+.frame-wrap { margin-top: 26px; }
+.frame-cap {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 10px;
+  font-family: Chivo, sans-serif; font-size: 13px; font-weight: 700; letter-spacing: .01em;
+}
+.frame-cap .tag {
+  font-family: "IBM Plex Mono", monospace; font-size: 10.5px; font-weight: 600; letter-spacing: .1em;
+  text-transform: uppercase; padding: 2px 7px; border-radius: 999px;
+}
+.tag-now  { background: var(--bad-w);  color: var(--bad);  }
+.tag-next { background: var(--good-w); color: var(--good); }
+.tag-edge { background: var(--warn-w); color: var(--warn); }
+.frame-cap .note { font-family: "Source Serif 4", serif; font-weight: 400; font-size: 14px; color: var(--ink-mute); }
+
+.frame {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  overflow-x: auto;
+  box-shadow: var(--shadow);
+  font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  font-size: 12.5px;
+  color: var(--fg);
+  line-height: 1.45;
+}
+.frame-inner { min-width: 880px; }
+
+/* ── app chrome inside the frame ── */
+.rr-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding-bottom: 11px; border-bottom: 1px solid rgba(143,155,242,.26);
+}
+.rr-id { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.rr-icon {
+  width: 34px; height: 34px; flex: 0 0 34px; border-radius: 9px; display: grid; place-items: center;
+  border: 1px solid rgba(143,155,242,.5); color: #cfd5ff; font-size: 15px;
+  background: linear-gradient(145deg, rgba(143,155,242,.5), rgba(143,155,242,.18));
+}
+.rr-title { font-size: 17px; font-weight: 750; letter-spacing: -.01em; }
+.rr-sub { font-size: 11px; color: var(--fg-mute); margin-top: 2px; }
+.rr-actions { display: flex; gap: 7px; flex: 0 0 auto; align-items: center; }
+
+.btn {
+  font: inherit; font-size: 12px; font-weight: 600; border-radius: 7px; padding: 7px 13px;
+  border: 1px solid var(--border-strong); background: var(--bg-2); color: var(--fg);
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: default;
+}
+.btn-primary { background: linear-gradient(180deg, #2fb37a, #14926a); border-color: #2fb37a; color: #04241a; }
+.btn-ghost { background: transparent; border-color: var(--border); color: var(--fg-dim); }
+.btn-warn { background: rgba(251,191,36,.14); border-color: rgba(251,191,36,.5); color: #fde3a0; }
+.btn-danger { background: rgba(251,113,133,.13); border-color: rgba(251,113,133,.45); color: #ffc2cd; }
+.btn-sm { font-size: 11px; padding: 4px 9px; border-radius: 6px; }
+
+/* ── summary tiles ── */
+.rr-tiles { display: flex; gap: 0; margin-top: 12px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg-1); }
+.rr-tile { flex: 1; padding: 10px 14px; border-left: 1px solid var(--border); }
+.rr-tile:first-child { border-left: 0; }
+.rr-tile .k { font-size: 9.5px; letter-spacing: .13em; text-transform: uppercase; color: var(--fg-mute); font-weight: 600; }
+.rr-tile .v { font-size: 21px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.rr-tile .v small { font-size: 11px; font-weight: 500; color: var(--fg-mute); margin-left: 5px; }
+.rr-tile--live { background: rgba(56,189,248,.07); box-shadow: inset 0 -2px 0 var(--accent); }
+.rr-tile--btnish { cursor: default; }
+.rr-tile--btnish .k::after { content: " ▾"; opacity: .5; }
+
+/* ── group ── */
+.rr-group { margin-top: 12px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg-1); }
+.rr-ghead { display: flex; align-items: center; gap: 11px; padding: 10px 13px; background: var(--bg-2); border-bottom: 1px solid var(--border); }
+.rr-ghead .gt { font-weight: 700; font-size: 13px; }
+.rr-ghead .gd { color: var(--fg-mute); font-size: 11.5px; }
+.rr-ghead .count { background: var(--bg-3); border-radius: 999px; padding: 1px 8px; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.spacer { margin-left: auto; }
+
+.cb { width: 15px; height: 15px; flex: 0 0 15px; border-radius: 4px; border: 1.5px solid var(--border-strong); display: grid; place-items: center; font-size: 10px; color: var(--bg); }
+.cb-on { background: var(--accent); border-color: var(--accent); }
+.cb-mixed { background: var(--bg-3); }
+.cb-mixed::after { content: ""; width: 7px; height: 2px; background: var(--accent); border-radius: 1px; }
+
+/* ── rows ── */
+.rr-row { display: grid; align-items: center; gap: 10px; padding: 8px 13px; border-top: 1px solid rgba(125,211,252,.07); }
+.rr-row:first-child { border-top: 0; }
+.grid-now  { grid-template-columns: 15px 168px 42px auto 1fr 78px; }
+.grid-next { grid-template-columns: 15px 128px 1fr 132px 1.25fr auto auto auto; }
+
+.pill { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 600; border: 1px solid var(--border); background: var(--bg-2); white-space: nowrap; }
+.pill-slug { max-width: 100%; overflow: hidden; text-overflow: ellipsis; display: inline-block; }
+.pill-state { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; padding: 1px 7px; }
+.st-todo { color: #c9d8e6; }
+.st-done { color: var(--a-good); border-color: rgba(52,211,153,.45); background: rgba(52,211,153,.12); }
+.st-blocked { color: var(--a-bad); border-color: rgba(251,113,133,.45); background: rgba(251,113,133,.12); }
+.st-arch { color: var(--a-warn); border-color: rgba(251,191,36,.45); background: rgba(251,191,36,.12); }
+.arrow { color: var(--fg-mute); }
+.ev { color: var(--fg-mute); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.conf-old { display: inline-flex; align-items: center; justify-content: space-between; gap: 6px; width: 74px; border-radius: 999px; padding: 3px 9px; font-size: 11px; font-weight: 600; border: 1px solid rgba(251,191,36,.45); background: rgba(251,191,36,.12); color: #fde3a0; }
+.conf-old.hi { border-color: rgba(52,211,153,.45); background: rgba(52,211,153,.12); color: #9ff0cd; }
+
+/* the redesigned pieces */
+.verb {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 700;
+  border-radius: 6px; padding: 4px 9px; border: 1px solid rgba(56,189,248,.42);
+  background: rgba(56,189,248,.13); color: #bfe9ff; white-space: nowrap;
+}
+.verb-warn { border-color: rgba(251,191,36,.42); background: rgba(251,191,36,.12); color: #fde3a0; }
+.verb-mute { border-color: var(--border); background: transparent; color: var(--fg-mute); }
+.verb-good { border-color: rgba(52,211,153,.42); background: rgba(52,211,153,.12); color: #9ff0cd; }
+.verb .ic { font-size: 11px; opacity: .9; }
+
+.target { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.target .plan { color: var(--accent-soft); text-decoration: underline; text-decoration-color: rgba(186,230,253,.35); text-underline-offset: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.target .sep { color: var(--fg-mute); font-size: 10px; }
+.target .item { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--fg-dim); }
+
+.confdot { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--fg-dim); white-space: nowrap; }
+.confdot i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.d-high { background: var(--a-good); }
+.d-med  { background: var(--a-warn); }
+.d-low  { background: var(--a-bad); }
+.why { font: inherit; font-size: 11px; font-weight: 600; color: var(--fg-mute); background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; display: inline-flex; gap: 4px; align-items: center; }
+.kebab { color: var(--fg-mute); border: 1px solid transparent; border-radius: 6px; padding: 3px 7px; font-size: 13px; letter-spacing: 1px; }
+
+/* row states */
+.row-blocked { background: rgba(251,113,133,.05); }
+.row-manual  { background: rgba(143,155,242,.05); }
+.row-applied { opacity: .62; }
+.row-stale   { background: rgba(251,191,36,.06); }
+.mark { display: grid; place-items: center; font-size: 12px; }
+.mark-ok { color: var(--a-good); }
+.mark-manual { color: #a8b2f5; }
+.mark-skip { color: var(--fg-mute); }
+
+.inline-note { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 7px 0 2px 25px; font-size: 11.5px; color: var(--fg-dim); }
+.inline-note.bad { color: #ffc2cd; }
+
+/* ── the run-state bar ── */
+.runbar { display: flex; align-items: center; gap: 12px; padding: 10px 13px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-1); margin-top: 12px; }
+.runbar-icon { width: 26px; height: 26px; flex: 0 0 26px; border-radius: 7px; display: grid; place-items: center; font-size: 13px; }
+.runbar-txt { min-width: 0; }
+.runbar-txt b { font-size: 12.5px; font-weight: 700; }
+.runbar-txt div { font-size: 11.5px; color: var(--fg-mute); margin-top: 1px; }
+.runbar-actions { margin-left: auto; display: flex; gap: 7px; flex: 0 0 auto; }
+.rb-warn { border-color: rgba(251,191,36,.4); background: rgba(251,191,36,.07); }
+.rb-warn .runbar-icon { background: rgba(251,191,36,.16); color: var(--a-warn); }
+.rb-bad { border-color: rgba(251,113,133,.4); background: rgba(251,113,133,.07); }
+.rb-bad .runbar-icon { background: rgba(251,113,133,.16); color: var(--a-bad); }
+.rb-good { border-color: rgba(52,211,153,.35); background: rgba(52,211,153,.06); }
+.rb-good .runbar-icon { background: rgba(52,211,153,.16); color: var(--a-good); }
+.rb-live .runbar-icon { background: rgba(56,189,248,.16); color: var(--accent); }
+.rb-live { border-color: rgba(56,189,248,.35); background: rgba(56,189,248,.06); }
+
+.progress { height: 4px; border-radius: 999px; background: var(--bg-3); overflow: hidden; margin-top: 6px; width: 220px; }
+.progress i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+
+/* ── callout pins over the "today" board ── */
+.pinned { position: relative; }
+.pin {
+  position: absolute; width: 19px; height: 19px; border-radius: 50%;
+  background: var(--a-bad); color: #2a0710; font-family: Chivo, sans-serif; font-weight: 800; font-size: 11px;
+  display: grid; place-items: center; box-shadow: 0 0 0 3px rgba(251,113,133,.22); z-index: 2;
+}
+.pinlist { margin-top: 16px; display: grid; gap: 10px; }
+@media (min-width: 780px) { .pinlist { grid-template-columns: 1fr 1fr; } }
+.pinrow { display: grid; grid-template-columns: 21px 1fr; gap: 10px; align-items: start; font-size: 15px; line-height: 1.45; }
+.pinrow .n {
+  width: 19px; height: 19px; border-radius: 50%; background: var(--bad); color: var(--surface);
+  font-family: Chivo, sans-serif; font-weight: 800; font-size: 11px; display: grid; place-items: center; margin-top: 4px;
+}
+.pinrow b { font-family: Chivo, sans-serif; font-size: 14.5px; }
+
+/* ═══ prose furniture ═════════════════════════════════════════════════ */
+.rule-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+.rule-list li { padding: 13px 0; border-top: 1px solid var(--rule-soft); display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: baseline; }
+.rule-list li:first-child { border-top: 0; }
+.rule-list .lbl { font-family: Chivo, sans-serif; font-weight: 700; font-size: 13px; letter-spacing: .01em; color: var(--doc-accent); white-space: nowrap; }
+
+.callout {
+  border-left: 3px solid var(--doc-accent); background: var(--surface); padding: 16px 20px;
+  border-radius: 0 8px 8px 0; box-shadow: var(--shadow);
+}
+.callout.warn { border-left-color: var(--warn); }
+.callout.bad { border-left-color: var(--bad); }
+.callout h4 { margin-bottom: 5px; font-family: Chivo, sans-serif; }
+
+.tbl-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 14.5px; }
+thead th {
+  text-align: left; font-family: Chivo, sans-serif; font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--ink-mute); font-weight: 700; padding: 11px 14px; border-bottom: 1px solid var(--rule); background: var(--surface-sunk);
+  position: sticky; top: 0;
+}
+tbody td { padding: 11px 14px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; line-height: 1.45; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody th {
+  text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--rule-soft); vertical-align: top;
+  font-family: Chivo, sans-serif; font-weight: 700; font-size: 13.5px; line-height: 1.35; width: 27%;
+}
+td.today { color: var(--ink-mute); }
+.sev { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; vertical-align: middle; }
+.sev-hi { background: var(--bad); }
+.sev-md { background: var(--warn); }
+.sev-lo { background: var(--good); }
+.grp-row td { background: var(--surface-sunk); font-family: Chivo, sans-serif; font-weight: 700; font-size: 11px; letter-spacing: .13em; text-transform: uppercase; color: var(--ink-soft); padding: 9px 14px; }
+
+.split { display: grid; gap: 22px; }
+@media (min-width: 860px) { .split { grid-template-columns: 1fr 1fr; } }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 20px; box-shadow: var(--shadow); }
+.card h4 { font-size: 15px; margin-bottom: 8px; }
+.card ul { margin: 8px 0 0; padding-left: 19px; font-size: 15px; line-height: 1.5; }
+.card li + li { margin-top: 5px; }
+
+.foot { padding: 44px 24px 64px; border-top: 1px solid var(--rule); background: var(--surface); }
+.foot .col { font-size: 14px; color: var(--ink-mute); }
+</style>
+
+<div class="page">
+
+<!-- ══════════════════ masthead ══════════════════ -->
+<header class="masthead">
+  <div class="col">
+    <p class="eyebrow">Design review · Papercup operator</p>
+    <h1>Say what the button does, and let the owner run it again</h1>
+    <p class="lede">
+      The clean-up report reads like a database dump wearing UI. Every row carries four
+      pills and not one of them names an action; a run that stops halfway has no way back.
+      Three asks, three fixes, one shared surface for Plans and Inbox.
+    </p>
+    <div class="masthead-meta">
+      <span>2026-08-31</span>
+      <span>WI-1736645</span>
+      <span>ReviewReportShell · PlanCleanupReport · InboxBulkReport</span>
+    </div>
+  </div>
+</header>
+
+<div class="band" style="padding-top:34px">
+  <div class="col">
+    <nav class="ask-index">
+      <a href="#legibility"><span class="n">ASK 1</span><span class="t">What does this pill even do</span><span class="s">Four controls per row, zero verbs, one outright lie of affordance.</span></a>
+      <a href="#lifecycle"><span class="n">ASK 2</span><span class="t">There is no re-run</span><span class="s">Stop it mid-scan and the findings you paid for become a dead end.</span></a>
+      <a href="#edges"><span class="n">ASK 3</span><span class="t">Every edge case</span><span class="s">28 states across run, row, staleness, scale and concurrency.</span></a>
+    </nav>
+  </div>
+</div>
+
+<!-- ══════════════════ ASK 1 ══════════════════ -->
+<section id="legibility" class="band">
+  <div class="col stack-16">
+    <p class="eyebrow">Ask 1 — legibility</p>
+    <h2>A row with four controls and no verb</h2>
+    <p>
+      Here is one row exactly as it ships. Read it left to right and try to answer a single
+      question: <em>if I tick this box and press Apply, what happens?</em> The row never says.
+      The verb lives in the group header two rows up, and scrolls away.
+    </p>
+  </div>
+
+  <div class="col-wide frame-wrap">
+    <div class="frame-cap"><span class="tag tag-now">Today</span> Plans clean-up · one row, annotated</div>
+    <div class="frame pinned">
+      <div class="frame-inner">
+        <div class="rr-group" style="margin-top:0">
+          <div class="rr-ghead">
+            <span class="cb cb-on">✓</span>
+            <span class="gt">Clear stale blockers and claims</span>
+            <span class="count">6</span>
+            <span class="gd">Blockers that are terminal and expired claims whose holder is gone.</span>
+            <span class="spacer" style="color:var(--fg-mute)">⌄</span>
+          </div>
+          <div class="rr-row grid-now">
+            <span class="cb cb-on">✓</span>
+            <span class="pill pill-slug">code-intelligence-routing-…</span>
+            <span class="mono" style="font-size:11px;color:var(--fg-dim)">P-006</span>
+            <span><span class="pill pill-state st-blocked">blocked</span> <span class="arrow">→</span> <span class="pill pill-state st-todo">todo</span></span>
+            <span class="ev">plan-item · P-004 · blocker status=done</span>
+            <span class="conf-old hi">high <span style="opacity:.6">⌄</span></span>
+          </div>
+          <div class="rr-row grid-now">
+            <span class="cb cb-on">✓</span>
+            <span class="pill pill-slug">local-concurrent-inferenc…</span>
+            <span class="mono" style="font-size:11px;color:var(--fg-dim)">P-008</span>
+            <span><span class="pill pill-state st-blocked">blocked</span> <span class="arrow">→</span> <span class="pill pill-state st-todo">todo</span></span>
+            <span class="ev">plan-item · P-004 · blocker status=done</span>
+            <span class="conf-old hi">high <span style="opacity:.6">⌄</span></span>
+          </div>
+        </div>
+      </div>
+      <span class="pin" style="left:20px; top:96px">1</span>
+      <span class="pin" style="left:150px; top:96px">2</span>
+      <span class="pin" style="left:352px; top:96px">3</span>
+      <span class="pin" style="right:112px; top:96px">4</span>
+      <span class="pin" style="left:20px; top:26px">5</span>
+    </div>
+
+    <div class="pinlist">
+      <div class="pinrow"><span class="n">1</span><div><b>The checkbox slot is three different things.</b> A real checkbox, or <span class="mono">✓</span> for applied, or <span class="mono">↗</span> for "manual review required", or <span class="mono">—</span> for dismissed. The <span class="mono">↗</span> glyph reads as <em>open in new tab</em> and is not clickable.</div></div>
+      <div class="pinrow"><span class="n">2</span><div><b>The slug pill looks like a link and is a <code>&lt;span&gt;</code>.</b> Rounded, bordered, truncated with an ellipsis that promises "click to see the rest". Nothing happens.</div></div>
+      <div class="pinrow"><span class="n">3</span><div><b>Two status badges and an arrow are not a sentence.</b> <span class="mono">blocked → todo</span> renders as current fact, not as a proposed change. Nothing on the row says "if applied".</div></div>
+      <div class="pinrow"><span class="n">4</span><div><b>This is the lie.</b> A pill with a chevron, sized like a select, labelled with a value — <span class="mono">high</span>, <span class="mono">medium</span>. Every convention says <em>pick a different one</em>. It is the disclosure toggle for the evidence panel. The confidence isn't editable at all.</div></div>
+      <div class="pinrow"><span class="n">5</span><div><b>The verb only exists in the group header</b> — "Clear stale blockers" — and the header scrolls off. Twelve rows down, the owner is ticking boxes with no idea what the tick commits to.</div></div>
+    </div>
+  </div>
+
+  <div class="col stack-16" style="margin-top:44px">
+    <h3>The fix: every row states its action in the first column</h3>
+    <p>
+      Five moves. The row becomes a sentence you read left to right — <em>verb, target, change,
+      because</em> — and the only chevron on the row belongs to the only thing that discloses.
+    </p>
+    <ul class="rule-list">
+      <li><span class="lbl">Verb first</span><span>A coloured action chip in column one: <b>Mark done</b>, <b>Clear blocker</b>, <b>Archive plan</b>, <b>Rewrite Now</b>. Same vocabulary as the button that commits it.</span></li>
+      <li><span class="lbl">Change, not badges</span><span>Keep the pills, but label the transition <span class="mono">status</span> and reserve the coloured "after" pill for the value Apply will write.</span></li>
+      <li><span class="lbl">Honest chevrons</span><span>Confidence becomes a non-interactive dot + word. A separate <b>Why ▾</b> button opens the evidence. One chevron, on the disclosure.</span></li>
+      <li><span class="lbl">Real links</span><span>The slug opens the plan dashboard. It already looks like a link; make it one.</span></li>
+      <li><span class="lbl">Per-row actions</span><span>An overflow menu carries <b>Apply just this</b>, <b>Skip</b>, <b>Re-check</b>, <b>Open plan</b> — the four things the backend already supports and the report never offered.</span></li>
+    </ul>
+  </div>
+
+  <div class="col-wide frame-wrap">
+    <div class="frame-cap"><span class="tag tag-next">Proposed</span> The same six findings, verb-first<span class="note">— hover reveals the overflow; nothing else moved position</span></div>
+    <div class="frame">
+      <div class="frame-inner">
+        <div class="rr-group" style="margin-top:0">
+          <div class="rr-ghead">
+            <span class="cb cb-on">✓</span>
+            <span class="gt">Clear stale blockers</span>
+            <span class="count">6 selected</span>
+            <span class="gd">Their blocker already finished, so the item can move back to todo.</span>
+            <span class="spacer btn btn-ghost btn-sm">Collapse</span>
+          </div>
+
+          <div class="rr-row grid-next">
+            <span class="cb cb-on">✓</span>
+            <span class="verb"><span class="ic">⤺</span> Clear blocker</span>
+            <span class="target"><span class="plan">code-intelligence-routing</span><span class="sep">▸</span><span class="item">P-006</span></span>
+            <span><span style="color:var(--fg-mute);font-size:10.5px">status</span> <span class="pill pill-state st-blocked">blocked</span> <span class="arrow">→</span> <span class="pill pill-state st-todo">todo</span></span>
+            <span class="ev">its blocker P-004 finished 6d ago</span>
+            <span class="confdot"><i class="d-high"></i>high</span>
+            <span class="why">Why <span style="opacity:.55">⌄</span></span>
+            <span class="kebab">···</span>
+          </div>
+
+          <div class="rr-row grid-next">
+            <span class="cb cb-on">✓</span>
+            <span class="verb"><span class="ic">⤺</span> Clear blocker</span>
+            <span class="target"><span class="plan">local-concurrent-inference</span><span class="sep">▸</span><span class="item">P-008</span></span>
+            <span><span style="color:var(--fg-mute);font-size:10.5px">status</span> <span class="pill pill-state st-blocked">blocked</span> <span class="arrow">→</span> <span class="pill pill-state st-todo">todo</span></span>
+            <span class="ev">its blocker P-004 finished 6d ago</span>
+            <span class="confdot"><i class="d-high"></i>high</span>
+            <span class="why">Why <span style="opacity:.55">⌄</span></span>
+            <span class="kebab">···</span>
+          </div>
+
+          <div class="rr-row grid-next row-manual">
+            <span class="mark mark-manual">✎</span>
+            <span class="verb verb-mute"><span class="ic">✎</span> You write it</span>
+            <span class="target"><span class="plan">derived-truth-audit</span><span class="sep">▸</span><span class="item">## Now</span></span>
+            <span><span style="color:var(--fg-mute);font-size:10.5px">needs</span> <span class="pill pill-state st-arch">new State / Next</span></span>
+            <span class="ev">Now points only at finished work</span>
+            <span class="confdot"><i class="d-med"></i>medium</span>
+            <span class="why">Why <span style="opacity:.55">⌄</span></span>
+            <span class="kebab">···</span>
+            <span class="inline-note">Papercup can spot the staleness but not author the replacement. <span class="btn btn-ghost btn-sm">Open plan and rewrite</span><span class="btn btn-ghost btn-sm">Ask Papercup to draft it</span></span>
+          </div>
+
+          <div class="rr-row grid-next row-applied">
+            <span class="mark mark-ok">✓</span>
+            <span class="verb verb-good"><span class="ic">✓</span> Marked done</span>
+            <span class="target"><span class="plan">rem-dream-recombination</span><span class="sep">▸</span><span class="item">P-005</span></span>
+            <span><span style="color:var(--fg-mute);font-size:10.5px">status</span> <span class="pill pill-state st-todo">blocked</span> <span class="arrow">→</span> <span class="pill pill-state st-done">todo</span></span>
+            <span class="ev">applied automatically · 08:14, evidence recorded</span>
+            <span class="confdot"><i class="d-high"></i>high</span>
+            <span class="why">Why <span style="opacity:.55">⌄</span></span>
+            <span class="kebab">···</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col stack-16" style="margin-top:34px">
+    <h3>And the tiles stop being jargon</h3>
+    <p>
+      <span class="mono">RESULTS / READY / HANDLED / MANUAL / NOT APPLIED</span> is the resolver's
+      vocabulary, not the owner's. Rewrite them as what the owner has to <em>do</em>, and make each
+      one a filter — a count you cannot click is a count you cannot act on.
+    </p>
+  </div>
+
+  <div class="col-wide frame-wrap">
+    <div class="frame-cap"><span class="tag tag-now">Today</span> / <span class="tag tag-next">Proposed</span> Summary tiles</div>
+    <div class="frame">
+      <div class="frame-inner">
+        <div class="rr-tiles">
+          <div class="rr-tile"><div class="k">Results</div><div class="v">24</div></div>
+          <div class="rr-tile"><div class="k">Ready</div><div class="v">12</div></div>
+          <div class="rr-tile"><div class="k">Handled</div><div class="v">0</div></div>
+          <div class="rr-tile"><div class="k">Manual</div><div class="v">12</div></div>
+          <div class="rr-tile"><div class="k">Not applied</div><div class="v">0</div></div>
+        </div>
+        <div class="rr-tiles" style="margin-top:14px">
+          <div class="rr-tile rr-tile--live rr-tile--btnish"><div class="k">Papercup can fix</div><div class="v">12 <small>selected</small></div></div>
+          <div class="rr-tile rr-tile--btnish"><div class="k">Needs you</div><div class="v">12 <small>in 9 plans</small></div></div>
+          <div class="rr-tile rr-tile--btnish"><div class="k">Already fixed</div><div class="v">0</div></div>
+          <div class="rr-tile rr-tile--btnish"><div class="k">Skipped</div><div class="v">0</div></div>
+          <div class="rr-tile rr-tile--btnish"><div class="k">Not assessed</div><div class="v">0</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════ ASK 2 ══════════════════ -->
+<section id="lifecycle" class="band">
+  <div class="col stack-16">
+    <p class="eyebrow">Ask 2 — the run lifecycle</p>
+    <h2>The re-run already exists. The report just never offers it.</h2>
+    <p>
+      This is the part that stings. <code>/api/admin/plan-cleanup</code> accepts
+      <code>stop</code>, <code>restart</code>, <code>resume</code>, <code>recheck-finding</code>,
+      <code>dismiss-finding</code> and <code>reclassify</code>. The progress strip wires up three of
+      them. Then the run reaches review, the strip is replaced by the takeover, and the takeover's
+      entire action set is <b>Apply selected</b> and <b>Close</b>.
+    </p>
+
+    <div class="callout bad">
+      <h4>Worse: two whole run outcomes have no screen at all</h4>
+      <p style="font-size:15.5px">
+        Both hosts render only when <code>run.phase === 'review'</code>. A run that
+        auto-applied everything settles to <code>complete</code> — so the one run that actually
+        changed the owner's plans without asking is the one run they can never open and inspect.
+        A run that ends <code>failed</code> is equally invisible. There is no run history either:
+        the only door to a past run is a <code>?opcln=</code> URL nothing in the UI hands you.
+      </p>
+    </div>
+
+    <h3 style="margin-top:12px">A run-state bar, always present, directly under the header</h3>
+    <p>
+      One strip that states what the run <em>is</em>, how old it is, and what you can do to the run
+      itself — as opposed to the findings inside it. It carries the controls the API already has.
+      Six states; the owner never has to guess which one they're in.
+    </p>
+  </div>
+
+  <div class="col-wide frame-wrap">
+    <div class="frame-cap"><span class="tag tag-next">Proposed</span> Run-state bar — six states</div>
+    <div class="frame">
+      <div class="frame-inner">
+
+        <div class="rr-head" style="border-bottom-color:rgba(143,155,242,.26)">
+          <div class="rr-id">
+            <span class="rr-icon">🧹</span>
+            <div>
+              <div class="rr-title">Clean-up report</div>
+              <div class="rr-sub">24 findings across 22 plans · started 08:12, took 4m 09s · <span style="color:var(--accent-soft)">Runs ▾</span></div>
+            </div>
+          </div>
+          <div class="rr-actions">
+            <span class="btn btn-ghost">Re-run ▾</span>
+            <span class="btn btn-primary">✓ Apply 12 selected</span>
+            <span class="btn">Close</span>
+          </div>
+        </div>
+
+        <div class="runbar rb-live">
+          <span class="runbar-icon">◐</span>
+          <div class="runbar-txt">
+            <b>Scanning — 40 of 120 plans</b>
+            <div>18 findings so far · resolver reported 3s ago</div>
+            <div class="progress"><i style="width:33%"></i></div>
+          </div>
+          <div class="runbar-actions"><span class="btn btn-ghost btn-sm">Review what's found</span><span class="btn btn-warn btn-sm">Stop</span></div>
+        </div>
+
+        <div class="runbar rb-warn">
+          <span class="runbar-icon">⏸</span>
+          <div class="runbar-txt">
+            <b>You stopped this run after 40 of 120 plans</b>
+            <div>24 findings assessed and kept. 80 plans were never looked at.</div>
+          </div>
+          <div class="runbar-actions"><span class="btn btn-warn btn-sm">▶ Resume the remaining 80</span><span class="btn btn-ghost btn-sm">Re-run all 120</span></div>
+        </div>
+
+        <div class="runbar rb-bad">
+          <span class="runbar-icon">⚠</span>
+          <div class="runbar-txt">
+            <b>The resolver stopped reporting 11 minutes ago</b>
+            <div>Last heartbeat 08:19. 6 findings were left unassessed — they're listed below as <i>Not assessed</i>.</div>
+          </div>
+          <div class="runbar-actions"><span class="btn btn-danger btn-sm">↻ Restart the resolver</span><span class="btn btn-ghost btn-sm">Keep the 18 it finished</span></div>
+        </div>
+
+        <div class="runbar rb-bad">
+          <span class="runbar-icon">✕</span>
+          <div class="runbar-txt">
+            <b>This run failed</b>
+            <div class="mono" style="font-size:10.5px">persisted launch settings are no longer valid — model <code style="background:none;border:none;color:inherit;padding:0">sonnet-4.9</code> is not configured</div>
+          </div>
+          <div class="runbar-actions"><span class="btn btn-ghost btn-sm">Choose settings</span><span class="btn btn-danger btn-sm">↻ Re-run</span></div>
+        </div>
+
+        <div class="runbar rb-warn">
+          <span class="runbar-icon">⧗</span>
+          <div class="runbar-txt">
+            <b>This report is 3 days old</b>
+            <div>4 of its 12 ready findings no longer match the plan's current state. Applying them now would overwrite newer work.</div>
+          </div>
+          <div class="runbar-actions"><span class="btn btn-warn btn-sm">↻ Re-check all 12</span><span class="btn btn-ghost btn-sm">Show the 4</span></div>
+        </div>
+
+        <div class="runbar rb-good">
+          <span class="runbar-icon">✓</span>
+          <div class="runbar-txt">
+            <b>Papercup fixed all 24 findings on its own</b>
+            <div>Nothing needs you. Every change is listed below with the evidence behind it.</div>
+          </div>
+          <div class="runbar-actions"><span class="btn btn-ghost btn-sm">Undo all</span><span class="btn btn-ghost btn-sm">Run again</span></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div class="col stack-16" style="margin-top:40px">
+    <h3>Stopped mid-run, in full</h3>
+    <p>
+      Today a stopped run lands in review with its unreached findings marked
+      <code>pending</code>, which the report renders as <em>manual</em> with the reason
+      <span class="mono">"The resolver did not reach this finding; no action is available."</span>
+      That is a factual dead end. The finding is not manual work — it is work
+      <em>nobody has done yet</em>, and <code>resume</code> is one POST away.
+    </p>
+  </div>
+
+  <div class="col-wide frame-wrap">
+    <div class="frame-cap"><span class="tag tag-next">Proposed</span> A stopped run · unassessed rows become resumable, not manual</div>
+    <div class="frame">
+      <div class="frame-inner">
+        <div class="runbar rb-warn" style="margin-top:0">
+          <span class="runbar-icon">⏸</span>
+          <div class="runbar-txt">
+            <b>Stopped after 40 of 120 plans</b>
+            <div>24 assessed · 6 never reached</div>
+          </div>
+          <div class="runbar-actions"><span class="btn btn-warn btn-sm">▶ Resume the remaining 80</span><span class="btn btn-ghost btn-sm">Re-run all</span></div>
+        </div>
+
+        <div class="rr-group">
+          <div class="rr-ghead" style="background:rgba(251,191,36,.08)">
+            <span class="cb"></span>
+            <span class="gt">Not assessed yet</span>
+            <span class="count">6</span>
+            <span class="gd">Found by the scan, but the run stopped before Papercup could judge them.</span>
+            <span class="spacer btn btn-warn btn-sm">▶ Assess these 6</span>
+          </div>
+          <div class="rr-row grid-next row-stale">
+            <span class="mark mark-skip">…</span>
+            <span class="verb verb-warn"><span class="ic">▶</span> Assess</span>
+            <span class="target"><span class="plan">silent-halt-detection</span><span class="sep">▸</span><span class="item">P-006</span></span>
+            <span><span style="color:var(--fg-mute);font-size:10.5px">candidate</span> <span class="pill pill-state st-blocked">blocked</span> <span class="arrow">→</span> <span class="pill pill-state" style="color:var(--fg-mute)">?</span></span>
+            <span class="ev">blocker P-005 is terminal — needs judging</span>
+            <span class="confdot"><i class="d-low"></i>not judged</span>
+            <span class="why">Why <span style="opacity:.55">⌄</span></span>
+            <span class="kebab">···</span>
+          </div>
+          <div class="rr-row grid-next row-stale">
+            <span class="mark mark-skip">…</span>
+            <span class="verb verb-warn"><span class="ic">▶</span> Assess</span>
+            <span class="target"><span class="plan">unified-app-template</span><span class="sep">▸</span><span class="item">P-006</span></span>
+            <span><span style="color:var(--fg-mute);font-size:10.5px">candidate</span> <span class="pill pill-state st-blocked">blocked</span> <span class="arrow">→</span> <span class="pill pill-state" style="color:var(--fg-mute)">?</span></span>
+            <span class="ev">blocker P-002 is terminal — needs judging</span>
+            <span class="confdot"><i class="d-low"></i>not judged</span>
+            <span class="why">Why <span style="opacity:.55">⌄</span></span>
+            <span class="kebab">···</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col stack-16" style="margin-top:40px">
+    <h3>Apply is a batch, so it needs a batch result</h3>
+    <p>
+      Today Apply disables the whole report, writes each finding one at a time, and paints failures
+      as a red line under whichever rows lost. There is no progress, no summary, and no way to retry
+      only the ones that failed — the owner has to re-tick by hand and hope.
+    </p>
+  </div>
+
+  <div class="col-wide frame-wrap">
+    <div class="frame-cap"><span class="tag tag-next">Proposed</span> Applying · and the result of a partial failure</div>
+    <div class="frame">
+      <div class="frame-inner">
+        <div class="runbar rb-live" style="margin-top:0">
+          <span class="runbar-icon">◐</span>
+          <div class="runbar-txt">
+            <b>Applying 12 fixes — 9 done</b>
+            <div>Writing <span class="mono">rem-dream-recombination ▸ P-005</span></div>
+            <div class="progress"><i style="width:75%"></i></div>
+          </div>
+          <div class="runbar-actions"><span class="btn btn-warn btn-sm">Stop after this one</span></div>
+        </div>
+
+        <div class="runbar rb-warn">
+          <span class="runbar-icon">!</span>
+          <div class="runbar-txt">
+            <b>9 applied, 3 failed</b>
+            <div>2 plans changed since the scan; 1 write was refused. Nothing was left half-written.</div>
+          </div>
+          <div class="runbar-actions"><span class="btn btn-warn btn-sm">↻ Re-check &amp; retry the 3</span><span class="btn btn-ghost btn-sm">Show only failures</span><span class="btn btn-ghost btn-sm">Undo the 9</span></div>
+        </div>
+
+        <div class="rr-group">
+          <div class="rr-ghead" style="background:rgba(251,113,133,.08)">
+            <span class="cb cb-mixed"></span>
+            <span class="gt">Failed to apply</span>
+            <span class="count">3</span>
+            <span class="gd">Nothing changed for these. Each one says why.</span>
+            <span class="spacer btn btn-danger btn-sm">↻ Retry all 3</span>
+          </div>
+          <div class="rr-row grid-next row-blocked">
+            <span class="cb cb-on">✓</span>
+            <span class="verb verb-warn"><span class="ic">↻</span> Retry</span>
+            <span class="target"><span class="plan">resource-efficiency-close</span><span class="sep">▸</span><span class="item">P-007</span></span>
+            <span><span style="color:var(--fg-mute);font-size:10.5px">status</span> <span class="pill pill-state st-blocked">blocked</span> <span class="arrow">→</span> <span class="pill pill-state st-todo">todo</span></span>
+            <span class="ev">someone set this to <b>done</b> 40m ago</span>
+            <span class="confdot"><i class="d-low"></i>stale</span>
+            <span class="why">Why <span style="opacity:.55">⌄</span></span>
+            <span class="kebab">···</span>
+            <span class="inline-note bad">⚠ The plan moved after the scan. Papercup did not overwrite it. <span class="btn btn-ghost btn-sm">Re-check this row</span><span class="btn btn-ghost btn-sm">Open plan</span><span class="btn btn-ghost btn-sm">Apply anyway</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col" style="margin-top:34px">
+    <div class="callout warn">
+      <h4>The staleness guard needs a back-end half, not just a banner</h4>
+      <p style="font-size:15.5px">
+        <code>applyPlanCleanupFinding</code> calls <code>setItemStatus</code> with the target value and
+        no expected-current value, so applying a three-day-old report silently overwrites whatever
+        happened since. The write already returns <code>oldStatus</code>, so the cheap fix is to send the
+        finding's recorded <code>from</code> as a precondition and let the route refuse the mismatch —
+        that refusal is what feeds the <b>changed since the scan</b> row state above.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════ ASK 3 ══════════════════ -->
+<section id="edges" class="band">
+  <div class="col stack-16">
+    <p class="eyebrow">Ask 3 — edge cases</p>
+    <h2>Twenty-eight states, and what each one should say</h2>
+    <p>
+      Grouped by where the failure comes from. The dot is how badly today's behaviour hurts:
+      <span class="sev sev-hi"></span>silently wrong or a dead end,
+      <span class="sev sev-md"></span>confusing but recoverable,
+      <span class="sev sev-lo"></span>fine today, worth pinning with a test.
+    </p>
+  </div>
+
+  <div class="col-wide" style="margin-top:24px">
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Condition</th><th>Today</th><th>Should be</th></tr></thead>
+        <tbody>
+          <tr class="grp-row"><td colspan="3">Run lifecycle</td></tr>
+          <tr><th><span class="sev sev-hi"></span>Run settles <code>complete</code> — everything auto-applied</th><td class="today">No report renders at all. Both hosts gate on <code>phase === 'review'</code>.</td><td>The report opens in a read-only "all fixed" state listing every change and its evidence, with <b>Undo all</b>. This is the run that most needs an audit trail.</td></tr>
+          <tr><th><span class="sev sev-hi"></span>Run ends <code>failed</code></th><td class="today">No report. The error string is stored on the run and never surfaced.</td><td>Report opens with the failure bar, the error text, and <b>Re-run</b> / <b>Choose settings</b>.</td></tr>
+          <tr><th><span class="sev sev-hi"></span>Owner stops the run mid-scan</th><td class="today">Unreached findings render as manual with "the resolver did not reach this finding; no action is available".</td><td>A <i>Not assessed</i> group with <b>Resume</b>, plus a run bar stating how many plans were never looked at.</td></tr>
+          <tr><th><span class="sev sev-hi"></span>Resolver dies; heartbeat goes stale</th><td class="today">The progress strip shows restart — but only while <code>phase</code> is still running. Once it settles to review, the report offers nothing.</td><td>Stale-heartbeat bar inside the report, with <b>Restart the resolver</b> and <b>Keep what it finished</b>.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Run is still <code>running</code>, owner deep-links <code>?opcln=</code></th><td class="today">Takeover does not mount; no message.</td><td>Report opens live: rows stream in, run bar shows progress, Apply enabled for what has landed.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Run is <code>pending</code> — queued, resolver never launched</th><td class="today">Nothing renders.</td><td>"Waiting to start" with <b>Cancel</b>, and after a timeout, "the resolver never started" + <b>Re-run</b>.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Run id is unknown or was deleted</th><td class="today">The takeover param releases itself. The screen just goes back.</td><td>A toast naming what happened: "That clean-up run no longer exists." Then release.</td></tr>
+          <tr><th><span class="sev sev-hi"></span>No way to reach a previous run</th><td class="today">Only via a <code>?opcln=</code> URL, which nothing in the UI produces.</td><td><b>Runs ▾</b> in the report header and on the Plans pane: last 10 runs with time, scope, and outcome.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Scan finds nothing</th><td class="today">An empty grouped shell.</td><td>"Nothing to clean up in these 22 plans" + when it last ran + <b>Run again</b>.</td></tr>
+          <tr><th><span class="sev sev-md"></span><code>launchSnapshot</code> no longer valid on resume</th><td class="today">Route 409s <code>invalid_persisted_launch_settings</code> and flips the run to failed. UI shows a generic error.</td><td>Name the setting that went missing and offer the settings control inline.</td></tr>
+
+          <tr class="grp-row"><td colspan="3">Row lifecycle</td></tr>
+          <tr><th><span class="sev sev-hi"></span>A row's write fails</th><td class="today">Red text under the row; the row stays selected and pending. No retry, no summary.</td><td>Row moves to a <b>Failed</b> group with the reason and a <b>Retry</b> verb; batch summary counts it.</td></tr>
+          <tr><th><span class="sev sev-hi"></span>Row is non-actionable (<i>manual</i>)</th><td class="today">A bare <code>↗</code> in the checkbox slot and a sentence in the drill-in. No action.</td><td>An explicit "You write it" verb plus <b>Open plan</b> / <b>Ask Papercup to draft it</b>.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Row outcome is <code>pending</code></th><td class="today">Counted as manual. Indistinguishable from genuinely-manual work.</td><td>Its own <i>Not assessed</i> category, with per-row <b>Assess</b> (<code>recheck-finding</code>).</td></tr>
+          <tr><th><span class="sev sev-md"></span>Row was dismissed</th><td class="today"><code>—</code> mark. No way to undo.</td><td>Dismissed rows collapse into a "Skipped (4)" group with <b>Un-skip</b>.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Finding has no evidence</th><td class="today">Renders "No reason was recorded." and is still selectable and pre-selected.</td><td>Evidence-free findings are never pre-selected. The row says so, in place of a confidence dot.</td></tr>
+          <tr><th><span class="sev sev-lo"></span>Finding kind has no group</th><td class="today">Falls into "Other recommendations". Correct, and worth keeping.</td><td>Keep. Add a test that a new kind cannot silently vanish.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Row's plan was archived or deleted since the scan</th><td class="today">The write fails with whatever the plans API returns.</td><td>Detected at re-check: "this plan was archived" + <b>Skip</b>.</td></tr>
+
+          <tr class="grp-row"><td colspan="3">Staleness and concurrency</td></tr>
+          <tr><th><span class="sev sev-hi"></span>Plan changed between scan and apply</th><td class="today"><code>setItemStatus</code> takes no expected-current value, so the apply overwrites the newer state.</td><td>Send the finding's <code>from</code> as a precondition; refuse the mismatch; surface it as <b>changed since the scan</b> with <b>Re-check</b> / <b>Apply anyway</b>.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Report opened days after the run</th><td class="today">Nothing indicates age. The rows look current.</td><td>Age bar past a threshold, with <b>Re-check all</b>. Selection is cleared, not pre-ticked.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Two runs in review at once over the same plans</th><td class="today">Nothing prevents or mentions it.</td><td>The newer report names the older overlapping run and offers to supersede it.</td></tr>
+          <tr><th><span class="sev sev-md"></span>An agent applies the same fix while the report is open</th><td class="today">Rows do not re-derive; apply then no-ops or clobbers.</td><td>Sync already invalidates the run; re-derive rows live and mark the ones that resolved themselves <b>Already fixed elsewhere</b>.</td></tr>
+          <tr><th><span class="sev sev-lo"></span>Rows change while a selection is held</th><td class="today">Handled — selection is intersected with what is still pending.</td><td>Keep. Already covered by tests.</td></tr>
+
+          <tr class="grp-row"><td colspan="3">Scale, input, access</td></tr>
+          <tr><th><span class="sev sev-md"></span>More than 500 findings</th><td class="today"><code>resume</code> silently truncates the id list to 500.</td><td>Chunk the resume client-side and report progress; never silently drop the tail.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Several hundred rows in one report</th><td class="today">Every row is in the DOM. Disclosure is already row-scoped, which helps, but the initial paint is not bounded.</td><td>Virtualise the row list; keep the group headers and tiles fixed.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Apply takes minutes</th><td class="today">The whole report is inert with no progress and no cancel.</td><td>Progress bar, running count, and <b>Stop after this one</b>.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Owner closes mid-apply</th><td class="today">Undefined — writes continue against an unmounted tree.</td><td>Confirm on close while writes are in flight; the run keeps its own record either way.</td></tr>
+          <tr><th><span class="sev sev-lo"></span>Keyboard-only review</th><td class="today">Roving focus and busy-state restore are already implemented.</td><td>Keep. Add: <kbd>A</kbd> apply, <kbd>S</kbd> skip, <kbd>?</kbd> why, <kbd>J</kbd>/<kbd>K</kbd> move.</td></tr>
+          <tr><th><span class="sev sev-md"></span>Screen reader on the confidence pill</th><td class="today">Announces "Show details… medium confidence" — correct. Visually it still reads as a select.</td><td>Split the control, so the visual and the announcement finally agree.</td></tr>
+          <tr><th><span class="sev sev-lo"></span>Feature flag off mid-review</th><td class="today">Host returns null; the takeover vanishes.</td><td>Keep, but release the URL param so a reload does not land nowhere.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════ ASK 4 ══════════════════ -->
+<section id="inbox" class="band">
+  <div class="col stack-16">
+    <p class="eyebrow">Ask 4 — Inbox parity</p>
+    <h2>Same shell, same bugs, opposite gaps</h2>
+    <p>
+      The two flows already share <code>ReviewReportShell</code>, <code>ReportTakeover</code> and the
+      row/group model — that part of the earlier work landed. What did not get shared is everything
+      <em>around</em> the rows, and the two flows have drifted in opposite directions.
+    </p>
+
+    <div class="split" style="margin-top:8px">
+      <div class="card">
+        <h4>Plans clean-up has</h4>
+        <ul>
+          <li>Grouping by fix kind, and a per-group select-all</li>
+          <li>A transition (<code>from → to</code>) on every row</li>
+          <li>Nothing per-row: no retry, no skip, no re-check</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>Inbox bulk-resolve has</h4>
+        <ul>
+          <li>Per-row <b>Retry</b>, <b>Dismiss</b> and <b>Reconcile</b>, inline in the drill-in</li>
+          <li>A recommendation card with rationale and retry condition</li>
+          <li>No per-group verbs; the row's action lives inside the disclosure</li>
+        </ul>
+      </div>
+    </div>
+
+    <p style="margin-top:6px">
+      Both gate on <code>phase === 'review'</code>, so both lose their <code>complete</code> and
+      <code>failed</code> runs. Both hide the resolver's liveness once the strip is replaced. Fixing
+      either one twice would be the mistake — so the fix is to move three things up into the shared
+      layer and let each flow supply only what is genuinely different.
+    </p>
+
+    <ul class="rule-list">
+      <li><span class="lbl">1 · useBulkRun</span><span>One hook over one route shape. <code>use-plan-cleanup-run</code> and <code>use-inbox-bulk-run</code> are the same lifecycle — <code>start / stop / restart / resume / accept / dismiss / recheck</code> — typed twice. Collapse to a generic keyed by <code>runKind</code>, and both flows inherit every lifecycle control at once.</span></li>
+      <li><span class="lbl">2 · RunLifecycleBar</span><span>The six-state bar above is pure function of <code>phase</code> + <code>liveness</code> + counts, all of which already exist on both runs. It belongs in <code>review-report/</code> beside the shell, not in either consumer.</span></li>
+      <li><span class="lbl">3 · Row actions</span><span>Add <code>actions?: RowAction[]</code> to <code>ReviewReportRow</code> — <code>{ id, label, verb, tone, run }</code>. Inbox moves its Retry/Dismiss/Reconcile into it and gets the overflow menu for free; Plans passes Apply-one / Skip / Re-check and gets parity with Inbox on day one.</span></li>
+      <li><span class="lbl">4 · Host gate</span><span>One shared host that admits <b>every</b> phase and picks the presentation, instead of two copies of <code>phase === 'review'</code> that each drop two outcomes on the floor.</span></li>
+    </ul>
+  </div>
+
+  <div class="col-wide frame-wrap">
+    <div class="frame-cap"><span class="tag tag-next">Proposed</span> Inbox bulk-resolve, on the shared surface<span class="note">— same bar, same verb column, Inbox's own nouns</span></div>
+    <div class="frame">
+      <div class="frame-inner">
+        <div class="rr-head">
+          <div class="rr-id">
+            <span class="rr-icon" style="border-color:rgba(56,189,248,.5);background:linear-gradient(145deg,rgba(56,189,248,.45),rgba(56,189,248,.16));color:#cdeeff">✉</span>
+            <div>
+              <div class="rr-title">Inbox review</div>
+              <div class="rr-sub">31 items assessed · started 07:40, took 6m 22s · <span style="color:var(--accent-soft)">Runs ▾</span></div>
+            </div>
+          </div>
+          <div class="rr-actions">
+            <span class="btn btn-ghost">Re-run ▾</span>
+            <span class="btn btn-primary">✓ Apply 14 selected</span>
+            <span class="btn">Close</span>
+          </div>
+        </div>
+
+        <div class="runbar rb-warn">
+          <span class="runbar-icon">⚠</span>
+          <div class="runbar-txt">
+            <b>4 items could not be judged</b>
+            <div>Each names the condition that would let a retry succeed.</div>
+          </div>
+          <div class="runbar-actions"><span class="btn btn-warn btn-sm">↻ Retry all 4</span></div>
+        </div>
+
+        <div class="rr-group">
+          <div class="rr-ghead">
+            <span class="cb cb-on">✓</span>
+            <span class="gt">Resolve as answered</span>
+            <span class="count">14 selected</span>
+            <span class="gd">A later message or work-item already answered these.</span>
+            <span class="spacer btn btn-ghost btn-sm">Collapse</span>
+          </div>
+          <div class="rr-row grid-next">
+            <span class="cb cb-on">✓</span>
+            <span class="verb"><span class="ic">✓</span> Resolve</span>
+            <span class="target"><span class="plan">gate is red on portal</span><span class="sep">▸</span><span class="item">su-062dd</span></span>
+            <span><span style="color:var(--fg-mute);font-size:10.5px">state</span> <span class="pill pill-state st-todo">open</span> <span class="arrow">→</span> <span class="pill pill-state st-done">resolved</span></span>
+            <span class="ev">WI-1721884 closed it 2h ago</span>
+            <span class="confdot"><i class="d-high"></i>high</span>
+            <span class="why">Why <span style="opacity:.55">⌄</span></span>
+            <span class="kebab">···</span>
+          </div>
+          <div class="rr-row grid-next row-blocked">
+            <span class="mark mark-skip">↻</span>
+            <span class="verb verb-warn"><span class="ic">↻</span> Retry</span>
+            <span class="target"><span class="plan">stale routine executor</span><span class="sep">▸</span><span class="item">system</span></span>
+            <span><span style="color:var(--fg-mute);font-size:10.5px">state</span> <span class="pill pill-state st-todo">open</span> <span class="arrow">→</span> <span class="pill pill-state" style="color:var(--fg-mute)">?</span></span>
+            <span class="ev">resolver ran out of context</span>
+            <span class="confdot"><i class="d-low"></i>insufficient</span>
+            <span class="why">Why <span style="opacity:.55">⌄</span></span>
+            <span class="kebab">···</span>
+            <span class="inline-note">Retry when: the linked run finishes. <span class="btn btn-ghost btn-sm">↻ Retry now</span><span class="btn btn-ghost btn-sm">Reconcile by hand</span><span class="btn btn-ghost btn-sm">Skip</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════ sequencing ══════════════════ -->
+<section class="band">
+  <div class="col stack-16">
+    <p class="eyebrow">If you want it built</p>
+    <h2>Four changes, in the order that de-risks them</h2>
+    <p>
+      Ordered so each one is shippable alone and the riskiest change lands on a surface the
+      previous ones already made legible.
+    </p>
+    <ul class="rule-list">
+      <li><span class="lbl">First</span><span><b>Row legibility.</b> Verb column, split confidence, real link, honest chevron. Pure presentation inside <code>ReviewReportShell</code> — no route changes, both flows benefit the moment it merges.</span></li>
+      <li><span class="lbl">Second</span><span><b>Open every phase.</b> One shared host; <code>complete</code> and <code>failed</code> runs stop being invisible. Small, and it is the change that makes the auto-apply path auditable.</span></li>
+      <li><span class="lbl">Third</span><span><b>The run-state bar and per-row actions.</b> Wires the controls the API already exposes. This is where <i>stopped mid-run</i> stops being a dead end.</span></li>
+      <li><span class="lbl">Fourth</span><span><b>The staleness precondition.</b> Send <code>from</code> as an expected-current value and refuse the mismatch. Touches the write path, so it goes last — on top of a report that can already show and re-check a stale row.</span></li>
+    </ul>
+  </div>
+</section>
+
+<footer class="foot">
+  <div class="col">
+    Verified against <code>ReviewReportShell.tsx</code>, <code>PlanCleanupReport.tsx</code>,
+    <code>PlanCleanupReportHost.tsx</code>, <code>InboxBulkReport.tsx</code>,
+    <code>InboxBulkReportHost.tsx</code>, <code>PlansCleanupStrip.tsx</code>,
+    <code>use-plan-cleanup-run.ts</code>, <code>bulk-run-store.ts</code> and
+    <code>routes/admin/plan-cleanup.ts</code> at staging, 2026-08-31. Every "today" claim in the
+    tables above is read from that source, not inferred from the screenshot.
+  </div>
+</footer>
+
+</div>

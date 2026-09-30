@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Launch the desktop app in DEV mode: skip the bundled embedded-postgres
+# and point the sidecar at the system Postgres on :5432, the same DB
+# the webapp at :3055/:3070 reads + writes. Lets you see live data in
+# the Tauri shell without spawning new harness runs.
+#
+# This is a dev-only path. Production users don't have a local Postgres
+# at :5432 — for them the embedded path (bin/desktop) is the only one
+# that works.
+#
+# Tunables (override at the env):
+#   PAPERCUSP_DEV_PG_HOST   default 127.0.0.1
+#   PAPERCUSP_DEV_PG_PORT   default 5432
+#   PAPERCUSP_DEV_PG_DB     default papercusp
+#   PAPERCUSP_DEV_PG_APP_USER / _APP_PWD   default harness_app / harness_app_pwd
+#   PAPERCUSP_DEV_PG_ADMIN_USER / _ADMIN_PWD   default harness_admin / harness_admin_pwd
+#
+# Usage: bin/desktop-dev                  (foreground; logs to stdout)
+#        BG=1 bin/desktop-dev             (background; logs to $LOG)
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+BIN="$ROOT/src-tauri/target/release/papercusp-desktop"
+LOG="${LOG:-/tmp/papercusp-desktop-dev.log}"
+
+PG_HOST="${PAPERCUSP_DEV_PG_HOST:-127.0.0.1}"
+PG_PORT="${PAPERCUSP_DEV_PG_PORT:-5432}"
+PG_DB="${PAPERCUSP_DEV_PG_DB:-papercusp}"
+APP_USER="${PAPERCUSP_DEV_PG_APP_USER:-harness_app}"
+APP_PWD="${PAPERCUSP_DEV_PG_APP_PWD:-harness_app_pwd}"
+ADMIN_USER="${PAPERCUSP_DEV_PG_ADMIN_USER:-harness_admin}"
+ADMIN_PWD="${PAPERCUSP_DEV_PG_ADMIN_PWD:-harness_admin_pwd}"
+
+if [[ ! -x "$BIN" ]]; then
+  echo "ERROR: binary missing at $BIN"
+  echo "Build it first: (cd $ROOT/src-tauri && cargo build --release)"
+  exit 1
+fi
+
+# Sanity check: the system PG should be reachable, otherwise the desktop
+# starts but every query 500s. Skip silently if psql isn't on PATH.
+if command -v psql >/dev/null; then
+  PGPASSWORD="$APP_PWD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$APP_USER" \
+    -d "$PG_DB" -tAc 'SELECT 1' >/dev/null 2>&1 \
+    || { echo "ERROR: cannot connect to ${APP_USER}@${PG_HOST}:${PG_PORT}/${PG_DB}"; exit 1; }
+fi
+
+# Workspace-registry symlink workaround.
+# Tauri (src-tauri/src/main.rs:602) hard-overrides HOME to the per-workspace
+# dir for isolation. The operator bundle then resolves
+# `~/.papercusp-workspaces/registry.json` relative to the FAKE home, finds
+# nothing, and a Turbopack TDZ bug surfaces as
+# `ReferenceError: DEFAULT_WORKSPACE_ID is not defined` at module init —
+# which kills every /api/* route. Ensuring the symlink is present makes
+# the workspace lookup succeed, sidesteps the TDZ entirely, and lets the
+# dev shell see the same workspace registry as the webapp at :3055/:3070.
+WORKSPACE_HOME="${PAPERCUSP_WORKSPACE_HOME:-$HOME/.papercusp-workspaces/default}"
+if [[ -f "$HOME/.papercusp-workspaces/registry.json" ]]; then
+  mkdir -p "$WORKSPACE_HOME/.papercusp-workspaces"
+  ln -sfn "$HOME/.papercusp-workspaces/registry.json" \
+    "$WORKSPACE_HOME/.papercusp-workspaces/registry.json"
+fi
+
+echo "==> killing any running papercusp-desktop + orphan sidecars"
+pgrep -af "papercusp-desktop|embedded-postgres-server|sidecar/.*next-server|sidecar/.*code-server" \
+  | grep -v "$$" | grep -v "pgrep\|grep " | awk '{print $1}' \
+  | xargs -r kill 2>/dev/null || true
+sleep 2
+
+echo "==> launching $BIN (mode=dev-pg, target=${APP_USER}@${PG_HOST}:${PG_PORT}/${PG_DB}, log=$LOG)"
+EXPORTS=(
+  # PAPERCUSP_USE_EMBEDDED_PG=0 tells the Rust shell to skip spawning
+  # embedded-postgres-server and use our supplied HARNESS_DATABASE_URL
+  # instead (dev-PG mode against an external Postgres). The legacy pglite
+  # fallback was removed 2026-06-01, so this single flag is all it takes.
+  "PAPERCUSP_USE_EMBEDDED_PG=0"
+  "HARNESS_DATABASE_URL=postgresql://${APP_USER}:${APP_PWD}@${PG_HOST}:${PG_PORT}/${PG_DB}"
+  "HARNESS_ADMIN_DATABASE_URL=postgresql://${ADMIN_USER}:${ADMIN_PWD}@${PG_HOST}:${PG_PORT}/${PG_DB}"
+)
+
+if [[ "${BG:-0}" == "1" ]]; then
+  env "${EXPORTS[@]}" nohup "$BIN" > "$LOG" 2>&1 &
+  echo "==> backgrounded as pid $!"
+else
+  exec env "${EXPORTS[@]}" "$BIN"
+fi

@@ -1,0 +1,75 @@
+# Credentials are already provisioned — search before escalating
+URL: /internal/docs/agent-insights/credentials-are-already-provisioned-search-before-escalating
+
+Agents repeatedly declare a credential owner-walled when it already exists on the dev box; here is where every secret actually lives and how to find it.
+
+## The mistake
+
+An agent needs a credential (Cloudflare, PostHog, an API key), does not find it in
+the obvious place, and **stops** — marking the work "blocked on the owner /
+owner-walled" and handing it back. The owner then replies, in effect:
+
+> "search our repo, the cloudflare credentials should be there" — owner, 2026-07-12
+
+…and they are. This has happened more than once, which is why it is written down.
+It is a specific instance of the CLAUDE.md rule *"A blocker is work, not a stop
+sign"*: **a credential you have not looked for is not a blocker, it is a search you
+have not run yet.**
+
+The failure is expensive in a way that is easy to miss. Escalating parks the whole
+task until a human is next at the keyboard — so a 30-second `ls` you skipped can
+cost hours of wall-clock, and it spends the owner's attention on something you were
+fully capable of resolving.
+
+## Where secrets actually live
+
+All of these are mode `600`, owned by the dev user, and deliberately **outside git**.
+Check them in this order:
+
+1. **`~/.papercusp/local-secrets/`** — per-service env files. This is the big one:
+   * `restart.env.production` — a large env file that (among \~40 keys) carries
+     **`CF_API_TOKEN`** and **`CF_ZONE_ID`**
+   * `posthog-admin.env`, `defguard-mesh.env`, `weatherapi-key`,
+     `restart-admin-password.txt`
+2. **`~/.papercusp/deploy-credentials/`** — one file per account
+   (`owner-owner`, `ownerhandle*`, `definitelyahuman`).
+3. **`~/.papercusp/marketplace-keys/`** — `marketplace-ed25519.pem` / `.pub`.
+4. **`~/.papercusp/*.env`** at the top level — `posthog-deploy.env`,
+   `release-host.env` (the permanent release-host secret).
+5. **The committed docs.** Non-secret identifiers are checked in — e.g. the real
+   Cloudflare **`R2_ACCOUNT_ID`** is in
+   `apps/operator-docs/src/content/docs/implementation/marketplace.mdx`. An account
+   id is not a secret; don't escalate for one.
+
+## How to search without drowning in build artifacts
+
+A naive `grep -r CLOUDFLARE` returns hundreds of hits and looks like noise, which is
+part of why agents give up. The repo contains several **generated trees** that mirror
+the docs and the bundled host, and they will bury the real hit:
+
+```bash
+grep -rniI --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=target \
+  --exclude-dir=sidecar --exclude-dir='sidecar.tmp*' --exclude-dir=internal-docs \
+  --exclude-dir=dist-host --exclude-dir=_retired --exclude-dir=.next \
+  -e 'CF_API_TOKEN' -e 'R2_ACCOUNT_ID' -e 'CLOUDFLARE_' .
+```
+
+`src-tauri/sidecar/`, `src-tauri/sidecar.tmp.*/`, `internal-docs/` (the rendered
+HTML mirror) and `apps/operator/dist-host/` are all build output — always exclude
+them.
+
+Also list the stores directly; the filename usually tells you what you need:
+
+```bash
+ls -la ~/.papercusp/local-secrets/ ~/.papercusp/deploy-credentials/
+grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' ~/.papercusp/local-secrets/*.env   # key names, no values
+```
+
+That last form prints **key names only** — use it when you are exploring, so secret
+values never land in a transcript.
+
+## The rule
+
+**Escalate only after the stores above come up empty.** When you do escalate, say
+where you looked, so the owner can tell you the store you missed instead of pasting
+a secret by hand.

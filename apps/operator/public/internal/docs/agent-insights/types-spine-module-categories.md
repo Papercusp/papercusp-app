@@ -1,0 +1,113 @@
+# Types-spine module categories — wire, decision, PG-mirror, key-format
+URL: /internal/docs/agent-insights/types-spine-module-categories
+
+Eighteen types-only modules shipped in one loop fell into 4 distinct categories. Each has a different test surface, risk profile, and import-by pattern. Picking the right category up front clarifies what to test + how the runtime will consume the module.
+
+import { Aside } from '@astrojs/starlight/components';
+
+## The taxonomy
+
+Eighteen types-only modules shipped in the 2026-05-24 dogfood loop ([wrap doc](/internal/docs/plans/overnight-session-2026-05-24-su) for the full list). They fell into four distinct categories. Naming the category up front clarifies what to test + how the eventual runtime will consume the module.
+
+### 1. Wire types
+
+Modules that pin a JSON / message shape exchanged across a process boundary.
+
+**Examples this loop:**
+
+* `packages/operator-core/lib/cupboard/types.ts` — Cupboard server ↔ desktop client RPCs
+* `packages/operator-core/lib/identity/contributor-file-types.ts` — signed JSON committed to git
+* `packages/operator-core/lib/harness/harness-link-types.ts` — `papercusp://harness?...` URL format
+* `packages/operator-core/lib/pr-host/types.ts` — neutral PrHost interface + Pr shape
+
+**Test surface:** structural predicates (`isHarnessListing`), round-trip pairs (`formatHarnessLink` ↔ `parseHarnessLink`), JCS field-order const tests, error-discriminator coverage.
+
+**Risk profile:** **highest.** A wire-shape bug ships invisibly until a second implementation tries to read what the first wrote. The structural predicate test is load-bearing — it's the smoke test for "can the receiver parse the sender's output."
+
+**Import pattern:** symmetric. Sender + receiver both import; types are the bilateral contract.
+
+### 2. Pure decision functions
+
+Modules that pull the "what should I do next?" logic out of a daemon or runtime into a pure function returning a discriminated union.
+
+**Examples this loop:**
+
+* `packages/operator-core/lib/pr-host/auto-review-decision-types.ts` (`decideAutoReview`)
+* `packages/operator-core/lib/pr-host/retry-policy-types.ts` (`decideRetry`, `computeBackoffMs`)
+* `packages/operator-core/lib/harness/feature-claim-types.ts` (`arbitrateClaims`, `findWinningClaim`)
+* `packages/operator-core/lib/identity/binding-verifier-types.ts` (`deriveBindingStatus`, `canClaimHarness`)
+
+**Test surface:** input × output permutation coverage. Every variant of the discriminated-union return shows up at least once. Edge-case args (boundary timestamps, empty arrays, zero counts) exercised explicitly.
+
+**Risk profile:** **medium.** The decision is pure, so unit tests catch logic bugs cheaply. The risk is "the caller doesn't dispatch on every variant" — the discriminated union forces a `switch` so the type system helps.
+
+**Import pattern:** asymmetric one-way. The daemon imports the decision; the decision never imports the daemon. Other call-sites (UI hints, audit-log replay) also import the same function — that's the value-multiplier.
+
+See [`pure-decision-functions-pulled-from-daemons`](/internal/docs/agent-insights/pure-decision-functions-pulled-from-daemons/) for the deeper why.
+
+### 3. PG-mirror row types
+
+Modules that pin a row shape mirroring a PG table that's the canonical durability layer for a Hyperbee KV.
+
+**Examples this loop:**
+
+* `packages/operator-core/lib/harness/contributor-row-types.ts` (mirror of `contributors`)
+* `packages/operator-core/lib/harness/feature-queue-row-types.ts` (mirror of `feature_queue`)
+* `packages/operator-core/lib/pr-host/harness-feature-pr-row-types.ts` (mirror of `harness_feature_prs`)
+* `packages/operator-core/lib/pr-host/pr-reviewer-settings-types.ts` (mirror of `pr_reviewer_settings`)
+
+**Test surface:** structural predicate (rejects legacy rows missing the new columns), default-value constructor (`defaultPrReviewerSettings`), patch-merge helper (`applyPatch`), soft-delete marker (`markRemoved`), schema\_version invariants.
+
+**Risk profile:** **medium-low.** PG mirrors have a forgiving migration path (`ALTER TABLE ADD COLUMN` is cheap), but the predicate catches drift between the SQL migration + the TS reader before it surfaces as runtime errors.
+
+**Import pattern:** PG-reader → predicate-narrow → consumer. Multiple consumers (UI rows, agent calls, projection writer) share one type definition.
+
+### 4. Key-format / path-format types
+
+Modules that pin a key string shape used by a KV store, URL scheme, or filesystem layout.
+
+**Examples this loop:**
+
+* `packages/operator-core/lib/harness/hyperbee-key-types.ts` (9 key shapes for the Hyperbee KV)
+* `packages/operator-core/lib/identity/contributor-file-types.ts` (path: `.papercusp/contributors/<login>.json`)
+* `packages/operator-core/lib/harness/harness-shared-config-types.ts` (path: `.papercusp/shared.json`)
+* `packages/operator-core/lib/pr-host/types.ts` (composePrKey / parsePrKey — `<remote>#<number>`)
+
+**Test surface:** composer + parser round-trip coverage, path-escape defense (`../`, embedded slashes), edge cases (numeric overflow, empty segments).
+
+**Risk profile:** **medium.** A key-format drift loses every row that gets written but never read. Round-trip tests catch this — `parseHyperbeeKey(keyContributor(id)).tag === 'contributors'` is the smallest sanity check.
+
+**Import pattern:** writer + reader symmetric. Often the same module exports both composer and parser to enforce the symmetry locally.
+
+## How to pick the category for new groundwork
+
+When shipping a new types-only module, decide which of these you're writing **before** the file. The category determines:
+
+1. **Test file structure.** Wire types lean on structural predicates; decision functions lean on permutation matrices; PG mirrors lean on default/patch helpers; key formats lean on round-trips.
+2. **What to ship + skip.** Wire types ship the schema-version invariant; decision functions don't. PG mirrors ship a default constructor; wire types don't (the wire is built by the producer, not defaulted).
+3. **How the runtime will import.** Symmetric (wire + key) vs asymmetric (decision + PG mirror). Affects where the module lives in `lib/`.
+
+## When a module spans categories
+
+Some modules naturally span. `contributor-file-types.ts` is **both** a wire type (signed JSON over git) **and** a key format (`.papercusp/contributors/<login>.json` path). That's fine — split the test file into per-category sections so the predicate-vs-round-trip-vs-edge-case coverage is visible.
+
+## The 18 from this loop, categorized
+
+| Category      | Modules                                                                                                                                                                                                                                |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Wire types    | `cupboard/types`, `contributor-file-types`, `harness-link-types`, `pr-host/types`, `contributor-usage-event-types`, `attestation-types`, `binding-types`, `completion-ref-types`, `harness-shared-config-types`, `feature-claim-types` |
+| Pure decision | `auto-review-decision-types`, `retry-policy-types`, `binding-verifier-types`                                                                                                                                                           |
+| PG-mirror     | `contributor-row-types`, `feature-queue-row-types`, `harness-feature-pr-row-types`, `pr-reviewer-settings-types`                                                                                                                       |
+| Key-format    | `hyperbee-key-types`                                                                                                                                                                                                                   |
+
+(Total > 18 because some modules span — `contributor-file-types` is in two; `harness-link-types`, `cupboard/types`, `pr-host/types` are also dual-category.)
+
+## See also
+
+* [`types-first-from-design-memo`](/internal/docs/agent-insights/types-first-from-design-memo/) — the *when* to ship types-only modules.
+* [`pure-decision-functions-pulled-from-daemons`](/internal/docs/agent-insights/pure-decision-functions-pulled-from-daemons/) — deep-dive on category 2.
+* [`jcs-canonical-form-for-signed-json`](/internal/docs/agent-insights/jcs-canonical-form-for-signed-json/) — the canonical-form spec for signed wire types in category 1.
+* [`verification-signal-on-the-row`](/internal/docs/agent-insights/verification-signal-on-the-row/) — when a PG-mirror category type doesn't match the design memo, deviating with diagnosis can be the right call.
+* Plan-store entry `overnight-session-2026-05-24-su` — the wrap doc that catalogs all 18 modules with phase + test counts.
+
+A category-1 (wire) module with no structural predicate isn't a wire type — it's a type alias. Add the predicate. Reading "what the wire sends" is the contract; if you trust the wire, you don't need the type. The predicate is the load-bearing piece.

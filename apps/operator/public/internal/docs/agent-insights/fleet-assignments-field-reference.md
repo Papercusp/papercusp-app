@@ -1,0 +1,44 @@
+# fleet:assignments — full field reference
+URL: /internal/docs/agent-insights/fleet-assignments-field-reference
+
+The lifecycle verdict enum, orphaned-vs-stalled semantics, and the per-claim activity/progress fields that were trimmed out of the tool's inline guidance to clear the P-011 prompt-weight hard cap (EI-18687972462757295).
+
+## Why this doc exists
+
+`fleet:assignments`' inline `description`/`guidance` previously spelled out every
+enum value and edge case in-prompt, which pushed the tool to 1890 chars — 290 over
+the 1600-char P-011 hard cap (every candidate touching it would red the green
+checkpoint). The prose below was cut from the tool definition and moved here
+per the "prefer a docs pointer over prose-in-place" guidance in
+`tool-guidance-budget.ts`. Nothing here changed behaviorally — this is the
+detail an agent can look up when the trimmed inline description isn't enough.
+
+## Per-row fields
+
+* **`self`** — your ownerId. Your own row is stamped `isSelf:true`.
+* **work-list** — each live agent carries its ordered `doing` / `queued` /
+  `load` — this is the placement-decision read (what to hand a given agent
+  next).
+* **`orphaned`** — a live lease whose holder is DEAD per the liveness oracle.
+* **`stalled`** — no item-scoped progress within the window. A stalled claim
+  held by a LIVE agent is **not** reclaimable — the holder simply hasn't
+  checkpointed recently; that is never grounds to release its work.
+* **`verdict` + `action`** — only `verdict: orphan` / `action: reclaim` rows
+  (holder confirmed gone) may actually be reclaimed. `held-by-live-agent` /
+  `ask` means: `coord:send` the holder and wait for an answer, never release.
+  Act on `summary.reclaimable_claims`, never on raw orphaned/stalled counts —
+  those can include live-held stalled claims that aren't reclaimable.
+* **`progress`** — states absence explicitly: `never-checkpointed` vs
+  `stale-since:<ts>`, plus per-claim `activity` and any declared-but-unclaimed
+  intents.
+* **lifecycle `verdict` enum** — one of: `monitoring` | `waiting` |
+  `parked-awaiting-capability` (healthy loop owners, carries `nextFireAt`) |
+  `booted` | `joined` | `first-turn-done` | `speaking` | `stalled` | `dead`.
+* **`wakeMode`** — `auto` | `manual`.
+* **`unanswered`** — directed-message state: whether this agent has an
+  un-replied directed message outstanding.
+
+## Rule of thumb
+
+Read `fleet:assignments`, not a stale `coord` broadcast, for "who is on
+what" — broadcasts don't carry liveness or the reclaim verdict.

@@ -1,0 +1,120 @@
+# One requirement: Intent, Acceptance and Verification
+URL: /internal/docs/agent-insights/unified-requirement-contract
+
+Author one canonical requirement, preserve distinct revisioned checks and evidence, inspect the unified view, and finish through independent grading, author acceptance and release.
+
+A requirement has three sections: **Intent**, **Acceptance (BAR)** and **Verification**. Open the plan's Acceptance gate, then expand a requirement to inspect those sections together with its linked work, evidence and review history.
+
+The acceptance flow is:
+
+```text
+Build and run checks → evidence tied to revisions → independent grade
+                    → author acceptance → accepted
+```
+
+A failed or inadequate check returns the work to implementation. Release checks and deployment follow acceptance. Passing tests, a finished work-item list, or a disclosure of unfinished work cannot establish that the promised outcome works.
+
+## One authority, three sections
+
+| Section          | What it records                                                                                                                   |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Intent           | The requested outcome, rationale, constraints and original source references.                                                     |
+| Acceptance (BAR) | Success condition, falsifier, mandatory outcome/disclosure role, required scope, evidence plane, proof depth and passing ratings. |
+| Verification     | The method, structured check and replication procedure used to demonstrate that outcome.                                          |
+
+The canonical rubric criterion owns these fields. Existing plan/rubric writers accept `intent`, `acceptance` and `verification` together. Persistence retains Intent metadata and canonicalizes the latter two sections into the existing criterion fields (`model`, `driftMarkers`, `method`, `check` and the structural policy fields). It does not store a second editable promise or method. The existing contract snapshot derives the three-section view from that authority.
+
+If an input supplies both a section and an older field with conflicting values, the writer refuses with `requirement_alias_conflict`. Do not silently choose one. Read the current criterion, resolve the intended meaning, and submit consistent input. Existing field-based clients continue to work. Missing legacy Intent remains explicitly unrecorded; an inferred story is not original provenance.
+
+## Authoring and amending
+
+Use the existing `rubrics:propose`, rubric template-data writer, and `rubrics:amend` surfaces. A criterion can contain:
+
+```json
+{
+  "key": "complete-export",
+  "title": "Complete export",
+  "intent": {
+    "request": "Export all selected work, including attachments.",
+    "rationale": "Keep a recoverable copy outside the application.",
+    "constraints": ["Preserve record relationships."],
+    "sourceRefs": ["<the actual original request reference>"]
+  },
+  "acceptance": {
+    "condition": "Every selected record, attachment and relationship is present in the export.",
+    "falsifier": "Any selected record, attachment or relationship is missing.",
+    "role": "outcome",
+    "mandatory": true,
+    "requiredScope": ["selected-records", "attachments", "relationships"],
+    "evidencePlane": "tree",
+    "requiredTestLayers": ["integration", "e2e"],
+    "passRatings": ["healthy"]
+  },
+  "verification": {
+    "method": "Create a fixture containing linked records and attachments, invoke the user export path, then independently inspect the resulting archive.",
+    "replication": "Compare the archive inventory and relationship targets against the source fixture; retain the failed and successful run records."
+  }
+}
+```
+
+This is an illustrative criterion, not a claim that an export feature was implemented. Bind its actual executable check to existing registered test paths or an instrument when authoring the real rubric. A complete acceptance rubric follows the existing class and vetting rules.
+
+For a method improvement, `rubrics:amend` accepts:
+
+```json
+{
+  "rubricRef": "<current rubric>",
+  "requirement": {
+    "key": "complete-export",
+    "verification": {
+      "method": "Also compare binary attachment digests and resolve every exported relationship target."
+    }
+  }
+}
+```
+
+A Verification-only amendment preserves the BAR identity/hash while advancing the dependent rubric/spec revision pins. Evidence and grading for the earlier revision remain historical and must be refreshed as required. Intent-only updates preserve the promise too.
+
+A change to the success condition, falsifier, scope, evidence plane, required proof depth, mandatory role or passing thresholds changes the BAR. Use the existing recorded amendment path: preview with `rubrics:amend { dryRun:true, ... }`, obtain the authenticated approval required by that path, then apply its exact revision-bound transaction. The server updates the existing projections atomically. Re-proposing the rubric, editing template data or revising a method cannot bypass these guards.
+
+For a started BAR meaning change, share the preview approval JSON with the outside-lineage reviewer. The reviewer must post the exact receipt as a `work_items:comment` on any existing thread they can write to, preferably a work-item they already hold, then return that post id. `thread-post:<id>` is resolved by workspace and local post id, not by the requester's thread; do not create a separate counter-sign work-item just for this comment.
+
+Whole-criterion-set replacement remains a whole replacement: first read the current rubric and retain every criterion and its procedure unless its removal is explicit and authorized. Do not use a partial resubmission to erase outcomes.
+
+## Validation, implementation and evidence stay distinct
+
+Unifying authoring does not merge validation into requirement prose. Existing spec clauses and explicit check relations preserve many-to-many mappings: a check may cover several requirements, and one requirement may need several checks. Task-level implementation contracts remain narrower links to the exact spec revision.
+
+The requirement view shows plan-item/spec/check identifiers, work-item contracts, exact evidence references and independent/author review records. Failed evidence survives a later success. The view distinguishes a historical spec revision, stale evidence, evidence whose freshness was not compared, partial history, unavailable sources and absent reviews.
+
+A passing unit test of a helper cannot prove a promised end-to-end capability. The BAR's required scope, evidence plane and proof layers must be met by adequate evidence through the promised entry path. Likewise, documenting a tested seam for a future consumer does not fulfill an original promise of a working user-facing capability. Generic ship force cannot discharge an unrealized requirement.
+
+The snapshot's completeness and applicability are part of the result. An unavailable source or a read limit must not turn missing records into a clean pass. A legacy contract may need adoption/repair; the UI shows that limitation instead of manufacturing acceptance.
+
+## Examples of the right proof
+
+**Export completeness.** The archive opening successfully is insufficient. Compare every selected record and attachment with an independently generated source manifest, verify binary digests, and resolve relationship references. Preserve a failed incomplete archive result after a corrected implementation passes.
+
+**Crash recovery.** If the promise is that acknowledged updates survive a crash, interrupt the actual application after acknowledgment, restart it using its normal recovery path, and compare recovered state. A helper's serialization test alone does not demonstrate recovery. A better crash-injection method can preserve the BAR; permitting loss of acknowledged writes changes it.
+
+**A narrow-screen (mobile) interaction.** If the promise includes a mobile viewport — 390 pixels wide — drive the real app at that measured width. Open the requirement, inspect its sections, follow a work reference, and close the popup without losing the parent. Check keyboard access and content overflow. A screenshot of an unopened panel or a wide viewport cannot satisfy that narrower promise.
+
+For this integration, the actual Tauri journey checked 1280×800 and 390×844 (the mobile viewport), real evidence history, Enter/Space expansion, scoped work-item popups and returning to the plan with Escape. It found and fixed two navigation defects that rendered component tests alone had not caught. The durable evidence is on `unified-requirement-contract-2026-09-05#P-005` / `WI-2146792`.
+
+## Independent judgment and final release
+
+The independent grader must be outside the implementer's lineage and use the current rubric revision. The author then records an explicit acceptance or rejection after reading that grading. These are separate review records; neither a passing check nor a self-grade supplies the missing independent judgment. A stale, missing or rejected verdict leaves acceptance incomplete.
+
+Continue through the existing [plan completion runbook](/internal/docs/agent-insights/acceptance-rubrics-on-every-plan-runbook) and [rubric vetting method](/internal/docs/agent-insights/acceptance-rubric-vetting). Current staging/build is the implementation acceptance plane. The final normal-pipeline promotion and deployment have their own evidence; report them only after verifying them.
+
+## Verification anchors
+
+The implementation and its regressions live in the existing modules:
+
+* `packages/operator-core/lib/requirement-contract.ts` and `requirement-contract.test.ts`: unified inputs, canonical projection and conflicting-field refusal.
+* `packages/operator-core/lib/rubrics.integration.test.ts`: real PostgreSQL proposal/amendment paths, revision changes and retained projection history.
+* `packages/operator-core/lib/acceptance-bar-contract-snapshot.ts` and its test: shared requirement/evidence/review view and completeness.
+* `packages/operator-core/lib/agent-tools/plans/requirement-fulfillment.test.ts`: the actual ship handler refuses inadequate proof even with generic force.
+* `apps/operator/app/admin/plans/PlanAcceptanceGateSection.test.tsx` and `PlansClient.test.tsx`: rendered states, same-page linked work and popup Escape behavior.
+
+No new table, parallel acceptance gate, or separate validation store is introduced.

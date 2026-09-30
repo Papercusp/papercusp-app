@@ -1,0 +1,18 @@
+{
+  "name": "@papercusp/seed-bundle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic seed-bundle primitive: a manifest + provider registry + restore orchestration for shipping a CHECKPOINT of a replicated store (git, hypercore, …) that a host restores BEFORE the store's own catch-up protocol runs — pre-positioning bytes so the unmodified live sync transfers only the delta. Pure data + orchestration over injected SeedProviders; zero domain coupling, zero runtime deps. The host supplies the providers, the payload resolver, and the restore context.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  }
+}

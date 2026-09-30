@@ -1,0 +1,56 @@
+# Live-LLM transport — claude CLI subprocess works where raw OAuth API calls 429
+URL: /internal/docs/agent-insights/llm-transport-claude-cli-vs-raw-oauth
+
+On the shared dev credential, direct Anthropic API calls (raw OAuth) can be persistently rate-limited (429) while spawning the claude CLI as a subprocess succeeds. Prefer the CLI-subprocess lane for live-LLM test harnesses.
+
+## What
+
+During the Scout live-quality test campaign (session **su-1e4ef**,
+2026-06-11), the live-LLM lane was blocked for \~7 hours: **every raw
+OAuth-credential API call to Anthropic returned `rate_limit_error` (429)**
+— 15× in a row across 8 windows, $0 spent, zero calls landing — even
+during an owner-granted quiet window with the owner's own usage paused.
+
+The unblock was a **transport switch**: instead of calling the API
+directly with the shared OAuth credential, **spawn the `claude` CLI as a
+subprocess** and let it make the calls. The same work then ran
+successfully.
+
+## Why
+
+The two transports hit different limit pools / negotiation paths: the
+raw shared OAuth credential is contended by the whole fleet (and was
+observed 429-saturated even when idle-ish), while the `claude` CLI
+manages its own session/credential negotiation. The exact server-side
+accounting is opaque to us — treat this as an empirical, repeatable
+observation on this box, not a documented API contract.
+
+**Precise mechanism (sharpened 2026-06-16):** a large part of "raw OAuth 429s
+but the CLI works" is **system-block framing**, not just bucket contention. The
+`oauth-2025-04-20` beta grants the relaxed limiter only when the FIRST `system`
+block is exactly `You are Claude Code, Anthropic's official CLI for Claude.` as
+its own block — which the CLI does and a concatenating raw caller doesn't. A
+mis-framed request gets a **bogus** `rate_limit_error` (body `"Error"`, no
+`anthropic-ratelimit-*` headers) at 0.0 utilization. So the escape isn't only
+"use the CLI transport" — it's "frame the first system block correctly," which
+any transport can do. Full proof + the fix:
+[max-oauth-first-system-block-must-be-claude-code-identity](/internal/docs/agent-insights/max-oauth-first-system-block-must-be-claude-code-identity).
+
+## How to apply
+
+* Building a **live-LLM test harness / eval lane**: drive it through a
+  `claude` CLI subprocess (the way the orchestrator drives agents)
+  rather than direct API calls on the shared credential.
+* Seeing **persistent 429s with $0 spend** on the shared credential:
+  don't keep retrying or waiting for quiet windows — switch transport
+  and retest before concluding capacity is exhausted.
+* Quiet windows (pausing other users) are **not sufficient** to unblock
+  the raw-OAuth lane when it's in this state — observed live.
+
+## Source
+
+su-1e4ef's Scout test campaign (coord stream, 2026-06-11). This page was
+written by a *peer* session from the coord fragments after the lesson
+nearly went uncaptured — if you ran the campaign and know the precise
+mechanism (which limiter, which credential pool), please sharpen the
+**Why** section.

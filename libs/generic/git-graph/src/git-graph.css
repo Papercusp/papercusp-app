@@ -1,0 +1,7163 @@
+@import 'react-diff-view/style/index.css';
+
+/* Harness-specific styles.
+ * Builds on the global token system in apps/web/app/globals.css
+ * (--bg, --fg, --good, --bad, --border, --dur-*, etc.) */
+
+.h-root {
+  /* Fallback to 49px (papercusp's pc-header height) when --app-nav-height
+     is undefined. Without the fallback the calc() is invalid and height
+     reverts to auto, which sizes to content — collapsing the dashboard
+     and leaving empty space below the tables. */
+  height: calc(100vh - var(--app-nav-height, 49px));
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+}
+
+/* ── Top bar / mission header ────────────────────────────────── */
+.h-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+.h-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: 0.2px;
+}
+.h-project {
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+  min-width: 180px;
+}
+.h-project:focus { border-color: var(--accent); }
+
+/* Stat cards sitting inline in the header */
+.h-stats {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  margin-left: 8px;
+}
+.h-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 12px;
+  border-left: 1px solid var(--border);
+  min-width: 58px;
+}
+.h-stat-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.h-stat-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.h-stat-value.good { color: var(--good); }
+.h-stat-value.warn { color: var(--warn); }
+.h-stat-value.bad  { color: var(--bad); }
+.h-stat-value.info { color: var(--info); }
+
+/* Animated "running" pulse ring on the alive indicator */
+.h-pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  position: relative;
+  flex-shrink: 0;
+}
+.h-pulse-dot.live {
+  background: var(--good);
+  box-shadow: 0 0 0 0 rgba(158, 206, 106, 0.6);
+  animation: hPulse 1.6s var(--ease-out) infinite;
+}
+.h-pulse-dot.idle {
+  background: var(--fg-dim);
+  opacity: 0.55;
+}
+@keyframes hPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(158, 206, 106, 0.55); }
+  70%  { box-shadow: 0 0 0 7px rgba(158, 206, 106, 0.0); }
+  100% { box-shadow: 0 0 0 0 rgba(158, 206, 106, 0.0); }
+}
+
+/* Action buttons */
+.h-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
+  user-select: none;
+}
+.h-btn:hover { background: color-mix(in oklab, var(--bg-3), white 6%); border-color: color-mix(in oklab, var(--border), white 10%); }
+.h-btn:active { transform: translateY(1px); }
+.h-btn.primary {
+  background: color-mix(in oklab, var(--good), black 35%);
+  border-color: color-mix(in oklab, var(--good), black 15%);
+  color: #eaffea;
+}
+.h-btn.primary:hover { background: color-mix(in oklab, var(--good), black 20%); }
+.h-btn.danger {
+  background: color-mix(in oklab, var(--bad), black 35%);
+  border-color: color-mix(in oklab, var(--bad), black 15%);
+  color: #ffeaea;
+}
+.h-btn.danger:hover { background: color-mix(in oklab, var(--bad), black 20%); }
+.h-btn.ghost { background: transparent; }
+
+.h-btn-icon {
+  padding: 4px 6px;
+  border-radius: 5px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.h-btn-icon:hover { color: var(--fg); background: var(--bg-3); }
+
+/* ── Panels ──────────────────────────────────────────────────── */
+.h-panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  min-height: 0;
+  height: 100%;
+}
+.h-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--bg-2), white 2%);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.h-panel-title {
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.h-panel-count {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.h-panel-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.h-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0;
+}
+.h-panel-body.padded { padding: 10px; }
+
+/* ── Feature queue rows ──────────────────────────────────────── */
+.h-feat {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 40%);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.h-feat:hover { background: color-mix(in oklab, var(--bg-2), white 3%); }
+.h-feat-id {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-dim);
+  flex-shrink: 0;
+}
+.h-feat-title {
+  font-size: 12.5px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-feat-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.h-feat-attempts {
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+.h-feat-reset {
+  font-size: 10px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.h-feat:hover .h-feat-reset { opacity: 1; }
+.h-feat-reset:hover { color: var(--bad); border-color: var(--bad); }
+
+/* Status pills — small, icon + label */
+.h-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  letter-spacing: 0.2px;
+  text-transform: lowercase;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.h-pill.todo         { background: color-mix(in oklab, var(--fg-dim), transparent 82%); color: var(--fg-dim); border-color: color-mix(in oklab, var(--fg-dim), transparent 70%); }
+.h-pill.in_progress  { background: color-mix(in oklab, var(--info), transparent 82%);   color: var(--info);    border-color: color-mix(in oklab, var(--info), transparent 65%); }
+.h-pill.validating   { background: color-mix(in oklab, #a855f7, transparent 82%);        color: #c084fc;        border-color: color-mix(in oklab, #a855f7, transparent 65%); }
+.h-pill.failing      { background: color-mix(in oklab, var(--bad), transparent 82%);    color: var(--bad);     border-color: color-mix(in oklab, var(--bad), transparent 65%); }
+.h-pill.passed       { background: color-mix(in oklab, var(--good), transparent 82%);   color: var(--good);    border-color: color-mix(in oklab, var(--good), transparent 65%); }
+.h-pill.blocked      { background: color-mix(in oklab, var(--warn), transparent 82%);   color: var(--warn);    border-color: color-mix(in oklab, var(--warn), transparent 65%); }
+
+/* Animated "processing" shimmer on in-progress / validating pills */
+.h-pill.in_progress .h-pill-dot,
+.h-pill.validating  .h-pill-dot {
+  animation: hBlink 1.2s var(--ease-in-out) infinite;
+}
+.h-pill-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+  flex-shrink: 0;
+}
+@keyframes hBlink {
+  0%, 100% { opacity: 0.5; transform: scale(0.85); }
+  50%      { opacity: 1;   transform: scale(1); }
+}
+
+/* ── Log lines ───────────────────────────────────────────────── */
+.h-log {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.3px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+  background: radial-gradient(circle at 12% 0%, color-mix(in oklab, var(--accent), transparent 94%), transparent 22rem), color-mix(in oklab, var(--bg), white 1%);
+}
+
+.h-log-line {
+  position: relative;
+  display: grid;
+  grid-template-columns: 34px 88px minmax(50px, auto) minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-height: 23px;
+  padding: 3px 10px 3px 8px;
+  border-left: 3px solid transparent;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.h-log-line:nth-child(2n) {
+  background: rgba(255,255,255,0.012);
+}
+
+.h-log-line:hover {
+  background: color-mix(in oklab, var(--accent), transparent 94%);
+}
+
+.h-log-no {
+  color: color-mix(in oklab, var(--fg-dim), transparent 48%);
+  text-align: right;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.h-log-ts {
+  color: color-mix(in oklab, var(--fg-dim), white 5%);
+  font-variant-numeric: tabular-nums;
+}
+
+.h-log-ts.empty {
+  color: transparent;
+}
+
+.h-log-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  width: fit-content;
+  max-width: 72px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  border-radius: 999px;
+  padding: 1px 6px;
+  color: color-mix(in oklab, var(--fg-dim), white 10%);
+  background: color-mix(in oklab, var(--bg-3), transparent 18%);
+  font-size: 9.5px;
+  font-weight: 850;
+  letter-spacing: 0.05em;
+  line-height: 1.45;
+  text-transform: uppercase;
+}
+
+.h-log-tag.empty {
+  visibility: hidden;
+}
+
+.h-log-msg {
+  min-width: 0;
+  color: color-mix(in oklab, var(--fg-dim), white 12%);
+}
+
+.h-log-line.kind-decision {
+  border-left-color: var(--accent);
+  background: color-mix(in oklab, var(--accent), transparent 93%);
+}
+
+.h-log-line.kind-decision .h-log-tag {
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent), transparent 55%);
+  background: color-mix(in oklab, var(--accent), transparent 86%);
+}
+
+.h-log-line.kind-plan { border-left-color: var(--info); }
+.h-log-line.kind-plan .h-log-tag { color: var(--info); border-color: color-mix(in oklab, var(--info), transparent 58%); background: color-mix(in oklab, var(--info), transparent 88%); }
+
+.h-log-line.kind-iteration {
+  border-left-color: color-mix(in oklab, var(--fg-dim), white 8%);
+  background: color-mix(in oklab, var(--bg-3), transparent 38%);
+}
+
+.h-log-line.kind-iteration .h-log-msg {
+  color: color-mix(in oklab, var(--fg-dim), white 22%);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.h-log-line.kind-invoke { border-left-color: var(--good); }
+.h-log-line.kind-invoke .h-log-tag { color: var(--good); border-color: color-mix(in oklab, var(--good), transparent 58%); background: color-mix(in oklab, var(--good), transparent 88%); }
+
+.h-log-line.error,
+.h-log-line.kind-error {
+  border-left-color: var(--bad);
+  background: color-mix(in oklab, var(--bad), transparent 91%);
+}
+
+.h-log-line.error .h-log-msg,
+.h-log-line.kind-error .h-log-msg { color: color-mix(in oklab, var(--bad), white 18%); }
+.h-log-line.error .h-log-tag,
+.h-log-line.kind-error .h-log-tag { color: var(--bad); border-color: color-mix(in oklab, var(--bad), transparent 55%); background: color-mix(in oklab, var(--bad), transparent 86%); }
+
+.h-log-line.warn,
+.h-log-line.kind-warn {
+  border-left-color: var(--warn);
+  background: color-mix(in oklab, var(--warn), transparent 92%);
+}
+
+.h-log-line.warn .h-log-msg,
+.h-log-line.kind-warn .h-log-msg { color: color-mix(in oklab, var(--warn), white 8%); }
+.h-log-line.warn .h-log-tag,
+.h-log-line.kind-warn .h-log-tag { color: var(--warn); border-color: color-mix(in oklab, var(--warn), transparent 55%); background: color-mix(in oklab, var(--warn), transparent 86%); }
+
+/* ── Agent timeline blocks ──────────────────────────────────── */
+.h-tl-block {
+  margin-bottom: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.h-tl-block.text    { color: var(--fg); background: transparent; }
+.h-tl-block.tool    { background: color-mix(in oklab, var(--info), transparent 88%); border-left: 2px solid var(--info); }
+.h-tl-block.result  { background: color-mix(in oklab, var(--good), transparent 88%); border-left: 2px solid var(--good); }
+.h-tl-block.error   { background: color-mix(in oklab, var(--bad), transparent 88%);  border-left: 2px solid var(--bad); }
+.h-tl-block.status  { color: var(--fg-dim); font-style: italic; font-size: 11px; }
+.h-tl-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--info);
+  margin-bottom: 2px;
+}
+.h-tl-block.result .h-tl-tag { color: var(--good); }
+.h-tl-block.error .h-tl-tag  { color: var(--bad); }
+
+/* ── Markdown rendering (issues.md) ─────────────────────────── */
+.h-md {
+  padding: 12px 14px;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.h-md h1, .h-md h2, .h-md h3, .h-md h4 {
+  margin: 16px 0 6px;
+  font-weight: 600;
+  color: var(--fg);
+  line-height: 1.25;
+}
+.h-md h1 { font-size: 17px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+.h-md h2 { font-size: 15px; color: var(--accent); }
+.h-md h3 { font-size: 13.5px; color: var(--fg); }
+.h-md p { margin: 6px 0; }
+.h-md ul, .h-md ol { margin: 6px 0; padding-left: 22px; }
+.h-md li { margin: 2px 0; }
+.h-md code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  background: var(--bg-3);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--counter);
+}
+.h-md pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 11.5px;
+  margin: 8px 0;
+}
+.h-md pre code { background: transparent; padding: 0; color: var(--fg); }
+.h-md blockquote {
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+  color: var(--fg-dim);
+  margin: 6px 0;
+}
+.h-md strong { color: var(--fg); }
+.h-md a { color: var(--accent); text-decoration: none; }
+.h-md a:hover { text-decoration: underline; }
+.h-md table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.h-md th, .h-md td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+}
+.h-md th { background: var(--bg-3); font-weight: 600; }
+
+/* ── JSON viewer theme override ─────────────────────────────── */
+.h-json {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  background: transparent !important;
+  color: var(--fg) !important;
+}
+.h-json > ul { padding-left: 0 !important; }
+
+/* ── Resizable panel handles ────────────────────────────────── */
+.h-resize-h {
+  width: 3px;
+  background: var(--border);
+  transition: background var(--dur-fast) var(--ease-out);
+  flex-shrink: 0;
+}
+.h-resize-h[data-resize-handle-state="hover"],
+.h-resize-h[data-resize-handle-state="drag"] {
+  background: var(--accent);
+}
+.h-resize-v {
+  height: 3px;
+  background: var(--border);
+  transition: background var(--dur-fast) var(--ease-out);
+  flex-shrink: 0;
+}
+.h-resize-v[data-resize-handle-state="hover"],
+.h-resize-v[data-resize-handle-state="drag"] {
+  background: var(--accent);
+}
+
+/* ── Empty states ───────────────────────────────────────────── */
+.h-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 6px;
+  color: var(--fg-dim);
+  font-size: 12px;
+  padding: 20px;
+  text-align: center;
+}
+.h-empty-icon {
+  color: color-mix(in oklab, var(--fg-dim), transparent 30%);
+  opacity: 0.7;
+}
+
+/* ── Mission header animated gradient when alive ───────────── */
+.h-header.alive {
+  position: relative;
+  overflow: hidden;
+}
+.h-header.alive::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklab, var(--good), transparent 92%) 40%,
+    color-mix(in oklab, var(--good), transparent 92%) 60%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: hShimmer 4.5s linear infinite;
+  pointer-events: none;
+  opacity: 0.6;
+}
+@keyframes hShimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Scrollbar inside panel bodies (reuses libs/ui scrollbar styles) ── */
+.h-panel-body::-webkit-scrollbar { width: 8px; height: 8px; }
+.h-panel-body::-webkit-scrollbar-track { background: transparent; }
+.h-panel-body::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 4px; }
+.h-panel-body::-webkit-scrollbar-thumb:hover { background: var(--border); }
+
+/* ── Issues tracker ─────────────────────────────────────────── */
+.h-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  align-items: stretch;
+  flex-shrink: 0;
+}
+.h-tabs.h-main-tabs {
+  padding: 0 16px;
+  background: var(--bg);
+  gap: 4px;
+}
+.h-main-tabs .h-tab {
+  padding: 9px 14px;
+  font-size: 11.5px;
+}
+.h-main-tabs .h-tab[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.h-main-tabs .h-tab[disabled]:hover {
+  color: var(--fg-dim);
+}
+.h-tab {
+  padding: 7px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  border: none;
+  background: transparent;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.h-tab:hover { color: var(--fg); }
+.h-tab.on {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+.h-tab-count {
+  background: var(--bg-3);
+  color: var(--fg-dim);
+  font-weight: 600;
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.h-tab.on .h-tab-count { background: color-mix(in oklab, var(--accent), transparent 75%); color: var(--accent); }
+
+.h-issues-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 14%);
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 3%), color-mix(in oklab, var(--bg-2), transparent 4%));
+  flex-shrink: 0;
+}
+
+.h-issues-toolbar-main,
+.h-issues-toolbar-side {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.h-issues-toolbar-main {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.h-issues-toolbar-main::-webkit-scrollbar { display: none; }
+
+.h-issues-toolbar-side {
+  flex-shrink: 0;
+}
+
+.h-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: color-mix(in oklab, var(--fg-dim), white 7%);
+  background: color-mix(in oklab, var(--bg), white 2%);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 8%);
+  border-radius: 999px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+
+.h-chip strong {
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+}
+
+.h-chip:hover { color: var(--fg); transform: translateY(-1px); }
+.h-chip.on {
+  color: color-mix(in oklab, var(--fg), var(--accent) 10%);
+  background: color-mix(in oklab, var(--accent), transparent 87%);
+  border-color: color-mix(in oklab, var(--accent), transparent 50%);
+}
+
+.h-issue-mini-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: color-mix(in oklab, var(--fg-dim), white 5%);
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.h-issue-mini-stat strong {
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.h-issues {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  overflow: auto;
+}
+
+.h-issue {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 10px 9px 12px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  border-radius: 11px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 2%), color-mix(in oklab, var(--bg), white 1%));
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+
+.h-issue::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+  background: color-mix(in oklab, var(--fg-dim), transparent 30%);
+}
+
+.h-issue.h-issue-critical::before { background: #dc2626; }
+.h-issue.h-issue-major::before { background: var(--warn); }
+.h-issue.h-issue-minor::before { background: var(--info); }
+.h-issue.h-issue-nit::before { background: color-mix(in oklab, var(--fg-dim), white 14%); }
+
+.h-issue:hover,
+.h-issue:focus-visible {
+  background: linear-gradient(90deg, color-mix(in oklab, var(--accent), transparent 91%), color-mix(in oklab, var(--bg-2), white 3%));
+  border-color: color-mix(in oklab, var(--accent), transparent 55%);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.h-issue-sev {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+}
+.h-issue-sev.sev-critical { background: color-mix(in oklab, #dc2626, transparent 80%); color: #fca5a5; border-color: color-mix(in oklab, #dc2626, transparent 55%); }
+.h-issue-sev.sev-major    { background: color-mix(in oklab, var(--warn), transparent 82%); color: var(--warn); border-color: color-mix(in oklab, var(--warn), transparent 60%); }
+.h-issue-sev.sev-minor    { background: color-mix(in oklab, var(--info), transparent 82%); color: var(--info); border-color: color-mix(in oklab, var(--info), transparent 60%); }
+.h-issue-sev.sev-nit      { background: color-mix(in oklab, var(--fg-dim), transparent 82%); color: var(--fg-dim); border-color: color-mix(in oklab, var(--fg-dim), transparent 60%); }
+
+.h-issue-body { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.h-issue-title {
+  font-size: 12.5px;
+  font-weight: 680;
+  color: color-mix(in oklab, var(--fg), white 3%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.h-issue-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  flex-wrap: wrap;
+}
+
+.h-issue-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: color-mix(in oklab, var(--fg-dim), white 10%);
+  text-transform: lowercase;
+}
+.h-issue-id { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.h-issue-feat { color: color-mix(in oklab, var(--fg-dim), transparent 20%); }
+.h-issue-code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  color: var(--counter);
+}
+
+.h-issue-right {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.h-issue-open-affordance {
+  opacity: 0;
+  transform: translateX(-2px);
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 62%);
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: color-mix(in oklab, var(--accent), white 10%);
+  background: color-mix(in oklab, var(--accent), transparent 90%);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  transition: opacity 140ms var(--ease-out), transform 140ms var(--ease-out);
+}
+
+.h-issue:hover .h-issue-open-affordance,
+.h-issue:focus-visible .h-issue-open-affordance {
+  opacity: 1;
+  transform: translateX(0);
+}
+.h-issue-linked {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--good);
+  background: color-mix(in oklab, var(--good), transparent 85%);
+  border: 1px solid color-mix(in oklab, var(--good), transparent 60%);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+}
+.h-issue-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-weight: 600;
+  text-transform: lowercase;
+  border: 1px solid transparent;
+}
+.h-issue-status.st-open         { background: color-mix(in oklab, var(--bad), transparent 82%); color: var(--bad); border-color: color-mix(in oklab, var(--bad), transparent 60%); }
+.h-issue-status.st-acknowledged { background: color-mix(in oklab, var(--fg-dim), transparent 82%); color: var(--fg-dim); border-color: color-mix(in oklab, var(--fg-dim), transparent 60%); }
+.h-issue-status.st-fixing       { background: color-mix(in oklab, var(--info), transparent 82%); color: var(--info); border-color: color-mix(in oklab, var(--info), transparent 60%); }
+.h-issue-status.st-closed       { background: color-mix(in oklab, var(--good), transparent 82%); color: var(--good); border-color: color-mix(in oklab, var(--good), transparent 60%); }
+.h-issue-status.st-wontfix      { background: color-mix(in oklab, var(--fg-dim), transparent 88%); color: var(--fg-dim); border-color: color-mix(in oklab, var(--fg-dim), transparent 70%); text-decoration: line-through; }
+.h-issue-status.st-passed       { background: color-mix(in oklab, var(--good), transparent 78%); color: var(--good); border-color: color-mix(in oklab, var(--good), transparent 55%); }
+
+.h-issue-pre {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg);
+  max-height: 320px;
+  overflow: auto;
+}
+
+.h-spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Pending validator findings — surfaced before curator/triage merges them. */
+.h-chip-pending {
+  color: var(--counter);
+  border-color: color-mix(in oklab, var(--counter), transparent 50%);
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+.h-chip-pending:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--counter), transparent 85%);
+  color: var(--counter);
+}
+.h-chip-pending:disabled { opacity: 0.6; cursor: wait; }
+
+.h-pending-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: color-mix(in oklab, var(--counter), transparent 88%);
+  border-bottom: 1px solid color-mix(in oklab, var(--counter), transparent 60%);
+  color: var(--counter);
+  font-size: 10.5px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+
+/* ── Command-center polish layer ─────────────────────────────── */
+.h-root {
+  background:
+    radial-gradient(circle at 12% -10%, color-mix(in oklab, var(--accent), transparent 84%) 0, transparent 28rem),
+    radial-gradient(circle at 86% 0%, color-mix(in oklab, var(--info), transparent 90%) 0, transparent 24rem),
+    linear-gradient(180deg, color-mix(in oklab, var(--bg), white 2%) 0%, var(--bg) 46%);
+}
+
+.h-header {
+  align-items: stretch;
+  gap: 16px;
+  padding: 16px 24px 14px;
+  background: linear-gradient(135deg, color-mix(in oklab, var(--bg-2), white 4%), color-mix(in oklab, var(--bg), white 1%));
+  border-bottom-color: color-mix(in oklab, var(--border), white 8%);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.22);
+}
+
+.h-header-main {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) minmax(280px, 1fr);
+  align-items: stretch;
+  gap: 18px;
+  min-width: 0;
+  flex: 1 1 520px;
+}
+
+.h-brand {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.h-brand-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.h-title {
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.h-project-card {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 12px 10px;
+  border: 1px solid color-mix(in oklab, var(--border), white 10%);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--bg-2), transparent 8%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+}
+
+.h-project-topline,
+.h-project-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.h-project-label {
+  color: var(--fg-dim);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.h-project {
+  min-width: 0;
+  width: 100%;
+  height: 34px;
+  border-radius: 10px;
+  border-color: color-mix(in oklab, var(--border), white 14%);
+  background: color-mix(in oklab, var(--bg-3), transparent 8%);
+  color: var(--fg);
+  font-weight: 650;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.04);
+}
+
+.h-project:hover {
+  border-color: color-mix(in oklab, var(--accent), transparent 30%);
+}
+
+.h-project-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in oklab, var(--fg-dim), white 12%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.h-project-progress {
+  flex-shrink: 0;
+  color: var(--fg-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.h-progress-rail {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg), white 8%);
+}
+
+.h-progress-rail > span {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--good));
+  box-shadow: 0 0 16px color-mix(in oklab, var(--accent), transparent 30%);
+  transition: width 280ms var(--ease-out);
+}
+
+.h-status-chip,
+.h-escalated-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+
+.h-status-chip.live {
+  color: var(--good);
+  border-color: color-mix(in oklab, var(--good), transparent 58%);
+  background: color-mix(in oklab, var(--good), transparent 88%);
+}
+
+.h-status-chip.idle {
+  color: var(--fg-dim);
+  border-color: color-mix(in oklab, var(--fg-dim), transparent 70%);
+  background: color-mix(in oklab, var(--fg-dim), transparent 90%);
+}
+
+.h-escalated-pill {
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn), transparent 50%);
+  background: color-mix(in oklab, var(--warn), transparent 84%);
+}
+
+.h-header-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-end;
+  gap: 10px;
+  min-width: 340px;
+  max-width: 620px;
+}
+
+.h-stats {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-left: 0;
+}
+
+.h-stat {
+  min-width: 72px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 16%);
+  border-radius: 11px;
+  background: color-mix(in oklab, var(--bg-3), transparent 18%);
+}
+
+.h-stat-label {
+  font-size: 9px;
+  letter-spacing: 0.11em;
+}
+
+.h-stat-value {
+  font-size: 15px;
+}
+
+.h-stat-button {
+  appearance: none;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.h-stat-button:hover .h-stat {
+  border-color: color-mix(in oklab, var(--accent), transparent 38%);
+}
+
+.h-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.h-header-empty {
+  display: flex;
+  align-items: center;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.h-header-empty strong {
+  color: var(--fg);
+}
+
+.h-btn {
+  min-height: 30px;
+  border-radius: 9px;
+  border-color: color-mix(in oklab, var(--border), white 8%);
+  background: color-mix(in oklab, var(--bg-3), transparent 14%);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.035);
+}
+
+.h-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 7px 16px rgba(0,0,0,0.18);
+}
+
+.h-btn:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+.h-key-btn {
+  min-width: 44px;
+  justify-content: center;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.h-tabs.h-main-tabs {
+  gap: 6px;
+  padding: 10px 24px 0;
+  background: transparent;
+  border-bottom-color: color-mix(in oklab, var(--border), transparent 8%);
+}
+
+.h-main-tabs .h-tab {
+  margin-bottom: -1px;
+  padding: 9px 14px 10px;
+  border: 1px solid transparent;
+  border-bottom: 1px solid transparent;
+  border-radius: 10px 10px 0 0;
+}
+
+.h-main-tabs .h-tab.on {
+  background: color-mix(in oklab, var(--bg-2), white 3%);
+  border-color: color-mix(in oklab, var(--border), white 8%);
+  border-bottom-color: color-mix(in oklab, var(--bg-2), white 3%);
+  box-shadow: 0 -8px 22px rgba(0,0,0,0.16);
+}
+
+.h-guide-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 24px 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 68%);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--accent), transparent 92%);
+  color: color-mix(in oklab, var(--fg), var(--accent) 18%);
+  font-size: 12px;
+}
+
+.h-guide-action {
+  margin-left: auto;
+  color: var(--accent);
+  background: color-mix(in oklab, var(--accent), transparent 88%);
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 58%);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.h-main-shell {
+  flex: 1;
+  min-height: 0;
+}
+
+.h-main-shell.dashboard {
+  display: block;
+  padding: 10px 24px 18px;
+}
+
+.h-main-shell.embed {
+  display: flex;
+  padding: 10px 24px 18px;
+}
+
+.h-main-shell.embed iframe {
+  overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--border), white 8%) !important;
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(0,0,0,0.28);
+}
+
+.h-panel {
+  border-radius: 12px;
+  border-color: color-mix(in oklab, var(--border), white 7%);
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 3%), var(--bg-2));
+  box-shadow: 0 12px 30px rgba(0,0,0,0.20), inset 0 1px 0 rgba(255,255,255,0.025);
+}
+
+.h-panel-head {
+  min-height: 32px;
+  padding: 8px 11px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 5%), color-mix(in oklab, var(--bg-2), white 1%));
+}
+
+.h-panel-title {
+  color: color-mix(in oklab, var(--fg-dim), white 18%);
+  letter-spacing: 0.09em;
+}
+
+.h-empty {
+  gap: 9px;
+  color: color-mix(in oklab, var(--fg-dim), white 10%);
+}
+
+.h-feat:hover,
+.h-issue:hover {
+  background: color-mix(in oklab, var(--accent), transparent 94%);
+}
+
+@media (max-width: 1180px) {
+  .h-header {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+
+  .h-header-main {
+    flex: 1 1 min(100%, 620px);
+  }
+
+  .h-header-side {
+    flex: 1 1 100%;
+    align-items: stretch;
+    max-width: none;
+    min-width: 0;
+  }
+
+  .h-stats,
+.h-header-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  .h-header {
+    padding: 12px;
+  }
+
+  .h-header-main {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    flex-basis: 100%;
+  }
+
+  .h-brand {
+    gap: 4px;
+  }
+
+  .h-title {
+    font-size: 17px;
+  }
+
+  .h-project-card {
+    padding: 10px;
+  }
+
+  .h-project {
+    height: 32px;
+  }
+
+  .h-project-meta {
+    align-items: flex-start;
+  }
+
+  .h-project-progress {
+    font-size: 9px;
+  }
+
+  .h-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    width: 100%;
+    overflow: visible;
+    padding-bottom: 0;
+  }
+
+  .h-stats > *,
+  .h-stat-button {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .h-stat {
+    min-width: 0;
+    height: 100%;
+    padding: 8px 10px;
+  }
+
+  .h-header-actions {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+
+  .h-header-actions::-webkit-scrollbar {
+    display: none;
+  }
+
+  .h-header-actions .h-btn {
+    flex-shrink: 0;
+    justify-content: center;
+  }
+
+  .h-main-shell.dashboard,
+.h-main-shell.embed {
+    padding: 8px 12px 14px;
+  }
+
+  .h-tabs.h-main-tabs {
+    padding-inline: 12px;
+  }
+}
+
+/* ── Active lanes / now-running strip ───────────────────────── */
+.h-running-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 24px 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in oklab, var(--border), white 5%);
+  border-radius: 13px;
+  background: color-mix(in oklab, var(--bg-2), transparent 4%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.025);
+}
+
+.h-running-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  color: color-mix(in oklab, var(--fg-dim), white 12%);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.h-running-head strong {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.h-running-lanes {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 1px;
+}
+
+.h-running-lane {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 8%);
+  border-radius: 999px;
+  padding: 4px 9px;
+  color: var(--fg-dim);
+  background: color-mix(in oklab, var(--bg-3), transparent 25%);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.h-running-lane.live {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--good), transparent 62%);
+  background: linear-gradient(90deg, color-mix(in oklab, var(--good), transparent 88%), color-mix(in oklab, var(--accent), transparent 92%));
+  cursor: pointer;
+}
+
+.h-running-lane.live:hover {
+  border-color: color-mix(in oklab, var(--good), transparent 35%);
+  transform: translateY(-1px);
+}
+
+.h-running-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--good);
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--good), transparent 82%);
+}
+
+.h-running-id {
+  color: var(--good);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-weight: 800;
+}
+
+.h-running-title {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.h-running-time {
+  color: var(--fg-dim);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* ── Compact dashboard ─────────────────────────────────────── */
+.h-compact-dashboard {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.h-compact-dashboard .h-panel,
+.h-compact-panel,
+.h-compact-git {
+  min-height: 300px;
+  height: auto;
+}
+
+.h-compact-dashboard .h-panel-body {
+  min-height: 260px;
+}
+
+.h-compact-inbox {
+  overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--border), white 7%);
+  border-radius: 12px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 3%), var(--bg-2));
+  box-shadow: 0 12px 30px rgba(0,0,0,0.20), inset 0 1px 0 rgba(255,255,255,0.025);
+}
+
+.h-compact-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  color: color-mix(in oklab, var(--fg-dim), white 18%);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+/* ── Recent agents table polish ────────────────────────────── */
+.h-agent-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.h-agent-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in oklab, var(--bg-2), white 3%);
+}
+
+.h-agent-table th {
+  padding: 7px 10px;
+  color: var(--fg-dim);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-align: left;
+  text-transform: uppercase;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 10%);
+}
+
+.h-agent-table th.right,
+.h-agent-table td.right {
+  text-align: right;
+}
+
+.h-agent-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 44%);
+}
+
+.h-agent-table tr[role="button"] {
+  cursor: pointer;
+  transition: background 140ms var(--ease-out), transform 140ms var(--ease-out);
+}
+
+.h-agent-table tr[role="button"]:hover,
+.h-agent-table tr[role="button"]:focus-visible {
+  background: color-mix(in oklab, var(--accent), transparent 94%);
+  outline: none;
+}
+
+.h-agent-table tr[role="button"]:active {
+  transform: translateY(1px);
+}
+
+.h-agent-table .muted { color: var(--fg-dim); }
+.h-agent-table .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.h-agent-table .nowrap { white-space: nowrap; }
+.h-agent-table .runid { color: color-mix(in oklab, var(--fg-dim), white 12%); }
+
+.h-agent-role {
+  display: inline-flex;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 68%);
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: color-mix(in oklab, var(--accent), white 14%);
+  background: color-mix(in oklab, var(--accent), transparent 90%);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+
+.h-agent-role.validator {
+  color: #c084fc;
+  border-color: color-mix(in oklab, #a855f7, transparent 64%);
+  background: color-mix(in oklab, #a855f7, transparent 88%);
+}
+
+.h-agent-role.orchestrator {
+  color: var(--good);
+  border-color: color-mix(in oklab, var(--good), transparent 64%);
+  background: color-mix(in oklab, var(--good), transparent 88%);
+}
+
+.h-agent-row {
+  position: relative;
+  outline: 1px solid transparent;
+}
+
+.h-agent-row::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent), transparent 25%);
+  opacity: 0.8;
+}
+
+.h-agent-row.role-validator::before { background: #a855f7; }
+.h-agent-row.role-orchestrator::before { background: var(--good); }
+.h-agent-row.role-worker::before { background: var(--info); }
+.h-agent-row.role-documenter::before { background: #f59e0b; }
+
+.h-agent-table .h-agent-row td {
+  padding-block: 8px;
+}
+
+.h-agent-time-cell {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: color-mix(in oklab, var(--fg-dim), white 10%);
+  font-variant-numeric: tabular-nums;
+}
+
+.h-agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--accent), white 12%);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent), transparent 86%);
+}
+
+.h-agent-row.role-validator .h-agent-dot { background: #a855f7; box-shadow: 0 0 0 3px color-mix(in oklab, #a855f7, transparent 86%); }
+.h-agent-row.role-orchestrator .h-agent-dot { background: var(--good); box-shadow: 0 0 0 3px color-mix(in oklab, var(--good), transparent 86%); }
+.h-agent-row.role-worker .h-agent-dot { background: var(--info); box-shadow: 0 0 0 3px color-mix(in oklab, var(--info), transparent 86%); }
+.h-agent-row.role-documenter .h-agent-dot { background: #f59e0b; box-shadow: 0 0 0 3px color-mix(in oklab, #f59e0b, transparent 86%); }
+
+.h-agent-role-cell {
+  min-width: 0;
+}
+
+.h-agent-run-cell {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.h-agent-run-hint {
+  color: color-mix(in oklab, var(--fg-dim), transparent 12%);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+.h-agent-size-cell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.h-agent-open {
+  opacity: 0;
+  transform: translateX(-2px);
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 62%);
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: color-mix(in oklab, var(--accent), white 10%);
+  background: color-mix(in oklab, var(--accent), transparent 90%);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  transition: opacity 140ms var(--ease-out), transform 140ms var(--ease-out);
+}
+
+.h-agent-row:hover .h-agent-open,
+.h-agent-row:focus-visible .h-agent-open {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.h-agent-row:focus-visible {
+  outline-color: color-mix(in oklab, var(--accent), transparent 45%);
+}
+
+@media (max-width: 760px) {
+  .h-agent-table th:nth-child(4),
+  .h-agent-table td:nth-child(4) {
+    display: none;
+  }
+
+  .h-agent-run-hint {
+    display: none;
+  }
+
+  .h-agent-table td {
+    padding-inline: 8px;
+  }
+}
+
+@media (max-width: 760px) {
+  .h-running-strip {
+    align-items: flex-start;
+    flex-direction: column;
+    margin-inline: 12px;
+  }
+
+  .h-running-lanes {
+    width: 100%;
+  }
+
+  .h-running-lane {
+    flex-shrink: 0;
+  }
+
+  .h-running-title {
+    max-width: 160px;
+  }
+
+  .h-main-shell.dashboard {
+    overflow: auto;
+  }
+
+  .h-compact-dashboard .h-panel,
+.h-compact-panel,
+.h-compact-git {
+    min-height: 240px;
+  }
+
+  .h-compact-dashboard .h-panel-body {
+    min-height: 210px;
+  }
+
+  .h-agent-table th:nth-child(3),
+.h-agent-table td:nth-child(3) {
+    display: none;
+  }
+}
+/* ── assistant-ui chat shell ────────────────────────────────── */
+.h-chat-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.h-chat-head {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 50%);
+  flex-shrink: 0;
+}
+.h-chat-head-actions { display: flex; gap: 4px; align-items: center; }
+.h-chat-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.h-chat-empty {
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 6px 2px;
+}
+
+/* messages */
+.h-chat-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 92%;
+}
+.h-chat-user { align-self: flex-end; align-items: flex-end; }
+.h-chat-assistant { align-self: flex-start; align-items: flex-start; }
+
+.h-chat-bubble {
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: -apple-system, system-ui, sans-serif;
+}
+.h-chat-user .h-chat-bubble {
+  background: color-mix(in oklab, var(--accent), transparent 85%);
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 60%);
+}
+.h-chat-assistant .h-chat-bubble {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+}
+
+.h-chat-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+  padding: 0 4px;
+}
+.h-chat-msg:hover .h-chat-actions { opacity: 1; }
+
+.h-chat-thinking {
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-style: italic;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+}
+.h-chat-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 11px;
+  background: var(--accent);
+  animation: hBlink 1s steps(1, end) infinite;
+}
+
+/* composer */
+.h-chat-composer {
+  padding: 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+.h-chat-input {
+  width: 100%;
+  padding: 6px 8px;
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  resize: vertical;
+  outline: none;
+  min-height: 56px;
+}
+.h-chat-input:focus { border-color: var(--accent); }
+.h-chat-composer-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+  justify-content: flex-end;
+}
+.h-chat-hint {
+  font-size: 9.5px;
+  color: var(--fg-dim);
+  letter-spacing: 0.4px;
+  margin-right: auto;
+}
+
+/* action (patch / promote) blocks embedded inside messages */
+.h-action-block {
+  margin: 8px 0;
+  border: 1px solid color-mix(in oklab, var(--border), white 10%);
+  border-radius: 4px;
+  overflow: hidden;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.h-action-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--bg);
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 40%);
+  font-size: 10.5px;
+}
+.h-action-head-target { color: var(--fg); }
+.h-action-head-label { color: var(--fg-dim); }
+.h-action-head-btns { margin-left: auto; display: flex; gap: 4px; }
+.h-action-body {
+  margin: 0;
+  padding: 6px 8px;
+  font-size: 10.5px;
+  color: var(--fg);
+  background: var(--bg);
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+.h-action-body.expanded { max-height: 50vh; }
+.h-action-more {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 4px 0 0;
+  display: block;
+}
+
+/* ── Brainstorm panel ───────────────────────────────────────── */
+.h-brainstorm-subtabs {
+  display: flex;
+  gap: 2px;
+  margin-left: 8px;
+}
+.h-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all var(--dur-fast) var(--ease-out);
+}
+.h-sub:hover { color: var(--fg); }
+.h-sub.on {
+  background: var(--bg-3);
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+.h-btn-icon.on { color: var(--accent); background: var(--bg-3); }
+
+.h-brainstorm-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.h-brainstorm-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.h-brainstorm-chat {
+  flex: 1 1 50%;
+  min-height: 200px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+}
+
+/* BlockNote editor — override Mantine tokens to match our dark palette */
+.h-brainstorm-write {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  background: var(--bg-2);
+  position: relative;
+}
+.h-brainstorm-write .bn-container {
+  background: var(--bg-2);
+  color: var(--fg);
+}
+.h-brainstorm-write .ProseMirror {
+  padding: 12px 16px !important;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.h-brainstorm-write [data-color-scheme="dark"] { background: var(--bg-2); }
+.h-brainstorm-savehint {
+  position: absolute;
+  top: 6px;
+  right: 12px;
+  font-size: 10px;
+  color: var(--fg-dim);
+  z-index: 10;
+  pointer-events: none;
+}
+
+/* Markmap container */
+.h-brainstorm-map {
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+.h-brainstorm-map svg { display: block; width: 100%; height: 100%; }
+
+/* Excalidraw container */
+.h-brainstorm-canvas {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+.h-brainstorm-canvas .excalidraw {
+  height: 100%;
+}
+
+/* ── Brainstorm full-tab layout ─────────────────────────────── */
+.h-main-shell.brainstorm-full {
+  display: flex;
+  padding: 10px 24px 18px;
+  min-height: 0;
+}
+.h-bsfull {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+}
+.h-bsfull-subtabs {
+  display: flex;
+  gap: 2px;
+  margin-left: 8px;
+}
+.h-bsfull-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all var(--dur-fast) var(--ease-out);
+}
+.h-bsfull-sub:hover { color: var(--fg); }
+.h-bsfull-sub.on {
+  background: var(--bg-3);
+  color: var(--fg);
+  border-color: var(--border);
+}
+.h-bsfull-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.h-root.brainstorm-mode .h-main-tabs {
+  margin-top: 2px;
+}
+
+.h-root.brainstorm-mode .h-main-shell.brainstorm-full {
+  padding-top: 10px;
+}
+
+.h-root.brainstorm-mode .h-header {
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.18);
+}
+
+.h-brainstorm-write {
+  overflow: hidden;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 2%), color-mix(in oklab, var(--bg-2), black 2%));
+}
+
+.h-brainstorm-write .bn-container {
+  flex: 1;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.h-brainstorm-write .bn-editor,
+.h-brainstorm-write .ProseMirror {
+  flex: 1;
+  min-height: 100%;
+}
+
+
+/* ── Mission overview / health strip ────────────────────────── */
+.h-mission-overview {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.1fr) minmax(280px, 2fr);
+  align-items: stretch;
+  gap: 10px;
+  margin: 8px 24px 0;
+}
+
+.h-mission-overview.has-action {
+  grid-template-columns: minmax(240px, 1.1fr) minmax(280px, 2fr) auto;
+}
+
+.h-focus-card,
+.h-overview-action {
+  border: 1px solid color-mix(in oklab, var(--border), white 7%);
+  border-radius: 13px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 4%), color-mix(in oklab, var(--bg-2), transparent 2%));
+  color: var(--fg);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.025);
+}
+
+.h-focus-card {
+  display: grid;
+  grid-template-rows: auto auto auto;
+  justify-items: start;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 150ms var(--ease-out), transform 150ms var(--ease-out), background 150ms var(--ease-out);
+}
+
+.h-focus-card:hover:not(:disabled),
+.h-focus-card:focus-visible {
+  border-color: color-mix(in oklab, var(--accent), transparent 34%);
+  background: linear-gradient(180deg, color-mix(in oklab, var(--accent), transparent 90%), color-mix(in oklab, var(--bg-2), white 2%));
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.h-focus-card:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.h-overline {
+  color: var(--fg-dim);
+  font-size: 9.5px;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.h-focus-card strong {
+  color: var(--fg);
+  font-size: 13px;
+  letter-spacing: -0.01em;
+}
+
+.h-focus-title {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in oklab, var(--fg-dim), white 12%);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.h-focus-card.failing,
+.h-focus-card.blocked {
+  border-color: color-mix(in oklab, var(--warn), transparent 58%);
+}
+
+.h-focus-card.in_progress,
+.h-focus-card.validating {
+  border-color: color-mix(in oklab, var(--info), transparent 62%);
+}
+
+.h-status-distribution {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 9px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in oklab, var(--border), white 7%);
+  border-radius: 13px;
+  background: color-mix(in oklab, var(--bg-2), transparent 4%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.025);
+}
+
+.h-status-rail {
+  display: flex;
+  gap: 3px;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg), white 8%);
+}
+
+.h-status-segment {
+  min-width: 4px;
+  border-radius: inherit;
+  background: var(--fg-dim);
+}
+
+.h-status-segment.in_progress { background: var(--info); }
+.h-status-segment.validating { background: #a855f7; }
+.h-status-segment.failing { background: var(--bad); }
+.h-status-segment.todo { background: color-mix(in oklab, var(--fg-dim), white 12%); }
+.h-status-segment.blocked { background: var(--warn); }
+.h-status-segment.passed { background: var(--good); }
+.h-status-segment.empty { flex: 1; background: color-mix(in oklab, var(--fg-dim), transparent 70%); }
+
+.h-status-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 1px;
+  scrollbar-width: none;
+}
+
+.h-status-legend::-webkit-scrollbar { display: none; }
+
+.h-status-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 22%);
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: color-mix(in oklab, var(--bg-3), transparent 26%);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.h-status-token > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.h-status-token strong {
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-weight: 800;
+}
+
+.h-status-token.in_progress { color: var(--info); }
+.h-status-token.validating { color: #c084fc; }
+.h-status-token.failing { color: var(--bad); }
+.h-status-token.todo { color: color-mix(in oklab, var(--fg-dim), white 10%); }
+.h-status-token.blocked { color: var(--warn); }
+.h-status-token.passed { color: var(--good); }
+
+.h-overview-action {
+  min-width: 136px;
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: border-color 150ms var(--ease-out), transform 150ms var(--ease-out), background 150ms var(--ease-out);
+}
+
+.h-overview-action:hover,
+.h-overview-action:focus-visible {
+  border-color: color-mix(in oklab, var(--accent), transparent 35%);
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.h-overview-action.warn {
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn), transparent 55%);
+  background: color-mix(in oklab, var(--warn), transparent 88%);
+}
+
+@media (max-width: 760px) {
+  nav.top {
+    overflow-x: auto;
+    overflow-y: visible;
+    scrollbar-width: none;
+  }
+
+  nav.top::-webkit-scrollbar {
+    display: none;
+  }
+
+  nav.top .top-inner {
+    flex-direction: row !important;
+    align-items: center;
+    gap: 12px;
+    min-width: max-content;
+    padding: 10px 12px;
+  }
+
+  nav.top .brand {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    min-width: 82px;
+    padding-right: 10px;
+    background: linear-gradient(90deg, rgba(19, 23, 34, 0.98) 70%, rgba(19, 23, 34, 0));
+  }
+
+  nav.top .top-groups {
+    gap: 10px;
+  }
+
+  nav.top .nav-group-label {
+    padding: 5px 8px;
+    font-size: 12px;
+  }
+
+  .h-mission-overview {
+    grid-template-columns: 1fr;
+    margin-inline: 12px;
+  }
+
+  .h-focus-card {
+    min-height: 70px;
+  }
+
+  .h-status-distribution {
+    gap: 7px;
+  }
+
+  .h-overview-action {
+    min-height: 34px;
+    width: 100%;
+  }
+}
+
+/* ── Command palette polish ─────────────────────────────────── */
+.h-cmd-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  background: radial-gradient(circle at 50% 8%, color-mix(in oklab, var(--accent), transparent 80%), transparent 28rem), rgba(2, 6, 14, 0.72);
+  backdrop-filter: blur(10px);
+}
+
+.h-cmd {
+  position: fixed !important;
+  /* True viewport-center: top/left at 50% with the centering offsets
+     baked into `transform`. The shared `pc-slide-down-in` keyframe
+     animates `transform` to `none`, which would un-center mid-flight,
+     so we override the animation below with `h-cmd-center-in` that
+     keeps the centering transform across the keyframes. */
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 101 !important;
+  width: min(700px, 92vw);
+  max-height: 72vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid color-mix(in oklab, var(--border), white 12%);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 7%), color-mix(in oklab, var(--bg-2), black 3%)),
+    var(--bg);
+  box-shadow: 0 34px 90px rgba(0,0,0,0.72), inset 0 1px 0 rgba(255,255,255,0.045);
+}
+
+/* Centering-preserving open/close keyframes for the command palette.
+   The shared `pc-slide-down-in` ends at `transform: none` which would
+   wipe the `translate(-50%, -50%)` centering once the animation runs.
+   These `h-cmd-center-*` variants keep `translate(-50%, -50%)` in every
+   keyframe so the dialog stays centered the whole time. */
+@keyframes h-cmd-center-in {
+  from { opacity: 0; transform: translate(-50%, calc(-50% - 10px)) scale(0.985); }
+  to   { opacity: 1; transform: translate(-50%, -50%); }
+}
+@keyframes h-cmd-center-out {
+  from { opacity: 1; transform: translate(-50%, -50%); }
+  to   { opacity: 0; transform: translate(-50%, calc(-50% - 10px)) scale(0.985); }
+}
+.h-cmd[data-anim="slide-down"][data-state="open"] {
+  animation: h-cmd-center-in var(--dur-normal) var(--ease-out) !important;
+}
+.h-cmd[data-anim="slide-down"][data-state="closed"] {
+  animation: h-cmd-center-out var(--dur-fast) var(--ease-in) !important;
+}
+
+.h-cmd-inputbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 10%);
+}
+
+.h-cmd-key,
+.h-cmd-esc,
+.h-cmd-clear {
+  flex-shrink: 0;
+  border: 1px solid color-mix(in oklab, var(--border), white 9%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg-3), transparent 10%);
+  color: color-mix(in oklab, var(--fg-dim), white 14%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.h-cmd-key {
+  padding: 5px 9px;
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent), transparent 62%);
+  background: color-mix(in oklab, var(--accent), transparent 88%);
+}
+
+.h-cmd-esc {
+  padding: 4px 8px;
+}
+
+.h-cmd-clear {
+  padding: 4px 9px;
+  cursor: pointer;
+  transition: border-color 140ms var(--ease-out), color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+.h-cmd-clear:hover {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--accent), transparent 48%);
+  background: color-mix(in oklab, var(--accent), transparent 88%);
+}
+
+.h-cmd-input {
+  min-width: 0;
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.h-cmd-input::placeholder {
+  color: color-mix(in oklab, var(--fg-dim), transparent 10%);
+}
+
+.h-cmd-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 38%);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.h-cmd-meta span:first-child {
+  color: color-mix(in oklab, var(--fg), var(--accent) 18%);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.h-cmd-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.h-cmd-section {
+  padding: 10px 10px 5px;
+  color: color-mix(in oklab, var(--fg-dim), white 8%);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.h-cmd-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--fg);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms var(--ease-out), background 140ms var(--ease-out), transform 140ms var(--ease-out);
+}
+
+.h-cmd-row:hover,
+.h-cmd-row.selected {
+  border-color: color-mix(in oklab, var(--accent), transparent 58%);
+  background: linear-gradient(90deg, color-mix(in oklab, var(--accent), transparent 88%), color-mix(in oklab, var(--bg-3), transparent 22%));
+  transform: translateY(-1px);
+}
+
+.h-cmd-icon {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 24%);
+  background: color-mix(in oklab, var(--bg), white 5%);
+  color: color-mix(in oklab, var(--fg), var(--accent) 22%);
+}
+
+.h-cmd-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.h-cmd-title,
+.h-cmd-subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.h-cmd-title {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.h-cmd-subtitle {
+  color: color-mix(in oklab, var(--fg-dim), white 8%);
+  font-size: 11px;
+}
+
+.h-cmd-empty {
+  min-height: 180px;
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  text-align: center;
+  color: var(--fg-dim);
+}
+
+.h-cmd-empty strong {
+  color: var(--fg);
+}
+
+.h-cmd-footer {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border-top: 1px solid color-mix(in oklab, var(--border), transparent 20%);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.h-cmd-footer span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Brainstorm workspace polish ────────────────────────────── */
+.h-bsfull-grid {
+  flex: 1;
+  min-width: 0;
+  min-height: clamp(420px, 100%, 900px);
+  display: grid;
+  grid-template-columns: minmax(0, 2.25fr) minmax(340px, 0.95fr);
+  gap: 12px;
+}
+
+.h-bsfull-panel {
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  border-radius: 16px;
+  border-color: color-mix(in oklab, var(--border), white 8%);
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 5%), color-mix(in oklab, var(--bg-2), black 2%));
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.h-bsfull-head {
+  min-height: 42px;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.h-bsfull-titleblock {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.h-bsfull-caption {
+  color: color-mix(in oklab, var(--fg-dim), white 9%);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  text-transform: none;
+}
+
+.h-bsfull-main {
+  background: radial-gradient(circle at 14% 0%, color-mix(in oklab, var(--accent), transparent 92%), transparent 22rem);
+}
+
+.h-bsfull-panel.primary .h-bsfull-head {
+  background: linear-gradient(90deg, color-mix(in oklab, var(--accent), transparent 90%), color-mix(in oklab, var(--bg-2), white 3%));
+}
+
+.h-bsfull-panel.partner .h-bsfull-head {
+  background: linear-gradient(90deg, color-mix(in oklab, var(--good), transparent 91%), color-mix(in oklab, var(--bg-2), white 3%));
+}
+
+.h-bsfull-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  border: 1px solid color-mix(in oklab, var(--good), transparent 62%);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--good);
+  background: color-mix(in oklab, var(--good), transparent 90%);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.h-bsfull-live::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 10px currentColor;
+}
+
+.h-bsfull-separator {
+  margin: 0 10px;
+}
+
+.h-bsfull-partner-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.h-bsfull-partner-body .h-chat-head {
+  display: none;
+}
+
+.h-bsfull-partner-body .h-chat-viewport {
+  padding: 14px 14px 10px;
+}
+
+.h-bsfull-partner-body .h-chat-empty {
+  margin: 4px 0;
+  padding: 12px 12px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 22%);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--bg), white 4%);
+  color: color-mix(in oklab, var(--fg-dim), white 10%);
+}
+
+.h-bsfull-partner-body .h-chat-composer {
+  padding: 10px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), transparent 8%), color-mix(in oklab, var(--bg), white 3%));
+}
+
+.h-bsfull-partner-body .h-chat-input {
+  min-height: 68px;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--bg), white 3%);
+}
+
+.h-bsfull-stack {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(420px, 1.15fr) minmax(320px, 0.85fr);
+  gap: 10px;
+}
+
+@media (max-width: 1180px) {
+  .h-bsfull-grid {
+    grid-template-columns: minmax(0, 1.5fr) minmax(300px, 0.85fr);
+  }
+}
+
+@media (max-width: 760px) {
+  .h-main-shell.brainstorm-full {
+    padding: 8px 12px 14px;
+    overflow: auto;
+  }
+
+  .h-bsfull {
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .h-bsfull-stack {
+    grid-template-rows: minmax(360px, 56vh) minmax(300px, 42vh);
+  }
+
+  .h-bsfull-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .h-bsfull-subtabs {
+    width: 100%;
+    margin-left: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .h-bsfull-subtabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .h-bsfull-sub {
+    flex: 1 0 auto;
+    justify-content: center;
+  }
+
+  .h-cmd-overlay {
+    padding-top: 7vh;
+  }
+
+  .h-cmd {
+    width: calc(100vw - 24px);
+    max-height: 82vh;
+    border-radius: 16px;
+  }
+
+  .h-cmd-meta {
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .h-cmd-row {
+    grid-template-columns: 28px minmax(0, 1fr);
+  }
+
+  .h-cmd-row .kbd,
+  .h-cmd-row kbd {
+    display: none;
+  }
+
+  .h-cmd-footer {
+    flex-wrap: wrap;
+    gap: 9px 14px;
+  }
+}
+
+/* ── Feature queue toolbar polish ───────────────────────────── */
+.h-feature-toolbar {
+  display: grid;
+  gap: 7px;
+  padding: 8px 10px 7px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 2%), color-mix(in oklab, var(--bg-2), transparent 5%));
+  flex-shrink: 0;
+}
+
+.h-feature-viewbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 1px;
+  scrollbar-width: none;
+}
+
+.h-feature-viewbar::-webkit-scrollbar {
+  display: none;
+}
+
+.h-feature-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: color-mix(in oklab, var(--fg-dim), white 8%);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: color 140ms var(--ease-out), border-color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+.h-feature-filter:hover,
+.h-feature-filter:focus-visible {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--border), white 8%);
+  outline: none;
+}
+
+.h-feature-filter.active {
+  color: color-mix(in oklab, var(--fg), var(--accent) 12%);
+  border-color: color-mix(in oklab, var(--accent), transparent 60%);
+  background: color-mix(in oklab, var(--accent), transparent 90%);
+}
+
+.h-feature-filter strong {
+  color: inherit;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.h-feature-toolrow {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto auto auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.h-feature-search {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 30px;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 10%);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--bg), white 1%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+}
+
+.h-feature-search:focus-within {
+  border-color: color-mix(in oklab, var(--accent), transparent 40%);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent), transparent 86%);
+}
+
+.h-feature-search-icon {
+  color: var(--fg-dim);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.h-feature-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+}
+
+.h-feature-search-input::placeholder {
+  color: color-mix(in oklab, var(--fg-dim), transparent 8%);
+}
+
+.h-feature-search-clear {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 16%);
+  border-radius: 999px;
+  color: var(--fg-dim);
+  background: color-mix(in oklab, var(--bg-3), transparent 18%);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.h-feature-search-clear:hover {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--accent), transparent 55%);
+}
+
+.h-feature-result-count {
+  color: var(--fg-dim);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.h-feature-mode {
+  display: inline-flex;
+  /* Don't let the surrounding grid squeeze us below content width — the buttons inside
+     are clipped by overflow:hidden if this collapses (regression noticed in the dense
+     toolrow layout). */
+  min-width: max-content;
+  flex-shrink: 0;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 10%);
+  border-radius: 9px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--bg-3), transparent 28%);
+}
+
+.h-feature-mode-btn {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-right: 1px solid color-mix(in oklab, var(--border), transparent 24%);
+  color: var(--fg-dim);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.h-feature-mode-btn:last-child {
+  border-right: 0;
+}
+
+.h-feature-mode-btn.active {
+  color: var(--fg);
+  background: color-mix(in oklab, var(--accent), transparent 88%);
+}
+
+.h-feature-add {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 62%);
+  border-radius: 9px;
+  color: color-mix(in oklab, var(--fg), var(--accent) 18%);
+  background: color-mix(in oklab, var(--accent), transparent 90%);
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.h-feature-add:hover {
+  border-color: color-mix(in oklab, var(--accent), transparent 42%);
+  background: color-mix(in oklab, var(--accent), transparent 84%);
+}
+
+.h-feature-filter:focus-visible,
+.h-feature-mode-btn:focus-visible,
+.h-feature-add:focus-visible,
+.h-feature-search-clear:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--accent), transparent 45%);
+  outline-offset: 2px;
+}
+
+@media (max-width: 760px) {
+  .h-feature-toolbar {
+    padding: 8px;
+  }
+
+  .h-feature-toolrow {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "search search"
+      "count add"
+      "mode mode";
+  }
+
+  .h-feature-search { grid-area: search; }
+  .h-feature-result-count { grid-area: count; }
+  .h-feature-mode { grid-area: mode; width: 100%; }
+  .h-feature-add { grid-area: add; }
+  .h-feature-mode-btn { flex: 1; }
+}
+
+/* ── Feature queue row affordances ──────────────────────────── */
+.h-feature-row {
+  position: relative;
+  isolation: isolate;
+  margin: 2px 6px;
+  border-radius: 10px;
+  outline: 1px solid transparent;
+  transition: transform 140ms var(--ease-out), outline-color 140ms var(--ease-out), box-shadow 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+.h-feature-row::after {
+  content: "";
+  position: absolute;
+  inset: 7px auto 7px 2px;
+  width: 2px;
+  border-radius: 999px;
+  opacity: 0.9;
+  background: color-mix(in oklab, var(--fg-dim), transparent 20%);
+  pointer-events: none;
+}
+
+.h-feature-row:hover,
+.h-feature-row:focus-visible {
+  transform: translateX(1px);
+  outline-color: color-mix(in oklab, var(--accent), transparent 58%);
+  box-shadow: 0 8px 20px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.025);
+}
+
+.h-feature-row.is-focused,
+.h-feature-row.is-active {
+  outline-color: color-mix(in oklab, var(--accent), transparent 48%);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent), transparent 70%);
+}
+
+.h-feature-row.is-selected {
+  outline-color: color-mix(in oklab, var(--accent), transparent 48%);
+}
+
+.h-feature-row.status-in_progress::after { background: var(--info); }
+.h-feature-row.status-validating::after { background: #a855f7; }
+.h-feature-row.status-failing::after { background: var(--bad); }
+.h-feature-row.status-blocked::after { background: var(--warn); }
+.h-feature-row.status-passed::after { background: var(--good); }
+.h-feature-row.status-todo::after { background: color-mix(in oklab, var(--fg-dim), white 10%); }
+
+.h-feature-row input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+}
+
+.h-feature-row.compact {
+  margin: 4px 6px;
+  border-radius: 12px;
+}
+
+.h-feature-row.compact::after {
+  inset-block: 8px;
+}
+/* ── Feature-id inline chips (in summary / markdown) ─────────── */
+.h-fid-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  margin: 0 1px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+  vertical-align: baseline;
+  text-decoration: none;
+  background: var(--bg-3);
+  color: var(--fg);
+}
+.h-fid-chip:hover {
+  transform: translateY(-0.5px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+}
+.h-fid-chip.h-fid-unknown {
+  color: var(--fg-dim);
+  background: var(--bg-3);
+  border-color: color-mix(in oklab, var(--fg-dim), transparent 60%);
+  cursor: help;
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in oklab, var(--fg-dim), transparent 50%);
+}
+
+.h-fid-pop {
+  min-width: 300px;
+  max-width: 440px;
+  background: var(--bg-2);
+  border: 1px solid color-mix(in oklab, var(--border), white 10%);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.55);
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 12px;
+  color: var(--fg);
+  animation: hFidPopIn 120ms var(--ease-out);
+  z-index: 1000;
+}
+@keyframes hFidPopIn {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.h-fid-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.h-fid-pop-id {
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.h-fid-pop-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  text-transform: lowercase;
+}
+.h-fid-pop-attempts {
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, monospace;
+}
+.h-fid-pop-title {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+.h-fid-pop-claims {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.h-fid-pop-claim {
+  background: var(--bg-3);
+  color: var(--counter);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+}
+.h-fid-pop-more {
+  color: var(--fg-dim);
+  font-size: 10px;
+  align-self: center;
+}
+.h-fid-pop-notes {
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.45;
+  border-top: 1px solid color-mix(in oklab, var(--border), transparent 50%);
+  padding-top: 6px;
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow: auto;
+}
+.h-fid-pop-footer {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid color-mix(in oklab, var(--border), transparent 50%);
+  color: var(--fg-dim);
+  font-size: 10px;
+}
+
+
+@media (max-width: 760px) {
+  .h-root.brainstorm-mode .h-header {
+    padding: 10px 12px;
+  }
+
+  .h-root.brainstorm-mode .h-brand {
+    display: none;
+  }
+
+  .h-root.brainstorm-mode .h-header-main {
+    gap: 0;
+  }
+
+  .h-root.brainstorm-mode .h-header-side {
+    gap: 8px;
+  }
+
+  .h-root.brainstorm-mode .h-stats {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .h-root.brainstorm-mode .h-stat {
+    padding: 6px 7px;
+  }
+
+  .h-root.brainstorm-mode .h-stat-label {
+    font-size: 8px;
+  }
+
+  .h-root.brainstorm-mode .h-stat-value {
+    font-size: 12px;
+  }
+
+  .h-root.brainstorm-mode .h-header-actions {
+    padding-bottom: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .h-issues-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .h-issues-toolbar-main,
+.h-issues-toolbar-side {
+    width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .h-issues-toolbar-main::-webkit-scrollbar,
+.h-issues-toolbar-side::-webkit-scrollbar {
+    display: none;
+  }
+
+  .h-issue {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 7px;
+    padding: 10px 11px 10px 13px;
+  }
+
+  .h-issue-right {
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
+  .h-issue-open-affordance {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .h-log {
+    font-size: 10.8px;
+  }
+
+  .h-log-line {
+    grid-template-columns: 74px minmax(0, 1fr);
+    gap: 7px;
+    padding: 3px 9px 3px 7px;
+  }
+
+  .h-log-no,
+.h-log-tag {
+    display: none;
+  }
+}
+
+/* Dense data views: keep high information throughput in small dashboard panels. */
+.h-agent-table {
+  table-layout: fixed;
+  font-size: 11.5px;
+}
+
+.h-agent-table th {
+  padding: 4px 8px;
+  line-height: 1.2;
+}
+
+.h-agent-table td,
+.h-agent-table .h-agent-row td {
+  padding: 3px 8px;
+  line-height: 1.25;
+  vertical-align: middle;
+}
+
+.h-agent-row::before {
+  top: 4px;
+  bottom: 4px;
+  left: 1px;
+}
+
+.h-agent-time-cell,
+.h-agent-run-cell,
+.h-agent-size-cell {
+  display: table-cell;
+}
+
+.h-agent-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+.h-agent-role {
+  max-width: 92px;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.h-agent-run-cell,
+.h-agent-table .runid {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.h-agent-run-hint,
+.h-agent-open {
+  display: none;
+}
+
+.h-issues-toolbar {
+  gap: 6px;
+  padding: 4px 7px;
+}
+
+.h-issues-toolbar-main,
+.h-issues-toolbar-side {
+  gap: 4px;
+}
+
+.h-chip {
+  min-height: 19px;
+  padding: 1px 7px;
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.h-issue-mini-stat {
+  font-size: 9.5px;
+}
+
+.h-pending-banner {
+  min-height: 19px;
+  padding: 3px 8px;
+  font-size: 10px;
+}
+
+.h-issues {
+  gap: 0;
+  padding: 0;
+}
+
+.h-issue {
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  gap: 8px;
+  min-height: 31px;
+  padding: 4px 8px 4px 10px;
+  border-width: 0 0 1px;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.h-issue::before {
+  top: 5px;
+  bottom: 5px;
+  width: 2px;
+}
+
+.h-issue:hover,
+.h-issue:focus-visible {
+  transform: none;
+}
+
+.h-issue-sev {
+  padding: 1px 5px;
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.h-issue-body {
+  gap: 1px;
+}
+
+.h-issue-title {
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.h-issue-meta {
+  flex-wrap: nowrap;
+  gap: 5px;
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.h-issue-meta > * {
+  flex-shrink: 0;
+}
+
+.h-issue-code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.h-issue-right {
+  gap: 4px;
+}
+
+.h-issue-linked,
+.h-issue-status {
+  padding: 1px 6px;
+  font-size: 9.5px;
+  line-height: 1.35;
+}
+
+.h-issue-open-affordance {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .h-agent-table th,
+  .h-agent-table td,
+  .h-agent-table .h-agent-row td {
+    padding-inline: 6px;
+  }
+
+  .h-issues-toolbar {
+    gap: 4px;
+  }
+
+  .h-issue {
+    grid-template-columns: 48px minmax(0, 1fr) auto;
+    gap: 6px;
+    min-height: 30px;
+    padding: 4px 7px 4px 9px;
+  }
+
+  .h-issue-meta {
+    display: none;
+  }
+}
+
+/* Pending count is already in the triage chip; keep the list area for issue rows. */
+.h-pending-banner {
+  display: none;
+}
+
+
+/* Dense Feature Queue: preserve operations-console row throughput. */
+.h-feature-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+}
+
+.h-feature-viewbar {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 3px;
+  padding-bottom: 0;
+}
+
+.h-feature-viewbar {
+  mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+  padding-right: 12px;
+}
+
+.h-feature-toolrow {
+  flex: 0 0 auto;
+  width: min(360px, 64%);
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto auto auto;
+  gap: 4px;
+}
+
+.h-feature-filter {
+  min-height: 20px;
+  padding: 1px 7px;
+  gap: 4px;
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.h-feature-filter strong {
+  font-size: 9.5px;
+}
+
+.h-feature-search {
+  min-height: 24px;
+  gap: 4px;
+  padding: 0 6px;
+  border-radius: 7px;
+}
+
+.h-feature-search-input {
+  height: 22px;
+  font-size: 11px;
+}
+
+.h-feature-search-clear {
+  width: 17px;
+  height: 17px;
+}
+
+.h-feature-result-count {
+  font-size: 9.5px;
+}
+
+.h-feature-mode {
+  border-radius: 7px;
+}
+
+.h-feature-mode-btn,
+.h-feature-add {
+  min-height: 24px;
+  padding-inline: 7px;
+  font-size: 10px;
+}
+
+.h-feature-row {
+  margin: 0 3px !important;
+  border-radius: 5px !important;
+  gap: 7px !important;
+  min-height: 28px !important;
+  padding: 3px 8px !important;
+}
+
+.h-feature-row::after {
+  inset: 5px auto 5px 1px;
+  width: 2px;
+}
+
+.h-feature-row:hover,
+.h-feature-row:focus-visible {
+  transform: none;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.018);
+}
+
+.h-feature-row input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+}
+
+@media (max-width: 760px) {
+  .h-feature-toolbar {
+    display: grid;
+    gap: 4px;
+    padding: 5px 7px;
+  }
+
+  .h-feature-toolrow {
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 4px;
+    grid-template-areas:
+      "search add"
+      "mode mode";
+  }
+
+  .h-feature-result-count {
+    display: none;
+  }
+
+  .h-feature-row {
+    min-height: 38px !important;
+    padding: 5px 8px !important;
+    margin-inline: 3px !important;
+  }
+}
+
+/* Main workspace tab rail: keep navigation visible and horizontally usable without stealing list space. */
+.h-tabs.h-main-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 25;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg), white 4%), color-mix(in oklab, var(--bg), transparent 0%));
+  backdrop-filter: blur(14px);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.02);
+  mask-image: linear-gradient(90deg, transparent 0, #000 18px, #000 calc(100% - 18px), transparent);
+}
+.h-tabs.h-main-tabs::-webkit-scrollbar {
+  display: none;
+}
+.h-main-tabs .h-tab {
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+}
+.h-main-tabs .h-tab:focus-visible {
+  color: var(--fg);
+  outline: 1px solid color-mix(in oklab, var(--accent), white 16%);
+  outline-offset: -2px;
+}
+.h-main-tabs .h-tab.on {
+  position: relative;
+}
+.h-main-tabs .h-tab.on::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 2px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), color-mix(in oklab, var(--accent), white 28%));
+  box-shadow: 0 0 14px color-mix(in oklab, var(--accent), transparent 54%);
+}
+@media (max-width: 760px) {
+  .h-tabs.h-main-tabs {
+    gap: 5px;
+    padding: 8px 12px 0;
+    scroll-snap-type: x proximity;
+    mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+  }
+
+  .h-main-tabs .h-tab {
+    min-height: 34px;
+    padding: 8px 11px 9px;
+    border-radius: 9px 9px 0 0;
+    font-size: 10.5px;
+  }
+
+  .h-main-tabs .h-tab svg {
+    width: 12px;
+    height: 12px;
+  }
+}
+
+@media (max-width: 760px) {
+  nav.top {
+    max-width: 100vw;
+    mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+  }
+
+  nav.top .nav-flyout {
+    position: fixed;
+    top: calc(var(--app-nav-height, 49px) + 6px);
+    left: 8px;
+    right: 8px;
+    width: auto;
+    min-width: 0;
+    max-width: calc(100vw - 16px);
+    max-height: min(60vh, 420px);
+    overflow: auto;
+  }
+
+  nav.top .nav-flyout.wide {
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  nav.top .nav-flyout .nav-link {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+@media (max-width: 760px) {
+  .h-root {
+    overflow-x: clip;
+  }
+
+  nav.top .top-inner {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  nav.top .top-groups {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    padding-right: 24px;
+    mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+  }
+
+  nav.top .top-groups::-webkit-scrollbar {
+    display: none;
+  }
+
+  .h-mission-overview,
+  .h-mission-overview.has-action {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Mobile command stack: reveal useful panels sooner without reducing data-row density. */
+@media (max-width: 760px) {
+  .h-header {
+    gap: 8px;
+    padding: 8px 12px 9px;
+  }
+
+  .h-header-main {
+    gap: 7px;
+  }
+
+  .h-brand {
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .h-brand-kicker {
+    max-width: 46%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 8.5px;
+  }
+
+  .h-brand-kicker svg {
+    display: none;
+  }
+
+  .h-title {
+    font-size: 16px;
+    line-height: 1.05;
+  }
+
+  .h-project-card {
+    gap: 5px;
+    padding: 8px;
+    border-radius: 12px;
+  }
+
+  .h-project-topline,
+  .h-project-meta {
+    gap: 8px;
+    align-items: center;
+  }
+
+  .h-project-label {
+    font-size: 9px;
+  }
+
+  .h-status-chip,
+  .h-escalated-pill {
+    padding: 2px 8px;
+    font-size: 10px;
+  }
+
+  .h-project {
+    height: 30px;
+    border-radius: 8px;
+    font-size: 12px;
+  }
+
+  .h-project-path {
+    font-size: 10.5px;
+  }
+
+  .h-project-progress {
+    font-size: 8.5px;
+  }
+
+  .h-progress-rail {
+    height: 4px;
+  }
+
+  .h-header-side {
+    gap: 6px;
+  }
+
+  .h-stats {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 6px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    padding-bottom: 1px;
+    mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+  }
+
+  .h-stats::-webkit-scrollbar {
+    display: none;
+  }
+
+  .h-stats > *,
+  .h-stat-button {
+    flex: 0 0 auto;
+    width: auto;
+  }
+
+  .h-stat {
+    min-width: 70px;
+    padding: 6px 8px;
+    border-radius: 9px;
+  }
+
+  .h-stats > :last-child .h-stat {
+    min-width: 136px;
+  }
+
+  .h-stat-label {
+    font-size: 8px;
+  }
+
+  .h-stat-value {
+    font-size: 13px;
+  }
+
+  .h-header-actions {
+    gap: 6px;
+    padding-bottom: 0;
+  }
+
+  .h-header-actions .h-btn {
+    min-height: 28px;
+    padding-inline: 10px;
+    border-radius: 8px;
+  }
+
+  .h-mission-overview,
+  .h-mission-overview.has-action {
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .h-focus-card {
+    min-height: 54px;
+    gap: 1px;
+    padding: 8px 10px;
+    border-radius: 11px;
+  }
+
+  .h-overline {
+    font-size: 8.5px;
+  }
+
+  .h-focus-card strong {
+    font-size: 12.5px;
+  }
+
+  .h-focus-title {
+    font-size: 10.5px;
+    line-height: 1.25;
+  }
+
+  .h-status-distribution {
+    gap: 5px;
+    padding: 7px 10px;
+    border-radius: 11px;
+  }
+
+  .h-status-rail {
+    height: 6px;
+  }
+
+  .h-status-token {
+    padding: 1px 6px;
+    font-size: 10px;
+  }
+
+  .h-overview-action {
+    min-height: 30px;
+    border-radius: 11px;
+  }
+
+  .h-running-strip {
+    align-items: center;
+    flex-direction: row;
+    gap: 8px;
+    margin-top: 6px;
+    padding: 6px 8px;
+  }
+
+  .h-running-head {
+    flex: 0 0 auto;
+  }
+
+  .h-running-lanes {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .h-running-lanes::-webkit-scrollbar {
+    display: none;
+  }
+
+  .h-running-lane {
+    min-height: 24px;
+    padding: 4px 8px;
+  }
+}
+
+/* Phase rail: on mobile, keep staging/testing/production on one horizontal lane. */
+@media (max-width: 760px) {
+  .h-phase-strip {
+    flex-wrap: nowrap !important;
+    gap: 6px !important;
+    padding: 3px 10px !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+  }
+
+  .h-phase-strip::-webkit-scrollbar {
+    display: none;
+  }
+
+  .h-phase-label {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    flex: 0 0 auto;
+    margin-right: 0 !important;
+    padding-right: 6px;
+    background: linear-gradient(90deg, var(--bg-2) 78%, transparent);
+  }
+
+  .h-phase-item {
+    flex: 0 0 auto;
+    min-height: 24px;
+    padding: 3px 8px !important;
+    border-radius: 6px !important;
+    white-space: nowrap;
+  }
+
+  .h-phase-dot {
+    width: 6px !important;
+    height: 6px !important;
+  }
+
+  .h-phase-meta,
+  .h-phase-cost,
+  .h-phase-open {
+    font-size: 9.5px !important;
+  }
+
+  .h-phase-open {
+    padding: 1px 6px !important;
+    border-radius: 5px !important;
+  }
+
+  .h-phase-setup {
+    flex: 0 0 auto;
+    margin-left: 0 !important;
+  }
+}
+/* ── Embedded-in-Papercup overrides ─────────────────────────────
+   When the harness dashboard is mounted inside `/papercup/harnesses`,
+   Papercup's sticky tab bar sits above `.h-root`, eating ~92px. The
+   default `height: calc(100vh - var(--app-nav-height, 49px))` overshoots
+   the available space. After subtracting the harness's own chrome
+   (header + phase strip + mission overview ≈ 430px), the inner
+   `.h-main-shell` collapses to ~120px — too small for the Proposals
+   list or Git graph to be usable.
+
+   Compromise: let the embedded harness page grow vertically and give
+   the dashboard panel area an explicit readable floor. The page gains
+   vertical scroll when needed, but the four dashboard boxes return to
+   their normal useful size instead of being squeezed under the Papercup
+   tabs/header chrome. */
+.papercup-route .h-root {
+  /* Fill the iframe viewport (papercup tab bar is ~92px above .h-root)
+     so the harness fits without forcing a page scroll. Floor at 720px
+     for very short viewports so the inner panels stay usable. */
+  height: calc(100dvh - 132px);
+  min-height: 720px;
+}
+
+/* Promote the shell to a flex container so its inner panel layout
+   gets the full computed height. The inner JSX uses `height: 100%`
+   inline which doesn't resolve in a `display: block` parent whose own
+   height was set via the parent flex algorithm; switching the shell
+   to `display: flex` + giving direct children `flex: 1` makes them
+   actually take all available space. */
+.papercup-route .h-main-shell.dashboard,
+.papercup-route .h-main-shell.embed {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.papercup-route .h-main-shell.dashboard > *,
+.papercup-route .h-main-shell.embed > * {
+  flex: 1;
+  min-height: 0;
+}
+
+
+/* ── Git tab: native scrolling history list ─────────────────────
+   The git tab lives in a narrow left pane inside the harness dashboard.
+   ReactFlow wheel-panning was cramped there and could trap scroll direction;
+   this list keeps branch/lane signal while using normal browser scrolling. */
+.h-git-panel {
+  height: min(760px, calc(100vh - var(--app-nav-height, 49px) - 140px));
+  min-height: 420px;
+  max-height: 760px;
+  min-width: 0;
+}
+
+.h-git-head {
+  min-height: 42px;
+  padding: 7px 8px;
+}
+
+.h-git-title-stack {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.h-git-title-stack .h-panel-count {
+  font-size: 10px;
+  line-height: 1.1;
+}
+
+.h-git-actions {
+  gap: 5px;
+}
+
+.h-git-limit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 58px;
+  padding: 4px 8px;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+
+.h-git-limit:focus-visible {
+  border-color: color-mix(in oklab, var(--accent, #6aa7ff), var(--border) 30%);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent, #6aa7ff), transparent 80%);
+}
+
+.h-git-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  padding: 7px 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 25%);
+  background: color-mix(in oklab, var(--bg-2), white 1.5%);
+}
+
+.h-git-summary span {
+  min-width: 0;
+  padding: 5px 6px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 16%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg), transparent 30%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.h-git-summary b {
+  color: var(--fg);
+  font-weight: 750;
+}
+
+.h-git-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  padding: 5px;
+  scrollbar-color: color-mix(in oklab, var(--fg-dim), transparent 55%) transparent;
+  scrollbar-width: thin;
+}
+
+.h-git-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: stretch;
+  min-height: 54px;
+  padding: 7px 7px 7px 5px;
+  color: inherit;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+
+.h-git-row:hover,
+.h-git-row:focus-visible {
+  background: color-mix(in oklab, var(--bg-2), white 4%);
+  border-color: color-mix(in oklab, var(--border), white 8%);
+  outline: none;
+}
+
+.h-git-row:active {
+  transform: translateY(1px);
+}
+
+.h-git-rail {
+  position: relative;
+  align-self: stretch;
+  min-height: 40px;
+  flex: 0 0 auto;
+}
+
+.h-git-lane {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  opacity: 0.22;
+  transform: translateX(-50%);
+}
+
+.h-git-lane.active {
+  width: 2px;
+  opacity: 0.56;
+}
+
+.h-git-dot {
+  position: absolute;
+  top: 7px;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--bg);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--border), white 8%);
+}
+
+.h-git-row-body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  align-content: center;
+}
+
+.h-git-subject {
+  min-width: 0;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.h-git-meta {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg-dim);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.2;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.h-git-meta span,
+.h-git-meta time {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.h-git-meta span:nth-child(2) {
+  max-width: 80px;
+}
+
+.h-git-merge {
+  color: var(--warn);
+}
+
+.h-git-refs {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.h-git-ref {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 105px;
+  padding: 1px 5px;
+  color: color-mix(in oklab, var(--fg-dim), white 10%);
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg-3), transparent 20%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.h-git-ref.head {
+  color: color-mix(in oklab, var(--good), white 10%);
+  border-color: color-mix(in oklab, var(--good), transparent 55%);
+  background: color-mix(in oklab, var(--good), transparent 90%);
+}
+
+.h-git-ref.tag {
+  color: color-mix(in oklab, var(--info), white 10%);
+  border-color: color-mix(in oklab, var(--info), transparent 55%);
+  background: color-mix(in oklab, var(--info), transparent 90%);
+}
+
+.h-git-ref.muted {
+  color: var(--fg-faint);
+}
+
+@media (max-width: 760px) {
+  .h-git-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+    padding: 6px;
+  }
+
+  .h-git-list {
+    padding: 4px;
+  }
+
+  .h-git-row {
+    min-height: 50px;
+    gap: 7px;
+    padding: 6px;
+  }
+
+  .h-git-subject {
+    font-size: 11.5px;
+  }
+}
+
+/* Standalone /harness has a lot of mission chrome above embed tabs; without a
+   proposals-specific floor the workbench can collapse to a ~180px strip. Allow
+   the page to grow vertically so the proposal list and markdown reader stay
+   useful, just like the Papercup embed override above. */
+.h-root:has(.h-proposals-panel) {
+  height: auto;
+  min-height: max(calc(100vh - var(--app-nav-height, 49px)), 1260px); /* match dashboard floor */
+}
+.h-main-shell.embed:has(.h-proposals-panel) {
+  /* Floor at 760px so smaller viewports stay usable; remove the max
+   * cap so the shell fills the available height. NOTE: :has() matches
+   * even when the proposals tab is in a hidden <Activity> Subtree, so
+   * this rule applies to *every* embed tab in the harness. The
+   * max-height was therefore capping summary, experts, config, etc.
+   * to 760px even though the user was on a different tab. */
+  min-height: 760px;
+}
+
+/* ── Proposals tab: dense product-review workbench ───────────────
+   Compact stats + filters, a native-scroll list, and a full-height detail
+   reader. Beauty here must preserve review throughput. */
+.h-proposals-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--fg);
+  background:
+    radial-gradient(circle at 12% -8%, color-mix(in oklab, var(--info), transparent 88%), transparent 34%),
+    radial-gradient(circle at 94% 0%, color-mix(in oklab, var(--accent), transparent 88%), transparent 32%),
+    linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 1.5%), var(--bg));
+}
+.h-proposal-detail-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.h-proposal-btn,
+.h-proposal-mini {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid color-mix(in oklab, var(--border), white 7%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg-3), transparent 12%);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 720;
+  line-height: 1;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.h-proposal-btn {
+  width: 100%;
+  min-height: 28px;
+  padding: 0 10px;
+}
+.h-proposal-mini {
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 10.5px;
+}
+.h-proposal-btn:hover:not(:disabled),
+.h-proposal-mini:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--bg-3), white 6%);
+  border-color: color-mix(in oklab, var(--border), white 16%);
+}
+.h-proposal-btn:active:not(:disabled),
+.h-proposal-mini:active:not(:disabled) { transform: translateY(1px); }
+.h-proposal-btn:disabled,
+.h-proposal-mini:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.h-proposal-btn.primary {
+  color: #eef4ff;
+  border-color: color-mix(in oklab, var(--accent), transparent 45%);
+  background: linear-gradient(180deg, color-mix(in oklab, var(--accent), white 10%), color-mix(in oklab, var(--accent), black 18%));
+}
+.h-proposal-btn.good,
+.h-proposal-mini.good {
+  color: color-mix(in oklab, var(--good), white 24%);
+  border-color: color-mix(in oklab, var(--good), transparent 58%);
+  background: color-mix(in oklab, var(--good), transparent 88%);
+}
+.h-proposal-btn.danger,
+.h-proposal-mini.bad {
+  color: color-mix(in oklab, var(--bad), white 28%);
+  border-color: color-mix(in oklab, var(--bad), transparent 56%);
+  background: color-mix(in oklab, var(--bad), transparent 90%);
+}
+.h-proposal-btn.ghost,
+.h-proposal-mini.ghost {
+  color: var(--fg-dim);
+  background: transparent;
+}
+.h-proposals-goal {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 6px;
+  padding: 8px 12px 10px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 22%);
+  background: color-mix(in oklab, var(--bg), transparent 25%);
+}
+.h-proposals-goal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.h-proposals-goal-head span:last-child {
+  color: var(--fg-faint);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.h-proposals-goal-preview {
+  max-height: 58px;
+  overflow: auto;
+  padding: 8px 10px;
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--bg-3), transparent 18%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  scrollbar-width: thin;
+}
+.h-proposals-goal-preview.empty {
+  color: var(--fg-faint);
+  font-family: inherit;
+  font-style: italic;
+}
+.h-proposals-goal-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+.h-proposals-goal-editor textarea {
+  width: 100%;
+  min-height: 74px;
+  box-sizing: border-box;
+  resize: vertical;
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--bg-3), transparent 8%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  outline: none;
+  padding: 9px 10px;
+}
+.h-proposals-goal-editor textarea:focus {
+  border-color: color-mix(in oklab, var(--accent), white 6%);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent), transparent 65%);
+}
+.h-proposals-goal-actions {
+  flex-direction: column;
+  min-width: 104px;
+}
+.h-proposal-toast,
+.h-proposal-replan {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  font-size: 12px;
+  line-height: 1.25;
+}
+.h-proposal-toast span {
+  display: inline-flex;
+  width: 17px;
+  height: 17px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 820;
+}
+.h-proposal-toast.good {
+  color: color-mix(in oklab, var(--good), white 20%);
+  background: color-mix(in oklab, var(--good), transparent 92%);
+}
+.h-proposal-toast.good span { background: color-mix(in oklab, var(--good), transparent 82%); }
+.h-proposal-toast.bad {
+  color: color-mix(in oklab, var(--bad), white 22%);
+  background: color-mix(in oklab, var(--bad), transparent 92%);
+}
+.h-proposal-toast.bad span { background: color-mix(in oklab, var(--bad), transparent 82%); }
+.h-proposal-replan {
+  color: color-mix(in oklab, var(--info), white 20%);
+  background: linear-gradient(90deg, color-mix(in oklab, var(--info), transparent 88%), color-mix(in oklab, var(--accent), transparent 93%));
+}
+.h-proposal-replan span {
+  min-width: 0;
+  flex: 1;
+}
+.h-proposal-replan code {
+  padding: 1px 4px;
+  border: 1px solid color-mix(in oklab, var(--info), transparent 60%);
+  border-radius: 5px;
+  background: color-mix(in oklab, var(--bg), transparent 15%);
+}
+.h-proposal-replan .h-proposal-btn { width: auto; }
+.h-proposals-workbench {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+.h-proposals-sidebar {
+  flex: 0 0 34%;
+  min-width: 284px;
+  max-width: 438px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid color-mix(in oklab, var(--border), transparent 16%);
+  background: color-mix(in oklab, var(--bg-2), transparent 10%);
+}
+.h-proposal-toolbar {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 24%);
+  background: color-mix(in oklab, var(--bg-2), white 1.5%);
+}
+.h-proposal-toolbar > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.h-proposal-toolbar-count {
+  color: var(--fg-faint);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10.5px;
+}
+.h-proposal-search {
+  width: 100%;
+  height: 30px;
+  box-sizing: border-box;
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg), transparent 15%);
+  font-size: 12px;
+  outline: none;
+  padding: 0 9px;
+}
+.h-proposal-search:focus {
+  border-color: color-mix(in oklab, var(--accent), white 6%);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent), transparent 66%);
+}
+.h-proposal-filter-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+.h-proposal-filter {
+  min-width: 0;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 0 7px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 14%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg-3), transparent 38%);
+  cursor: pointer;
+  font-size: 10.5px;
+  line-height: 1;
+}
+.h-proposal-filter span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.h-proposal-filter b {
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+}
+.h-proposal-filter.on {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--accent), transparent 45%);
+  background: color-mix(in oklab, var(--accent), transparent 90%);
+}
+.h-proposal-filter.status-pending.on {
+  border-color: color-mix(in oklab, var(--warn), transparent 50%);
+  background: color-mix(in oklab, var(--warn), transparent 91%);
+}
+.h-proposal-filter.status-applied.on {
+  border-color: color-mix(in oklab, var(--good), transparent 54%);
+  background: color-mix(in oklab, var(--good), transparent 92%);
+}
+.h-proposal-filter.status-rejected.on {
+  border-color: color-mix(in oklab, var(--bad), transparent 56%);
+  background: color-mix(in oklab, var(--bad), transparent 93%);
+}
+.h-proposal-select-all,
+.h-proposal-bulkbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 24%);
+  font-size: 11.5px;
+}
+.h-proposal-select-all {
+  color: var(--fg-dim);
+  cursor: pointer;
+  background: color-mix(in oklab, var(--bg), transparent 48%);
+}
+.h-proposal-select-all input,
+.h-proposal-item input { accent-color: var(--accent); }
+.h-proposal-bulkbar {
+  color: var(--fg);
+  background: color-mix(in oklab, var(--warn), transparent 92%);
+}
+.h-proposal-bulkbar span {
+  flex: 1;
+  min-width: 0;
+}
+.h-proposal-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px;
+  scrollbar-color: color-mix(in oklab, var(--fg-dim), transparent 55%) transparent;
+  scrollbar-width: thin;
+}
+.h-proposal-empty {
+  min-height: 154px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 7px;
+  padding: 20px;
+  text-align: center;
+  color: var(--fg-dim);
+  border: 1px dashed color-mix(in oklab, var(--border), white 8%);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--bg-3), transparent 60%);
+}
+.h-proposal-empty b {
+  color: var(--fg);
+  font-size: 13px;
+}
+.h-proposal-empty span {
+  max-width: 280px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.h-proposal-empty em {
+  color: var(--accent);
+  font-style: normal;
+  font-weight: 740;
+}
+.h-proposal-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+  margin-bottom: 5px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.h-proposal-item::before {
+  content: "";
+  position: absolute;
+  inset: 7px auto 7px 0;
+  width: 3px;
+  border-radius: 999px;
+  opacity: 0.72;
+  background: var(--fg-faint);
+}
+.h-proposal-item.status-pending::before { background: var(--warn); }
+.h-proposal-item.status-applied::before { background: var(--good); }
+.h-proposal-item.status-rejected::before { background: var(--bad); }
+.h-proposal-item:hover,
+.h-proposal-item.is-active {
+  border-color: color-mix(in oklab, var(--border), white 10%);
+  background: color-mix(in oklab, var(--bg-3), transparent 18%);
+}
+.h-proposal-item.is-active { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent), transparent 70%); }
+.h-proposal-item input {
+  z-index: 1;
+  justify-self: center;
+  margin: 0;
+}
+.h-proposal-item-spacer {
+  width: 14px;
+  height: 14px;
+}
+.h-proposal-row-button {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 8px 9px 8px 0;
+  color: inherit;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.h-proposal-row-top,
+.h-proposal-row-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.h-proposal-row-top { justify-content: space-between; }
+.h-proposal-row-top time,
+.h-proposal-row-meta {
+  color: var(--fg-faint);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+.h-proposal-row-title {
+  min-width: 0;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 1.22;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: capitalize;
+}
+.h-proposal-row-meta {
+  overflow: hidden;
+  mask-image: linear-gradient(90deg, #000 0%, #000 88%, transparent 100%);
+}
+.h-proposal-row-meta span { flex: 0 0 auto; }
+.h-proposal-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 18px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg-3), transparent 20%);
+  color: var(--fg-dim);
+  font-size: 9.5px;
+  font-weight: 780;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.h-proposal-badge.status-pending {
+  color: color-mix(in oklab, var(--warn), white 18%);
+  border-color: color-mix(in oklab, var(--warn), transparent 58%);
+  background: color-mix(in oklab, var(--warn), transparent 90%);
+}
+.h-proposal-badge.status-applied {
+  color: color-mix(in oklab, var(--good), white 18%);
+  border-color: color-mix(in oklab, var(--good), transparent 60%);
+  background: color-mix(in oklab, var(--good), transparent 91%);
+}
+.h-proposal-badge.status-rejected {
+  color: color-mix(in oklab, var(--bad), white 22%);
+  border-color: color-mix(in oklab, var(--bad), transparent 58%);
+  background: color-mix(in oklab, var(--bad), transparent 92%);
+}
+.h-proposal-badge.review-accept {
+  color: color-mix(in oklab, var(--accent, var(--good)), white 22%);
+  border-color: color-mix(in oklab, var(--accent, var(--good)), transparent 55%);
+  background: color-mix(in oklab, var(--accent, var(--good)), transparent 88%);
+}
+.h-proposal-badge.review-reject {
+  color: color-mix(in oklab, var(--bad), white 22%);
+  border-color: color-mix(in oklab, var(--bad), transparent 58%);
+  background: color-mix(in oklab, var(--bad), transparent 92%);
+}
+.h-proposal-badge.review-defer {
+  color: color-mix(in oklab, var(--fg-dim), white 8%);
+  border-color: color-mix(in oklab, var(--border), white 6%);
+  background: color-mix(in oklab, var(--bg-3), transparent 25%);
+}
+.h-proposal-review-summary {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-style: normal;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-proposal-review-summary em {
+  font-style: normal;
+  font-weight: 700;
+  color: color-mix(in oklab, var(--fg), var(--fg-dim) 20%);
+  margin-right: 4px;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+.h-proposal-detail {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--bg), transparent 8%);
+}
+.h-proposal-detail-head {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "title metrics"
+    "title actions";
+  gap: 7px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  background: linear-gradient(90deg, color-mix(in oklab, var(--bg-2), white 2%), transparent), color-mix(in oklab, var(--bg), transparent 18%);
+}
+.h-proposal-detail-head.status-pending { box-shadow: inset 3px 0 0 color-mix(in oklab, var(--warn), transparent 15%); }
+.h-proposal-detail-head.status-applied { box-shadow: inset 3px 0 0 color-mix(in oklab, var(--good), transparent 15%); }
+.h-proposal-detail-head.status-rejected { box-shadow: inset 3px 0 0 color-mix(in oklab, var(--bad), transparent 15%); }
+.h-proposal-detail-title {
+  grid-area: title;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.h-proposal-detail-title h3 {
+  min-width: 0;
+  margin: 0;
+  color: var(--fg);
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.18;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: capitalize;
+}
+.h-proposal-detail-title p {
+  min-width: 0;
+  margin: 0;
+  color: var(--fg-faint);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-proposal-detail-title .h-proposal-badge { justify-self: start; }
+.h-proposal-detail-metrics {
+  grid-area: metrics;
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  max-width: 440px;
+  overflow: hidden;
+}
+.h-proposal-detail-metrics span {
+  min-height: 23px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 7px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 16%);
+  border-radius: 7px;
+  background: color-mix(in oklab, var(--bg-3), transparent 25%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.h-proposal-detail-metrics b { color: var(--fg); }
+.h-proposal-detail-actions { grid-area: actions; }
+.h-proposal-detail-actions .h-proposal-btn { width: auto; }
+.h-proposal-doc-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: auto;
+  padding: 12px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg), transparent 10%), transparent 90px), color-mix(in oklab, var(--bg), black 4%);
+  scrollbar-color: color-mix(in oklab, var(--fg-dim), transparent 55%) transparent;
+  scrollbar-width: thin;
+}
+.h-proposal-doc {
+  width: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 14px 16px;
+  color: color-mix(in oklab, var(--fg), white 2%);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  border-radius: 12px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 2%), color-mix(in oklab, var(--bg), transparent 5%));
+  box-shadow: 0 10px 24px color-mix(in oklab, black, transparent 84%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.h-proposal-loading,
+.h-proposal-detail-empty {
+  flex: 1;
+  min-height: 260px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 7px;
+  color: var(--fg-dim);
+  text-align: center;
+}
+.h-proposal-detail-empty b {
+  color: var(--fg);
+  font-size: 15px;
+}
+.h-proposal-detail-empty span {
+  max-width: 340px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+@media (max-width: 760px) {
+  .h-proposals-panel { overflow: auto; }
+  .h-proposals-goal { padding: 7px 8px; }
+  .h-proposals-goal-editor { grid-template-columns: minmax(0, 1fr); }
+  .h-proposals-goal-actions { flex-direction: row; }
+  .h-proposals-workbench { min-height: 720px; flex-direction: column; overflow: visible; }
+  .h-proposals-sidebar {
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: none;
+    max-height: 360px;
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 16%);
+  }
+  .h-proposal-list { max-height: 230px; }
+  .h-proposal-detail { flex: 1 1 420px; min-height: 420px; }
+  .h-proposal-detail-head {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "title"
+      "metrics"
+      "actions";
+  }
+  .h-proposal-detail-metrics {
+    justify-content: flex-start;
+    overflow-x: auto;
+    mask-image: linear-gradient(90deg, #000 0%, #000 90%, transparent 100%);
+  }
+  .h-proposal-detail-actions { justify-content: stretch; }
+  .h-proposal-detail-actions .h-proposal-btn { flex: 1; }
+}
+
+/* Standalone /harness has enough mission chrome to squeeze the dashboard left
+   pane into a tiny strip. When the Architect Inbox is visible, let the page
+   grow and give the dashboard grid the same readable floor used in Papercup.
+   Scope: standalone /harness only. /papercup uses iframe-bounded sizing
+   (see .papercup-route .h-root above) and would scroll-overflow under this
+   1260px floor, so we exclude it here. */
+.h-root:has(.h-main-shell.dashboard [data-harness-inbox]):not(.papercup-route .h-root) {
+  height: auto;
+  min-height: max(calc(100vh - var(--app-nav-height, 49px)), 1260px);
+}
+.h-main-shell.dashboard:has([data-harness-inbox]):not(.papercup-route .h-main-shell.dashboard) {
+  min-height: 760px;
+}
+
+/* ── Dashboard Inbox: compact Architect decision cockpit ──────────
+   The inbox lives in the narrow dashboard left pane, so it needs dense
+   controls, strong hierarchy, and native scrolling without wasting rows. */
+.h-inbox-shell {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--fg);
+  background:
+    radial-gradient(circle at 18% -8%, color-mix(in oklab, var(--accent), transparent 88%), transparent 34%),
+    linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 2%), color-mix(in oklab, var(--bg), transparent 10%));
+}
+.h-inbox-command {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 3%), color-mix(in oklab, var(--bg-2), transparent 8%));
+  box-shadow: 0 10px 22px color-mix(in oklab, black, transparent 88%);
+  z-index: 2;
+}
+.h-inbox-command-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.h-inbox-title-stack {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.h-inbox-eyebrow {
+  color: var(--fg-dim);
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.h-inbox-title-stack strong {
+  min-width: 0;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 820;
+  line-height: 1.15;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-inbox-action {
+  display: inline-flex;
+  min-height: 25px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 8px;
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg-3), transparent 16%);
+  cursor: pointer;
+  font-size: 10.5px;
+  font-weight: 760;
+  line-height: 1;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.h-inbox-action:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--bg-3), white 6%);
+  border-color: color-mix(in oklab, var(--border), white 16%);
+}
+.h-inbox-action:active:not(:disabled) { transform: translateY(1px); }
+.h-inbox-action.primary {
+  color: #eef4ff;
+  border-color: color-mix(in oklab, var(--accent), transparent 44%);
+  background: linear-gradient(180deg, color-mix(in oklab, var(--accent), white 10%), color-mix(in oklab, var(--accent), black 18%));
+}
+.h-inbox-action.ghost {
+  color: var(--fg-dim);
+  background: transparent;
+}
+.h-inbox-action.danger {
+  color: color-mix(in oklab, var(--bad), white 25%);
+  border-color: color-mix(in oklab, var(--bad), transparent 58%);
+  background: color-mix(in oklab, var(--bad), transparent 91%);
+}
+.h-inbox-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+.h-inbox-metric {
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--bg-3), transparent 18%);
+}
+.h-inbox-metric b {
+  display: block;
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 14px;
+  line-height: 1;
+}
+.h-inbox-metric span {
+  display: block;
+  margin-top: 4px;
+  color: var(--fg-dim);
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.h-inbox-metric.tone-warn {
+  border-color: color-mix(in oklab, var(--warn), transparent 56%);
+  background: color-mix(in oklab, var(--warn), transparent 91%);
+}
+.h-inbox-metric.tone-good {
+  border-color: color-mix(in oklab, var(--good), transparent 64%);
+  background: color-mix(in oklab, var(--good), transparent 93%);
+}
+.h-inbox-metric.tone-bad {
+  border-color: color-mix(in oklab, var(--bad), transparent 60%);
+  background: color-mix(in oklab, var(--bad), transparent 92%);
+}
+.h-inbox-search-row { min-width: 0; }
+.h-inbox-search {
+  width: 100%;
+  height: 28px;
+  box-sizing: border-box;
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--border), white 7%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg), transparent 12%);
+  font-size: 11.5px;
+  outline: none;
+  padding: 0 8px;
+}
+.h-inbox-search:focus {
+  border-color: color-mix(in oklab, var(--accent), white 8%);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent), transparent 64%);
+}
+.h-inbox-filter-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+.h-inbox-filter {
+  min-width: 0;
+  min-height: 27px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 0 7px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg-3), transparent 38%);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+}
+.h-inbox-filter span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.h-inbox-filter b {
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+}
+.h-inbox-filter.on {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--accent), transparent 48%);
+  background: color-mix(in oklab, var(--accent), transparent 90%);
+}
+.h-inbox-feed {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 7px;
+  scrollbar-color: color-mix(in oklab, var(--fg-dim), transparent 55%) transparent;
+  scrollbar-width: thin;
+}
+.h-inbox-section {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+.h-inbox-section-title {
+  position: sticky;
+  top: -7px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 2px 4px;
+  color: var(--fg-dim);
+  background: linear-gradient(180deg, var(--bg-2), color-mix(in oklab, var(--bg-2), transparent 8%));
+  font-size: 9px;
+  font-weight: 820;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.h-inbox-section-title.tone-warn { color: color-mix(in oklab, var(--warn), white 14%); }
+.h-inbox-section-title b {
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0;
+}
+.h-inbox-section-body {
+  display: grid;
+  gap: 5px;
+}
+.h-inbox-empty {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  padding: 16px 10px;
+  text-align: center;
+  color: var(--fg-dim);
+  border: 1px dashed color-mix(in oklab, var(--border), white 8%);
+  border-radius: 13px;
+  background:
+    radial-gradient(circle at 50% 0%, color-mix(in oklab, var(--accent), transparent 88%), transparent 50%),
+    color-mix(in oklab, var(--bg-3), transparent 54%);
+}
+.h-inbox-empty-orb {
+  width: 26px;
+  height: 26px;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 50%);
+  border-radius: 999px;
+  background: radial-gradient(circle, color-mix(in oklab, var(--accent), white 12%) 0 24%, transparent 25% 100%);
+  box-shadow: 0 0 24px color-mix(in oklab, var(--accent), transparent 70%);
+}
+.h-inbox-empty b {
+  color: var(--fg);
+  font-size: 13px;
+}
+.h-inbox-empty p {
+  max-width: 260px;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.h-inbox-row {
+  width: 100%;
+  min-width: 0;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "feature kind"
+    "title title"
+    "sub sub"
+    "foot foot";
+  gap: 4px 6px;
+  padding: 8px 9px 8px 10px;
+  color: inherit;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 28%);
+  border-radius: 11px;
+  background: color-mix(in oklab, var(--bg-3), transparent 42%);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.h-inbox-row::before {
+  content: "";
+  position: absolute;
+  inset: 8px auto 8px 0;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  opacity: 0.75;
+}
+.h-inbox-row:hover,
+.h-inbox-row:focus-visible {
+  background: color-mix(in oklab, var(--bg-3), white 4%);
+  border-color: color-mix(in oklab, var(--border), white 12%);
+  outline: none;
+}
+.h-inbox-row:active { transform: translateY(1px); }
+.h-inbox-row.tone-warn::before { background: var(--warn); }
+.h-inbox-row.tone-bad::before { background: var(--bad); }
+.h-inbox-row.tone-good::before { background: var(--good); }
+.h-inbox-row.tone-info::before { background: var(--info); }
+.h-inbox-row.tone-purple::before,
+.h-inbox-row.tone-violet::before,
+.h-inbox-row.tone-rose::before { background: var(--accent); }
+.h-inbox-feature {
+  grid-area: feature;
+  min-width: 0;
+  justify-self: start;
+  max-width: 100%;
+  padding: 2px 5px;
+  color: color-mix(in oklab, var(--fg-dim), white 10%);
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--bg), transparent 20%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-inbox-kind {
+  grid-area: kind;
+  justify-self: end;
+  padding: 2px 6px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg-3), transparent 15%);
+  font-size: 9px;
+  font-weight: 820;
+  letter-spacing: 0.05em;
+  line-height: 1.1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.h-inbox-kind.tone-warn {
+  color: color-mix(in oklab, var(--warn), white 14%);
+  border-color: color-mix(in oklab, var(--warn), transparent 58%);
+  background: color-mix(in oklab, var(--warn), transparent 91%);
+}
+.h-inbox-kind.tone-bad,
+.h-inbox-kind.tone-rose {
+  color: color-mix(in oklab, var(--bad), white 22%);
+  border-color: color-mix(in oklab, var(--bad), transparent 58%);
+  background: color-mix(in oklab, var(--bad), transparent 92%);
+}
+.h-inbox-kind.tone-good {
+  color: color-mix(in oklab, var(--good), white 18%);
+  border-color: color-mix(in oklab, var(--good), transparent 60%);
+  background: color-mix(in oklab, var(--good), transparent 92%);
+}
+.h-inbox-kind.tone-info,
+.h-inbox-kind.tone-purple,
+.h-inbox-kind.tone-violet {
+  color: color-mix(in oklab, var(--info), white 18%);
+  border-color: color-mix(in oklab, var(--info), transparent 58%);
+  background: color-mix(in oklab, var(--info), transparent 92%);
+}
+.h-inbox-row-title {
+  grid-area: title;
+  min-width: 0;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 1.26;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-inbox-row-sub {
+  grid-area: sub;
+  min-width: 0;
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.h-inbox-row-foot {
+  grid-area: foot;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--fg-faint);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 1.1;
+}
+.h-inbox-thread {
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    "dot title"
+    "dot sub"
+    "dot foot";
+}
+.h-inbox-thread-dot {
+  grid-area: dot;
+  align-self: start;
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+  border: 1px solid color-mix(in oklab, var(--accent), white 10%);
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent), transparent 84%);
+}
+.h-inbox-promotion {
+  padding: 2px;
+  border: 1px solid color-mix(in oklab, var(--good), transparent 66%);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--good), transparent 94%);
+}
+.h-inbox-chat {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--fg);
+  background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 2%), var(--bg));
+}
+.h-inbox-chat-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  background: color-mix(in oklab, var(--bg-2), white 2%);
+}
+.h-inbox-chat-title {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.h-inbox-chat-title span {
+  color: var(--fg-dim);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.h-inbox-chat-title strong {
+  min-width: 0;
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-inbox-context-card {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 6px;
+  margin: 8px;
+  padding: 9px;
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--warn), transparent 58%);
+  border-radius: 11px;
+  background: color-mix(in oklab, var(--warn), transparent 93%);
+}
+.h-inbox-context-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.h-inbox-context-card b {
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.h-inbox-context-card p {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 10.8px;
+  line-height: 1.38;
+}
+.h-inbox-context-card p strong { color: var(--fg); }
+.h-inbox-chat-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.h-inbox-chat-body > * {
+  flex: 1;
+  min-height: 0;
+}
+@media (max-width: 760px) {
+  .h-inbox-command {
+    gap: 6px;
+    padding: 7px;
+  }
+  .h-inbox-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .h-inbox-feed {
+    padding: 6px;
+  }
+  .h-inbox-row {
+    padding: 8px;
+  }
+}
+
+/* Inbox continuation refinements: sync status, quick compose, templates, and thread cleanup. */
+.h-inbox-top-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+.h-inbox-top-actions .h-inbox-action {
+  min-height: 24px;
+  padding-inline: 7px;
+}
+.h-inbox-ops-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  color: var(--fg-faint);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 1;
+}
+.h-inbox-ops-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 5px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 24%);
+  border-radius: 7px;
+  background: color-mix(in oklab, var(--bg), transparent 30%);
+}
+.h-inbox-compose {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 58%);
+  border-radius: 11px;
+  background:
+    radial-gradient(circle at 18% 0%, color-mix(in oklab, var(--accent), transparent 84%), transparent 44%),
+    color-mix(in oklab, var(--bg-3), transparent 20%);
+  box-shadow: inset 0 1px 0 color-mix(in oklab, white, transparent 94%);
+}
+.h-inbox-compose label {
+  display: grid;
+  gap: 5px;
+}
+.h-inbox-compose label > span {
+  color: var(--fg-dim);
+  font-size: 9px;
+  font-weight: 820;
+  letter-spacing: 0.11em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.h-inbox-compose textarea {
+  width: 100%;
+  min-height: 64px;
+  box-sizing: border-box;
+  resize: vertical;
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--bg), transparent 12%);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.35;
+  outline: none;
+  padding: 8px;
+}
+.h-inbox-compose textarea:focus {
+  border-color: color-mix(in oklab, var(--accent), white 8%);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent), transparent 64%);
+}
+.h-inbox-template-row {
+  display: flex;
+  gap: 5px;
+  overflow-x: auto;
+  padding-bottom: 1px;
+  mask-image: linear-gradient(90deg, #000 0%, #000 90%, transparent 100%);
+  scrollbar-width: none;
+}
+.h-inbox-template-row::-webkit-scrollbar { display: none; }
+.h-inbox-template-row button {
+  flex: 0 0 auto;
+  max-width: 180px;
+  padding: 4px 7px;
+  color: color-mix(in oklab, var(--fg-dim), white 8%);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg), transparent 28%);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-inbox-template-row button:hover {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--accent), transparent 52%);
+  background: color-mix(in oklab, var(--accent), transparent 91%);
+}
+.h-inbox-compose-actions {
+  display: flex;
+  gap: 6px;
+}
+.h-inbox-compose-actions .h-inbox-action {
+  flex: 1;
+}
+.h-inbox-row-delete {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-faint);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+}
+.h-inbox-row:hover .h-inbox-row-delete,
+.h-inbox-row:focus-within .h-inbox-row-delete {
+  opacity: 1;
+}
+.h-inbox-row-delete:hover {
+  color: color-mix(in oklab, var(--bad), white 24%);
+  border-color: color-mix(in oklab, var(--bad), transparent 60%);
+  background: color-mix(in oklab, var(--bad), transparent 91%);
+}
+.h-inbox-thread .h-inbox-row-title {
+  padding-right: 22px;
+}
+@media (max-width: 760px) {
+  .h-inbox-ops-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    font-size: 9px;
+  }
+  .h-inbox-compose {
+    padding: 7px;
+  }
+  .h-inbox-template-row button {
+    max-width: 150px;
+  }
+}
+
+/* Inbox continuation pass: kind focus rail, latest action, and persistent playbook. */
+.h-inbox-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+.h-inbox-top-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 128px;
+}
+.h-inbox-kind-rail {
+  display: flex;
+  gap: 5px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 1px;
+  mask-image: linear-gradient(90deg, #000 0%, #000 88%, transparent 100%);
+  scrollbar-width: none;
+}
+.h-inbox-kind-rail::-webkit-scrollbar { display: none; }
+.h-inbox-kind-chip {
+  flex: 0 0 auto;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg), transparent 30%);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.h-inbox-kind-chip b {
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+}
+.h-inbox-kind-chip.on {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--accent), transparent 48%);
+  background: color-mix(in oklab, var(--accent), transparent 90%);
+}
+.h-inbox-kind-chip.tone-warn.on {
+  border-color: color-mix(in oklab, var(--warn), transparent 52%);
+  background: color-mix(in oklab, var(--warn), transparent 91%);
+}
+.h-inbox-kind-chip.tone-bad.on,
+.h-inbox-kind-chip.tone-rose.on {
+  border-color: color-mix(in oklab, var(--bad), transparent 58%);
+  background: color-mix(in oklab, var(--bad), transparent 92%);
+}
+.h-inbox-kind-chip.tone-good.on {
+  border-color: color-mix(in oklab, var(--good), transparent 60%);
+  background: color-mix(in oklab, var(--good), transparent 92%);
+}
+.h-inbox-template-dock {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 22%);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 20% 0%, color-mix(in oklab, var(--info), transparent 88%), transparent 48%),
+    color-mix(in oklab, var(--bg-3), transparent 48%);
+}
+.h-inbox-template-dock.compact {
+  padding: 7px;
+}
+.h-inbox-template-dock-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--fg-dim);
+  font-size: 9px;
+  font-weight: 820;
+  letter-spacing: 0.11em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.h-inbox-template-dock-head b {
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0;
+}
+.h-inbox-template-grid {
+  display: grid;
+  gap: 5px;
+}
+.h-inbox-template-grid button {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 7px;
+  color: color-mix(in oklab, var(--fg-dim), white 8%);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg), transparent 26%);
+  cursor: pointer;
+  font-size: 10.5px;
+  line-height: 1.2;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-inbox-template-grid button:hover {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--info), transparent 54%);
+  background: color-mix(in oklab, var(--info), transparent 92%);
+}
+@media (max-width: 760px) {
+  .h-inbox-top-actions {
+    max-width: 150px;
+  }
+  .h-inbox-template-dock {
+    margin-top: 6px;
+  }
+}
+
+/* Inbox watchlist: pinned local threads stay above normal threads and can be filtered. */
+.h-inbox-filter-row {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.h-inbox-filter {
+  padding-inline: 5px;
+}
+.h-inbox-filter span {
+  font-size: 9.5px;
+}
+.h-inbox-thread.is-pinned {
+  border-color: color-mix(in oklab, var(--warn), transparent 54%);
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in oklab, var(--warn), transparent 88%), transparent 38%),
+    color-mix(in oklab, var(--bg-3), transparent 28%);
+}
+.h-inbox-thread.is-pinned::before {
+  background: var(--warn);
+  opacity: 0.95;
+}
+.h-inbox-row-pin {
+  position: absolute;
+  top: 7px;
+  right: 30px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-faint);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+}
+.h-inbox-row:hover .h-inbox-row-pin,
+.h-inbox-row:focus-within .h-inbox-row-pin,
+.h-inbox-row-pin.on {
+  opacity: 1;
+}
+.h-inbox-row-pin:hover,
+.h-inbox-row-pin.on {
+  color: color-mix(in oklab, var(--warn), white 16%);
+  border-color: color-mix(in oklab, var(--warn), transparent 60%);
+  background: color-mix(in oklab, var(--warn), transparent 90%);
+}
+.h-inbox-thread .h-inbox-row-title {
+  padding-right: 46px;
+}
+@media (max-width: 760px) {
+  .h-inbox-filter {
+    padding-inline: 4px;
+  }
+  .h-inbox-filter span {
+    font-size: 9px;
+  }
+}
+
+/* Git dashboard refinement: searchable native-scroll commit cockpit. */
+.h-git-panel {
+  background:
+    radial-gradient(circle at 0% 0%, color-mix(in oklab, var(--accent), transparent 90%), transparent 34%),
+    linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 1.5%), var(--bg-2));
+}
+.h-git-command {
+  display: grid;
+  gap: 6px;
+  padding: 7px 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 24%);
+  background: color-mix(in oklab, var(--bg-2), transparent 8%);
+}
+.h-git-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px;
+  align-items: center;
+}
+.h-git-search {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 8px;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.h-git-search::placeholder {
+  color: var(--fg-mute, #9a9aa3);
+  opacity: 0.7;
+}
+.h-git-search:focus {
+  border-color: color-mix(in oklab, var(--accent, #6aa7ff), var(--border) 30%);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent, #6aa7ff), transparent 80%);
+}
+.h-git-clear {
+  height: 27px;
+  padding: 0 8px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 8%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg-3), transparent 22%);
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.h-git-clear:hover,
+.h-git-clear:focus-visible {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--accent), transparent 45%);
+  outline: none;
+}
+.h-git-filter-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+.h-git-filter {
+  min-width: 0;
+  height: 25px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 0 6px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 10%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg-3), transparent 30%);
+  cursor: pointer;
+}
+.h-git-filter span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.h-git-filter b {
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+}
+.h-git-filter.on {
+  color: color-mix(in oklab, var(--accent), white 15%);
+  border-color: color-mix(in oklab, var(--accent), transparent 48%);
+  background: color-mix(in oklab, var(--accent), transparent 88%);
+}
+.h-git-ref-rail,
+.h-git-author-rail {
+  display: flex;
+  gap: 5px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 30%);
+  scrollbar-width: none;
+  mask-image: linear-gradient(90deg, transparent 0, black 10px, black calc(100% - 18px), transparent 100%);
+}
+.h-git-ref-rail::-webkit-scrollbar,
+.h-git-author-rail::-webkit-scrollbar {
+  display: none;
+}
+.h-git-ref-chip,
+.h-git-author-rail button {
+  flex: 0 0 auto;
+  max-width: 150px;
+  min-width: 0;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 10%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg-3), transparent 28%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  cursor: pointer;
+}
+.h-git-ref-chip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-git-ref-chip.head {
+  color: color-mix(in oklab, var(--good), white 10%);
+  border-color: color-mix(in oklab, var(--good), transparent 58%);
+  background: color-mix(in oklab, var(--good), transparent 91%);
+}
+.h-git-ref-chip.tag {
+  color: color-mix(in oklab, var(--info), white 12%);
+  border-color: color-mix(in oklab, var(--info), transparent 58%);
+  background: color-mix(in oklab, var(--info), transparent 91%);
+}
+.h-git-ref-chip:hover,
+.h-git-ref-chip:focus-visible,
+.h-git-author-rail button:hover,
+.h-git-author-rail button:focus-visible {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--accent), transparent 54%);
+  outline: none;
+}
+.h-git-author-rail {
+  padding-top: 0;
+}
+.h-git-author-rail button span {
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-git-author-rail button b {
+  color: var(--fg);
+  font-size: 9.5px;
+}
+.h-git-row.is-active {
+  border-color: color-mix(in oklab, var(--accent), transparent 45%);
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in oklab, var(--accent), transparent 84%), transparent 45%),
+    color-mix(in oklab, var(--bg-2), white 5%);
+}
+.h-git-row.is-active .h-git-dot {
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent), transparent 45%);
+}
+.h-git-error {
+  color: var(--bad);
+}
+.h-git-empty {
+  gap: 8px;
+}
+.h-git-empty .h-git-clear {
+  margin-top: 6px;
+}
+.h-git-panel .h-git-summary {
+  padding-block: 6px;
+}
+.h-git-panel .h-git-list {
+  padding-top: 6px;
+}
+.h-git-panel .h-git-row {
+  min-height: 52px;
+}
+.h-git-panel .h-git-meta {
+  gap: 5px;
+}
+@media (max-width: 760px) {
+  .h-git-command {
+    padding: 6px;
+  }
+  .h-git-search {
+    height: 26px;
+  }
+  .h-git-clear {
+    height: 26px;
+    padding-inline: 7px;
+  }
+  .h-git-filter {
+    padding-inline: 5px;
+  }
+  .h-git-ref-rail,
+  .h-git-author-rail {
+    padding-inline: 6px;
+  }
+  .h-git-author-rail {
+    padding-top: 0;
+  }
+}
+
+/* Git is data-heavy: keep the dashboard list tall after adding command controls. */
+.h-main-shell.dashboard:has(.h-git-panel) {
+  min-height: 760px;
+}
+.h-main-shell.dashboard .h-git-panel {
+  height: 760px;
+  min-height: 760px;
+  max-height: 760px;
+}
+
+/* Git commit detail drawer polish. */
+.h-git-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.68);
+  backdrop-filter: blur(3px);
+}
+.h-git-detail-drawer {
+  width: 100%;
+  max-width: 1600px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  /* Opaque base is required: this drawer is portaled to <body>, so it has
+     no opaque ancestor to sit on. --bg-2 is a *translucent* surface tier
+     (rgba white 0.045) — using it here let the page show straight through
+     the panel. --bg-popover is the solid elevated-surface token. */
+  background:
+    radial-gradient(circle at 0% 0%, color-mix(in oklab, var(--accent), transparent 88%), transparent 38%),
+    var(--bg-popover);
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 12px;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.h-git-detail-drawer--inline {
+  max-width: none;
+  border-radius: 0;
+  border: none;
+  border-left: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  box-shadow: none;
+  background: var(--bg-popover);
+  height: 100%;
+}
+
+.h-git-detail-head {
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 14px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 18%);
+  background: color-mix(in oklab, var(--bg-2), white 2%);
+}
+.h-git-detail-id {
+  display: grid;
+  gap: 2px;
+  min-width: 98px;
+}
+.h-git-detail-id span {
+  color: var(--fg-faint);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.h-git-detail-id code {
+  color: color-mix(in oklab, var(--accent), white 18%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.h-git-detail-title-stack {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+.h-git-detail-title-stack strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 720;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-git-detail-meta {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  mask-image: linear-gradient(90deg, black calc(100% - 18px), transparent 100%);
+}
+.h-git-detail-meta::-webkit-scrollbar {
+  display: none;
+}
+.h-git-detail-meta span {
+  flex: 0 0 auto;
+  max-width: 190px;
+  overflow: hidden;
+  padding: 3px 7px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 14%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg-3), transparent 28%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-git-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.h-git-detail-copy {
+  height: 28px;
+  padding: 0 9px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--bg-3), transparent 18%);
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.h-git-detail-copy:hover,
+.h-git-detail-copy:focus-visible {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--accent), transparent 45%);
+  outline: none;
+}
+.h-git-detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+  scrollbar-color: color-mix(in oklab, var(--fg-dim), transparent 55%) transparent;
+  scrollbar-width: thin;
+}
+.h-git-detail-loading .h-empty-icon {
+  animation: spin 1s linear infinite;
+}
+.h-git-detail-message {
+  margin: 0 0 14px;
+  padding: 12px 13px;
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 10%);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--bg), transparent 18%);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.h-git-detail-empty {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+.h-git-detail-truncated {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in oklab, var(--warn, #d6a420), transparent 60%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--warn, #d6a420), transparent 88%);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.h-git-detail-truncated a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+}
+.h-git-file-card {
+  margin-bottom: 14px;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--border), white 4%);
+  border-radius: 10px;
+  background: #07111c;
+}
+.h-git-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 7px 10px;
+  color: var(--fg);
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 12%);
+  background:
+    linear-gradient(180deg, color-mix(in oklab, var(--bg-3), white 3%), color-mix(in oklab, var(--bg-3), transparent 12%)),
+    #0b1522;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+}
+.h-git-file-card:has(.h-git-file-head[aria-expanded="false"]) .h-git-file-head {
+  border-bottom: none;
+}
+.h-git-file-head > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-git-file-head-button {
+  width: 100%;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  text-align: left;
+  cursor: pointer;
+}
+.h-git-file-head-button:hover {
+  background:
+    linear-gradient(180deg, color-mix(in oklab, var(--bg-3), white 6%), color-mix(in oklab, var(--bg-3), transparent 4%)),
+    #0d1a2a;
+}
+.h-git-file-stats {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.h-git-file-kind,
+.h-git-file-note {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in oklab, var(--border), white 4%);
+  border-radius: 999px;
+  color: var(--fg-dim);
+  background: color-mix(in oklab, var(--bg-3), transparent 20%);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.h-git-file-kind--modify { border-color: color-mix(in oklab, var(--accent), transparent 62%); color: color-mix(in oklab, var(--accent), white 34%); }
+.h-git-file-kind--add { border-color: color-mix(in oklab, var(--good), transparent 60%); color: color-mix(in oklab, var(--good), white 32%); }
+.h-git-file-kind--delete { border-color: color-mix(in oklab, var(--bad), transparent 58%); color: color-mix(in oklab, var(--bad), white 34%); }
+.h-git-file-kind--rename,
+.h-git-file-kind--copy { border-color: color-mix(in oklab, var(--warn, #d6a420), transparent 58%); color: color-mix(in oklab, var(--warn, #d6a420), white 32%); }
+.h-git-file-note {
+  flex: 0 0 auto;
+  margin-left: 2px;
+  color: var(--fg-dim);
+}
+.h-git-diff-table-wrap {
+  overflow: auto;
+  max-height: 560px;
+  background: #09111b;
+  --diff-background-color: transparent;
+  --diff-text-color: var(--fg);
+  --diff-font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --diff-selection-background-color: color-mix(in oklab, var(--accent), transparent 74%);
+  --diff-selection-text-color: #f8fbff;
+  --diff-gutter-insert-background-color: color-mix(in oklab, var(--good), transparent 78%);
+  --diff-gutter-insert-text-color: color-mix(in oklab, var(--good), white 34%);
+  --diff-gutter-delete-background-color: color-mix(in oklab, var(--bad), transparent 78%);
+  --diff-gutter-delete-text-color: color-mix(in oklab, var(--bad), white 34%);
+  --diff-gutter-selected-background-color: color-mix(in oklab, var(--bg-3), white 3%);
+  --diff-gutter-selected-text-color: var(--fg);
+  --diff-code-insert-background-color: color-mix(in oklab, var(--good), transparent 86%);
+  --diff-code-insert-text-color: var(--fg);
+  --diff-code-delete-background-color: color-mix(in oklab, var(--bad), transparent 86%);
+  --diff-code-delete-text-color: var(--fg);
+  --diff-code-insert-edit-background-color: color-mix(in oklab, var(--good), transparent 66%);
+  --diff-code-insert-edit-text-color: var(--fg);
+  --diff-code-delete-edit-background-color: color-mix(in oklab, var(--bad), transparent 66%);
+  --diff-code-delete-edit-text-color: var(--fg);
+  --diff-code-selected-background-color: color-mix(in oklab, var(--bg-3), white 3%);
+  --diff-code-selected-text-color: var(--fg);
+  --diff-omit-gutter-line-color: color-mix(in oklab, var(--accent), transparent 50%);
+}
+.h-git-diff-table {
+  min-width: 100%;
+}
+.h-git-diff-hunk + .h-git-diff-hunk {
+  border-top: 1px solid color-mix(in oklab, var(--border), transparent 35%);
+}
+.h-git-diff-line {
+  font-size: 11px;
+  line-height: 1.45;
+}
+.h-git-diff-gutter {
+  min-width: 5ch;
+  padding: 0 10px 0 8px;
+  color: var(--fg-dim);
+}
+.h-git-diff-code {
+  padding: 0 14px 0 12px;
+  white-space: pre;
+  word-break: normal;
+  word-wrap: normal;
+  overflow-wrap: normal;
+}
+.h-git-diff-warning,
+.h-git-raw-patch {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.h-git-diff-warning {
+  color: color-mix(in oklab, var(--warn, #d6a420), white 30%);
+  border-bottom: 1px solid color-mix(in oklab, var(--warn, #d6a420), transparent 70%);
+  background: color-mix(in oklab, var(--warn, #d6a420), transparent 88%);
+}
+.h-git-raw-patch {
+  max-height: 560px;
+  overflow: auto;
+  white-space: pre;
+  background: #09111b;
+}
+.h-git-detail-toolbar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.h-git-worktree-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  padding: 4px 8px;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+.h-git-worktree-filter:hover,
+.h-git-worktree-filter:focus-visible {
+  border-color: color-mix(in oklab, var(--accent, #6aa7ff), var(--border) 30%);
+  outline: none;
+}
+
+@media (max-width: 760px) {
+  .h-git-worktree-filter {
+    max-width: 140px;
+  }
+  .h-git-detail-drawer {
+    width: 100vw;
+  }
+  .h-git-detail-head {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 10px;
+  }
+  .h-git-detail-id {
+    display: none;
+  }
+  .h-git-detail-title-stack strong {
+    font-size: 12px;
+  }
+  .h-git-detail-copy {
+    display: none;
+  }
+  .h-git-detail-body {
+    padding: 10px;
+  }
+}
+
+/* Proposals queue refinement: sort, quick focus, and copy affordances. */
+.h-proposal-ops-row {
+  display: grid;
+  grid-template-columns: minmax(104px, 1fr) auto auto;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+}
+.h-proposal-sort {
+  min-width: 0;
+  height: 28px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 14%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg-3), transparent 38%);
+}
+.h-proposal-sort span {
+  color: var(--fg-faint);
+  font-size: 9px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.h-proposal-sort select {
+  min-width: 0;
+  width: 100%;
+  color: var(--fg);
+  border: 0;
+  background: transparent;
+  font-size: 10.5px;
+  font-weight: 700;
+  outline: none;
+}
+.h-proposal-ops-row .h-proposal-mini {
+  min-height: 28px;
+  white-space: nowrap;
+}
+.h-proposal-ops-row .h-proposal-mini:disabled {
+  opacity: 0.42;
+}
+.h-proposal-detail-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.h-proposal-detail-actions .h-proposal-btn.ghost {
+  border-style: dashed;
+}
+.h-proposal-detail-actions .h-proposal-btn.ghost:disabled {
+  opacity: 0.42;
+}
+@media (max-width: 760px) {
+  .h-proposal-ops-row {
+    grid-template-columns: minmax(0, 1fr) 1fr;
+  }
+  .h-proposal-ops-row .h-proposal-mini:last-child {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Proposals continuation: shortlist/watchlist and markdown outline rails. */
+.h-proposal-short-count {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  color: color-mix(in oklab, var(--warn), white 14%);
+  border: 1px solid color-mix(in oklab, var(--warn), transparent 64%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--warn), transparent 91%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  font-weight: 800;
+}
+.h-proposal-ops-row {
+  grid-template-columns: minmax(96px, 1fr) auto auto auto;
+}
+.h-proposal-mini.on {
+  color: color-mix(in oklab, var(--warn), white 16%);
+  border-color: color-mix(in oklab, var(--warn), transparent 56%);
+  background: color-mix(in oklab, var(--warn), transparent 91%);
+}
+.h-proposal-item {
+  grid-template-columns: 18px 22px minmax(0, 1fr);
+}
+.h-proposal-item.is-shortlisted {
+  border-color: color-mix(in oklab, var(--warn), transparent 58%);
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in oklab, var(--warn), transparent 89%), transparent 44%),
+    color-mix(in oklab, var(--bg-3), transparent 24%);
+}
+.h-proposal-pin {
+  z-index: 1;
+  width: 21px;
+  height: 21px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: center;
+  color: var(--fg-faint);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.5;
+  transition: opacity var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+}
+.h-proposal-item:hover .h-proposal-pin,
+.h-proposal-item:focus-within .h-proposal-pin,
+.h-proposal-pin.on {
+  opacity: 1;
+}
+.h-proposal-pin:hover,
+.h-proposal-pin:focus-visible,
+.h-proposal-pin.on {
+  color: color-mix(in oklab, var(--warn), white 14%);
+  border-color: color-mix(in oklab, var(--warn), transparent 58%);
+  background: color-mix(in oklab, var(--warn), transparent 91%);
+  outline: none;
+}
+.h-proposal-shortlist-detail.on {
+  color: color-mix(in oklab, var(--warn), white 16%);
+  border-color: color-mix(in oklab, var(--warn), transparent 58%);
+  background: color-mix(in oklab, var(--warn), transparent 92%);
+}
+.h-proposal-outline {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 7px 12px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 22%);
+  background: color-mix(in oklab, var(--bg-2), transparent 18%);
+  scrollbar-width: none;
+  mask-image: linear-gradient(90deg, black calc(100% - 22px), transparent 100%);
+}
+.h-proposal-outline::-webkit-scrollbar {
+  display: none;
+}
+.h-proposal-outline span {
+  flex: 0 0 auto;
+  color: var(--fg-faint);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.h-proposal-outline b,
+.h-proposal-outline em {
+  flex: 0 0 auto;
+  max-width: 180px;
+  overflow: hidden;
+  padding: 3px 7px;
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 14%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg-3), transparent 24%);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.h-proposal-outline em {
+  color: color-mix(in oklab, var(--info), white 12%);
+  border-color: color-mix(in oklab, var(--info), transparent 60%);
+  background: color-mix(in oklab, var(--info), transparent 92%);
+}
+@media (max-width: 760px) {
+  .h-proposal-ops-row {
+    grid-template-columns: minmax(0, 1fr) 1fr;
+  }
+  .h-proposal-item {
+    grid-template-columns: 18px 21px minmax(0, 1fr);
+  }
+  .h-proposal-pin {
+    width: 20px;
+    height: 20px;
+  }
+  .h-proposal-outline {
+    padding-inline: 10px;
+  }
+}
+
+/* Git main workspace tab + starred commit workflow.
+ * Same shape as dashboard + brainstorm: shell fills the available
+ * height, panel fills inside it. Same caveat as proposals above —
+ * the git-panel may be in a hidden <Activity> subtree, so the
+ * shell rule applies cross-tab. Removing the max-cap. */
+.h-main-shell.embed:has(.h-git-panel) {
+  min-height: 760px;
+}
+.h-main-shell.embed .h-git-panel {
+  width: 100%;
+  flex: 1;
+  height: auto;
+  min-height: 760px;
+  max-height: none;
+}
+.h-git-filter-row {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.h-git-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.h-git-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+.h-git-row.is-bookmarked {
+  border-color: color-mix(in oklab, var(--warn), transparent 60%);
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in oklab, var(--warn), transparent 90%), transparent 42%),
+    color-mix(in oklab, var(--bg-3), transparent 35%);
+}
+.h-git-row-bookmark {
+  align-self: start;
+  justify-self: end;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+  color: var(--fg-faint);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.48;
+  transition: opacity var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+.h-git-row:hover .h-git-row-bookmark,
+.h-git-row:focus-within .h-git-row-bookmark,
+.h-git-row-bookmark.on {
+  opacity: 1;
+}
+.h-git-row-bookmark:hover,
+.h-git-row-bookmark:focus-visible,
+.h-git-row-bookmark.on {
+  color: color-mix(in oklab, var(--warn), white 16%);
+  border-color: color-mix(in oklab, var(--warn), transparent 58%);
+  background: color-mix(in oklab, var(--warn), transparent 91%);
+  outline: none;
+}
+.h-git-row.is-bookmarked .h-git-dot {
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--warn), transparent 52%);
+}
+@media (max-width: 760px) {
+  .h-main-shell.embed:has(.h-git-panel) {
+    min-height: 760px;
+    max-height: none;
+  }
+  .h-main-shell.embed .h-git-panel {
+    height: 760px;
+    min-height: 760px;
+  }
+  .h-git-filter {
+    padding-inline: 4px;
+  }
+  .h-git-filter span {
+    font-size: 9px;
+  }
+  .h-git-row-bookmark {
+    width: 20px;
+    height: 20px;
+  }
+}
+
+/* Proposals review workflow: keyboard navigation + bulk shortlist without shrinking the reader. */
+.h-proposal-ops-row {
+  grid-template-columns: minmax(92px, 1fr) repeat(4, auto);
+}
+.h-proposal-review-rail {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 7px;
+  color: var(--fg-faint);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 22%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg), transparent 35%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.018);
+}
+.h-proposal-review-rail > span {
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.h-proposal-review-rail > span b {
+  color: var(--fg);
+}
+.h-proposal-hotkeys {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  mask-image: linear-gradient(90deg, transparent 0, black 10px, black calc(100% - 14px), transparent 100%);
+}
+.h-proposal-hotkeys::-webkit-scrollbar {
+  display: none;
+}
+.h-proposal-hotkeys kbd {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  color: color-mix(in oklab, var(--accent), white 18%);
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 64%);
+  border-radius: 5px;
+  background: color-mix(in oklab, var(--accent), transparent 91%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9px;
+  font-weight: 820;
+  line-height: 1;
+}
+.h-proposal-hotkeys span {
+  flex: 0 0 auto;
+  color: var(--fg-faint);
+  font-size: 9px;
+  font-weight: 720;
+  line-height: 1;
+  margin-right: 3px;
+}
+.h-proposal-row-button:focus-visible {
+  outline: 1px solid color-mix(in oklab, var(--accent), transparent 45%);
+  outline-offset: -2px;
+  border-radius: 9px;
+}
+.h-proposal-item.is-active .h-proposal-pin {
+  opacity: 1;
+}
+.h-proposal-detail-metrics {
+  mask-image: linear-gradient(90deg, black calc(100% - 18px), transparent 100%);
+}
+.h-proposal-detail-metrics::-webkit-scrollbar {
+  display: none;
+}
+@media (max-width: 760px) {
+  .h-proposal-ops-row {
+    grid-template-columns: minmax(0, 1fr) 1fr;
+  }
+  .h-proposal-sort {
+    grid-column: 1 / -1;
+  }
+  .h-proposal-review-rail {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .h-proposal-hotkeys {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .h-proposal-hotkeys span {
+    display: none;
+  }
+}
+
+/* Dashboard grid: panels begin directly below the dashboard tab without an intermediate menu. */
+.h-main-shell.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.h-dashboard-grid {
+  flex: 1 1 auto;
+  min-height: 760px;
+}
+/* In /papercup the grid is bounded by the iframe viewport (~908px tall),
+   most of which is consumed by the harness chrome. The 760px floor would
+   force scroll past the iframe edge, leaving the grid bottom hidden.
+   Let the grid flex into the actual remaining space instead. */
+.papercup-route .h-dashboard-grid {
+  min-height: 0;
+}
+.h-compact-dashboard {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Dashboard grid anchors preserve full-height panels without an extra command strip. */
+.h-dashboard-panel-anchor {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  outline: none;
+  scroll-margin-block-start: 168px;
+}
+.h-dashboard-panel-anchor > .h-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.h-dashboard-panel-anchor:focus-visible {
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent), transparent 42%), 0 0 0 4px color-mix(in oklab, var(--accent), transparent 82%);
+  border-radius: 12px;
+}
+.h-compact-dashboard .h-dashboard-panel-anchor {
+  height: auto;
+  min-height: 300px;
+}
+.h-compact-dashboard .h-dashboard-panel-anchor > .h-panel {
+  min-height: 300px;
+  height: auto;
+}
+
+/* Proposals dense queue: one-line rows so reviewers can scan many items before scrolling. */
+.h-proposal-list {
+  padding: 4px;
+}
+.h-proposal-item {
+  grid-template-columns: 16px 19px minmax(0, 1fr);
+  gap: 4px;
+  min-height: 30px;
+  margin-bottom: 2px;
+  border-radius: 8px;
+}
+.h-proposal-item::before {
+  inset: 4px auto 4px 0;
+  width: 2px;
+  opacity: 0.86;
+}
+.h-proposal-item input {
+  width: 13px;
+  height: 13px;
+}
+.h-proposal-item-spacer {
+  width: 13px;
+  height: 13px;
+}
+.h-proposal-pin {
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  font-size: 10px;
+  opacity: 0.42;
+}
+.h-proposal-row-button {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 2px 6px 2px 0;
+}
+.h-proposal-row-title {
+  font-size: 11.5px;
+  line-height: 1.1;
+  text-transform: none;
+}
+.h-proposal-row-button .h-proposal-badge {
+  min-height: 16px;
+  padding-inline: 5px;
+  font-size: 8.5px;
+  letter-spacing: 0.035em;
+}
+.h-proposal-row-age,
+.h-proposal-row-size {
+  flex: 0 0 auto;
+  color: var(--fg-faint);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.h-proposal-item.is-active .h-proposal-row-title {
+  color: color-mix(in oklab, var(--fg), var(--accent) 18%);
+}
+.h-proposal-item.is-shortlisted .h-proposal-row-title::after {
+  content: " ★";
+  color: color-mix(in oklab, var(--warn), white 10%);
+  font-size: 9px;
+}
+.h-proposal-row-top,
+.h-proposal-row-meta {
+  display: none;
+}
+.h-proposal-item.is-active {
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent), transparent 72%);
+}
+@media (max-width: 760px) {
+  .h-proposals-sidebar {
+    min-height: 560px;
+  }
+  .h-proposal-list {
+    flex: 0 0 min(320px, 42vh);
+    min-height: 220px;
+  }
+}
+
+@media (max-width: 760px) {
+  .h-proposal-list {
+    max-height: 320px;
+    padding: 3px;
+  }
+  .h-proposal-item {
+    grid-template-columns: 15px 18px minmax(0, 1fr);
+    min-height: 29px;
+  }
+  .h-proposal-row-button {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 4px;
+    min-height: 27px;
+  }
+  .h-proposal-row-size {
+    display: none;
+  }
+}
+
+/* Proposals compact chrome: no hero; goal and queue controls stay low-profile. */
+.h-proposals-goal {
+  padding: 5px 8px;
+  gap: 4px;
+  border-bottom-color: color-mix(in oklab, var(--border), transparent 34%);
+  background: color-mix(in oklab, var(--bg), transparent 38%);
+}
+.h-proposals-goal-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+.h-proposals-goal-head > span:first-child {
+  color: var(--fg-dim);
+  font-size: 9.5px;
+  font-weight: 820;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.h-proposals-goal-preview {
+  min-width: 0;
+  max-height: none;
+  overflow: hidden;
+  padding: 0;
+  color: var(--fg-dim);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+.h-proposals-goal-preview.empty {
+  color: var(--fg-faint);
+  font-style: normal;
+}
+.h-proposals-goal-meta {
+  color: var(--fg-faint);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+.h-proposals-goal-actions {
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  gap: 5px;
+  min-width: 0;
+}
+.h-proposals-goal-actions .h-proposal-btn {
+  width: auto;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 7px;
+  font-size: 10.5px;
+}
+.h-proposals-goal-editor {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+.h-proposals-goal-editor textarea {
+  min-height: 50px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+.h-proposal-toolbar {
+  gap: 5px;
+  padding: 5px;
+  border-bottom-color: color-mix(in oklab, var(--border), transparent 34%);
+}
+.h-proposal-toolbar-main {
+  display: grid;
+  grid-template-columns: auto minmax(150px, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.h-proposal-toolbar-titleline {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.h-proposal-toolbar-index {
+  padding: 2px 6px;
+  color: var(--fg-faint);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 24%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg), transparent 42%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 1;
+}
+.h-proposal-toolbar-index b {
+  color: var(--fg);
+}
+.h-proposal-search {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 7px;
+  font-size: 11.5px;
+}
+.h-proposal-toolbar-controls {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  mask-image: linear-gradient(90deg, black calc(100% - 18px), transparent 100%);
+}
+.h-proposal-toolbar-controls::-webkit-scrollbar {
+  display: none;
+}
+.h-proposal-toolbar-controls .h-proposal-filter-row {
+  flex: 1 1 230px;
+  display: flex;
+  gap: 4px;
+  min-width: 220px;
+}
+.h-proposal-toolbar-controls .h-proposal-filter {
+  flex: 1 1 0;
+  min-height: 24px;
+  padding: 0 6px;
+  border-radius: 7px;
+  font-size: 10px;
+}
+.h-proposal-toolbar-controls .h-proposal-sort {
+  flex: 0 0 96px;
+  height: 24px;
+  padding: 0 5px;
+  border-radius: 7px;
+}
+.h-proposal-toolbar-controls .h-proposal-mini {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0 7px;
+  border-radius: 7px;
+  font-size: 10px;
+}
+.h-proposal-toolbar-controls .h-proposal-hotkeys {
+  flex: 0 0 auto;
+  gap: 3px;
+  justify-content: flex-start;
+  mask-image: none;
+}
+.h-proposal-toolbar-controls .h-proposal-hotkeys span {
+  display: none;
+}
+.h-proposal-toolbar-controls .h-proposal-hotkeys kbd {
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  font-size: 8.5px;
+}
+@media (max-width: 760px) {
+  .h-proposals-goal {
+    padding: 5px 6px;
+  }
+  .h-proposals-goal-head {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 6px;
+  }
+  .h-proposals-goal-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+  .h-proposals-goal:not(.is-editing) .h-proposals-goal-actions {
+    grid-column: auto;
+    justify-content: flex-end;
+  }
+  .h-proposals-goal:not(.is-editing) .h-proposals-goal-actions .h-proposal-btn.ghost {
+    display: none;
+  }
+  .h-proposals-goal-meta {
+    display: none;
+  }
+  .h-proposal-toolbar-main {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+  .h-proposal-toolbar-titleline {
+    justify-content: space-between;
+  }
+  .h-proposal-toolbar-controls {
+    align-items: stretch;
+    flex-wrap: wrap;
+    overflow: visible;
+    mask-image: none;
+  }
+  .h-proposal-toolbar-controls .h-proposal-filter-row {
+    flex-basis: 100%;
+    min-width: 0;
+  }
+  .h-proposal-toolbar-controls .h-proposal-sort {
+    flex: 1 1 112px;
+  }
+  .h-proposal-toolbar-controls .h-proposal-hotkeys {
+    display: none;
+  }
+}
+/* GitSelect dropdown styling — matches apps/operator/app/harness/Select.tsx */
+.h-git-select-content {
+  background: rgba(5, 11, 19, 0.98);
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--accent, #6aa7ff), transparent 62%);
+  border-radius: 10px;
+  padding: 6px;
+  z-index: 70;
+  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.62), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  font-size: 12px;
+  min-width: var(--radix-select-trigger-width);
+  backdrop-filter: blur(14px) saturate(150%);
+}
+.h-git-select-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+.h-git-select-item[data-highlighted] {
+  background: color-mix(in oklab, var(--accent, #6aa7ff), transparent 80%);
+}

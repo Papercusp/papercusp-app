@@ -1,0 +1,31 @@
+# Historical routines version lottery — superseded multi-host topology
+URL: /internal/docs/agent-insights/routines-two-host-version-lottery
+
+Historical failure mode: multiple DBOS routine executors could claim one table, so code versions varied per fire. The current boot path gates DBOS registration on backgroundWorkersEnabled() plus PAPERCUSP_DBOS_ENABLE; PAPERCUSP_DBOS_ROUTINES alone does not make a request-only host an executor.
+
+> ⛔ **SUPERSEDED — this page describes a historical multi-host topology.** Do not use its historical race model as current guidance. The current implementation and deployment topology are documented below.
+
+# Historical routines version lottery (superseded)
+
+This page records the failure mode that existed when multiple DBOS routine executors registered against one `harness_shared.routines` table. It is retained as historical context because reintroducing a second background-capable host would recreate the risk.
+
+## Current behavior (verified 2026-08-12)
+
+The current boot path has two distinct gates:
+
+1. `host-bootstrap.ts` calls `startDbos()` only when both `backgroundWorkersEnabled()` and `PAPERCUSP_DBOS_ENABLE=1` are true.
+2. After DBOS has launched, `dbosRoutinesActive()` selects whether the routines workflow is registered from `PAPERCUSP_DBOS_ROUTINES=1`, also requiring the master orchestrator gate.
+
+Therefore `PAPERCUSP_DBOS_ROUTINES=1` by itself does **not** make a request-only host a routines executor. A process with `PAPERCUSP_BACKGROUND_WORKERS=0` cannot reach the DBOS registration path in `host-bootstrap.ts`, even if its environment still contains the routines flag.
+
+The intended deployment has one dedicated background host, `papercup-bg-host.service`, as the routines primary. The request-serving :3070/:3170 processes are not routine claimants when their background-worker gate is off. The stale-executor watchdog is correspondingly scoped to what it can establish locally: this process's boot commit versus the checkout HEAD and its uptime. It must report code staleness and recommend restarting that host; it cannot establish that a different process won a claim race.
+
+## Historical failure mode (2026-06-05)
+
+The old topology ran green :3070 and staging :3170 against the same routines table, and both registered `routinesTick`. `claimDueRoutine` atomically allowed only one host to claim a due row, but the winning host varied per fire. A payload understood only by newer code could therefore be handled by an older checkout until release caught up.
+
+This was a real deployment hazard, but it is not evidence that every stale executor is currently racing another executor. The stale-executor alarm must not say that a process is “winning a claim race” or “half-applying” routine fixes unless it has direct evidence of multiple registered claimants.
+
+## If the topology changes again
+
+Before enabling a second `BACKGROUND_WORKERS=1` host, verify the DBOS registration gate, the `DBOS__APPVERSION`/VM identity, and the code checkout for every host. Keep new routine payloads inactive until every intended executor can load them, or deploy/restart the routine primary first. If a stale executor is detected, restart the affected host through the managed restart path; do not duplicate or kill a supervised desktop process as a workaround.

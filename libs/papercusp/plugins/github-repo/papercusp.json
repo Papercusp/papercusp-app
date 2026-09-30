@@ -1,0 +1,101 @@
+{
+  "kind": "plugin",
+  "name": "@papercupai/github-repo",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Create a GitHub repo when a harness is created. Per-harness credentials and config — each harness can target a different account/org/repo. Optionally pushes the harness's project dir as the initial commit.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "main": "./index.js",
+  "publisher": "@papercupai",
+  "versionPin": { "mode": "exact" },
+  "capabilities": [
+    "http:fetch:api.github.com",
+    "compute:exec:git",
+    "events:listen:harness-created",
+    "storage:plugin-private"
+  ],
+  "actions": [
+    {
+      "name": "create-repo",
+      "label": "Create GitHub repo",
+      "surfaces": ["harness-toolbar"],
+      "capabilities": ["http:fetch:api.github.com", "compute:exec:git"],
+      "serverHandler": { "timeoutSec": 30 },
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "dryRun": { "type": "boolean", "default": false }
+        }
+      }
+    }
+  ],
+  "oauth": [
+    {
+      "provider": "github",
+      "scopes": ["repo"],
+      "fieldName": "github_token"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "required": ["github_token"],
+    "properties": {
+      "github_token": {
+        "type": "string",
+        "secret": true,
+        "snapshotPolicy": "strip",
+        "oauth": { "provider": "github", "scopes": ["repo"] },
+        "description": "GitHub OAuth token (or PAT with `repo` scope). Stored per-harness; never travels with snapshots."
+      },
+      "owner": {
+        "type": "string",
+        "shareable": false,
+        "pattern": "^[a-zA-Z0-9-]+$",
+        "description": "GitHub user or organization. Different per forker — must be re-supplied at fork time."
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name. Defaults to the harness slug."
+      },
+      "visibility": {
+        "type": "string",
+        "enum": ["private", "public"],
+        "default": "private",
+        "description": "Whether the new repo is public or private."
+      },
+      "description": {
+        "type": "string",
+        "description": "Repo description."
+      },
+      "defaultBranch": {
+        "type": "string",
+        "default": "main",
+        "description": "Default branch name.",
+        "aliases": ["default_branch"]
+      },
+      "pushOnCreate": {
+        "type": "boolean",
+        "default": true,
+        "description": "After creating the empty repo, run `git init` (if needed), commit any tracked files, and push to the new origin."
+      }
+    }
+  },
+  "provision": {
+    "setup": {
+      "path": "provision/setup.sh",
+      "timeoutSec": 60
+    },
+    "teardown": {
+      "path": "provision/teardown.sh",
+      "timeoutSec": 60
+    },
+    "verify": {
+      "path": "provision/verify.sh",
+      "timeoutSec": 30
+    },
+    "allowedHosts": ["api.github.com"],
+    "skipReprovisionOnPatch": true
+  },
+  "icon": "GitBranch"
+}

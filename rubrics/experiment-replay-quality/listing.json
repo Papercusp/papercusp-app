@@ -1,0 +1,10 @@
+{
+  "ref": "experiment-replay-quality",
+  "id": "experiment-replay-quality",
+  "title": "Experiment replay quality",
+  "description": "Scorecard for offline replay experiments: outcome, process, and divergence-value dimensions.",
+  "category": "experiment",
+  "scope": "rubric",
+  "version": "0.1.0",
+  "source": "first-party"
+}

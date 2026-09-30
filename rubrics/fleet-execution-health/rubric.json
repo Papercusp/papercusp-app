@@ -1,0 +1,108 @@
+{
+  "title": "Fleet execution health (per-wave leader scorecard)",
+  "criteria": [
+    {
+      "key": "claim-flow-no-double-placement",
+      "model": "Members self-select their next item (claim_next / scheduler:get_next) or are steered by a claim-spec; each item is worked by exactly ONE member. The leader steers via specs/priority as the default; directed placement (hand-assignment) is reserved for flagged needs-dedicated-owner items (see dedicated-ownership-routing) and is always recorded durably on the item. Either way, no two members land on the same item.",
+      "title": "Claims flowed without double-placement",
+      "method": "Read coord:orient coverage[] for coverage_collisions and duplicate/overlapping claims; dev:pg_query harness_shared.work_items / engineer_issues for any item with >1 concurrent live claim this wave.",
+      "driftMarkers": "coverage_collisions > 0; two members ran the same item; a member idled on a raced claim_next miss while ready work existed."
+    },
+    {
+      "key": "member-report-integrity",
+      "model": "Every terminal transition carries a completion_ref that reflects REAL work — files/root-cause, the exact test run + its result, tests added. A truthful 'blocked' is a better outcome than a fabricated all-clear. Fake or recycled 'done' work is the cardinal sin (owner mandate #1). The record must match reality in BOTH directions: no fabricated/inflated reports, AND no GHOST completions — real work landing in the tree with no claim, no thread post, no completion record. Invisible work is a fleet hazard: peers cannot see it, so they re-derive or re-implement it (near-duplicate implementations), and its tests may land never-run. Claim-or-post BEFORE implementing; credit follows the record.",
+      "title": "Member completion reports were truthful — and all real work has a record",
+      "method": "Spot-check a sample of this wave's terminalCompletionRefs (work_items:get) against the actual diff / test output — does the claimed evidence exist? ALSO read work_items:completion_stats: the genuineCompletions vs dedupOrUnverified split is the fleet-wide QUANTIFIED real-work ratio; track it wave-over-wave. Sweep the INVERSE too: significant diffs/commits in the wave's subsystems with no corresponding claim/post/completion (git log authors vs work-item holders + thread posters) — a near-duplicate implementation by a second member is the tell that a ghost landed. A member honestly refusing a mis-scoped item (with a reason) counts as integrity, not a miss.",
+      "driftMarkers": "A completion_ref with no matching change; a 'passing' claim with no test run; a fabricated state / a send or reading that never happened; the completion_stats dedupOrUnverified fraction climbing wave-over-wave with no structural cause being fixed; real work landed with NO claim/post/completion record (ghost completion — the WI-2797 near-duplication, 2026-07-04); a member's test landed never-run (fixture failures on its first real execution)."
+    },
+    {
+      "key": "blockers-escalated-not-parked",
+      "model": "A genuine blocker is set work_items:set_state=blocked WITH a reason (durable on the item) or escalated to the leader/owner — never left as a prose message that scrolls away or an item silently abandoned. A blocker is work to resolve, not just relay.",
+      "title": "Blockers were escalated, not silently parked",
+      "method": "Check blocked-state items carry reasons; scan coord:escalations + the leader inbox for this wave's raised blockers vs. items that simply stopped progressing; confirm the leader ACTED on in-scope blockers rather than only forwarding them.",
+      "driftMarkers": "Work stalled with no blocked-state and no escalation; a blocker relayed only in chat; an item abandoned mid-flight with no note; a resolvable blocker handed to the owner instead of fixed."
+    },
+    {
+      "key": "wave-outcome-vs-plan",
+      "model": "The plan's items reached terminal states consistent with the wave's stated goal; progress is real burn-down, not churn.",
+      "title": "Wave outcome matched the plan (burn-down, not churn)",
+      "method": "Compare plan item effectiveStatus deltas across the wave (plans:get / dev:pg_query) against the wave goal + the plan ## Now. Quantify churn: reclaim/re-queue counts + the completion_stats dedup fraction — a wave that closes many terminals but whose dedup ratio does not fall is CHURNING (re-touching the same items), not burning down.",
+      "driftMarkers": "Items churned wip<->todo without terminal progress; the plan ## Now went stale; the wave closed with the goal no closer; high reclaim-churn on the same items (a claim-pool scoping leak, e.g. an active-plan item leaking into the general pool)."
+    },
+    {
+      "key": "handoff-durability",
+      "model": "Parked or handed-off work left a work_items:checkpoint / loop:checkpoint carry-note (what's done / what's left / key insight / gotcha) + a plan ## Now pointer, so the next leader or the next wake resumes from durable state that survives compaction.",
+      "title": "Handoffs were durable — carry-notes, not prose",
+      "method": "Check that mid-flight items at park time carry a checkpoint; confirm the loop carry-note (did/left/insight/next) is current and the plan ## Now points at the resume state rather than a chat handoff.",
+      "driftMarkers": "A handoff done via a scrolling chat message; no checkpoint on parked work; a stale/empty loop carry-note; the successor had to reconstruct state from scratch."
+    },
+    {
+      "key": "member-liveness-and-loop-health",
+      "model": "Each member is genuinely progressing — its engine loop fires on cadence (auto-wake), it takes turns and pulls work, and it re-arms. 'alive' (heartbeat) is NOT 'working': a member can hold a fresh heartbeat while its loop is wedged. A parked member between wakes is fine; a member whose loop cannot re-fire is stranded and silently stops contributing. Members CANNOT self-rearm, so the leader detects a wedged/stranded loop and wakes it (coord:wake), and relaunches a truly-ended session. An INTENTIONALLY ended loop (deliberate scale-down) is healthy, not stranding.",
+      "title": "Members alive AND looping, not stranded",
+      "method": "Cross-check fleet:status sessionState (live/parked/ended) + lastActiveSecAgo against loop:status per member (active, parked, nextFireAt, fireCount, lastDeliveryOutcome). A member alive:true but loop parked with nextFireAt:null / fireCount:0 / lastDeliveryOutcome='loop-stuck-backstop' is STRANDED (distinct from a leader-ended loop). Use coord:presence for real activity vs bare heartbeat.",
+      "driftMarkers": "A member 'alive' by heartbeat but sessionState=ended, or its loop wedged at loop-stuck-backstop (nextFireAt:null) unremediated; members parked far past their interval while ready work sits in the pool; the leader treating heartbeat-alive as working without checking the loop (the classic liveness error); recurring stranding with no durable auto-wake fix landed."
+    },
+    {
+      "key": "capacity-and-resource-discipline",
+      "model": "The fleet is sized to the live inference-pool capacity and does not flood shared resources (the inference gateway, the memory-pressured box, per-account rate limits). The leader scales DOWN under pressure (gateway flooding, 429 account deaths, queue backup) and only scales up into genuine spare capacity. A model-specific fleet respects its backend's real quota (e.g. production ChatGPT = the owner's live quota; a killed backend stays dead).",
+      "title": "Fleet right-sized to inference / shared-resource capacity",
+      "method": "Read fleet:capacity (dispatchBudget = spare slots, pool utilization, healthyAccounts, paused/queue depth, reserved floor). Watch for gateway-flood signals / 429 member deaths / queue growth. Compare live active-member count against spare capacity; when scaling down an SU fleet, confirm the load was actually removed (loop:end on su members — fleet:cancel/drain are NO-OPS on desktop-su sessions).",
+      "driftMarkers": "Active member count exceeds pool capacity (gateway flooding, 429 deaths, queue backup) with no scale-down; a scale-down that did not reduce load (fleet:cancel on su members instead of loop:end); running a model-fleet into a saturated or owner-killed backend; the inverse — idle capacity while a ready frontier waits."
+    },
+    {
+      "key": "completed-work-ships",
+      "model": "A fix that is merged/closed but not LIVE is not done. The wave's completed work reaches the running operator: it is deployed (not frozen behind a stale/red release gate) and not left dark behind an OFF feature flag. The leader treats a red/stalled release gate blocking its wave's output as its own to green, and flips finished flags on.",
+      "title": "Completed work actually reached production",
+      "method": "For this wave's terminal items, check dev:pipeline_position (committed -> staging -> main -> deployed) + the green-gate state (stalled/consecutiveReds, main staleness); confirm no finished feature is left dark (flags default ON; KNOWN_DARK_FLAGS not abused). A red gate blocking deploys is escalated AND acted on (release:checkpoint-run after verifying staging is green), not merely relayed.",
+      "driftMarkers": "Completed fixes stuck undeployed (main N commits stale, a red/stalled gate unattended for hours); a finished feature shipped dark (flag OFF by default); the leader relaying a release-gate blocker instead of resolving it; 'done' items whose value never reached :3070."
+    },
+    {
+      "key": "backlog-hygiene",
+      "model": "Distinct from member-report-integrity (is the COMPLETION real?) — this grades whether the TASKS in the claimable pool are real BEFORE a member burns a turn on them. A healthy pool holds genuine, actionable, correctly-scoped, non-duplicate work: no zombie items (a genuine prior completion that never flipped state off open/todo, so it resurfaces for re-verification), no duplicate/auto-synth noise clusters, no items un-executable by the fleet's actual capability (e.g. a 2-machine-rig task in a single-box pool), and no do-not-claim items with nowhere to park (issue-family has no non-terminal parked state, so a deferred item sits open=claimable and recycles). The leader keeps the pool clean so claim_next always returns doable work.",
+      "title": "The claimable pool holds real, actionable, non-duplicate work",
+      "method": "dev:pg_query harness_shared.work_items for the claimable set (status IN todo/open/failing): (a) requeue_count / attempts outliers = items repeatedly handed out then released; (b) terminal-but-open zombies = rows carrying terminal_owner + terminal_completion_ref yet still status open/todo; (c) duplicate title-clusters (GROUP BY normalized title HAVING count>1) = auto-synth or mirror noise; (d) rig-/capability-gated items (title/summary ILIKE cross-machine / 2-machine / hetzner) sitting in a single-box pool. Cross-ref work_items:completion_stats dedupOrUnverified + the reclaim/re-queue counts from wave-outcome-vs-plan. Reference evidence (2026-07-04): EI-7528 (159 zombie stuck-open items), 34 duplicate hive-coordination-health synth-scorecards, 21 cross-machine items (WI-2796), the WI-652 do-not-claim recycle (WI-2797).",
+      "driftMarkers": "A member burns a turn discovering a pool item is a duplicate / already-done / un-doable-solo; the same item recycles across >=2 members via claim_next; terminal-but-open zombie rows accumulate (completion never flipped state); auto-synth/mirror duplicate clusters grow; rig-gated items sit in a single-box claim pool; a do-not-claim item stays open because no park state exists; the pool grows faster than genuine burn-down."
+    },
+    {
+      "key": "dedicated-ownership-routing",
+      "model": "Some items are legitimately NOT opportunistic-claimable: fleet-wide-blast-radius changes requiring a live controlled verification first (e.g. a gateway header change that would 400 every request if wrong), converged designs needing a focused multi-file implementation + integration-test session, and owner-gated surfaces. The moment an item is flagged needs-dedicated-owner in triage OR accumulates >=2 investigate-then-release cycles (design converged, nobody implementing), the LEADER converts it out of the opportunistic pool: directed placement on a named, capable member (coord:dispatch with an implementation brief + a placement record posted on the item) or parked via the claim-hold lever — never left open for claim_next to hand to holder #N+1. Investigate-then-release WITH a durable handoff note is healthy ONCE; re-investigation of an already-converged item is pure waste, and the leader watching the ping-pong without routing is a leadership miss, not a member miss.",
+      "title": "Needs-dedicated-owner items get routed, not recycled",
+      "method": "From this wave's pg + threads: items with >=2 distinct non-terminal holders (requeue_count/attempts outliers; distinct thread-post authors each concluding 'not attempting here / releasing'); for each, check the leader either PLACED it (a directed dispatch + a placement comment on the item naming the assignee and the chosen design) or PARKED it (claim-hold) — and measure holders-after-convergence: any holder who pulled it AFTER the design was converged/flagged is a routing failure. Cross-ref fleet:status member loads to confirm placement targeted a member with capacity + subsystem affinity.",
+      "driftMarkers": "An item flagged do-not-claim/needs-dedicated-owner recycles to a 3rd+ holder; a converged design gets re-derived from scratch by a later holder; the leader observes the ping-pong across wakes without converting it to a placement or a park; a placement made only in chat with no durable record on the item (the next opportunistic puller can't see it); a placed item silently dropped because the assignee never acked and the leader never followed up."
+    },
+    {
+      "key": "comms-economy",
+      "model": "Coordination volume is proportional to coordination need. Members use directed sends with a concrete ask/answer; broadcasts are reserved for genuinely fleet-relevant state (a shared-tree fault, a gate change). No duplicate verifications announced N times, no ceremonial ACK chains, no status chatter that a durable surface (work-item state, plan ## Now, checkpoint) already carries. A directed question gets ONE reply (or an ACK+ETA), not a thread of restatements. A structural fix (claim-spec bump, a fact, a plan note) beats repeating guidance member-by-member.",
+      "title": "Member-to-member communication was economical — no redundant or ceremonial messages",
+      "method": "Sample the wave's coord:feed scoped to the fleet audience: compute messages-per-terminal-item; count broadcasts vs directed sends; flag messages restating what a work-item state/checkpoint already records; count duplicate announcements of the same fact. dev:coord_categorize buckets the corpus; compare the dup/ceremonial fraction wave-over-wave.",
+      "driftMarkers": "Broadcast used where a directed send (or no message) suffices; the same completion/fact announced repeatedly; ACK chains with no content; messages-per-terminal-item climbing while burn-down stalls; a member narrating each step in chat instead of checkpointing durably."
+    },
+    {
+      "key": "leader-visibility-reporting",
+      "model": "The leader can steer ONLY on what members surface. Every member's claim, terminal transition (with completion_ref/evidence), blocker (with reason + what was tried), and capacity signal (idle, wedged, rate-limited) reaches the leader through durable surfaces (work-item states, checkpoints, escalations) or a directed send — WITHOUT the leader having to poll each member or re-derive state from raw PG. Escalations name the DECISION needed, not just the problem. A member that goes idle/blocked silently, or completes work the leader only discovers by diffing the tree, has made the fleet unleadable.",
+      "title": "Members kept the leader leadable — complete, timely, decision-grade reporting",
+      "method": "Per monitoring wake, list what the leader learned ONLY by digging (pg queries / tree diffs / session transcripts) that a member should have surfaced: silent idles, un-escalated blockers, unreported completions, un-acked directed asks. Cross-ref coord:escalations + leader inbox vs the wave's actual state transitions; count leader-discovered vs member-reported events.",
+      "driftMarkers": "The leader discovers a member's blocked/idle state by polling, not by report; a completion with no report to the leader/thread; an escalation naming a problem but not the needed decision; directed leader questions un-answered for a full wake; the leader's picture of member state diverging from live state at every wake."
+    },
+    {
+      "key": "context-budget-discipline",
+      "model": "Members treat the context window as a managed budget: state is externalized to carry surfaces (facts:assert, work_items:checkpoint, loop:checkpoint) the moment it forms; compaction is deliberate, at clean stopping points, before the soft limit; post-compaction resume retrieves (sessions:search / checkpoints) instead of re-deriving; reads are bounded (server-side filters, code:run summaries — no whole-list dumps).",
+      "title": "Context-window usage discipline",
+      "method": "Per wave: count watchdog FORCE-compactions vs deliberate self-compactions across members (session logs / compaction notices); spot-check 2-3 post-compaction members for seamless resume (checkpoint present + no re-derivation churn); flag members that idled near the ceiling without flushing or burned context on unfiltered dumps.",
+      "driftMarkers": "Watchdog force-compactions recurring on the same member; post-compaction re-derivation of state that was retrievable; in-flight work lost at compaction; a member wedged/dead from context exhaustion; items stalled because the holder can no longer act; unbounded list dumps in transcripts."
+    }
+  ],
+  "rubricId": "fleet-execution-health",
+  "methodRef": null,
+  "description": null,
+  "ratingScale": [
+    "healthy",
+    "degraded",
+    "broken",
+    "unknown"
+  ],
+  "characteristic": "fleet-execution",
+  "version": "0.1.0",
+  "source": "first-party"
+}

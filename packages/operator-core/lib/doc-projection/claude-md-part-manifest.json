@@ -1,0 +1,4075 @@
+{
+ "schema": "claude-md-part-manifest/1",
+ "sourcePath": "CLAUDE.md",
+ "docId": "claude-md",
+ "contentMode": "composed",
+ "snapshotSha256": "77afdc4a46a5af9d0b5e7f604c6e2e1e592d51bef791b59633d4f00d1af8db2b",
+ "snapshotChars": 165959,
+ "snapshotBytes": 167499,
+ "snapshotLines": 2338,
+ "generatedBy": "scripts/gen-claude-md-manifest.mjs (P-014, claude-md-projection-from-pg-2026-08-10)",
+ "summary": {
+  "byKind": {
+   "invariant": {
+    "parts": 107,
+    "chars": 66892
+   },
+   "prose": {
+    "parts": 131,
+    "chars": 90537
+   },
+   "pointer": {
+    "parts": 7,
+    "chars": 2802
+   },
+   "recipe": {
+    "parts": 8,
+    "chars": 3734
+   }
+  },
+  "projectedChars": 73428,
+  "totalParts": 253,
+  "needsReview": 0
+ },
+ "parts": [
+  {
+   "partKey": "preamble-papercup-agent-guide",
+   "ordinal": 1,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "(preamble)",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "da7c2e7e8085dc3a",
+   "chars": 25,
+   "lineHint": [
+    1,
+    1
+   ]
+  },
+  {
+   "partKey": "preamble-invariants-pointers-only-the-long-form",
+   "ordinal": 2,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "(preamble)",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "55966883b1f33c3c",
+   "chars": 330,
+   "lineHint": [
+    3,
+    7
+   ]
+  },
+  {
+   "partKey": "preamble-environment-quick-start-agent-envmdagen",
+   "ordinal": 3,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "(preamble)",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "8086259d49a2263b",
+   "chars": 453,
+   "lineHint": [
+    9,
+    14
+   ]
+  },
+  {
+   "partKey": "running-testing-this-app-it-the-most-ignored-rul",
+   "ordinal": 4,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "▶ Running / testing this app — it is the **Tauri DESKTOP app**, not a browser webapp",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "c953250f0d7c6b28",
+   "chars": 79,
+   "lineHint": [
+    18,
+    18
+   ]
+  },
+  {
+   "partKey": "running-testing-this-app-it-the-only-supported-w",
+   "ordinal": 5,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "▶ Running / testing this app — it is the **Tauri DESKTOP app**, not a browser webapp",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "742b07f219c45279",
+   "chars": 51,
+   "lineHint": [
+    20,
+    20
+   ]
+  },
+  {
+   "partKey": "running-testing-this-app-it-bash",
+   "ordinal": 6,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "▶ Running / testing this app — it is the **Tauri DESKTOP app**, not a browser webapp",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "073ecd3e161c4a07",
+   "chars": 71,
+   "lineHint": [
+    22,
+    24
+   ]
+  },
+  {
+   "partKey": "running-testing-this-app-it-then-drive-the-tauri",
+   "ordinal": 7,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "▶ Running / testing this app — it is the **Tauri DESKTOP app**, not a browser webapp",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "509e41d74eba70a9",
+   "chars": 226,
+   "lineHint": [
+    26,
+    29
+   ]
+  },
+  {
+   "partKey": "running-testing-this-app-it-launch-via-npm-run-d",
+   "ordinal": 8,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "▶ Running / testing this app — it is the **Tauri DESKTOP app**, not a browser webapp",
+   "projectRank": 900,
+   "expiring": true,
+   "blockSha": "dd86c6c5de3e33e7",
+   "chars": 1943,
+   "lineHint": [
+    31,
+    57
+   ]
+  },
+  {
+   "partKey": "running-testing-this-app-it-you-can-and-therefor",
+   "ordinal": 9,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "▶ Running / testing this app — it is the **Tauri DESKTOP app**, not a browser webapp",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "fb2323ef0ec310ae",
+   "chars": 1065,
+   "lineHint": [
+    59,
+    72
+   ]
+  },
+  {
+   "partKey": "running-testing-this-app-it-never-open-3055-or-3",
+   "ordinal": 10,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "▶ Running / testing this app — it is the **Tauri DESKTOP app**, not a browser webapp",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "4e350efc952bd400",
+   "chars": 641,
+   "lineHint": [
+    74,
+    83
+   ]
+  },
+  {
+   "partKey": "running-testing-this-app-it-the-30553070-layer-i",
+   "ordinal": 11,
+   "kind": "pointer",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "▶ Running / testing this app — it is the **Tauri DESKTOP app**, not a browser webapp",
+   "projectRank": 300,
+   "expiring": false,
+   "blockSha": "101d063fa3676a14",
+   "chars": 271,
+   "lineHint": [
+    85,
+    88
+   ]
+  },
+  {
+   "partKey": "almost-all-state-should-be-i-if-a-piece-of-state",
+   "ordinal": 12,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Almost all state should be in nuqs",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "bb47f2900fde5995",
+   "chars": 269,
+   "lineHint": [
+    92,
+    95
+   ]
+  },
+  {
+   "partKey": "almost-all-state-should-be-i-nuqs-tabviewmode-se",
+   "ordinal": 13,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Almost all state should be in nuqs",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "7458831d9ab83aee",
+   "chars": 268,
+   "lineHint": [
+    97,
+    100
+   ]
+  },
+  {
+   "partKey": "almost-all-state-should-be-i-when-in-doubt-choos",
+   "ordinal": 14,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Almost all state should be in nuqs",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "559304610d6e5ea0",
+   "chars": 306,
+   "lineHint": [
+    102,
+    105
+   ]
+  },
+  {
+   "partKey": "all-client-data-sync-goes-th-reads-via-usesyncqu",
+   "ordinal": 15,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "All client data sync goes through `@papercusp/sync`",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "a8e8e0a7298bac44",
+   "chars": 514,
+   "lineHint": [
+    109,
+    115
+   ]
+  },
+  {
+   "partKey": "all-client-data-sync-goes-th-wiring-resolver-ent",
+   "ordinal": 16,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "All client data sync goes through `@papercusp/sync`",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "77793d67484f1e5c",
+   "chars": 393,
+   "lineHint": [
+    117,
+    122
+   ]
+  },
+  {
+   "partKey": "scheduling-no-bare-setinterv-recurring-work-has",
+   "ordinal": 17,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Scheduling: no bare `setInterval`, no new scheduler",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "50a79ed71683b5e2",
+   "chars": 803,
+   "lineHint": [
+    126,
+    134
+   ]
+  },
+  {
+   "partKey": "scheduling-no-bare-setinterv-scheduleinventory-i",
+   "ordinal": 18,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Scheduling: no bare `setInterval`, no new scheduler",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "6c3347e5d97ded2b",
+   "chars": 1266,
+   "lineHint": [
+    136,
+    151
+   ]
+  },
+  {
+   "partKey": "scheduling-no-bare-setinterv-federation-was-nece",
+   "ordinal": 19,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Scheduling: no bare `setInterval`, no new scheduler",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "7347d1d483bd1a29",
+   "chars": 1165,
+   "lineHint": [
+    153,
+    165
+   ]
+  },
+  {
+   "partKey": "spawning-no-unenrolled-detac-the-process-analogu",
+   "ordinal": 20,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Spawning: no unenrolled `detached` spawn, and never kill by name",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "8c40e482b565da44",
+   "chars": 953,
+   "lineHint": [
+    169,
+    179
+   ]
+  },
+  {
+   "partKey": "spawning-no-unenrolled-detac-never-kill-by-name",
+   "ordinal": 21,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Spawning: no unenrolled `detached` spawn, and never kill by name",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "77d68e26ec8e559e",
+   "chars": 436,
+   "lineHint": [
+    181,
+    185
+   ]
+  },
+  {
+   "partKey": "spawning-no-unenrolled-detac-you-want-use-not",
+   "ordinal": 22,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Spawning: no unenrolled `detached` spawn, and never kill by name",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "32f51c1807814c08",
+   "chars": 421,
+   "lineHint": [
+    187,
+    191
+   ]
+  },
+  {
+   "partKey": "spawning-no-unenrolled-detac-human-pane-admintas",
+   "ordinal": 23,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Spawning: no unenrolled `detached` spawn, and never kill by name",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "9ad5f122223b4aee",
+   "chars": 263,
+   "lineHint": [
+    193,
+    195
+   ]
+  },
+  {
+   "partKey": "shared-lib-singletons-pin-th-module-scoped-mutab",
+   "ordinal": 24,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Shared-lib singletons: pin through the primitive, never by hand",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "70e54e2d62a47f3e",
+   "chars": 609,
+   "lineHint": [
+    199,
+    205
+   ]
+  },
+  {
+   "partKey": "shared-lib-singletons-pin-th-use-pinmodulestate",
+   "ordinal": 25,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Shared-lib singletons: pin through the primitive, never by hand",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "9297c7d101666a84",
+   "chars": 84,
+   "lineHint": [
+    207,
+    207
+   ]
+  },
+  {
+   "partKey": "shared-lib-singletons-pin-th-ts",
+   "ordinal": 26,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Shared-lib singletons: pin through the primitive, never by hand",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "755ef4b50662a690",
+   "chars": 102,
+   "lineHint": [
+    209,
+    211
+   ]
+  },
+  {
+   "partKey": "shared-lib-singletons-pin-th-it-pins-to-globalth",
+   "ordinal": 27,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Shared-lib singletons: pin through the primitive, never by hand",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "10f3d0f8f3e98b12",
+   "chars": 695,
+   "lineHint": [
+    213,
+    221
+   ]
+  },
+  {
+   "partKey": "shared-lib-singletons-pin-th-measured-ei-1945165",
+   "ordinal": 28,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Shared-lib singletons: pin through the primitive, never by hand",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "86f722ae4bb03cc1",
+   "chars": 492,
+   "lineHint": [
+    223,
+    228
+   ]
+  },
+  {
+   "partKey": "shared-lib-singletons-pin-th-listmoduleduplicati",
+   "ordinal": 29,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Shared-lib singletons: pin through the primitive, never by hand",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "f234e2e8894cb242",
+   "chars": 787,
+   "lineHint": [
+    230,
+    239
+   ]
+  },
+  {
+   "partKey": "shared-lib-singletons-pin-th-that-population-has",
+   "ordinal": 30,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Shared-lib singletons: pin through the primitive, never by hand",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "bad23c510e5049ea",
+   "chars": 238,
+   "lineHint": [
+    241,
+    243
+   ]
+  },
+  {
+   "partKey": "shared-lib-singletons-pin-th-1-the-commissioning",
+   "ordinal": 31,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Shared-lib singletons: pin through the primitive, never by hand",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "05297a957c09b0ab",
+   "chars": 751,
+   "lineHint": [
+    245,
+    253
+   ]
+  },
+  {
+   "partKey": "shared-lib-singletons-pin-th-a-proxy-measurement",
+   "ordinal": 32,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Shared-lib singletons: pin through the primitive, never by hand",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "28b39bad7e6ee3df",
+   "chars": 601,
+   "lineHint": [
+    255,
+    261
+   ]
+  },
+  {
+   "partKey": "shared-lib-singletons-pin-th-note-the-allow-list",
+   "ordinal": 33,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Shared-lib singletons: pin through the primitive, never by hand",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "c9ef1d59e46a25d2",
+   "chars": 252,
+   "lineHint": [
+    263,
+    265
+   ]
+  },
+  {
+   "partKey": "shared-lib-singletons-pin-th-fixing-the-detector",
+   "ordinal": 34,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Shared-lib singletons: pin through the primitive, never by hand",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "9bea62db8a5cca28",
+   "chars": 1289,
+   "lineHint": [
+    267,
+    281
+   ]
+  },
+  {
+   "partKey": "deployment-model-desktop-is-shipping-target-the",
+   "ordinal": 35,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Deployment model: desktop is the product; the standalone webapp is RETIRED",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "c9ca664a1c7dc4f9",
+   "chars": 716,
+   "lineHint": [
+    285,
+    294
+   ]
+  },
+  {
+   "partKey": "retired-preserved-not-active-some-code-is-retire",
+   "ordinal": 36,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Retired / preserved-not-active surfaces",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "8572716c3d15497f",
+   "chars": 3993,
+   "lineHint": [
+    298,
+    349
+   ]
+  },
+  {
+   "partKey": "retired-preserved-not-active-what-enforces-this",
+   "ordinal": 37,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Retired / preserved-not-active surfaces",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "58d885ee0a8a483c",
+   "chars": 905,
+   "lineHint": [
+    351,
+    361
+   ]
+  },
+  {
+   "partKey": "retired-preserved-not-active-full-table-with-res",
+   "ordinal": 38,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Retired / preserved-not-active surfaces",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "94f5c0cce683d846",
+   "chars": 147,
+   "lineHint": [
+    363,
+    364
+   ]
+  },
+  {
+   "partKey": "borrowable-libraries-generic-domain-free-libs-li",
+   "ordinal": 39,
+   "kind": "pointer",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Borrowable libraries — generic-first",
+   "projectRank": 300,
+   "expiring": false,
+   "blockSha": "c7675c311d01f618",
+   "chars": 544,
+   "lineHint": [
+    368,
+    374
+   ]
+  },
+  {
+   "partKey": "this-app-is-in-testing-there-there-is-no-product",
+   "ordinal": 40,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "This app is in testing — there are no users yet",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "363b7b50961b5020",
+   "chars": 879,
+   "lineHint": [
+    378,
+    389
+   ]
+  },
+  {
+   "partKey": "a-blocker-is-work-not-a-stop-hit-a-blocker-somet",
+   "ordinal": 41,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "A blocker is work, not a stop sign — resolve it, don't just relay it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "88f312c551c835a6",
+   "chars": 835,
+   "lineHint": [
+    393,
+    403
+   ]
+  },
+  {
+   "partKey": "a-blocker-is-work-not-a-stop-interactive-human-p",
+   "ordinal": 42,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "A blocker is work, not a stop sign — resolve it, don't just relay it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "d13c7576dbc0c9e0",
+   "chars": 206,
+   "lineHint": [
+    405,
+    407
+   ]
+  },
+  {
+   "partKey": "a-cross-lane-ruling-is-a-pla-any-agent-not-only",
+   "ordinal": 43,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "A cross-lane ruling is a plan Decision, recorded the moment it forms",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "151adbfd9a5d25f6",
+   "chars": 633,
+   "lineHint": [
+    411,
+    417
+   ]
+  },
+  {
+   "partKey": "a-cross-lane-ruling-is-a-pla-this-is-not-a-paper",
+   "ordinal": 44,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "A cross-lane ruling is a plan Decision, recorded the moment it forms",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "0bb0a4c3c7ce73be",
+   "chars": 379,
+   "lineHint": [
+    419,
+    422
+   ]
+  },
+  {
+   "partKey": "a-cross-lane-ruling-is-a-pla-two-mechanisms-make",
+   "ordinal": 45,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "A cross-lane ruling is a plan Decision, recorded the moment it forms",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "598fd9cfca48ef82",
+   "chars": 44,
+   "lineHint": [
+    424,
+    424
+   ]
+  },
+  {
+   "partKey": "a-cross-lane-ruling-is-a-pla-at-claim-time-sched",
+   "ordinal": 46,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "A cross-lane ruling is a plan Decision, recorded the moment it forms",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "c7088d0b61cf8aad",
+   "chars": 513,
+   "lineHint": [
+    426,
+    431
+   ]
+  },
+  {
+   "partKey": "branch-discipline-the-shared-the-canonical-share",
+   "ordinal": 47,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Branch discipline: the shared tree stays on `staging`; `main` is automation-only",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "43c64ed7d5874d88",
+   "chars": 477,
+   "lineHint": [
+    435,
+    441
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-a-background-git-sy",
+   "ordinal": 48,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "56a3dd1d7c658cb6",
+   "chars": 554,
+   "lineHint": [
+    445,
+    451
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-checking-whether-yo",
+   "ordinal": 49,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "6e5456863b789ad0",
+   "chars": 3484,
+   "lineHint": [
+    453,
+    506
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-superproject-ha",
+   "ordinal": 50,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "4a23cd52ee54eeab",
+   "chars": 2136,
+   "lineHint": [
+    508,
+    541
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-git-blame-on-this-r",
+   "ordinal": 51,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "c02c707b1335cc7c",
+   "chars": 719,
+   "lineHint": [
+    543,
+    551
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-never-run-a-tree-wi",
+   "ordinal": 52,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "c499cb48bd63f3b5",
+   "chars": 1287,
+   "lineHint": [
+    553,
+    568
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-never-sit-in-a-wait",
+   "ordinal": 53,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "8a2db5310ff583a7",
+   "chars": 1035,
+   "lineHint": [
+    570,
+    582
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-is-my-change-live-a",
+   "ordinal": 54,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "30b49b47eb162a97",
+   "chars": 325,
+   "lineHint": [
+    584,
+    587
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-you-want-to-know-re",
+   "ordinal": 55,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "375f4b78e992412f",
+   "chars": 1188,
+   "lineHint": [
+    589,
+    596
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-nextaction-null-is",
+   "ordinal": 56,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "b39f706d0f78b129",
+   "chars": 279,
+   "lineHint": [
+    598,
+    600
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-about-to-act-on-one",
+   "ordinal": 57,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "12fb2ce92e4c0b56",
+   "chars": 651,
+   "lineHint": [
+    602,
+    610
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-you-do-not-have-to",
+   "ordinal": 58,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "29f70dd2d9e0a7cc",
+   "chars": 336,
+   "lineHint": [
+    612,
+    615
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-handle-is-alrea",
+   "ordinal": 59,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "3b46271ddfa18ebc",
+   "chars": 651,
+   "lineHint": [
+    617,
+    625
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-block-is-derive",
+   "ordinal": 60,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "d362d142d70c9160",
+   "chars": 251,
+   "lineHint": [
+    627,
+    629
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-two-specifics-worth",
+   "ordinal": 61,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "45db8d30826ab5b2",
+   "chars": 29,
+   "lineHint": [
+    631,
+    631
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-is-the-gate-red-abo",
+   "ordinal": 62,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "4cc1a917b7fa850e",
+   "chars": 603,
+   "lineHint": [
+    633,
+    640
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-it-does-answer-whic",
+   "ordinal": 63,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "e04199299e680142",
+   "chars": 724,
+   "lineHint": [
+    642,
+    649
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-this-passage-assert",
+   "ordinal": 64,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 900,
+   "expiring": true,
+   "blockSha": "581dc74b98270b5e",
+   "chars": 929,
+   "lineHint": [
+    651,
+    661
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-transferable-le",
+   "ordinal": 65,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 900,
+   "expiring": true,
+   "blockSha": "a92fbabdb0089cbb",
+   "chars": 629,
+   "lineHint": [
+    663,
+    669
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-judgingcontainspath",
+   "ordinal": 66,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 900,
+   "expiring": true,
+   "blockSha": "a07ac055b7be7f8b",
+   "chars": 651,
+   "lineHint": [
+    671,
+    678
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-premise-under-e",
+   "ordinal": 67,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "1f5fcc4643d27a41",
+   "chars": 184,
+   "lineHint": [
+    680,
+    681
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-green-checkpointts3",
+   "ordinal": 68,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "8459e487544dd02e",
+   "chars": 642,
+   "lineHint": [
+    683,
+    689
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-get-this-wrong-and",
+   "ordinal": 69,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "ed74c98451ec798a",
+   "chars": 382,
+   "lineHint": [
+    691,
+    695
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-this-section-docume",
+   "ordinal": 70,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "337410ab9c5553d7",
+   "chars": 763,
+   "lineHint": [
+    697,
+    705
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-step-0-first-establ",
+   "ordinal": 71,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "7604a2b29fd476e5",
+   "chars": 170,
+   "lineHint": [
+    707,
+    708
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-one-call-answers-st",
+   "ordinal": 72,
+   "kind": "recipe",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 200,
+   "expiring": false,
+   "blockSha": "9f2800c162439bef",
+   "chars": 86,
+   "lineHint": [
+    710,
+    710
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o",
+   "ordinal": 73,
+   "kind": "recipe",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 200,
+   "expiring": false,
+   "blockSha": "b21293e94fdbcf9a",
+   "chars": 95,
+   "lineHint": [
+    712,
+    714
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-it-returns-the-judg",
+   "ordinal": 74,
+   "kind": "recipe",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 200,
+   "expiring": false,
+   "blockSha": "905572c674904636",
+   "chars": 878,
+   "lineHint": [
+    716,
+    725
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-candidate-field",
+   "ordinal": 75,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "df445b7dec785067",
+   "chars": 278,
+   "lineHint": [
+    727,
+    729
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-that-drift-is-a-fea",
+   "ordinal": 76,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "b2e0447f467e31cc",
+   "chars": 410,
+   "lineHint": [
+    731,
+    735
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-do-not-settle-this",
+   "ordinal": 77,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "d8dba8237a0a16d7",
+   "chars": 765,
+   "lineHint": [
+    737,
+    745
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-that-check-was-sedu",
+   "ordinal": 78,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "92f41dadae7f2e24",
+   "chars": 455,
+   "lineHint": [
+    747,
+    751
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-do-not-try-to-settl",
+   "ordinal": 79,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "60250492788fcac9",
+   "chars": 550,
+   "lineHint": [
+    753,
+    758
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-on-that-same-held-e",
+   "ordinal": 80,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "e1af662ccab3c67b",
+   "chars": 202,
+   "lineHint": [
+    760,
+    761
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-started-at-elapsed",
+   "ordinal": 81,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "88e4831ddf45316e",
+   "chars": 915,
+   "lineHint": [
+    763,
+    772
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-only-primary-ob",
+   "ordinal": 82,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "9b14f56d04534cff",
+   "chars": 352,
+   "lineHint": [
+    774,
+    777
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-fallback-the-routin",
+   "ordinal": 83,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "ca43c68547dbee87",
+   "chars": 520,
+   "lineHint": [
+    779,
+    784
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-sql",
+   "ordinal": 84,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "f1a8e434287f38b1",
+   "chars": 449,
+   "lineHint": [
+    786,
+    793
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-two-keys-answer",
+   "ordinal": 85,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "987b355768065196",
+   "chars": 98,
+   "lineHint": [
+    795,
+    795
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-inflightretriage-no",
+   "ordinal": 86,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "331996a1305dc0b0",
+   "chars": 1472,
+   "lineHint": [
+    797,
+    813
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-scope-both-install",
+   "ordinal": 87,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "4007c7dfbe9ea396",
+   "chars": 378,
+   "lineHint": [
+    815,
+    818
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-tmppapercup-gre",
+   "ordinal": 88,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "2acdefc313f93b9b",
+   "chars": 807,
+   "lineHint": [
+    820,
+    828
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-for-a-manual-run-th",
+   "ordinal": 89,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "7537e9d31b71c3ac",
+   "chars": 324,
+   "lineHint": [
+    830,
+    833
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-bash",
+   "ordinal": 90,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "db8b38a6bc145f09",
+   "chars": 340,
+   "lineHint": [
+    835,
+    840
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-do-not-collapse-tha",
+   "ordinal": 91,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "c41b95c6a3886a4c",
+   "chars": 348,
+   "lineHint": [
+    842,
+    845
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-measured-2026-08-02",
+   "ordinal": 92,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "3761d46f9c0383c1",
+   "chars": 733,
+   "lineHint": [
+    847,
+    854
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-do-not-take-the-fir",
+   "ordinal": 93,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "5a5690739c04fb6e",
+   "chars": 774,
+   "lineHint": [
+    856,
+    863
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-two-traps-specific",
+   "ordinal": 94,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "e3108c7d3552e458",
+   "chars": 348,
+   "lineHint": [
+    865,
+    868
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-then-and-only-then",
+   "ordinal": 95,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "925f65ebdd716cb2",
+   "chars": 154,
+   "lineHint": [
+    870,
+    871
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-bash-2",
+   "ordinal": 96,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "344cc43b42c76d7b",
+   "chars": 418,
+   "lineHint": [
+    873,
+    879
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-blob-line-compa",
+   "ordinal": 97,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "38339c056c0ec3fb",
+   "chars": 542,
+   "lineHint": [
+    881,
+    887
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-it-is-asymmetric-re",
+   "ordinal": 98,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "56d30c170d91671b",
+   "chars": 54,
+   "lineHint": [
+    889,
+    889
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-blob-identical-defi",
+   "ordinal": 99,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "765eb8e21274cfee",
+   "chars": 613,
+   "lineHint": [
+    891,
+    898
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-treating-inconclusi",
+   "ordinal": 100,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "0481a0b3f17d4cd6",
+   "chars": 169,
+   "lineHint": [
+    900,
+    901
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-blob-identity-answe",
+   "ordinal": 101,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "8eb49c5045a5d148",
+   "chars": 610,
+   "lineHint": [
+    903,
+    909
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-measured-2026-08-03",
+   "ordinal": 102,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "2871112e9809531a",
+   "chars": 443,
+   "lineHint": [
+    911,
+    915
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-tail-1-not-1-s-list",
+   "ordinal": 103,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "4c40e275f96db84c",
+   "chars": 551,
+   "lineHint": [
+    917,
+    922
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-verified-in-this-re",
+   "ordinal": 104,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "ff9dbad65884491e",
+   "chars": 178,
+   "lineHint": [
+    924,
+    925
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-2",
+   "ordinal": 105,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "e3d5025198a75462",
+   "chars": 287,
+   "lineHint": [
+    927,
+    931
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-s-is-blind-to-a-cha",
+   "ordinal": 106,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "344fba39a41aef29",
+   "chars": 538,
+   "lineHint": [
+    933,
+    938
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-recipe-above-is",
+   "ordinal": 107,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "68695e87b65c8f83",
+   "chars": 360,
+   "lineHint": [
+    940,
+    943
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-verified-in-this-re-2",
+   "ordinal": 108,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "1bfad109ddc70171",
+   "chars": 210,
+   "lineHint": [
+    945,
+    947
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-3",
+   "ordinal": 109,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "b0924ca766d811f6",
+   "chars": 183,
+   "lineHint": [
+    949,
+    952
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-cost-when-it-fired",
+   "ordinal": 110,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "203e6d3bd65dea44",
+   "chars": 516,
+   "lineHint": [
+    954,
+    959
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-no-string-unique-to",
+   "ordinal": 111,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "61b7d9a79d5089b7",
+   "chars": 297,
+   "lineHint": [
+    961,
+    964
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-this-corrects-two-c",
+   "ordinal": 112,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "51fca1dac01a6da7",
+   "chars": 275,
+   "lineHint": [
+    966,
+    968
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-is-ancestor-has-not",
+   "ordinal": 113,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "007d506ad8970ba0",
+   "chars": 1478,
+   "lineHint": [
+    970,
+    986
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-marker-is-still-use",
+   "ordinal": 114,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "62bca98e06d3a8e7",
+   "chars": 286,
+   "lineHint": [
+    988,
+    991
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-callereditsincandid",
+   "ordinal": 115,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "c88a14603f2d52fb",
+   "chars": 837,
+   "lineHint": [
+    993,
+    1002
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-reason-newer-commit",
+   "ordinal": 116,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "77f6913ba2a01865",
+   "chars": 1404,
+   "lineHint": [
+    1004,
+    1018
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-a-runs-judged-candi",
+   "ordinal": 117,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "1a4d6a62aef069a2",
+   "chars": 610,
+   "lineHint": [
+    1020,
+    1026
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-this-single-unstate",
+   "ordinal": 118,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "a80149aab0210259",
+   "chars": 428,
+   "lineHint": [
+    1028,
+    1032
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-authoritative-r",
+   "ordinal": 119,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "317969523802ff81",
+   "chars": 99,
+   "lineHint": [
+    1034,
+    1034
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-sql-2",
+   "ordinal": 120,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "b505ebcf39335c82",
+   "chars": 345,
+   "lineHint": [
+    1036,
+    1041
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-null-means-no-refir",
+   "ordinal": 121,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "858324f81324ebb2",
+   "chars": 179,
+   "lineHint": [
+    1043,
+    1044
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-persisted-log-n",
+   "ordinal": 122,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "1eb3616a22092126",
+   "chars": 650,
+   "lineHint": [
+    1046,
+    1053
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-green-in-that-heade",
+   "ordinal": 123,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "dfe7b18614d01a0d",
+   "chars": 556,
+   "lineHint": [
+    1055,
+    1060
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-bash-3",
+   "ordinal": 124,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "cbe4038edb3767ae",
+   "chars": 149,
+   "lineHint": [
+    1062,
+    1065
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-candidate-ancho",
+   "ordinal": 125,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "213721f3ce9a76cf",
+   "chars": 435,
+   "lineHint": [
+    1067,
+    1071
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-two-readings-that-a",
+   "ordinal": 126,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "e2cd0743682078de",
+   "chars": 577,
+   "lineHint": [
+    1073,
+    1078
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-why-it-exists-ei-20",
+   "ordinal": 127,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "f687b7b41747698f",
+   "chars": 431,
+   "lineHint": [
+    1080,
+    1084
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-a-log-written-befor",
+   "ordinal": 128,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "ced537e7901e72f0",
+   "chars": 338,
+   "lineHint": [
+    1086,
+    1089
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-affected-tests-resu",
+   "ordinal": 129,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "af02d9e8c7d628df",
+   "chars": 354,
+   "lineHint": [
+    1091,
+    1094
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-run-now-states",
+   "ordinal": 130,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "7a5a6df28fee06bb",
+   "chars": 94,
+   "lineHint": [
+    1096,
+    1096
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-bash-4",
+   "ordinal": 131,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "4d615c553e999816",
+   "chars": 350,
+   "lineHint": [
+    1098,
+    1103
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-read-coverage-befor",
+   "ordinal": 132,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "7df078897fc37db4",
+   "chars": 644,
+   "lineHint": [
+    1105,
+    1111
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-coverage-does-not-t",
+   "ordinal": 133,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "82082392e298c071",
+   "chars": 686,
+   "lineHint": [
+    1113,
+    1119
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-measured-2026-08-09",
+   "ordinal": 134,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "1d18a6f3ff88a7b1",
+   "chars": 529,
+   "lineHint": [
+    1121,
+    1126
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-runner-now-lead",
+   "ordinal": 135,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "2174a152031f6d95",
+   "chars": 808,
+   "lineHint": [
+    1128,
+    1136
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-that-line-covers-te",
+   "ordinal": 136,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "8ac2efd8312a339b",
+   "chars": 261,
+   "lineHint": [
+    1138,
+    1140
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-bash-5",
+   "ordinal": 137,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "4b7c788b2032a7fe",
+   "chars": 133,
+   "lineHint": [
+    1142,
+    1145
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-it-is-emitted-from",
+   "ordinal": 138,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "271ae4e9a800081e",
+   "chars": 263,
+   "lineHint": [
+    1147,
+    1149
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-keep-the-count-in-t",
+   "ordinal": 139,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "e337b6ddc39d8670",
+   "chars": 1847,
+   "lineHint": [
+    1151,
+    1170
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-why-this-exists-can",
+   "ordinal": 140,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "ad99342c423e745d",
+   "chars": 745,
+   "lineHint": [
+    1172,
+    1179
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-a-verdict-log-writt",
+   "ordinal": 141,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "35313821b6e53431",
+   "chars": 275,
+   "lineHint": [
+    1181,
+    1183
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-a-verdict-log-older",
+   "ordinal": 142,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "2130881cdce5a4b3",
+   "chars": 1002,
+   "lineHint": [
+    1185,
+    1195
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-bash-6",
+   "ordinal": 143,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "13041991032a57d4",
+   "chars": 147,
+   "lineHint": [
+    1197,
+    1201
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-do-not-mine-the-gat",
+   "ordinal": 144,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "f54d7d1eae5982c3",
+   "chars": 649,
+   "lineHint": [
+    1203,
+    1209
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-skipped-locked-is-a",
+   "ordinal": 145,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "bf7b67f81ee5e72d",
+   "chars": 800,
+   "lineHint": [
+    1211,
+    1219
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-measured-over-a-36h",
+   "ordinal": 146,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "38855efd6b674f62",
+   "chars": 631,
+   "lineHint": [
+    1221,
+    1227
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-error-this-exis",
+   "ordinal": 147,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "7e2ea34870db73bd",
+   "chars": 760,
+   "lineHint": [
+    1229,
+    1236
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-verdicts-lineag",
+   "ordinal": 148,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "a420dc64ec2a7dc4",
+   "chars": 748,
+   "lineHint": [
+    1238,
+    1245
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-measured-2026-08-03-2",
+   "ordinal": 149,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "bafb8f043a1b35d5",
+   "chars": 608,
+   "lineHint": [
+    1247,
+    1252
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-wording-is-fixe",
+   "ordinal": 150,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "e470e518549f64bb",
+   "chars": 389,
+   "lineHint": [
+    1254,
+    1257
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-the-verdict-says-it",
+   "ordinal": 151,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "01e9025d8bba626a",
+   "chars": 694,
+   "lineHint": [
+    1259,
+    1264
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-an-unmeasured-range",
+   "ordinal": 152,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "15df6bdaf2788aa3",
+   "chars": 291,
+   "lineHint": [
+    1266,
+    1268
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-do-not-glob-tmppape",
+   "ordinal": 153,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "035cd82fccacabd1",
+   "chars": 572,
+   "lineHint": [
+    1270,
+    1275
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-never-fire-a-manual",
+   "ordinal": 154,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "64de8e9bbda7bdd3",
+   "chars": 569,
+   "lineHint": [
+    1277,
+    1282
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-you-no-longer-have",
+   "ordinal": 155,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "804950dd37c9775c",
+   "chars": 1141,
+   "lineHint": [
+    1284,
+    1295
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-and-when-it-does-re",
+   "ordinal": 156,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "845692d887802108",
+   "chars": 261,
+   "lineHint": [
+    1297,
+    1299
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-never-answer-is-a-g",
+   "ordinal": 157,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "1076e6582337a2dd",
+   "chars": 2186,
+   "lineHint": [
+    1301,
+    1323
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-systemctl-user-is-a",
+   "ordinal": 158,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "d908fbc2598db63e",
+   "chars": 669,
+   "lineHint": [
+    1325,
+    1331
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-bash-7",
+   "ordinal": 159,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "00dd1a504756e5e4",
+   "chars": 113,
+   "lineHint": [
+    1333,
+    1335
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-measured-2026-08-10",
+   "ordinal": 160,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "0d34c7edbd65d8b9",
+   "chars": 657,
+   "lineHint": [
+    1337,
+    1343
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-read-the-pid-compar",
+   "ordinal": 161,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "5e2eaf02e85cfc54",
+   "chars": 705,
+   "lineHint": [
+    1345,
+    1352
+   ]
+  },
+  {
+   "partKey": "commit-discipline-git-sync-o-this-is-the-same-cl",
+   "ordinal": 162,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Commit discipline: git-sync owns commit + push — you do neither",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "ad6c8643a7f84c62",
+   "chars": 544,
+   "lineHint": [
+    1354,
+    1359
+   ]
+  },
+  {
+   "partKey": "server-side-edits-and-the-tw-the-hono-host-binho",
+   "ordinal": 163,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Server-side edits and the two-port model — no hot-reload",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "b37a4c94e9c7724d",
+   "chars": 185,
+   "lineHint": [
+    1363,
+    1365
+   ]
+  },
+  {
+   "partKey": "server-side-edits-and-the-tw-3070-green-operator",
+   "ordinal": 164,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Server-side edits and the two-port model — no hot-reload",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "dd3d3c16ea21bada",
+   "chars": 1268,
+   "lineHint": [
+    1367,
+    1384
+   ]
+  },
+  {
+   "partKey": "server-side-edits-and-the-tw-3055-vite-does-hot",
+   "ordinal": 165,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Server-side edits and the two-port model — no hot-reload",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "589f5f1c2a566b5c",
+   "chars": 211,
+   "lineHint": [
+    1386,
+    1388
+   ]
+  },
+  {
+   "partKey": "before-you-design-or-test-re-two-internaldocs-se",
+   "ordinal": 166,
+   "kind": "pointer",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Before you design or test — read the docs first",
+   "projectRank": 300,
+   "expiring": false,
+   "blockSha": "4f2d5f8dce767df6",
+   "chars": 141,
+   "lineHint": [
+    1392,
+    1393
+   ]
+  },
+  {
+   "partKey": "before-you-design-or-test-re-before-any-design-w",
+   "ordinal": 167,
+   "kind": "pointer",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Before you design or test — read the docs first",
+   "projectRank": 300,
+   "expiring": false,
+   "blockSha": "8b3975627aff70ab",
+   "chars": 767,
+   "lineHint": [
+    1395,
+    1406
+   ]
+  },
+  {
+   "partKey": "read-this-before-changing-co-performance-regress",
+   "ordinal": 168,
+   "kind": "pointer",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Read this before changing code — performance anti-patterns",
+   "projectRank": 300,
+   "expiring": false,
+   "blockSha": "fe90b0f548cc2875",
+   "chars": 395,
+   "lineHint": [
+    1410,
+    1415
+   ]
+  },
+  {
+   "partKey": "storage-policy-postgres-by-d-new-durable-state-g",
+   "ordinal": 169,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Storage policy: Postgres by default",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "bde0343bcddfe0f8",
+   "chars": 233,
+   "lineHint": [
+    1419,
+    1421
+   ]
+  },
+  {
+   "partKey": "storage-policy-postgres-by-d-schema-migrations-o",
+   "ordinal": 170,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Storage policy: Postgres by default",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "7c2c63a4925fceb3",
+   "chars": 2362,
+   "lineHint": [
+    1423,
+    1453
+   ]
+  },
+  {
+   "partKey": "storage-policy-postgres-by-d-you-want-use-not",
+   "ordinal": 171,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Storage policy: Postgres by default",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "70995baa9ec3b3c1",
+   "chars": 1233,
+   "lineHint": [
+    1455,
+    1463
+   ]
+  },
+  {
+   "partKey": "storage-policy-postgres-by-d-nothing-in-the-tabl",
+   "ordinal": 172,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Storage policy: Postgres by default",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "1f7f2c434ca42bc9",
+   "chars": 2308,
+   "lineHint": [
+    1465,
+    1494
+   ]
+  },
+  {
+   "partKey": "storage-policy-postgres-by-d-prefer-work-itemsli",
+   "ordinal": 173,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Storage policy: Postgres by default",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "756b093548e0cf6e",
+   "chars": 1798,
+   "lineHint": [
+    1496,
+    1516
+   ]
+  },
+  {
+   "partKey": "storage-policy-postgres-by-d-full-guide-acceptab",
+   "ordinal": 174,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Storage policy: Postgres by default",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "b5df62699d4e875a",
+   "chars": 182,
+   "lineHint": [
+    1518,
+    1520
+   ]
+  },
+  {
+   "partKey": "reaching-for-bash-these-read-bash-is-still-41-of",
+   "ordinal": 175,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Reaching for bash? These reads already have a tool",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "f69d44f7c18bd230",
+   "chars": 524,
+   "lineHint": [
+    1524,
+    1530
+   ]
+  },
+  {
+   "partKey": "reaching-for-bash-these-read-each-row-was-earned",
+   "ordinal": 176,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Reaching for bash? These reads already have a tool",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "246ab9293decba28",
+   "chars": 456,
+   "lineHint": [
+    1532,
+    1537
+   ]
+  },
+  {
+   "partKey": "reaching-for-bash-these-read-begin-generated-gen",
+   "ordinal": 177,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Reaching for bash? These reads already have a tool",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "0faee05e4ef63165",
+   "chars": 64,
+   "lineHint": [
+    1539,
+    1539
+   ]
+  },
+  {
+   "partKey": "reaching-for-bash-these-read-generated-from-the",
+   "ordinal": 178,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Reaching for bash? These reads already have a tool",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "ef63643187e95b00",
+   "chars": 1067,
+   "lineHint": [
+    1541,
+    1554
+   ]
+  },
+  {
+   "partKey": "reaching-for-bash-these-read-you-want-use-not",
+   "ordinal": 179,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Reaching for bash? These reads already have a tool",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "95747aa1c2c2eac5",
+   "chars": 5435,
+   "lineHint": [
+    1556,
+    1577
+   ]
+  },
+  {
+   "partKey": "reaching-for-bash-these-read-end-generated-gento",
+   "ordinal": 180,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Reaching for bash? These reads already have a tool",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "00405c9d2de846e9",
+   "chars": 40,
+   "lineHint": [
+    1579,
+    1579
+   ]
+  },
+  {
+   "partKey": "reaching-for-bash-these-read-the-tool-call-is-al",
+   "ordinal": 181,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Reaching for bash? These reads already have a tool",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "6890a3ee45450078",
+   "chars": 290,
+   "lineHint": [
+    1581,
+    1584
+   ]
+  },
+  {
+   "partKey": "cd-outside-the-repo-tree-doe-the-bash-tools-own",
+   "ordinal": 182,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "`cd` outside the repo tree does NOT persist across Bash calls — a failed one silently falls back to the repo ROOT",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "4f2e5f8d46afcfb8",
+   "chars": 654,
+   "lineHint": [
+    1588,
+    1596
+   ]
+  },
+  {
+   "partKey": "cd-outside-the-repo-tree-doe-why-this-is-dangero",
+   "ordinal": 183,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "`cd` outside the repo tree does NOT persist across Bash calls — a failed one silently falls back to the repo ROOT",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "e9805356e972f3ef",
+   "chars": 895,
+   "lineHint": [
+    1598,
+    1609
+   ]
+  },
+  {
+   "partKey": "cd-outside-the-repo-tree-doe-the-defensive-patte",
+   "ordinal": 184,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "`cd` outside the repo tree does NOT persist across Bash calls — a failed one silently falls back to the repo ROOT",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "d35f1c4cbb45bd4e",
+   "chars": 566,
+   "lineHint": [
+    1611,
+    1620
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-is-my-job-done-is-1",
+   "ordinal": 185,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "f48b559d4983fb5b",
+   "chars": 373,
+   "lineHint": [
+    1624,
+    1628
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-for-anything-that-r",
+   "ordinal": 186,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "df875d429419e135",
+   "chars": 272,
+   "lineHint": [
+    1630,
+    1633
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-a-background-job-st",
+   "ordinal": 187,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "c7067bd770034678",
+   "chars": 512,
+   "lineHint": [
+    1635,
+    1640
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-that-deadline-used",
+   "ordinal": 188,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "ffff959586dce219",
+   "chars": 678,
+   "lineHint": [
+    1642,
+    1650
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-why-the-tool-and-no",
+   "ordinal": 189,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "74b7062f00f2fdb5",
+   "chars": 1408,
+   "lineHint": [
+    1652,
+    1669
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-so-checkpoint-the-b",
+   "ordinal": 190,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "695a32ca1fd3e5fb",
+   "chars": 135,
+   "lineHint": [
+    1671,
+    1672
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-a-background-comman",
+   "ordinal": 191,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "3f1b752321c68ef0",
+   "chars": 1562,
+   "lineHint": [
+    1674,
+    1695
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-never-combine-capab",
+   "ordinal": 192,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "9fb4c191a7d02616",
+   "chars": 1378,
+   "lineHint": [
+    1697,
+    1715
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-never-wait-on-a-pro",
+   "ordinal": 193,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "5e1bca1a7df7dedb",
+   "chars": 840,
+   "lineHint": [
+    1717,
+    1727
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-there-is-a-purpose",
+   "ordinal": 194,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "927834d4bf877196",
+   "chars": 1081,
+   "lineHint": [
+    1729,
+    1743
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-pgrep-q-does-not-ex",
+   "ordinal": 195,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "817b46f2295b2eae",
+   "chars": 628,
+   "lineHint": [
+    1745,
+    1753
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-pgrep-x-matches-pro",
+   "ordinal": 196,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "a6ad6f0d833209bf",
+   "chars": 458,
+   "lineHint": [
+    1755,
+    1760
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-is-this-process-act",
+   "ordinal": 197,
+   "kind": "recipe",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 200,
+   "expiring": false,
+   "blockSha": "c1782d515e4dfd2b",
+   "chars": 543,
+   "lineHint": [
+    1762,
+    1768
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-bash",
+   "ordinal": 198,
+   "kind": "recipe",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 200,
+   "expiring": false,
+   "blockSha": "077c693cfbd1f8d6",
+   "chars": 364,
+   "lineHint": [
+    1770,
+    1775
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-measure-the-whole-p",
+   "ordinal": 199,
+   "kind": "recipe",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 200,
+   "expiring": false,
+   "blockSha": "c9bd347b0f99cead",
+   "chars": 675,
+   "lineHint": [
+    1777,
+    1786
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-a-corollary-worth-k",
+   "ordinal": 200,
+   "kind": "recipe",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 200,
+   "expiring": false,
+   "blockSha": "39e6396657a6dbb3",
+   "chars": 477,
+   "lineHint": [
+    1788,
+    1794
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-ei-2001777993706028",
+   "ordinal": 201,
+   "kind": "recipe",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 200,
+   "expiring": false,
+   "blockSha": "143dc7b8bb9a5f84",
+   "chars": 616,
+   "lineHint": [
+    1796,
+    1803
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-waiting-on-the-righ",
+   "ordinal": 202,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "0c123901804f11e4",
+   "chars": 1135,
+   "lineHint": [
+    1805,
+    1819
+   ]
+  },
+  {
+   "partKey": "long-jobs-background-them-at-do-not-sit-in-a-sle",
+   "ordinal": 203,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Long jobs: background them at the LAUNCH, don't poll for them afterwards",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "a16df2a12c3492a6",
+   "chars": 223,
+   "lineHint": [
+    1821,
+    1823
+   ]
+  },
+  {
+   "partKey": "feature-flags-posthog-single-source-of-truth-for",
+   "ordinal": 204,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Feature flags + PostHog",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "fc68f3375242f3e2",
+   "chars": 2546,
+   "lineHint": [
+    1827,
+    1855
+   ]
+  },
+  {
+   "partKey": "feature-flags-posthog-the-dark-allowlist-is-shri",
+   "ordinal": 205,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Feature flags + PostHog",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "3081f67c74f4b6c9",
+   "chars": 1952,
+   "lineHint": [
+    1857,
+    1877
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-bash",
+   "ordinal": 206,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Tests after editing",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "f429c0576f582bf4",
+   "chars": 241,
+   "lineHint": [
+    1881,
+    1885
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-testaffected-runs-the-suites",
+   "ordinal": 207,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Tests after editing",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "cf89d72b815e45d4",
+   "chars": 168,
+   "lineHint": [
+    1887,
+    1888
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-bash-2",
+   "ordinal": 208,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Tests after editing",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "604a87dff9035d3b",
+   "chars": 122,
+   "lineHint": [
+    1890,
+    1892
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-a-git-based-probe-cannot-ans",
+   "ordinal": 209,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "44ca503355dae149",
+   "chars": 738,
+   "lineHint": [
+    1894,
+    1902
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-testaffected-is-type-blind-a",
+   "ordinal": 210,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "74ca3b4968a179fd",
+   "chars": 709,
+   "lineHint": [
+    1904,
+    1912
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-name-the-files-do-not-use-mi",
+   "ordinal": 211,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "d17082cf3a1d386f",
+   "chars": 1615,
+   "lineHint": [
+    1914,
+    1933
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-linttsc-typechecks-packageso",
+   "ordinal": 212,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Tests after editing",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "52ef786fc2a21a70",
+   "chars": 558,
+   "lineHint": [
+    1935,
+    1941
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-editing-appsoperator-includi",
+   "ordinal": 213,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "697a35614c18dc09",
+   "chars": 2663,
+   "lineHint": [
+    1943,
+    1974
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-do-not-reach-for-npm-run-wor",
+   "ordinal": 214,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "40311cdd1b01ddbe",
+   "chars": 1250,
+   "lineHint": [
+    1976,
+    1994
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-files-no-longer-lies-about-t",
+   "ordinal": 215,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "3e0a7eb255eca08d",
+   "chars": 975,
+   "lineHint": [
+    1996,
+    2006
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-use-the-tool-not-a-hand-run",
+   "ordinal": 216,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "cad87fed13e22326",
+   "chars": 864,
+   "lineHint": [
+    2008,
+    2017
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-the-same-false-green-also-ar",
+   "ordinal": 217,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "c1a57a19187b8bff",
+   "chars": 1409,
+   "lineHint": [
+    2019,
+    2041
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-the-trigger-to-watch-adding",
+   "ordinal": 218,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Tests after editing",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "fcee96eba4e0475f",
+   "chars": 737,
+   "lineHint": [
+    2043,
+    2051
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-dont-do-that-by-hand-npm-run",
+   "ordinal": 219,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Tests after editing",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "696c41418fa6d887",
+   "chars": 939,
+   "lineHint": [
+    2053,
+    2063
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-a-migration-that-adds-a-colu",
+   "ordinal": 220,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Tests after editing",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "93b5e017137a3e57",
+   "chars": 900,
+   "lineHint": [
+    2065,
+    2075
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-schemamigration-edits-libspa",
+   "ordinal": 221,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Tests after editing",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "86eb8c670916f459",
+   "chars": 423,
+   "lineHint": [
+    2077,
+    2082
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-npm-only-never-pnpmyarn-in-t",
+   "ordinal": 222,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Tests after editing",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "cedaf4a3f0707c5a",
+   "chars": 679,
+   "lineHint": [
+    2084,
+    2092
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-bash-3",
+   "ordinal": 223,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Tests after editing",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "74c47a8ae5c1183e",
+   "chars": 85,
+   "lineHint": [
+    2094,
+    2096
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-it-discovers-each-files-owni",
+   "ordinal": 224,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "5cdb745785ff1da7",
+   "chars": 596,
+   "lineHint": [
+    2098,
+    2105
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-a-t-pattern-that-matches-zer",
+   "ordinal": 225,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "753269b6f7e24b96",
+   "chars": 845,
+   "lineHint": [
+    2107,
+    2116
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-npm-eats-one-level-of-quotin",
+   "ordinal": 226,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "f1bebcd7beab0999",
+   "chars": 375,
+   "lineHint": [
+    2118,
+    2122
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-npm-installnpm-ci-on-this-sh",
+   "ordinal": 227,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "0c7b4511eae63346",
+   "chars": 1365,
+   "lineHint": [
+    2124,
+    2140
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-a-test-file-route-error-matc",
+   "ordinal": 228,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "7b82683bfa113f74",
+   "chars": 942,
+   "lineHint": [
+    2142,
+    2151
+   ]
+  },
+  {
+   "partKey": "tests-after-editing-hit-a-confusing-cannot-find",
+   "ordinal": 229,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Tests after editing",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "61a96076f8d15924",
+   "chars": 1038,
+   "lineHint": [
+    2153,
+    2165
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-a-guard-test-that-h",
+   "ordinal": 230,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "8c4ffbf2682ac693",
+   "chars": 200,
+   "lineHint": [
+    2169,
+    2171
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-bash",
+   "ordinal": 231,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "5906ba775cdd8991",
+   "chars": 88,
+   "lineHint": [
+    2173,
+    2175
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-it-fails-in-two-ind",
+   "ordinal": 232,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "27bdb010a03f2163",
+   "chars": 86,
+   "lineHint": [
+    2177,
+    2177
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-1-death-race-the-re",
+   "ordinal": 233,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "9c82ff4efdfa0041",
+   "chars": 537,
+   "lineHint": [
+    2179,
+    2185
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-both-fired-for-real",
+   "ordinal": 234,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "3c6daf2c989e9206",
+   "chars": 529,
+   "lineHint": [
+    2187,
+    2193
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-pick-the-lowest-tie",
+   "ordinal": 235,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "c252815e5bf92fd9",
+   "chars": 78,
+   "lineHint": [
+    2195,
+    2195
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-your-subject-how-to",
+   "ordinal": 236,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "aba95162c5517792",
+   "chars": 777,
+   "lineHint": [
+    2197,
+    2201
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-scriptsmutation-pro",
+   "ordinal": 237,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "1b0502dc916158cf",
+   "chars": 352,
+   "lineHint": [
+    2203,
+    2207
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-bash-2",
+   "ordinal": 238,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "a15204c8f6cc5d8e",
+   "chars": 236,
+   "lineHint": [
+    2209,
+    2213
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-exit-codes-0-mutant",
+   "ordinal": 239,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "1fc7000761ea9ac8",
+   "chars": 305,
+   "lineHint": [
+    2215,
+    2218
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-for-tier-3-pause-th",
+   "ordinal": 240,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "65289b5b559eff0d",
+   "chars": 131,
+   "lineHint": [
+    2220,
+    2221
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab",
+   "ordinal": 241,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "4f42386af1aaea88",
+   "chars": 150,
+   "lineHint": [
+    2223,
+    2226
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-a-trap-alone-does-n",
+   "ordinal": 242,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "434cf3c3e6dc98ad",
+   "chars": 582,
+   "lineHint": [
+    2228,
+    2234
+   ]
+  },
+  {
+   "partKey": "proving-a-guard-is-falsifiab-prior-independent-d",
+   "ordinal": 243,
+   "kind": "prose",
+   "clientScope": [],
+   "targetSection": "Proving a guard is falsifiable — never mutate the shared tree to do it",
+   "projectRank": 1000,
+   "expiring": false,
+   "blockSha": "b91e84a01ec98560",
+   "chars": 158,
+   "lineHint": [
+    2236,
+    2237
+   ]
+  },
+  {
+   "partKey": "browser-checks-use-verdict-ad-hocexploratory-bro",
+   "ordinal": 244,
+   "kind": "pointer",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Browser checks — use `verdict`",
+   "projectRank": 300,
+   "expiring": false,
+   "blockSha": "075e32c7a23c908d",
+   "chars": 404,
+   "lineHint": [
+    2241,
+    2246
+   ]
+  },
+  {
+   "partKey": "use-context7-for-current-lib-before-non-trivial",
+   "ordinal": 245,
+   "kind": "pointer",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Use Context7 for current library docs",
+   "projectRank": 300,
+   "expiring": false,
+   "blockSha": "a15ceed76f086d5e",
+   "chars": 280,
+   "lineHint": [
+    2250,
+    2253
+   ]
+  },
+  {
+   "partKey": "adding-a-tool-the-per-role-g-1-define-in-package",
+   "ordinal": 246,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Adding a tool — the per-role guidance discipline",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "58386d1a4df840f6",
+   "chars": 818,
+   "lineHint": [
+    2257,
+    2268
+   ]
+  },
+  {
+   "partKey": "adding-a-tool-the-per-role-g-it-is-a-root-entryp",
+   "ordinal": 247,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Adding a tool — the per-role guidance discipline",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "291812318290e300",
+   "chars": 471,
+   "lineHint": [
+    2270,
+    2276
+   ]
+  },
+  {
+   "partKey": "adding-a-tool-the-per-role-g-editing-a-live-tool",
+   "ordinal": 248,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Adding a tool — the per-role guidance discipline",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "ec0638175389cfbf",
+   "chars": 685,
+   "lineHint": [
+    2278,
+    2286
+   ]
+  },
+  {
+   "partKey": "adding-a-tool-the-per-role-g-per-tool-whennot-wh",
+   "ordinal": 249,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Adding a tool — the per-role guidance discipline",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "75e3908615aeba51",
+   "chars": 202,
+   "lineHint": [
+    2288,
+    2290
+   ]
+  },
+  {
+   "partKey": "adding-a-tool-the-per-role-g-a-callers-limit-bou",
+   "ordinal": 250,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Adding a tool — the per-role guidance discipline",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "a2b74f0477fcccc8",
+   "chars": 890,
+   "lineHint": [
+    2292,
+    2302
+   ]
+  },
+  {
+   "partKey": "adding-a-tool-the-per-role-g-the-fix-pattern-bot",
+   "ordinal": 251,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Adding a tool — the per-role guidance discipline",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "b91bf87758146611",
+   "chars": 506,
+   "lineHint": [
+    2304,
+    2310
+   ]
+  },
+  {
+   "partKey": "prompts-are-auto-generated-e-every-agent-facing",
+   "ordinal": 252,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Prompts are auto-generated — edit the source, never the rendered output",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "c5e47127c8ddc297",
+   "chars": 854,
+   "lineHint": [
+    2314,
+    2325
+   ]
+  },
+  {
+   "partKey": "where-new-tests-go-four-cano-every-new-test-goes",
+   "ordinal": 253,
+   "kind": "invariant",
+   "clientScope": [
+    "all"
+   ],
+   "targetSection": "Where new tests go — four canonical frameworks",
+   "projectRank": 100,
+   "expiring": false,
+   "blockSha": "9524269f3f867738",
+   "chars": 593,
+   "lineHint": [
+    2329,
+    2337
+   ]
+  }
+ ]
+}

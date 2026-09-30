@@ -1,0 +1,172 @@
+# Pull daemon decision logic into pure functions, leave glue in the runtime
+URL: /internal/docs/agent-insights/pure-decision-functions-pulled-from-daemons
+
+A poll daemon's "what should I do next?" logic is testable in isolation only when it's pure. The runtime becomes a thin shim around `decideX()` calls; every interesting branch lives in a unit-tested types module.
+
+import { Aside } from '@astrojs/starlight/components';
+
+## The trap
+
+A typical poll daemon looks like this:
+
+```ts
+async function pollLoop() {
+  while (running) {
+    try {
+      const prs = await prHost.listOpenPrs(...);
+      for (const pr of prs.data) {
+        // 30 lines of nested ifs deciding whether to auto-approve, auto-merge,
+        // skip, retry, give up...
+        if (settings.pr_reviewer_role_enabled) {
+          if (settings.auto_review) {
+            if (pr.state === 'open' && !pr.is_draft) {
+              if (settings.trust_list.has(pr.author.github_user_id)) {
+                // ... actually fire the approve, maybe merge, maybe both ...
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // 20 lines of nested ifs on error kind + attempt count + oauth-refresh
+      // state deciding whether to back off, refresh tokens, give up...
+    }
+  }
+}
+```
+
+This is wrong in a specific way: every interesting branch (the 4-clause AND for
+auto-approve, the 9-variant error-kind dispatch, the backoff math) is locked
+inside the I/O loop. To test it you'd have to mock the entire PrHost, fake the
+PG cache, fake the `gh` CLI, run the daemon in a vitest worker, and assert
+behavior at the I/O boundary. You won't write those tests; nobody does.
+
+## The pattern
+
+**Pull every interesting branch into a pure `decideX()` function. The daemon
+becomes a thin shim that calls `decideX()` and dispatches the result.**
+
+```ts
+// In lib/pr-host/auto-review-decision-types.ts — pure, ~150 LOC:
+export function decideAutoReview(
+  pr: Pr,
+  settings: AutoReviewSettings,
+): AutoReviewDecision {
+  // 30 lines of nested ifs, but they return discriminated unions
+  // instead of doing I/O.
+}
+
+// In lib/pr-host/retry-policy-types.ts — pure, ~150 LOC:
+export function decideRetry(
+  error: PrHostError,
+  ctx: RetryContext,
+  config: RetryPolicyConfig = DEFAULT_RETRY_POLICY,
+): RetryDecision {
+  // 20 lines of nested ifs, returning discriminated unions.
+}
+
+// In lib/pr-host/poll-daemon.ts — runtime, ~50 LOC:
+async function pollLoop() {
+  while (running) {
+    try {
+      const prs = await prHost.listOpenPrs(...);
+      for (const pr of prs.data) {
+        const decision = decideAutoReview(pr, settings);
+        switch (decision.kind) {
+          case 'skip': continue;
+          case 'approve': await prHost.postReview({ ... }); break;
+          case 'approve_and_merge': await prHost.postReview({ ... }); await prHost.merge({ ... }); break;
+        }
+      }
+    } catch (e) {
+      const retry = decideRetry(e, retryCtx);
+      switch (retry.kind) {
+        case 'wait': await delay(retry.delay_ms); break;
+        case 'oauth_refresh_then_retry': await refreshToken(); break;
+        case 'give_up': return done(retry.reason);
+        case 'alert_user': await surfaceBanner(retry.reason); return;
+      }
+    }
+  }
+}
+```
+
+The daemon collapses to "call decideX, dispatch on the discriminated union." It
+**cannot have a logic bug** — every condition that could go wrong was deposited
+into `decideX()`, which has 100% test coverage at every input permutation.
+
+## What you give up + why it's fine
+
+**You give up** the ability to peek at I/O state mid-decision. If `decideRetry`
+wants to know "is this PR currently in a pending CI run?" it can't ask GitHub
+directly — the caller has to pass that in. Result: `decideX` functions take
+more args than they would if they were impure.
+
+**Why it's fine:** the daemon already had to fetch that state (otherwise it
+couldn't decide). Pulling the fetch out to the daemon and passing the result in
+just makes the decision's data dependencies explicit. The next reader of
+`decideRetry` sees exactly what it needs to make a decision; the next reader of
+the impure version had to spelunk through the daemon to figure out what state
+got read where.
+
+## Test surface ratio
+
+Three concrete numbers from this session's pr-host modules:
+
+| Module                            | LOC | Test LOC | Test count | Run time |
+| --------------------------------- | --- | -------- | ---------- | -------- |
+| `auto-review-decision-types.ts`   | 218 | 240      | 27         | 12ms     |
+| `retry-policy-types.ts`           | 196 | 215      | 25         | 13ms     |
+| `harness-feature-pr-row-types.ts` | 232 | 247      | 25         | 12ms     |
+
+For each, the test file is roughly the same size as the source file and runs in
+\~10ms. The daemon that consumes them needs **integration tests** but not
+**unit tests** — every interesting branch is already covered by the pure module
+tests. The integration tests only verify "I call decideX, then I actually
+dispatch the side effect correctly," which is mostly a single mock + one
+assertion per case.
+
+## When to apply this
+
+Whenever you find yourself writing a daemon with more than \~3 branches at any
+decision point, suspect the pattern applies. Specific smells:
+
+* A `for` loop with nested `if/else` chains for "should I fire this side effect."
+* A `catch` block with `error.code === 'X' && attempt < N && !refreshed` shaped checks.
+* A "main loop" function over 100 LOC with comments like `// auto-approve gate`.
+* Logic you can describe in plain English ("approve if X and Y and Z, unless W")
+  but you don't have a unit test for.
+
+When you don't see the smells, don't force it — a function that does one thing
+once doesn't benefit from being split into "decide + do."
+
+## Cross-call coherence
+
+A bonus the pattern enables: **multiple call-sites consume the same `decideX()`**
+and they can't drift. The auto-review gate is consumed by:
+
+1. The poll daemon (fires the side effect).
+2. The PRs tab UI (renders "would auto-approve if you trusted @alice").
+3. The audit-log replay tool (re-decides historical gate outcomes).
+
+If those three had each re-implemented the 4-clause AND, drift would be
+inevitable. They all import `decideAutoReview` and `wouldFireIfTrusted` from
+the same module. The UI hint cannot lie about what the daemon would do.
+
+## See also
+
+* `packages/operator-core/lib/pr-host/auto-review-decision-types.ts` — the
+  canonical example. 27 tests cover every (settings × pr-state × review-state)
+  permutation.
+* `packages/operator-core/lib/pr-host/retry-policy-types.ts` — the
+  same pattern applied to backoff math.
+* `packages/operator-core/lib/harness/feature-claim-types.ts` — `arbitrateClaims()`
+  for distributed orchestration.
+* [`types-first-from-design-memo`](/internal/docs/agent-insights/types-first-from-design-memo/)
+  — sister pattern: ship the types ahead of the runtime.
+* [`forward-defined-registry-entries`](/internal/docs/agent-insights/forward-defined-registry-entries/)
+  — sister pattern for registrations.
+
+A good `decideX` function: takes data, returns a discriminated union, has no
+async, has no side effects, has tests that exercise every variant. If your
+function fails any of those, push the impurity further out into the runtime.

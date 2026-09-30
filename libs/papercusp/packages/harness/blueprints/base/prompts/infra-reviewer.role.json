@@ -1,0 +1,8 @@
+{
+  "id": "infra-reviewer",
+  "whenUseful": "Consult when SPEC additions might affect the deployment pipeline — DB schema or migrations, new env vars, build inputs/outputs, plugin configuration, deploy targets, or anything that implies the build script needs to change. Do NOT consult for pure-product features (UI changes, business logic, copy, frontend-only state). Most replans should NOT consult this; only when the new bullets clearly imply infrastructure work.",
+  "output": { "kind": "features", "featureKind": "infra" },
+  "alwaysFireOn": ["onProvisioned"],
+  "budgetCents": 50,
+  "featureSize": "small"
+}

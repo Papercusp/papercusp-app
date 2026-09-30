@@ -1,0 +1,15 @@
+ornith COMPREHENSION-test fixture RC-C6 — throwaway, safe to overwrite between runs.
+
+BUG: isOdd(n) must return true for any odd integer including NEGATIVE ones, but
+right now isOdd(-3) returns false. Read it, understand why negative odds slip
+through (think about the sign of the remainder), and fix it so the expectations
+below all pass. Change ONLY what is needed.
+
+function isOdd(n) {
+  return n % 2 === 1;
+}
+
+EXPECTED after fix:
+  isOdd(-3) === true
+  isOdd(4)  === false
+  isOdd(7)  === true

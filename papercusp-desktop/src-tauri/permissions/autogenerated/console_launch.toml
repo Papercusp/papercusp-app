@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-console-launch"
+description = "Enables the console_launch command without any pre-configured scope."
+commands.allow = ["console_launch"]
+
+[[permission]]
+identifier = "deny-console-launch"
+description = "Denies the console_launch command without any pre-configured scope."
+commands.deny = ["console_launch"]

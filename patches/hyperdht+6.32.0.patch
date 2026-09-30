@@ -1,0 +1,264 @@
+diff --git a/node_modules/hyperdht/lib/connect.js b/node_modules/hyperdht/lib/connect.js
+index 86afb4eb582bad55f4b9bafba9c035a2882d1e40..8840641a89f321dbcb6e59a9063a0e5c79687576 100644
+--- a/node_modules/hyperdht/lib/connect.js
++++ b/node_modules/hyperdht/lib/connect.js
+@@ -217,32 +217,149 @@ async function holepunch(c, opts) {
+ 
+   const relayed = diffAddress(serverAddress, relayAddress)
+ 
++  // WI-5980: record WHICH BRANCH resolved the data-path address, and what
++  // candidates it had to choose from.
++  //
++  // WHAT `serverAddress` IS — trace the binding, not the name. This local comes
++  // from `c.connect`, i.e. the value destructured from the router.peerHandshake
++  // REPLY (:444, stamped at :489). It is NOT `c.serverAddress`, the inbound-packet
++  // observation set in firewall() at :139-140 — two different variables sharing a
++  // name, and c.serverAddress is read at exactly one place (:535) and never
++  // reaches this path. Getting that wrong once already produced a published-then-
++  // retracted root cause; check the assignment before citing this field.
++  //
++  // Per router.js:75-76 (`serverAddress: hs.peerAddress || to`) it has two very
++  // different meanings depending on the branch:
++  //   relayed=false (hs.peerAddress === null, i.e. we queried the server itself,
++  //     router.js:104-105): serverAddress = `to` = the server's own announced DHT
++  //     address, which dht-rpc/index.js:201-214 reads off the BOUND serverSocket
++  //     behind an equality guard that refuses to publish unless the NAT-observed
++  //     reflexive port equals the bound port. That is a guarded DECLARATION of a
++  //     real listener — dialing it is legitimate.
++  //   relayed=true (hs.peerAddress set): serverAddress = the value a RELAY node
++  //     stamped at router.js:165 as `peerAddress: req.from` — the server's source
++  //     address as observed BY THAT RELAY. THIS is the branch that dials an
++  //     address the peer does not serve UDX on, and it is 100% of the observed
++  //     failures (317/317 dead records). NO NAT IS INVOLVED — see below.
++  //
++  // WHY THAT OBSERVED SOURCE IS A DEAD ADDRESS — CORRECTED 2026-07-26 (WI-5980).
++  // The text here previously said we dial the peer's DHT clientSocket, "bound (so
++  // no ICMP refusal — the dial just hangs)". BOTH HALVES WERE WRONG, and the way
++  // they were wrong is worth keeping on the record:
++  //   - MEASURED by raw UDP probe from inside a rig frame: the dialed port answers
++  //     ECONNREFUSED (ICMP port-unreachable) — NOTHING IS BOUND THERE. The peer's
++  //     clientSocket IS bound, and was never dialed once across 50 distinct dead
++  //     ports, so it is not the clientSocket either.
++  //   - "bound" had been INFERRED from the surfaced 'connection timed out'. That
++  //     inference is invalid: UDX does not act on ICMP, it retransmits and expires
++  //     (rtoCount~7, retransmits~10, death at ~13s), so a timeout is exactly what
++  //     an UNBOUND destination looks like through this transport. Probe the port
++  //     directly before concluding something is listening on it.
++  //
++  // WHAT THE ADDRESS ACTUALLY IS: a SocketPool transient. socket-pool.js:115
++  // createSocket() + :121 bind(0) mints a FRESH ephemeral port per SocketRef;
++  // holepuncher.js acquires one at :14/:108/:273; `reusable` defaults false
++  // (socket-pool.js:113) so _close (:158-180) closes it once idle + unreferenced.
++  // The relay observes that per-attempt socket and router.js:165 stamps it as
++  // `peerAddress: req.from`. Hence a DIFFERENT dialed port on every attempt — 50
++  // distinct across 94 dead records here, 111 across 221 connections on a second
++  // independent corpus — and never one the peer still holds.
++  //
++  // AND THE REAL LISTENER WAS RIGHT THERE: connect.js:483 builds addresses4 from
++  // localAddresses(c.dht.io.serverSocket) — the genuine UDX listener, invariant at
++  // a single port in both directions. It is NOT discarded by getFirstRemoteAddress:
++  // that runs only at :292, inside the branch that marks udxPunchPath 'open'
++  // (:308), and these connections do not take it (they are 'holepunch', :317 —
++  // which is also why udxAddressFromFallback is structurally ABSENT rather than
++  // false; do not read that absence as a value). What ACTUALLY discarded the real
++  // listener is the LAN shortcut at :330, which required client and server to be
++  // the SAME host — so two distinct hosts on one private /24 never qualified, and
++  // the branch only ever helped loopback. Broadened to a same-/24 test, restricted
++  // to non-routable space; see samePrivateIPv4Subnet24 below.
++  // Note udxAddresses4AllBogon is false for an EMPTY array by construction (it
++  // requires length > 0), and c.lan gates whether localAddrs are included at all,
++  // so read udxAddresses4's LENGTH alongside the flag.
++  // None of this is visible downstream unless the candidates AND their per-entry
++  // bogon verdicts are recorded, which is what this does.
++  //
++  // Non-enumerable + configurable, exactly like the WI-5863 fields below, so this
++  // cannot perturb any existing JSON.stringify/deepEqual of the stream object.
++  const es = c.encryptedSocket
++  const mark = (k, v) => {
++    if (es) Object.defineProperty(es, k, { value: v, configurable: true })
++  }
++  const candidates = Array.isArray(payload.addresses4) ? payload.addresses4 : []
++  mark('udxAddresses4', candidates.map(a => ({ host: a.host, port: a.port, bogon: isBogon(a.host) })))
++  mark('udxAddresses4AllBogon', candidates.length > 0 && candidates.every(a => isBogon(a.host)))
++  mark('udxRemoteHolepunchable', remoteHolepunchable)
++  // Emit firewall as a SELF-DESCRIBING LABEL, never the raw enum ordinal.
++  // FIREWALL = { UNKNOWN:0, OPEN:1, CONSISTENT:2, RANDOM:3 } — so the raw value
++  // renders as `firewall: 0` for UNKNOWN, which reads as falsy/none/"no firewall"
++  // and is the EXACT INVERSION of the truth (OPEN is 1, not 0). This field is
++  // load-bearing for the WI-5980 verdict: UNKNOWN is precisely the firewalled
++  // case that forces DHT egress onto the clientSocket. A reader who treats 0 as
++  // "not firewalled" concludes the opposite of what the data says.
++  // 'UNKNOWN(0)' cannot be misread, and cannot be confused with an ABSENT field
++  // (a stale bundle omits the key entirely rather than emitting a falsy value).
++  const FIREWALL_LABEL = { 0: 'UNKNOWN', 1: 'OPEN', 2: 'CONSISTENT', 3: 'RANDOM' }
++  const fw = payload.firewall
++  mark('udxFirewall', `${FIREWALL_LABEL[fw] ?? 'UNRECOGNIZED'}(${fw})`)
++
+   if (payload.firewall === FIREWALL.OPEN || (relayed && !remoteHolepunchable)) {
+     const addr = getFirstRemoteAddress(payload.addresses4, serverAddress)
+     if (addr) {
+       const socket = c.dht.socket
+       c.dht.stats.punches.open++
++      // The UNVERIFIED fast path: onsocket() fires below with no round-trip
++      // confirmation that `addr` is reachable. `addr === serverAddress` is an
++      // exact identity test for "fell through to the router-reply address"
++      // (getFirstRemoteAddress returns that very object), which distinguishes
++      // "used a real advertised address" from "used the peerHandshake reply".
++      // Combined with udxRelayed it separates the two failure modes: fallback +
++      // relayed=true means we dialed a RELAY-OBSERVED source port (router.js:165
++      // `req.from`) — the peer's DHT clientSocket, bound but not serving UDX;
++      // fallback + relayed=false means we dialed the server's guarded bound-port
++      // declaration, where a failure indicates staleness, not misresolution.
++      // Cross-check udxAddresses4: on a private overlay it should CONTAIN the
++      // peer's real listener as a bogon entry we skipped — that is the smoking gun.
++      mark('udxPunchPath', 'open')
++      mark('udxAddressFromFallback', addr === serverAddress)
++      mark('udxPunchStats', { ...c.dht.stats.punches })
+       c.onsocket(socket, addr.port, addr.host)
+       return
+     }
+     // TODO: check all addresses also obvs
+   }
+ 
++  mark('udxPunchPath', 'holepunch')
++
+   const onabort = () => {
+     c.session.destroy()
+     maybeDestroyEncryptedSocket(c, HOLEPUNCH_ABORTED())
+   }
+ 
+   if (c.firewall === FIREWALL.OPEN) {
++    mark('udxPunchPath', 'passive')
+     c.passiveConnectTimeout = setTimeout(onabort, 10000)
+     return
+   }
+ 
+   // TODO: would be better to just try local addrs in the background whilst continuing with other strategies...
+-  if (c.lan && relayed && clientAddress.host === serverAddress.host) {
++  // WI-5980: host-EQUALITY was too strict. Two DISTINCT hosts on one private /24
++  // (e.g. 10.99.0.11 -> 10.99.0.12) is the ordinary container/overlay topology, and
++  // this shortcut is the only path that dials the peer's REAL advertised listener
++  // instead of the transient punch-socket address (see the corrected note above).
++  // Strictly WIDENING: the original equality test is kept as a disjunct, so no case
++  // that fires today can regress. Deliberately /24-only — NOT "any private address",
++  // which would be a broader and currently unevidenced change.
++  if (c.lan && relayed && (clientAddress.host === serverAddress.host || samePrivateIPv4Subnet24(clientAddress.host, serverAddress.host))) {
+     const serverAddresses = payload.addresses4.filter(onlyNonReserved)
+ 
+     if (serverAddresses.length > 0) {
++      // This branch never constructs a Holepuncher. Mark it before the ping so
++      // both the successful LAN shortcut and its ping-failure return are
++      // distinguishable from a real punch attempt.
++      mark('udxPunchPath', 'lan')
+       const myAddresses = Holepuncher.localAddresses(c.dht.io.serverSocket)
+       const addr = Holepuncher.matchAddress(myAddresses, serverAddresses) || serverAddresses[0]
+ 
+@@ -259,10 +376,12 @@ async function holepunch(c, opts) {
+   }
+ 
+   if (!remoteHolepunchable) {
++    mark('udxPunchPath', 'cannot-holepunch')
+     maybeDestroyEncryptedSocket(c, CANNOT_HOLEPUNCH())
+     return
+   }
+ 
++  mark('udxPunchPath', 'holepunch-real')
+   c.puncher = new Holepuncher(c.dht, c.session, true, payload.firewall)
+ 
+   c.puncher.onconnect = c.onsocket
+@@ -477,6 +596,18 @@ async function connectThroughNode(c, address, socket) {
+     payload
+   }
+ 
++  // WI-5863: surface the DHT signalling outcome onto the returned encryptedSocket
++  // (the object hyperswarm hands back to app code as the 'connection' socket) —
++  // these three were destructured above but only ever lived on the internal `c`
++  // state machine, so app code could never distinguish "punch believed to have
++  // succeeded but the data path is dead" (relayed:false) from "the relay path
++  // itself is dead" (relayed:true). Both explain a connected-with-zero-bytes
++  // socket; only this tells them apart. Non-enumerable so it can't perturb any
++  // existing JSON.stringify/deepEqual of the stream object elsewhere.
++  Object.defineProperty(c.encryptedSocket, 'udxRelayed', { value: relayed, configurable: true })
++  Object.defineProperty(c.encryptedSocket, 'udxServerAddress', { value: serverAddress, configurable: true })
++  Object.defineProperty(c.encryptedSocket, 'udxClientAddress', { value: clientAddress, configurable: true })
++
+   c.payload = new SecurePayload(hs.holepunchSecret)
+ 
+   c.onsocket = function (socket, port, host) {
+@@ -863,6 +994,38 @@ function onlyNonReserved(addr) {
+   return !isReserved(addr.host)
+ }
+ 
++// WI-5980: same-/24 test for the LAN shortcut at the holepunch site above.
++// TWO conditions, both deliberate:
++//   1. a literal IPv4 /24 prefix match — NOT a bare "are both private?" test, which
++//      would fire between hosts that merely happen to be private without sharing a
++//      link, and which the evidence for this change does not cover;
++//   2. BOTH hosts RFC1918-private. This is NARROWER than a bare /24 match, on purpose.
++//      The branch this gates ABORTS the connection when its ping fails (it calls
++//      maybeDestroyEncryptedSocket and returns rather than falling through to the
++//      holepunch), so any pair admitted here that is NOT actually on one link loses
++//      a connection that holepunching would otherwise have rescued. Two peers behind
++//      one CGNAT /24 are exactly that hazard: same prefix, no direct path. Restricting
++//      to RFC1918 space keeps the shortcut to topologies where a shared /24 does
++//      imply a shared link — which is the evidenced case (10.99.0.11 <-> 10.99.0.12).
++// Non-IPv4 / malformed input returns false, so the caller's host-equality disjunct
++// stays the only path for IPv6 and this change remains strictly widening.
++function samePrivateIPv4Subnet24(a, b) {
++  if (typeof a !== 'string' || typeof b !== 'string') return false
++
++  const x = a.split('.')
++  const y = b.split('.')
++  if (x.length !== 4 || y.length !== 4) return false
++
++  for (let i = 0; i < 4; i++) {
++    if (!/^\d{1,3}$/.test(x[i]) || !/^\d{1,3}$/.test(y[i])) return false
++    if (Number(x[i]) > 255 || Number(y[i]) > 255) return false
++  }
++
++  if (x[0] !== y[0] || x[1] !== y[1] || x[2] !== y[2]) return false
++
++  return x[0] === '10' || (x[0] === '172' && Number(x[1]) >= 16 && Number(x[1]) <= 31) || (x[0] === '192' && x[1] === '168')
++}
++
+ function isRelay(relaySocket, socket, port, host) {
+   const stream = relaySocket.rawStream
+   if (!stream) return false
+diff --git a/node_modules/hyperdht/lib/server.js b/node_modules/hyperdht/lib/server.js
+index 0433c8a..58de4b7 100644
+--- a/node_modules/hyperdht/lib/server.js
++++ b/node_modules/hyperdht/lib/server.js
+@@ -334,6 +334,16 @@ module.exports = class Server extends EventEmitter {
+             keepAlive: this.dht.connectionKeepAlive
+           })
+ 
++          // WI-5863 (inbound half of the connect.js:477 instrumentation): the DIAL
++          // path sets udxRelayed from peerHandshake, but the ACCEPT path never did —
++          // so every connection this side accepted reported `undefined`, which any
++          // `?? false` / falsy render silently converts into "hyperdht said
++          // not-relayed". That is the absent-vs-zero trap, and it would have
++          // fabricated a confirmation of the committed relayed:false prediction.
++          // This is the DIRECT accept: rawStream was pointed at the PEER's own
++          // address from remotePayload.udx above, so it is by construction unrelayed.
++          Object.defineProperty(hs.encryptedSocket, 'udxRelayed', { value: false, configurable: true })
++
+           this.onconnection(hs.encryptedSocket)
+         }
+ 
+@@ -673,6 +683,16 @@ module.exports = class Server extends EventEmitter {
+ 
+         hs.encryptedSocket = this.createSecretStream(false, hs.rawStream, { handshake: h })
+ 
++        // WI-5863 (inbound half): the RELAYED accept — rawStream was just pointed at
++        // hs.relaySocket.rawStream's remote (the RELAY's address), not the peer's, so
++        // this connection is relayed by construction. Recording the addresses too:
++        // they are the independent ground truth if the flag and the address ever
++        // disagree (a mis-set flag, an undefined, or a wrong-object read all show up
++        // as a mismatch here).
++        Object.defineProperty(hs.encryptedSocket, 'udxRelayed', { value: true, configurable: true })
++        Object.defineProperty(hs.encryptedSocket, 'udxRelayHost', { value: remoteHost, configurable: true })
++        Object.defineProperty(hs.encryptedSocket, 'udxRelayPort', { value: remotePort, configurable: true })
++
+         this.onconnection(hs.encryptedSocket)
+       })
+ 

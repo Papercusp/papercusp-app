@@ -1,0 +1,24 @@
+-- EI-19311529270893371: pg_stat_activity caller-attribution by query text is
+-- SILENTLY BLIND to any backend owned by a role other than the current one,
+-- unless the current role has pg_read_all_stats (or is a superuser). Postgres
+-- masks other roles' `query` column as the literal string
+-- '<insufficient privilege>' rather than erroring, so a query-text filter over
+-- pg_stat_activity returns ZERO ROWS for those backends — indistinguishable
+-- from "nothing matched" rather than "you can't see this".
+--
+-- Measured live 2026-08-02 on `harness_admin` (the role dev:pg_query and the
+-- db-perf-verify tooling both connect as): 108 of 403 backends (~27%) carried
+-- query='<insufficient privilege>'. This directly broke
+-- db-performance-remediation-2026-07-26 D-012's BINDING "sample live activity
+-- by query text" caller-attribution method — 60 samples returned 0 hits for a
+-- statement pg_stat_statements proved was firing ~2.9/s the whole time,
+-- which would have produced a confidently WRONG "nothing calls this" verdict.
+--
+-- pg_read_all_stats is the purpose-built, minimal-privilege predefined role
+-- for exactly this (PG 10+): it exposes every backend's query text +
+-- pg_stat_* views without granting superuser or any DML/DDL capability. Grant
+-- it to harness_admin (the role every su/agent DB tool connects as) so
+-- pg_stat_activity-based caller attribution stops being silently blind.
+--
+-- Idempotent — GRANT of a role membership is a no-op if already held.
+GRANT pg_read_all_stats TO harness_admin;

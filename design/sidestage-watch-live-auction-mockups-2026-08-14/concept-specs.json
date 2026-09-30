@@ -1,0 +1,686 @@
+{
+  "artifact": {
+    "title": "SideStage Watch — conditional current-offer and room-context modules",
+    "date": "2026-08-14",
+    "target": "React web Watch tab",
+    "ecosystem": "react-tailwind",
+    "sourceDecision": "sidestage-watch-live-auction-mockups-2026-08-14#D-003 + #D-004",
+    "validation": {
+      "schema": "UI IR v0.1",
+      "validated": 2,
+      "linted": 2,
+      "errors": 0,
+      "warnings": 0
+    },
+    "registrySearch": {
+      "ecosystem": "react-tailwind",
+      "queries": [
+        "conditional product offer card live auction countdown current bid",
+        "bid activity feed leader amount input primary action",
+        "auction settling sold state status banner",
+        "tabbed content chat thread message composer",
+        "product details item condition shipping returns auction terms",
+        "seller profile reputation rating verified follow shop",
+        "tabs",
+        "avatar profile",
+        "form input",
+        "card"
+      ],
+      "matches": [
+        "action.primary",
+        "action.secondary",
+        "feedback.banner"
+      ],
+      "missingComposites": [
+        "tabs",
+        "chat thread",
+        "product details",
+        "seller profile"
+      ]
+    }
+  },
+  "module": {
+    "id": "conditional-current-offer",
+    "name": "Conditional current offer",
+    "thesis": "Keep one predictable right-hand offer slot and let its contents evolve with the sale instead of inserting a second auction surface below the stream.",
+    "states": [
+      "Now selling",
+      "Live auction",
+      "Settling",
+      "Sold"
+    ],
+    "implementationNotes": [
+      "The no-auction state preserves the existing Now Selling product card and Hold item action.",
+      "The live state transforms the same slot in place with the ring countdown, current bid, compact bid feed, leader, amount input, and Place bid action.",
+      "Settling disables bid controls while the server confirms the winner.",
+      "Sold keeps the final result and winner in the same slot.",
+      "No separate Live auction block appears below the video."
+    ],
+    "ir": {
+      "irVersion": "0.1",
+      "surface": "sidestage-watch-conditional-current-offer",
+      "ecosystem": "react-tailwind",
+      "layout": {
+        "kind": "stack",
+        "direction": "vertical",
+        "gap": {
+          "token": "--ss-gap"
+        },
+        "children": [
+          {
+            "kind": "header",
+            "title": {
+              "key": "offer.module.title",
+              "default": "Current offer"
+            },
+            "copy": {
+              "key": "offer.module.subtitle",
+              "default": "One right-hand slot that keeps the product offer stable as an auction starts, settles, and sells."
+            },
+            "a11y": {
+              "role": "banner"
+            }
+          },
+          {
+            "kind": "card",
+            "padding": {
+              "token": "--ss-pad"
+            },
+            "tokens": {
+              "uses": [
+                "--surface",
+                "--border",
+                "--shadow-card"
+              ]
+            },
+            "children": [
+              {
+                "kind": "stack",
+                "direction": "horizontal",
+                "align": "center",
+                "justify": "space-between",
+                "gap": {
+                  "token": "--ss-gap"
+                },
+                "responsive": {
+                  "viewport.narrow": {
+                    "direction": "vertical",
+                    "align": "stretch"
+                  }
+                },
+                "children": [
+                  {
+                    "kind": "progress",
+                    "label": {
+                      "key": "offer.live.timer",
+                      "default": "18 seconds left"
+                    },
+                    "binding": {
+                      "slot": "remainingFraction",
+                      "shape": "AuctionCountdown"
+                    },
+                    "a11y": {
+                      "role": "timer",
+                      "ariaLabel": {
+                        "key": "offer.live.timer_label",
+                        "default": "Auction time remaining"
+                      },
+                      "ariaLive": "off"
+                    }
+                  },
+                  {
+                    "kind": "stack",
+                    "direction": "vertical",
+                    "align": "start",
+                    "children": [
+                      {
+                        "kind": "text",
+                        "copy": {
+                          "key": "offer.live.current_bid",
+                          "default": "Current bid"
+                        }
+                      },
+                      {
+                        "kind": "heading",
+                        "copy": {
+                          "key": "offer.live.price",
+                          "default": "$142.00"
+                        },
+                        "binding": {
+                          "slot": "currentPrice",
+                          "shape": "Money"
+                        }
+                      },
+                      {
+                        "kind": "badge",
+                        "copy": {
+                          "key": "offer.live.call",
+                          "default": "Going twice"
+                        },
+                        "binding": {
+                          "slot": "closingCall",
+                          "shape": "AuctionClosingCall"
+                        },
+                        "a11y": {
+                          "role": "status",
+                          "ariaLive": "polite"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "list",
+                    "label": {
+                      "key": "offer.live.recent_bids",
+                      "default": "Recent bids"
+                    },
+                    "binding": {
+                      "slot": "recentBids",
+                      "repeats": true,
+                      "shape": "AuctionBid"
+                    },
+                    "item": {
+                      "kind": "stack",
+                      "direction": "horizontal",
+                      "justify": "space-between",
+                      "children": [
+                        {
+                          "kind": "text",
+                          "binding": {
+                            "slot": "bidderDisplayName",
+                            "shape": "Text"
+                          }
+                        },
+                        {
+                          "kind": "text",
+                          "binding": {
+                            "slot": "bidAmount",
+                            "shape": "Money"
+                          }
+                        }
+                      ]
+                    },
+                    "emptyState": {
+                      "kind": "text",
+                      "copy": {
+                        "key": "offer.live.no_bids",
+                        "default": "No bids yet"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "kind": "banner",
+                "copy": {
+                  "key": "offer.live.leader",
+                  "default": "You’re leading at $142.00."
+                },
+                "binding": {
+                  "slot": "leaderMessage",
+                  "shape": "AuctionLeaderMessage"
+                },
+                "a11y": {
+                  "role": "status",
+                  "ariaLive": "polite"
+                }
+              },
+              {
+                "kind": "form",
+                "direction": "horizontal",
+                "responsive": {
+                  "viewport.narrow": {
+                    "direction": "vertical"
+                  }
+                },
+                "children": [
+                  {
+                    "kind": "input",
+                    "label": {
+                      "key": "offer.live.bid_label",
+                      "default": "Your bid"
+                    },
+                    "placeholder": {
+                      "key": "offer.live.bid_placeholder",
+                      "default": "147.00"
+                    },
+                    "binding": {
+                      "slot": "bidDraft",
+                      "shape": "CurrencyInput"
+                    },
+                    "interactions": [
+                      "changeBid"
+                    ],
+                    "a11y": {
+                      "role": "textbox",
+                      "ariaLabel": {
+                        "key": "offer.live.bid_input_label",
+                        "default": "Bid amount in dollars"
+                      },
+                      "ariaDescribedBy": "current-offer-bid-help"
+                    }
+                  },
+                  {
+                    "kind": "button",
+                    "label": {
+                      "key": "offer.live.place_bid",
+                      "default": "Place bid"
+                    },
+                    "interactions": [
+                      "submitBid"
+                    ],
+                    "a11y": {
+                      "role": "button",
+                      "ariaLabel": {
+                        "key": "offer.live.place_bid_label",
+                        "default": "Place your bid"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "tokens": {
+        "uses": [
+          "--bg",
+          "--surface",
+          "--surface-soft",
+          "--text",
+          "--muted",
+          "--brand-red",
+          "--brand-yellow",
+          "--success",
+          "--warning",
+          "--danger",
+          "--border",
+          "--ss-gap",
+          "--ss-pad",
+          "--shadow-card"
+        ]
+      },
+      "states": {
+        "empty": {
+          "kind": "card",
+          "children": [
+            {
+              "kind": "header",
+              "title": {
+                "key": "offer.empty.title",
+                "default": "Now Selling"
+              },
+              "copy": {
+                "key": "offer.empty.product",
+                "default": "Stage Varsity Jacket"
+              }
+            },
+            {
+              "kind": "badge",
+              "copy": {
+                "key": "offer.empty.stock",
+                "default": "6 available"
+              },
+              "binding": {
+                "slot": "availableQuantity",
+                "shape": "InventoryCount"
+              }
+            },
+            {
+              "kind": "heading",
+              "copy": {
+                "key": "offer.empty.price",
+                "default": "$96.00"
+              },
+              "binding": {
+                "slot": "unitPrice",
+                "shape": "Money"
+              }
+            },
+            {
+              "kind": "button",
+              "label": {
+                "key": "offer.empty.hold",
+                "default": "Hold item"
+              },
+              "interactions": [
+                "holdItem"
+              ],
+              "a11y": {
+                "role": "button",
+                "ariaLabel": {
+                  "key": "offer.empty.hold_label",
+                  "default": "Hold the Stage Varsity Jacket"
+                }
+              }
+            }
+          ],
+          "a11y": {
+            "role": "region",
+            "ariaLabel": {
+              "key": "offer.empty.region",
+              "default": "Now selling offer"
+            }
+          }
+        },
+        "live": {
+          "kind": "banner",
+          "copy": {
+            "key": "offer.live.state",
+            "default": "Auction live. Bid controls are active."
+          },
+          "a11y": {
+            "role": "status",
+            "ariaLive": "polite"
+          }
+        },
+        "settling": {
+          "kind": "banner",
+          "copy": {
+            "key": "offer.settling.state",
+            "default": "Bidding closed. Confirming the winner from the server."
+          },
+          "a11y": {
+            "role": "status",
+            "ariaLive": "polite"
+          }
+        },
+        "closed": {
+          "kind": "banner",
+          "copy": {
+            "key": "offer.closed.state",
+            "default": "Sold to Morgan for $142.00."
+          },
+          "a11y": {
+            "role": "status",
+            "ariaLive": "polite"
+          }
+        }
+      },
+      "a11y": {
+        "landmark": "region",
+        "headingLevel": 3
+      }
+    }
+  },
+  "roomTabs": {
+    "id": "watch-room-context-tabs",
+    "name": "Watch room context tabs",
+    "sourceDecision": "sidestage-watch-live-auction-mockups-2026-08-14#D-004",
+    "thesis": "Let viewers move between conversation, item context, and seller trust without moving or obscuring the current-offer module.",
+    "registryReuse": [
+      "action.primary",
+      "action.secondary",
+      "feedback.banner"
+    ],
+    "states": [
+      "Chat",
+      "Details",
+      "Seller"
+    ],
+    "implementationNotes": [
+      "The existing tabs become one ARIA tablist with one stable content panel directly below the video.",
+      "Chat is the default state and includes recent messages plus a composer preview.",
+      "Details carries condition, measurements, materials, fulfillment, story, and auction terms.",
+      "Seller carries identity, verification, reputation, fulfillment performance, follow, and shop actions.",
+      "The right-hand current-offer module remains visible and independent while tabs switch.",
+      "Arrow keys plus Home and End move and activate tabs; selected state is expressed with aria-selected."
+    ],
+    "ir": {
+      "irVersion": "0.1",
+      "surface": "sidestage-watch-room-context",
+      "ecosystem": "react-tailwind",
+      "layout": {
+        "kind": "stack",
+        "direction": "vertical",
+        "gap": {
+          "token": "--ss-gap"
+        },
+        "children": [
+          {
+            "kind": "header",
+            "title": {
+              "key": "room.tabs.title",
+              "default": "Room information"
+            },
+            "copy": {
+              "key": "room.tabs.subtitle",
+              "default": "Chat, item details, and seller trust stay below the live video while the current offer remains visible."
+            },
+            "a11y": {
+              "role": "banner"
+            }
+          },
+          {
+            "kind": "stack",
+            "direction": "horizontal",
+            "gap": {
+              "token": "--ss-gap"
+            },
+            "responsive": {
+              "viewport.narrow": {
+                "align": "stretch"
+              }
+            },
+            "children": [
+              {
+                "kind": "button",
+                "label": {
+                  "key": "room.tabs.chat",
+                  "default": "Chat · 126"
+                },
+                "interactions": [
+                  "showChat"
+                ],
+                "a11y": {
+                  "role": "tab",
+                  "ariaLabel": {
+                    "key": "room.tabs.chat_label",
+                    "default": "Chat, 126 messages"
+                  }
+                }
+              },
+              {
+                "kind": "button",
+                "label": {
+                  "key": "room.tabs.details",
+                  "default": "Details"
+                },
+                "interactions": [
+                  "showDetails"
+                ],
+                "a11y": {
+                  "role": "tab"
+                }
+              },
+              {
+                "kind": "button",
+                "label": {
+                  "key": "room.tabs.seller",
+                  "default": "Seller"
+                },
+                "interactions": [
+                  "showSeller"
+                ],
+                "a11y": {
+                  "role": "tab"
+                }
+              }
+            ]
+          },
+          {
+            "kind": "card",
+            "padding": {
+              "token": "--ss-pad"
+            },
+            "tokens": {
+              "uses": [
+                "--surface",
+                "--surface-soft",
+                "--border",
+                "--shadow-card"
+              ]
+            },
+            "children": [
+              {
+                "kind": "header",
+                "title": {
+                  "key": "room.panel.title",
+                  "default": "Live chat"
+                },
+                "copy": {
+                  "key": "room.panel.meta",
+                  "default": "84 watching"
+                }
+              },
+              {
+                "kind": "list",
+                "label": {
+                  "key": "room.chat.recent",
+                  "default": "Recent live chat messages"
+                },
+                "binding": {
+                  "slot": "recentMessages",
+                  "repeats": true,
+                  "shape": "RoomMessage"
+                },
+                "item": {
+                  "kind": "stack",
+                  "direction": "vertical",
+                  "children": [
+                    {
+                      "kind": "text",
+                      "binding": {
+                        "slot": "authorDisplayName",
+                        "shape": "Text"
+                      }
+                    },
+                    {
+                      "kind": "text",
+                      "binding": {
+                        "slot": "messageBody",
+                        "shape": "Text"
+                      }
+                    }
+                  ]
+                },
+                "emptyState": {
+                  "kind": "text",
+                  "copy": {
+                    "key": "room.chat.empty",
+                    "default": "Be the first to ask about this item."
+                  }
+                }
+              },
+              {
+                "kind": "form",
+                "direction": "horizontal",
+                "responsive": {
+                  "viewport.narrow": {
+                    "direction": "vertical"
+                  }
+                },
+                "children": [
+                  {
+                    "kind": "input",
+                    "label": {
+                      "key": "room.chat.message_label",
+                      "default": "Message the room"
+                    },
+                    "placeholder": {
+                      "key": "room.chat.message_placeholder",
+                      "default": "Ask about fit, condition, or styling…"
+                    },
+                    "binding": {
+                      "slot": "messageDraft",
+                      "shape": "TextInput"
+                    },
+                    "interactions": [
+                      "changeMessage"
+                    ],
+                    "a11y": {
+                      "role": "textbox",
+                      "ariaLabel": {
+                        "key": "room.chat.message_aria",
+                        "default": "Message the room"
+                      }
+                    }
+                  },
+                  {
+                    "kind": "button",
+                    "label": {
+                      "key": "room.chat.send",
+                      "default": "Send"
+                    },
+                    "interactions": [
+                      "sendMessage"
+                    ],
+                    "a11y": {
+                      "role": "button"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "tokens": {
+        "uses": [
+          "--bg",
+          "--surface",
+          "--surface-soft",
+          "--text",
+          "--muted",
+          "--brand-red",
+          "--brand-yellow",
+          "--success",
+          "--border",
+          "--ss-gap",
+          "--ss-pad",
+          "--shadow-card"
+        ]
+      },
+      "states": {
+        "chat": {
+          "kind": "banner",
+          "copy": {
+            "key": "room.chat.state",
+            "default": "Live conversation and message composer are visible."
+          },
+          "a11y": {
+            "role": "status",
+            "ariaLive": "polite"
+          }
+        },
+        "details": {
+          "kind": "banner",
+          "copy": {
+            "key": "room.details.state",
+            "default": "Item condition, measurements, materials, fulfillment, story, and auction terms are visible."
+          },
+          "a11y": {
+            "role": "status",
+            "ariaLive": "polite"
+          }
+        },
+        "seller": {
+          "kind": "banner",
+          "copy": {
+            "key": "room.seller.state",
+            "default": "Seller identity, verification, reputation, fulfillment performance, and actions are visible."
+          },
+          "a11y": {
+            "role": "status",
+            "ariaLive": "polite"
+          }
+        }
+      },
+      "a11y": {
+        "landmark": "region",
+        "headingLevel": 3
+      }
+    }
+  }
+}

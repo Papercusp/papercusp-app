@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-endpoint-cancel"
+description = "Enables the endpoint_cancel command without any pre-configured scope."
+commands.allow = ["endpoint_cancel"]
+
+[[permission]]
+identifier = "deny-endpoint-cancel"
+description = "Denies the endpoint_cancel command without any pre-configured scope."
+commands.deny = ["endpoint_cancel"]

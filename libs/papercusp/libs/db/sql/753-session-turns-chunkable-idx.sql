@@ -1,0 +1,46 @@
+-- Migration 753 — partial index for the turn-chunk sync's eligibility scan
+-- (P-034 follow-on, semantic-search-fingerprint-coverage-2026-08-03).
+--
+-- WHAT IT SERVES. turn-chunk-sync.ts asks, every sweep tick: "which turns
+-- longer than the parent embed cut have no current chunks?" Freshest-first, so
+-- it wants `ORDER BY ingested_at DESC` over the ~8% of rows with
+-- `length(text) > 2000`. session_turns_ingested_idx orders correctly but covers
+-- EVERY row, so the scan walked the whole table and discarded 92% of it by
+-- filter on every tick.
+--
+-- MEASURED on the live 409,002-row table, fully caught up (i.e. the query
+-- returns ZERO work — the steady state it will be in almost always):
+--
+--   before                                        2844 ms
+--   with this index                               1045 ms
+--   with this index, sha computed once (code)      810 ms
+--   floor: same query with no sha at all           282 ms
+--
+-- Rows-removed-by-filter goes 376,962 -> 0 and the scan's buffers 434,332 ->
+-- 29,586. The residual is NOT this index's to fix: it is the cost of hashing
+-- every candidate turn's text (~157MB/tick) to compare against turn_sha. Making
+-- that free needs chunk-sync state stored ON the parent row so a partial index
+-- can exclude already-synced turns outright — a change to session_turns' schema
+-- and the hot ingest path, deliberately NOT bundled here. Filed separately.
+--
+-- ⚠ A COVERING INDEX ON THE CHUNK SIDE WAS MEASURED AND REJECTED. The obvious
+-- next move is to make the 33,279 per-tick PK probes index-only by adding
+-- `(workspace_id, source_kind, session_id, turn_idx, turn_sha)` to
+-- session_turn_chunks. It WORKS exactly as advertised — `Index Only Scan`,
+-- `Heap Fetches: 0`, per-probe 0.026ms -> 0.008ms — and it moved total
+-- execution 1045ms -> 1011ms, i.e. 3%. The probes were never the bottleneck.
+-- Do not add it on intuition; it would cost write amplification on every chunk
+-- insert to buy nothing.
+--
+-- Index-only rather than CONCURRENTLY because the migration runner wraps each
+-- file in a transaction and CREATE INDEX CONCURRENTLY cannot run inside one.
+-- The build takes a ShareLock on session_turns, blocking ingest writes for the
+-- duration; measured ~1s against 33k matching rows, which is the same tradeoff
+-- every other index on this table was added under.
+--
+-- The migration runner wraps each file in its own transaction, so this file
+-- carries NO top-level BEGIN;/COMMIT; (migration-runner contract; files >=215).
+
+CREATE INDEX IF NOT EXISTS session_turns_chunkable_idx
+  ON harness_shared.session_turns (ingested_at DESC)
+  WHERE length(text) > 2000;

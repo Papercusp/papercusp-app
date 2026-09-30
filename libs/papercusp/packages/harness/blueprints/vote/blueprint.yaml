@@ -1,0 +1,117 @@
+# The `vote` blueprint — coordination-ops-as-blueprint-primitives-2026-06-04 (P-002 / D-006).
+#
+# THE worked example: a vote IS a small orchestration — spawn diverse-lens voters
+# + an advocate → collect to quorum → confidence-weighted aggregate → gate
+# (resolve decisively / escalate the split). It is a PROGRAM-mode spine (steps +
+# gate, D-002), the additive complement to the decider model (coding/research).
+# Run by the durable coordProgramWorkflow; callable directly as `coord:vote`
+# (D-009) or fired by an event rule via the trigger (D-007).
+#
+# Trustworthiness lives in the DECLARATION, not the engine (D-010): the
+# one-voter-per-lens + advocate roster is the anti-correlated-error defense. A
+# user forks this (extends: vote) to declare THEIR decision process — different
+# lenses, a stricter gate, escalate-to-me — without code.
+id: vote
+extends: base
+version: 0.1.0
+description: >-
+  Decide between options via a diverse-lens, confidence-weighted vote: one voter
+  per lens + an advocate arguing against the lead; resolve decisively or escalate
+  a curated split to the human.
+
+# The decision work-item (rides the unified work_items table — kind discriminator).
+workItem:
+  kind: decision
+  idPrefix: VOTE
+
+# Program-mode spine (D-002): coord ops as declarative steps + a decision gate.
+spine:
+  steps:
+    # 1. Open the thread the voters post into; bind its ids for later steps.
+    - id: open-thread
+      op: coord:thread-open
+      args:
+        title: "{{ payload.question }}"
+        body: "Decision: {{ payload.question }}\nOptions: {{ payload.options }}"
+        kind: discussion
+        topics: "{{ payload.topics }}"
+      bind: thread
+    # 2. Fan out one voter per lens (diversity, D-010) + one advocate. The cost
+    #    guard caps voters at max_voters. Each agent gets the question/options +
+    #    its lens + the conversation_id to post into.
+    - id: fan-out
+      op: orchestrator:spawn-roles
+      args:
+        conversation_id: "{{ thread.conversation_id }}"
+        inject:
+          question: "{{ payload.question }}"
+          options: "{{ payload.options }}"
+        roles:
+          - { role: voter, per: "{{ payload.lenses }}", as: lens }
+          - { role: advocate, count: 1 }
+        max_voters: "{{ payload.max_voters }}"
+    # 3. Push-driven barrier: proceed once quorum posts exist (or on timeout).
+    - id: collect
+      op: coord:collect
+      args:
+        conversation_id: "{{ thread.conversation_id }}"
+        quorum: "{{ payload.quorum }}"
+        timeout_s: "{{ payload.timeout_s }}"
+      bind: collected
+    # 4. Confidence-weighted tally → winner, margin, mean_conf, advocate_veto.
+    - id: aggregate
+      op: vote:aggregate
+      args:
+        posts: "{{ collected.posts }}"
+        options: "{{ payload.options }}"
+        method: confidence-weighted
+      bind: tally
+  # The decision gate (D-006): decisive → resolve + notify the caller; otherwise a
+  # CURATED escalation (the split + the advocate's objection) — so a genuine
+  # escalation arrives pre-deliberated and the needs-human pile shrinks.
+  gate:
+    # MatchMap (@papercusp/rules) — implicit-AND of the three leaf tests
+    # (adopt-event-rules-engines D-002): decisive margin + confident + no veto.
+    - when: { "tally.margin": { gte: 0.5 }, "tally.mean_conf": { gte: 0.6 }, "tally.advocate_veto": { truthy: false } }
+      op: resolve
+      args:
+        decision: "{{ tally.winner }}"
+        summary: "Vote resolved '{{ payload.question }}' → {{ tally.winner }} (margin {{ tally.margin }}, conf {{ tally.mean_conf }})"
+    - else: true
+      op: coord:escalate
+      args:
+        severity: question
+        summary: "Vote split on: {{ payload.question }}"
+        body: "No decisive winner (margin {{ tally.margin }}, mean confidence {{ tally.mean_conf }}, advocate_veto {{ tally.advocate_veto }}). Tally: {{ tally.tally }}. Advocate objection: {{ tally.objection }}"
+
+roles:
+  - id: voter
+    description: "Evaluates the decision through ONE assigned lens; posts a structured vote."
+  - id: advocate
+    description: "Argues AGAINST the leading option; surfaces a missed failure mode."
+
+# Cost + recursion guards declared on the blueprint (D-008). The knobs default an
+# omitted payload field (a bare `coord:vote { question, options }` works).
+knobs:
+  quorum: 3
+  max_voters: 5
+  timeout_s: 300
+  budget: 50000
+  lenses: [correctness, risk, simplicity]
+
+recursion:
+  maxDepth: 2
+
+# Event-rule trigger (D-007): an event-reaction rule fires this blueprint by this
+# event key; it is ALSO directly invocable as the `coord:vote` tool (D-009).
+triggers:
+  event: coordination-op:vote
+
+# Dependencies (official-blueprints-cupboard-publish D-002): derived from the
+# blueprint-local voter/advocate personas (scripts/derive-blueprint-deps.mjs) —
+# voters post structured votes into the thread; the gate escalates a split.
+dependencies:
+  tools:
+    - coord:escalate
+    - coord:thread-post
+  plugins: []

@@ -1,0 +1,83 @@
+# The dead-target routine reaper — parking routines whose tree is gone
+URL: /internal/docs/agent-insights/dead-target-routine-reaper
+
+How the dead-target reaper decides a pot's tree is structurally unusable and parks its durable routines — the two kill switches, the fail-closed ladder, the evidence stamp, how to unpark, and the selection-vs-classification trap that makes a live control prove less than it looks.
+
+A durable routine whose target tree no longer exists does not stop. It fires, fails, and fires again, forever, and nothing in the scheduler notices — because from the scheduler's point of view a routine that errors is just a routine that errored.
+
+`ei669-repro-su-b621d` is the case that produced this code. An abandoned pot whose git object store became unreadable kept `system:git-sync` firing every \~3 minutes for **five days** — roughly 2,400 doomed attempts, 646 consecutive error ticks — plus an hourly `green-checkpoint` and a 2-minutely outbox drain. Every attempt was hopeless from the first one. It stopped only because a human noticed and paused the routines by hand. And because the fleet deploy panel is worst-wins, those 646 ticks held a **fleet-wide signal at crit for 32 hours**: one dead scratch pot degrading everyone's view.
+
+The reaper exists to make that condition self-terminating.
+
+## What it does
+
+On each routines tick, a step named `dead-target-reaper-sweep` (in `dbos/routines-workflow.ts`, alongside the autoloop chronic-failure and silent-stop sweeps) groups this workspace's **active** routines by install, probes each install's tree **once**, and — only on a permanent verdict confirmed across two spaced sweeps — sets that install's routines `active = false` and stamps the evidence where a human will find it.
+
+Three modules, deliberately split:
+
+| file                            | what it is                                                                                                                                                                         |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dead-target-routine-reaper.ts` | the pure decider. No I/O at all: `classifyTargetHealth(probe)` → `ok \| root-missing \| git-corrupt \| unknown`, plus `confirmPermanence`, `isProtectedInstall`, `targetIdentity`. |
+| `dead-target-probe.ts`          | the bounded probe: resolve the install slug to a path, does the root exist, is the git object store readable. Timeouts, never recursive fsck on the hot path.                      |
+| `dead-target-sweep.ts`          | the write side: candidate query, park, stamp, escalate. Fail-soft by contract.                                                                                                     |
+
+## It classifies by STRUCTURE, not by a failure streak
+
+The originating suggestion was a streak rule: on N consecutive failures with a permanent-looking cause, park the pot. The plan adopted the *cause* half and rejected the *streak* half (D-001).
+
+The decisive reason is not taste — **there is no counter to threshold on.** `harness_shared.routines` has no generic consecutive-failure column, so a streak design starts with a migration adding a counter and write-path changes on the fire hot path. A direct structural observation of the tree is cheaper, is available on the first tick rather than the Nth, and answers the question you actually have ("is this tree usable?") instead of a proxy for it ("has it failed a lot lately?").
+
+If you ever find yourself adding an error counter to the scheduler table, you are invalidating this design's stated rationale — see `EI-21919148454480854`, which proposes a guard so that happens loudly.
+
+## The safety ladder, in the order the code applies it
+
+This sweep **disables execution**, so unlike its read-only siblings it fails closed at every step.
+
+1. **Both kill switches, before any I/O.** The registered flag `FLAGS.DEAD_TARGET_REAPER` (default ON, flippable from `/admin/features`, effective within a tick, no restart) **and** the process-level emergency override `PAPERCUSP_DEAD_TARGET_REAPER=0`. Either one closed and nothing is probed. A flag read that *fails* is treated as OFF: if we cannot establish that parking is enabled, we do not park.
+2. **The home harness is removed from the candidate set before any probing**, compared on canonical slugs so a retired alias (`papercup` → `papercusp`) is protected too. Parking the operator's own git-sync and green-checkpoint would take the fleet's pipeline down.
+3. **Only `root-missing` and `git-corrupt` are permanent.** Every timeout, EACCES, unreadable registry, unregistered slug and thrown error decides `unknown`, which parks nothing. Note especially that `resolveProject` returns null for *both* an unregistered slug and an unreadable registry, so `TargetProbe` carries the resolution *outcome* (`resolved-with-path` / `unresolvable` / `read-failed`) rather than an optional path — collapsing that null into "root missing" is the bug D-003 exists to prevent.
+4. **A permanent verdict does not park on first sight.** `confirmPermanence` requires the same state on two sweeps spaced apart, so a lazily-materialized or briefly-unmounted pot home is seen present on the second look. A non-permanent verdict **clears** the run, so a recovered tree cannot be parked by a stale watermark — the bug (EI-6765) that has twice bitten this subsystem's read-only sibling.
+
+The asymmetry behind all of it: a missed park costs one more tick; a wrong park disables a live install.
+
+## The stamp is not optional
+
+The ei669 rows are, today, indistinguishable from a hand pause: `active = false` with a frozen `last_error` as the only witness to why. An automatic park that left the same trace would be strictly **worse**, because nobody would even know an automaton did it.
+
+So a park always writes `metadata.health.dead_target` — verdict, reason, probed path, confirmation count, timestamps — surfaced by `routines:list`. Escalation files **one** improvements observation per install per breach, debounced 24h through the existing `hive_watchdog_fires` ledger under source `dead-target-reaper` (not a parallel alerting system), renders identity as `install [workspace]`, and names the exact unpark command in the message. Every write is individually guarded: an observability write that could break dispatch would be a worse bug than the one it reports.
+
+## The persisted stamp is HUMAN-shaped, and `recordFromStamp` is the only bridge
+
+The stamp is written for someone reading `routines:list`: ISO-8601 timestamps, snake\_case keys like the rest of the row. The decider works in epoch milliseconds. **These are different shapes on purpose, and `recordFromStamp` is the one place they meet.**
+
+While that bridge was implicit — the SELECT was simply *typed* as a `PermanenceRecord` — writer and reader disagreed silently: `nowMs - undefined` produced `NaN`, the confirming sweep threw on `new Date(undefined).toISOString()`, and **the reaper could never park anything.** Every unit test still passed, because each one handed `priorRecord` a hand-built record rather than one this module had written.
+
+Two lessons worth carrying past this module:
+
+* A round trip is only tested by a test that goes through the **real persistence**. `dead-target-sweep.integration.test.ts` runs two real sweeps against one real row; that is the only instrument that saw this.
+* `recordFromStamp` fails **closed**: anything unreadable yields `null`, which restarts the run from a single sighting rather than parking on a record whose age cannot be established.
+
+## The trap: a control that enters at "classify" proves nothing about "select"
+
+The chain that actually runs is **select candidates → classify → confirm → park**. It is very easy to build a live control that enters at step two and reads as end-to-end evidence.
+
+Concretely, on this host (measured 2026-08-30):
+
+* the sweep's candidate query is `WHERE workspace_id = ... AND active = true AND install_slug IS NOT NULL`;
+* `ei669-repro-su-b621d` — the obvious positive control, a genuinely corrupt tree — has **0 candidate rows**, because its four routines were hand-paused to `active = false` on 2026-08-01. Running the decider against that tree is real evidence about *classification* and **no** evidence about *selection*;
+* `papercusp` has **107 candidate rows** and is protected.
+
+The negative control is the more dangerous half. "papercusp was never parked" is satisfiable by "papercusp was never selected" — an absence produced by an instrument that may not be running is not evidence. Assert the negative control is **present in the candidate set and not parked**, which is a positive observation and the only form that would notice a narrowed SELECT.
+
+This is the same failure as the stamp bug, one level up: fixtures build their own rows, the decider probed directly stays green, and the production path can be inert while every instrument reports health.
+
+## Operating it
+
+* **See a park:** `routines:list` — the parked rows carry `metadata.health.dead_target` with the verdict and evidence.
+* **Undo one:** re-activate the install's routines; the escalation message names the exact command. A recovered tree also clears its own run on the next sweep, so a re-armed install is not immediately re-parked by a stale watermark — but it *will* be re-parked (and, inside 24h, without paging anyone twice) if the tree is still dead.
+* **Turn it off:** flip `FLAGS.DEAD_TARGET_REAPER` off in `/admin/features` (takes effect within a tick). If the flag store itself is unreachable, `PAPERCUSP_DEAD_TARGET_REAPER=0` in the bg-host environment pins it off without a working database.
+* **Remember the bg-host constraint:** `routinesTick` only runs under `PAPERCUSP_BACKGROUND_WORKERS=1`, and it loads on **restart**, not on deploy.
+
+## What it does on today's fleet
+
+Nothing, and that is expected. The sweep only considers `active = true` routines, and the one known dead target's routines are already inactive. Its value is **prospective**: the next pot whose tree dies stops on its own, with a stamp saying why, instead of burning five days of ticks until a human notices.

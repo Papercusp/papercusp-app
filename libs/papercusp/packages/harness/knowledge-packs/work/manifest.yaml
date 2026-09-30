@@ -1,0 +1,6 @@
+id: work
+title: Generic work learnings
+description: Default starting wisdom for a work (non-coding) hive — the coordination discipline and knowledge hygiene shared with any hive, plus work-specific judgment — deliverables judged against a rubric (not verified by tests), decomposing by topic, grounding every claim in a source. Generic working knowledge carried as discovery rules, not domain bindings; project specifics belong in the per-hive override and a separate project pack. Every learning is editable and deletable per hive.
+version: 1.1.0
+author: Papercusp
+okf_version: "0.2"

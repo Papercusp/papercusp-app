@@ -1,0 +1,103 @@
+# "no such database: org_…" — PgBouncer default-on breaks getOrgPg env-routed integration tests
+URL: /internal/docs/agent-insights/pgbouncer-breaks-getorgpg-env-routed-integration-tests
+
+On a server-class host (the dev box), pgbouncerEnabled() is default-on, so getOrgPg reroutes to :6432 and ignores a testcontainer DSN — failing any integration test that env-routes getOrgPg at a throwaway DB. Fix - set PAPERCUSP_PGBOUNCER=0.
+
+## Update 2026-07-02 (WI-1666) — the durable class-level fix landed for the PAPERCUSP\_PG\_PORT case
+
+The SAME `pgbouncerEnabled()` default-on-server bug also broke **every isolated
+embedded-PG smoke-test/witness/rig process** (`two-instance-*-smoke.sh`,
+`deb-hetzner-*.sh`) on this box: a "fresh, isolated" instance would boot its own
+empty embedded PG on an explicit `PAPERCUSP_PG_PORT`, but `getOrgPg()` silently
+rerouted through the box's shared PgBouncer (`:6432` → the REAL native
+`postgresql@18-main` on `:5432`) — so the witness read *another process's*
+pre-existing rows instead of its own empty DB. Confirmed live: the witness's own
+embedded PG had 0 matching rows; the box's native PG had the exact "existing" rows
+the bug reported. This is very likely the reason a chunk of the federation/live-rig
+backlog reports "cannot continue without a created pot" on this box.
+
+**Fixed** (not just worked around) by implementing the "durable / class-level fix"
+option below: `pgbouncerEnabled()` now returns `false` whenever `PAPERCUSP_PG_PORT`
+is explicitly set (after the `PAPERCUSP_PGBOUNCER=1/0` explicit overrides, which
+still win) — the real dev/staging operators on this box never set that var (they
+attach via `DATABASE_URL`/discovery), while every isolated smoke/rig script always
+does, making it a safe, exclusive signal. See `connection.ts`'s `pgbouncerEnabled()`
+comment + `connection-helpers.test.ts`'s WI-1666 cases.
+
+This does **NOT** fully close the ORIGINAL symptom below (a test that env-routes
+`getOrgPg` at a testcontainer via `HARNESS_ADMIN_DATABASE_URL` without also setting
+its own `PAPERCUSP_PG_PORT`) — that per-test `PAPERCUSP_PGBOUNCER=0` workaround is
+still needed for testcontainer-backed integration tests that don't set
+`PAPERCUSP_PG_PORT`. A future pass could additionally derive the signal from an
+explicitly-set `HARNESS_ADMIN_DATABASE_URL`/`HARNESS_DATABASE_URL` pointing at a
+non-default port, closing that remaining gap too.
+
+## Symptom
+
+An integration test that env-routes the process-global `getOrgPg()` at a fresh
+throwaway database (`createOrgTestDb` / `createFreshPgDb` → `HARNESS_DATABASE_URL` /
+`HARNESS_ADMIN_DATABASE_URL`) fails on the **dev box** with:
+
+```
+PostgresError: no such database: org_<10-hex>
+```
+
+…even though that exact `org_<rand>` database **exists and is reachable** via the
+test's own `orgDb.adminSql` client (a direct `SELECT current_database()` succeeds).
+The same test passes in CI. The confusing part: the error names the *correct* DB,
+so it looks like the DB vanished — it didn't.
+
+## Root cause
+
+`backend-connection-scaling-2026-06-17` shipped **`pgbouncerEnabled()` DEFAULT-ON for
+`hostClass === 'server'`** (the 128-core dev box qualifies; laptops/desktops don't).
+When enabled, `maybePgbouncer(url)` (`libs/papercusp/libs/db/src/connection.ts`)
+**rewrites every org-pool URL's host to `127.0.0.1:6432`** (the local PgBouncer).
+
+So `getOrgPg()` honours your env DSN's *db name* but **not its host:port** — it
+connects through PgBouncer, which fronts the **native PG (:5432)**, not the
+testcontainer (e.g. `:33019`) your test created the DB on. The `org_<rand>` DB
+doesn't exist on native PG → `3D000 no such database`.
+
+CI passes because CI runners aren't `server` hostClass, so `pgbouncerEnabled()` is
+false and `maybePgbouncer()` is a passthrough. **This is a dev-box-only break**, but
+it hits the *whole class* of `getOrgPg`-env-routed integration tests
+(`feature-content-federation`, the `two-peer-convergence` pattern, anything seeding
+`hive_members` / org-scoped tables read back through `getOrgPg`).
+
+## Fix (per-test)
+
+Add the documented kill-switch to the env-routing block (and restore it in cleanup):
+
+```ts
+const prevPgb = process.env.PAPERCUSP_PGBOUNCER;
+process.env.PAPERCUSP_PGBOUNCER = '0'; // honour the env DSN's testcontainer port
+// …set HARNESS_*_DATABASE_URL, PAPERCUSP_WORKSPACE_ID, PAPERCUSP_SKIP_PG_DISCOVERY…
+_resetUrlCacheForTests();
+await resetDbOrgPools();
+cleanups.push(async () => {
+  if (prevPgb === undefined) delete process.env.PAPERCUSP_PGBOUNCER;
+  else process.env.PAPERCUSP_PGBOUNCER = prevPgb;
+  // …restore the rest, reset pools…
+});
+```
+
+`pgbouncerEnabled()` reads `process.env.PAPERCUSP_PGBOUNCER` per call, so setting it
+to `'0'` before the first `getOrgPg()` use makes `maybePgbouncer()` a passthrough.
+
+## How to recognise it fast
+
+* The "missing" DB name in the error == your `orgDb.dbName`.
+* `orgDb.adminSql\`SELECT 1\``works, but a`getOrgPg()\`-backed read fails.
+* `docker ps` shows the testcontainer healthy on its mapped port (e.g. `:33019`),
+  but the failing connection went to `127.0.0.1:6432`.
+* `getResourceProfile().hostClass === 'server'` on the box.
+
+## Durable / class-level fix (TODO, connection-scaling owner)
+
+A shared test-env helper that forces `PAPERCUSP_PGBOUNCER=0` whenever a test
+env-routes `getOrgPg` at a testcontainer, OR `maybePgbouncer()` declining to reroute
+an explicitly-env-set non-local URL. Until then, each such test opts out manually.
+
+Discovered 2026-06-22 while landing `shared-pot-member-content-federation-2026-06-20`
+P-005 (it was failing the *landed* P-001+P-002 case too). Refs that plan's D-009.

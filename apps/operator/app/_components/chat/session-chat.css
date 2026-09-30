@@ -1,0 +1,181 @@
+/* The session conversation is an embeddable surface. Its layout must travel
+   with it, rather than relying on the operator document's globals.css. */
+.session-chat {
+  color: var(--fg);
+  background: var(--bg-popover, var(--bg));
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+/* The shared PapercupChat sheet carries light-host fallbacks. This host is
+   dark, so bind both bubble fills and foregrounds explicitly. */
+.session-chat .op-chat-shared {
+  --pc-chat-surface: var(--bg);
+  --pc-chat-fg: var(--fg);
+  --pc-chat-fg-mute: var(--fg-mute);
+  --pc-chat-border: var(--border);
+  --pc-chat-bubble-assistant: var(--bg-2);
+  --pc-chat-bubble-assistant-fg: var(--fg);
+  --pc-chat-bubble-user: var(--bg-popover, var(--bg));
+  --pc-chat-bubble-user-fg: var(--fg);
+}
+.session-chat .oracle-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 22px 20px;
+  scrollbar-width: thin;
+  background: var(--bg);
+}
+.session-chat .oracle-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 100%;
+  margin: 0 0 22px;
+}
+.session-chat .oracle-msg-user { flex-direction: row-reverse; }
+.session-chat .oracle-msg-stack { min-width: 0; flex: 1; }
+.session-chat .oracle-msg-user .oracle-msg-stack { flex: 0 1 88%; }
+.session-chat .oracle-msg-role {
+  color: var(--fg-mute);
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 5px;
+}
+.session-chat .oracle-msg-content {
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
+.session-chat .oracle-msg-user .oracle-msg-content {
+  padding: 12px 15px;
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
+  border-radius: 14px 4px 14px 14px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-popover, var(--bg)));
+}
+.session-chat .oracle-msg-avatar {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg-mute);
+  background: var(--bg-2);
+}
+.session-chat .oracle-msg-avatar--identity { font-size: 10px; max-width: 86px; }
+.session-chat .oracle-msg-icon { width: 15px; height: 15px; }
+.session-chat .oracle-msg-time { display: block; margin-top: 5px; font-size: 10px; color: var(--fg-mute); }
+.session-chat .oracle-msg-content :where(p) { margin: 0 0 .65em; }
+.session-chat .oracle-msg-content :where(ul, ol) { margin: .5em 0; padding-left: 1.5em; }
+.session-chat .oracle-msg-content :where(a) { color: var(--accent); text-decoration: underline; }
+.session-chat .oracle-msg-content :where(pre) {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  white-space: pre;
+  font-size: 12px;
+}
+.session-chat .oracle-msg-content :where(code) { font-size: .9em; }
+.session-chat .oracle-form {
+  display: flex;
+  align-items: flex-end;
+  flex: none;
+  gap: 8px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-popover, var(--bg));
+}
+.session-chat .oracle-input-shell {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+  padding: 8px 12px;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+.session-chat .oracle-input-shell:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
+.session-chat .oracle-form :where(input, textarea) {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 26px;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  box-shadow: none;
+}
+.session-chat .oracle-input-icon { width: 16px; height: 16px; flex: none; color: var(--fg-mute); }
+.session-chat .oracle-input-meta { font-size: 10px; color: var(--fg-mute); }
+.session-chat .oracle-send-button {
+  flex: none;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--accent-ink, var(--bg));
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.session-chat .oracle-send-button:disabled { opacity: .45; cursor: default; }
+.session-chat .oracle-send-icon { width: 16px; height: 16px; vertical-align: middle; margin-right: 4px; }
+.session-chat .oracle-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 150px;
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--fg-mute);
+}
+.session-chat .oracle-empty-state-title { color: var(--fg); font-size: 15px; }
+.session-chat .oracle-empty-state-glyph { width: 28px; height: 28px; }
+.session-chat .oracle-error { padding: 12px; color: var(--bad); }
+.session-chat .oracle-thinking-row { padding: 8px 0; color: var(--fg-mute); font-size: 12px; }
+.session-chat .oracle-thinking-dots { display: inline-flex; gap: 4px; margin-left: 6px; }
+.session-chat .oracle-thinking-dots span { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+.session-chat .oracle-tool-chip { display: inline-block; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; font-size: 11px; }
+.session-chat :is(.pc-zone, .pc-ctl-band, .pc-fleet-launch-row) {
+  --pc-zone-rule: var(--border);
+  --pc-zone-fill: var(--bg-2);
+  --pc-zone-label: var(--fg);
+  --pc-zone-fill-warn: color-mix(in srgb, var(--warn) 8%, var(--bg));
+  --pc-zone-label-warn: var(--warn);
+}
+.session-chat__fleet-setup { flex: none; border-top: 1px solid var(--border); background: var(--bg-2); }
+.session-chat__fleet-setup > summary { padding: 10px 16px; color: var(--fg-mute); font-size: 12px; font-weight: 600; cursor: pointer; }
+.session-chat__fleet-setup > summary:hover { color: var(--fg); }
+.session-chat__fleet-setup > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.session-chat__fleet-setup[open] { max-height: 40%; overflow-y: auto; }
+.session-chat [data-testid='session-chat-conversation']:focus { outline: none; }
+.session-chat [data-testid='session-chat-conversation']:focus-visible { outline: 1px solid var(--border); outline-offset: -1px; }
+@media (max-width: 700px) {
+  .session-chat .oracle-body { padding: 14px 12px; }
+  .session-chat .oracle-form { padding: 10px; }
+  .session-chat .oracle-msg-avatar--identity { display: none; }
+  .session-chat .oracle-input-meta { display: none; }
+  .session-chat .oracle-msg-content { font-size: 13px; }
+}

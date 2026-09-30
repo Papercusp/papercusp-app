@@ -1,0 +1,19 @@
+[
+  {
+    "name": "papercup-org",
+    "version": "0.1.0",
+    "description": "5-department fictional company with cross-dept message bus, directives, and an automated YouTube briefing pipeline.",
+    "author": "Papercusp Team",
+    "license": "MIT",
+    "plugins": ["briefings@0.1.0"],
+    "homepage": "https://papercupai.com"
+  },
+  {
+    "name": "papercup-coding",
+    "version": "0.1.0",
+    "description": "Solo coding harness: scoper plans features, workers implement, validators verify, reviewers gate proposals. Drop in a SPEC.md and go.",
+    "author": "Papercusp Team",
+    "license": "MIT",
+    "plugins": []
+  }
+]

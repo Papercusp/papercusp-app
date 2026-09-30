@@ -1,0 +1,82 @@
+# Presence/fleet roster derives from the authoritative session log
+URL: /internal/docs/agent-insights/presence-derives-from-session-log
+
+Why coord:presence surfaces recorded-but-unregistered live sessions, the 'recorded' session-state, and how the session-log leg stays CLI-agnostic.
+
+## The gap this closes
+
+`coord:presence` (and the shared `assemblePresenceSnapshot`) used to be anchored
+on the **self-registered** `harness_shared.coord_presence` table: a row exists
+there only after the agent itself calls a coord tool (the `coord:declare-intent`
+in the OMP `onSessionStart` hook, or a per-tool-call heartbeat). The authoritative
+session log, `harness_shared.adv_sessions` (written at launch by `recordAdvSession`
+in `bootstrap-su.ts` / the console + role + spawn paths), was only LEFT-JOINed
+*from* presence.
+
+Consequence: a session that the system **recorded** but that had **not yet
+self-registered** in `coord_presence` was structurally **invisible** to the
+roster and **undispatchable**. This was worst for **autonomous/console agents**
+(mugs, overwatch, operators, pot cups) — they have no reliable
+`coord_presence` heartbeat path, so they were invisible for their *entire* life,
+not just a startup window. It also bit any interactive session in its
+launch→first-coord-call window.
+
+Proven (2026-06-22): 6–9 live `console/mug`/`overwatch` sessions with valid
+`coord_owner_id`s, up to 18 min old, absent from `coord:presence`.
+
+## The fix: presence is a VIEW over the session log
+
+`assemblePresenceSnapshot` now merges a **third leg** alongside `listPresence`
+(coord\_presence) and `listFederatedPresence`:
+
+* **`listRecordedLiveSessions`** (`adv-sessions.ts`) — live recorded sessions
+  (`ended_at IS NULL`, `coord_owner_id IS NOT NULL`, **12h recency-bound** to age
+  out unreaped zombies, workspace-scoped, `DISTINCT ON (coord_owner_id)`).
+* **`reconcileRosterSources`** (`recorded-sessions.ts`, pure — the merge entry
+  point `presence-snapshot.ts` calls) — reconciles the coord\_presence rows against
+  the recorded-live rows under a 3-rule precedence (P-001/P-002):
+  1. A **fresh** (non-stale) `coord_presence` row always wins — it carries the
+     richest live enrichment (intent, files, wakeability), so a session-log
+     record never shadows it.
+  2. A live session-log record **supersedes a STALE `coord_presence` row** — a
+     dead heartbeat must not hide a session that is actually still running. This
+     is the **resume case**: an exited session's `coord_presence` row lingers
+     stale (heartbeat > 10 min) while `psu --resume` revives the process and
+     reactivates its `adv_sessions` row; the live record wins and the stale
+     heartbeat row is dropped (no double-listing).
+  3. An owner with **only** a live session-log record (never self-registered)
+     gets a synthesized `'recorded'` row — via `synthesizeRecordedRosterRows`,
+     which projects each such session into a `UnifiedPresenceRecord`
+     (`source: 'session-log'` / `RECORDED_SESSION_SOURCE`, `stale: false` — the
+     `ended_at IS NULL` is a better liveness signal than heartbeat age).
+
+### The `'recorded'` session-state
+
+`deriveSessionState` is omp/su-centric: it treats "no live `coord:inbox-wake`
+await" as `ended`. A console agent never registers such an await, so it would be
+mislabeled `ended` while running. The snapshot therefore renders a session-log
+row that is live but not inbox-wakeable as **`recorded`** (authoritatively alive
+per `ended_at IS NULL`, just not inbox-wake-dispatchable) — distinct from `ended`
+(dead, relaunch). A recorded session that *has* begun registering (a live await
+exists → `wakeable`) derives normally. Read `byState.recorded` in the summary.
+
+## CLI-agnostic by construction (claude / codex / omp)
+
+The leg keys on the recorded row + its `coordOwnerId`, **never on the agent CLI**.
+The join key is uniform because `bootstrap-su.ts` mints `sid = su-<uuid>` (=
+`PAPERCUSP_SID`) and records it as `coordOwnerId` for **every** backend — and that
+is the *same* id the session later self-registers under in `coord_presence`
+(claude `s-<ts>-<hex>` console ids and codex/omp/su `su-<uuid>` ids both join
+consistently). So: codex + omp recorded sessions surface identically to claude,
+already-registered sessions of any CLI dedup correctly (no duplicate rows), and
+the omp detached/launch-window self-registration hole is moot — the `adv_sessions`
+row makes the session visible regardless of whether `onSessionStart` ever
+registers presence.
+
+## Scope note
+
+The recorded leg runs only for **workspace/`all`** scope (`hiveId == null`).
+`adv_sessions` carries no pot attribution yet, so including it under an explicit
+**pot** scope could leak cross-pot agents. Adding `hive_slug` to the recording
+(so the pot-scoped Mug view can include un-self-registered cups too) is the
+tracked follow-up (plan `presence-derive-from-session-log-2026-06-22`, P-002).

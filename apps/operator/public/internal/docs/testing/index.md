@@ -1,0 +1,1068 @@
+# Testing — strategy, conventions, and OSS stack (v1.1)
+URL: /internal/docs/testing/index
+
+Papercusp testing strategy, conventions, and per-project runbooks.
+
+import { Aside } from '@astrojs/starlight/components';
+
+* §1.10: dashboard policy clarified — an internal reference app's admin `/tests`,
+  `/load-tests`, `/tester` are explicitly in scope (cross-project,
+  separate surface).
+* §1.6: integration tests live in a sibling `test/` directory, not
+  colocated under `src/` — matches what's actually shipped.
+* §1.12: k6 scripts may live colocated *or* at workspace-root
+  `load-tests/scripts/` for cross-project scripts; the dashboard reads
+  from `<projectRoot>/load-tests/scripts/`.
+* §1.16 Q4: Pact marked won't-do (pi/agent-mcp covers contract drift
+  via schema generation).
+* §1.9: integration retry default lowered from `1` to `0`
+  (testcontainers-per-worker is deterministic).
+* §1.4: `vitest-fail-on-console` now wired by default in shared config.
+* §1.4: `@axe-core/playwright` + `vitest-axe` adopted; first coverage
+  in `libs/generic/ui-primitives` (`src/a11y.test.tsx` covers StatCard,
+  StatusPill, JsonTree, MarkdownView) and `apps/operator` e2e specs.
+* Phase 3: TESTING.md present in 16 packages so far — `apps/operator`, `apps/tui`,
+  `apps/pui-zellij-plugin`, `packages/operator-core`, `packages/tooldef-mcp`,
+  `libs/papercusp-shared`, `libs/papercusp/packages/blueprint-distribution`,
+  and most of `libs/generic/*` (`tooldef`, `tooldef-http`, `memory`,
+  `step-program`, `pubsub-substrate`, `structured-concurrency`,
+  `result-encoding`, `debounce-coalesce`, `deployment-driver`) — rollout to the
+  rest is ongoing.
+* Phase 4 (Storybook 10 + Lost Pixel): in progress across four packages —
+  `libs/generic/ui-primitives` (6 stories), `libs/marketplace-public-ui`
+  (3 stories), `libs/agent-chat` (2 stories), `apps/operator`
+  (3 stories). 15 `*.stories.ts(x)` files repo-wide today. CI's visual
+  job builds Storybook per package (the `ui-primitives` job runs from
+  `libs/generic/ui-primitives`) and runs via the `run-visual` PR label
+  (auto-applied on story file changes by `.github/labeler.yml`). See
+  [`testing/visual-regression`](./visual-regression) for the operational
+  guide.
+
+This page is the active design document for the **Papercusp testing
+framework** — what we build, what we adopt off-the-shelf, how agents
+discover the right tests to run, and how CI gates merges. Once
+infrastructure lands and the first reference suite ships, sections will
+fold into the per-project `TESTING.md` files this spec defines and the
+page becomes a historical record of the design rationale.
+
+**This is not a test plan for any single feature.** It is the
+substrate-wide framework that every app and lib in the monorepo
+plugs into.
+
+## 1.0a Four canonical frameworks — convention (2026-05-24)
+
+Per `admin-testing-tab-restructure-2026-05-24` D-006: **only four**
+test frameworks ship new tests. Everything else is being migrated out.
+
+| Framework         | File shape                     | Where                                               | Discovered by                                                                              |
+| ----------------- | ------------------------------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **Vitest**        | `*.test.ts` next to source     | per-package                                         | Tests-tab registry globs                                                                   |
+| **Playwright**    | `*.spec.ts`                    | `apps/operator/e2e/`                                | `harness` / domain-specific E2E sections                                                   |
+| **Cargo**         | `#[cfg(test)] mod tests { … }` | `<crate>/src/`                                      | `rust` (`Rust (Cargo)`) domain, via `shell` runners (`bash -c 'cd <crate> && cargo test'`) |
+| **LLM scenarios** | `.ts`                          | `packages/operator-core/lib/llm-testing/scenarios/` | LLM testing tab                                                                            |
+
+**Where tests appear in the UI:** drop a test file under one of the
+glob-matched paths in `packages/operator-core/lib/testing-domains-registry.ts`
+and it shows up automatically in the matching subtab of the `/adv` Tests
+tab — no registration step. (The old `/admin/testing` route was removed
+2026-06-11; the Tests tab is the only testing console.) The shared
+`<DomainTestPanel>` walks the server-side glob at every request, so
+renames + deletions propagate without a rebuild.
+
+The domain globs are deliberately **directory/prefix-level** so a new
+test in an existing area appears with no registry edit. A genuinely new
+subsystem (a new top-level dir nothing globs yet) is the one case that
+needs a one-line glob add — and the coverage guard below forces it.
+
+**Two sources, one of them generated.** The operator's testing API
+(`/api/admin/testing/*`) reads the registry
+(`testing-domains-registry.ts`) directly; the `/adv` Tests tab
+reads the harness contract `.papercusp/testing-domains.json`. That contract
+is **generated** from the registry — run `npm run gen:contract` after
+changing domains (CI's `gen:contract:check` fails if it drifted). Do not
+hand-edit the JSON.
+
+**Coverage guard (no test is invisible).** `npm run lint:tests` (from
+`apps/operator`; CI-gated) fails if any canonical `*.test.ts(x)` /
+`*.spec.ts` matches **no** registry glob — i.e. would be invisible in
+the tab. This caught the 2026-06-02 audit finding that 614 of 1168
+tests were orphaned. When it fires, widen a domain's globs (or add a
+domain) in the registry (`packages/operator-core/lib/testing-domains-registry.ts`),
+then `npm run gen:contract`.
+
+**Cargo runs through a shell runner, not a `cargo` runner kind.** The
+repo has **no root Cargo workspace**, so a `cargo test -p <crate>`
+invocation from the repo root can't resolve any crate. The `rust`
+(`Rust (Cargo)`) domain in `testing-domains-registry.ts` therefore `cd`s
+into each crate via `kind:'shell'` runners (`bash -c 'cd <crate> &&
+cargo test'`), covering the pui/TUI workbench (`apps/tui`), the pui
+companion proto + zellij plugin, and the `papercusp-desktop` Tauri shell.
+The standalone `cargo --message-format=json` reporter (P-012) was
+**dropped** — there is no such reporter file. Rust files are `.rs`, so
+they're never canonical-test orphans; the gap the `rust` domain closes
+was that nothing *ran* them.
+
+**Live smokes that can't be Vitest** (need a running operator / external
+service) are surfaced via `node` / `shell` **runners** on a domain
+section (e.g. the `voice` Smoke section, `design` Smoke, `dogfood`
+reactivity/claim) — not by forcing them into a Vitest file. Prefer a
+real Vitest/Playwright test; reach for a runner only when the test
+genuinely needs a live process.
+
+**Where tests do NOT go (will be linted out — P-038):**
+
+* `apps/operator/__tests__/integration/*.mjs` — hand-rolled ok/bad
+  drivers. Existing ones get migrated to Vitest integration tests in
+  P-027. New `.mjs` files in this directory fail CI.
+* `apps/operator/scripts/*-smoke.ts` — tsx smoke scripts. Existing
+  ones get migrated in P-029. New ones fail CI.
+* New bash `.sh` test drivers — bring the scenarios into Vitest specs
+  (P-030) or accept that ad-hoc bash is for one-off ops.
+
+**WebdriverIO** survives only as the packaged-build driver
+(`packaged-readiness` admin suite). Not a general test framework.
+
+### Agent-e2e workflow vs. file-Run buttons
+
+Two orthogonal ways to invoke a test:
+
+* **File-Run buttons in the `/adv` Tests tab** (P-014/P-016) spawn the
+  test file directly via `vitest run <path>` / `playwright test <path>` / `cargo test`. Single-process, polling-based status.
+* **Agent-e2e workflow** (see [`testing/agent-e2e`](./agent-e2e)) is a
+  meta-loop where an agent drives the Tauri UI to verify the running
+  app — the same test file may legitimately be invoked both ways.
+
+## 1.0 Why this exists
+
+The repo today has Vitest configured in five projects (`apps/shop-api`,
+`apps/ingest-service`, `apps/web`, `apps/shop`,
+`libs/papergrid/bloom-grid`) with no shared config, no integration-test
+strategy, no E2E suite, no CI test gate, and no convention for how
+agents pick which tests to run after a change. Adding tests ad-hoc as
+features land produces five different testing styles, drifting configs,
+and a CI signal nobody trusts.
+
+This spec defines:
+
+* The **three-layer model** every project uses (unit, integration, E2E).
+* The **OSS stack** we adopt — none of this is built from scratch.
+* The **conventions** for test layout, naming, and per-project ownership.
+* How **agents** discover which tests are relevant to a change.
+* The **CI pipeline** that gates merges and catches regressions.
+* The **UI surfaces** for humans browsing test status.
+
+The goal is one consistent testing experience across every app and lib,
+written once at the framework level and inherited everywhere.
+
+## 1.1 Goals + non-goals
+
+**Goals**
+
+* A single, opinionated test stack with one runner per layer.
+* Agents always know which tests to run after a change, without reading
+  the whole codebase.
+* Test DB hermeticity — no shared mutable state between tests, no
+  "works on my machine" Postgres drift.
+* CI gate on every PR runs the *minimum* set of relevant tests in
+  under 5 minutes.
+* A nightly full run catches anything the affected graph misses.
+* Free or self-hostable infrastructure — no Chromatic, no Percy, no
+  paid SaaS lock-in for v1.
+* Reproducibility: any test that passes locally must pass in CI; any
+  test that fails in CI must reproduce locally with one command.
+
+**Non-goals (v1)**
+
+* Mutation testing in CI per PR. Stryker is filed for a quarterly
+  health-check, not gating.
+* 100 % coverage targets. Coverage is tracked, not gated.
+* Browser matrix testing (IE, old Safari). Modern Chromium + Firefox +
+  WebKit via Playwright is the entire matrix; if you need IE, you
+  don't need Papercusp.
+* Hosted test-cloud platforms (Currents, Sauce Labs, BrowserStack).
+  Self-hosted Playwright in GH Actions covers the case.
+* Automated test generation. Agents write tests themselves; this spec
+  doesn't try to generate them.
+
+## 1.2 The three-layer model
+
+Every project — every app, every lib — slots its tests into one of
+three layers. Layers differ in what they touch, how fast they run,
+and when CI gates on them.
+
+| Layer           | Touches                                                                                         | Speed target       | CI gate                                     | File pattern            |
+| --------------- | ----------------------------------------------------------------------------------------------- | ------------------ | ------------------------------------------- | ----------------------- |
+| **Unit**        | Pure logic only. No DB, no network, no filesystem beyond fixtures.                              | \< 10s per project | Per-PR                                      | `*.test.ts`             |
+| **Integration** | Real Postgres (testcontainers), real internal-package calls, real Drizzle. No outbound network. | \< 60s per project | Per-PR (affected only)                      | `*.integration.test.ts` |
+| **End-to-end**  | Real running services + browser. Tests entire user flows.                                       | \< 5 min per suite | Per-PR for critical paths; nightly for full | `*.spec.ts`             |
+
+The split is **non-negotiable**: do not mix layers in one file. A test
+that touches Postgres goes in `*.integration.test.ts`; a test that
+spawns a browser goes in `*.spec.ts`. Tests that mix DB and browser go
+in `*.spec.ts` (browser is the higher-cost layer; once you've paid for
+it you can use the DB freely).
+
+**Naming guard rail**: CI runs each pattern with a different runner
+config. A misnamed test (e.g., a DB-touching test in `*.test.ts`) will
+fail at module-import time because the pure-Vitest config doesn't load
+the testcontainers global setup. This is intentional — the pattern
+mismatch surfaces as a clear error, not silent slowdown.
+
+> **The `.repro.` sub-contract — the one class the import-time guard rail
+> misses.** A `*.repro.test.ts` reproduces an *unfixed* bug and fails **by
+> design**, and a spawned-sidecar/real-swarm repro test doesn't import the
+> testcontainers setup — so under the unit config it doesn't fail at import, it
+> just **runs** and reds the deploy-gate (this red-gated all fleet deploys \~73h;
+> WI-1053). A repro/heavy test MUST therefore be `*.repro.integration.test.ts`,
+> enforced by `findMisroutedReproTests` + the `repro-test-naming-guard.test.ts`
+> meta-test. See
+> [Repro tests must be \*.repro.integration.test.ts](/internal/docs/agent-insights/repro-test-naming-contract).
+
+**A fourth Vitest mode — `browser`.** Alongside unit and integration,
+the shared config supports a `browser` layer for component tests run in
+real browser mode (`*.browser.test.ts` under `vitest.browser.config.ts`,
+`pool: 'threads'`). It is the Vitest-side counterpart of Storybook's
+component tests; the misroute guard treats `*.browser.test.*` the same
+way it treats `*.integration.test.*`. E2E (`*.spec.ts`, Playwright)
+remains the separate, browser-driving layer.
+
+## 1.3 Test database strategy
+
+**Decision: testcontainers-node + ephemeral Postgres per Vitest worker.**
+
+Each Vitest worker process boots one Postgres container at the start
+of its run, creates a fresh schema for each test file, and tears down
+on exit. No shared state between workers; no shared state between test
+files within a worker.
+
+Rejected alternatives:
+
+* **pg-mem** — incomplete Postgres semantics (no extensions, partial
+  JSONB, no advisory locks, no trigger semantics matching production).
+  Our codebase uses all of those. Mocking lies; integration tests must
+  hit a real Postgres or they don't catch anything.
+* **A single shared `papercusp_test` Postgres** — fast, but tests
+  pollute each other through orphan rows and leaked connections.
+  Workable for small suites; falls over fast.
+* **Mocking Drizzle / internal packages** — mocks drift from reality and
+  produce false greens. The whole point of integration tests is to
+  catch what mocks would miss.
+
+The testcontainers cost: \~2s startup per worker. Cached image + shared
+volume reduces this on subsequent runs. With four workers in CI on a
+4-core runner, that's \~8s amortized across an entire integration suite.
+
+**Implementation shape**:
+
+```ts
+// libs/test-config/src/pg-container.ts
+import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
+
+let container: StartedPostgreSqlContainer | null = null;
+
+export async function getTestPg() {
+  if (!container) {
+    container = await new PostgreSqlContainer('postgres:16-alpine')
+      .withDatabase('papercusp_test')
+      .start();
+  }
+  return container.getConnectionUri();
+}
+
+export async function teardownTestPg() {
+  await container?.stop();
+  container = null;
+}
+```
+
+Each integration test file gets a per-file schema:
+
+```ts
+// example.integration.test.ts
+import { beforeAll, afterAll, beforeEach } from 'vitest';
+import { getTestPg } from '@papercusp/test-config';
+
+let conn: string;
+let schema: string;
+
+beforeAll(async () => {
+  conn = await getTestPg();
+  schema = `test_${randomBytes(6).toString('hex')}`;
+  await sql`CREATE SCHEMA ${sql.identifier(schema)}`;
+  await runMigrations(conn, schema);
+});
+
+afterAll(async () => {
+  await sql`DROP SCHEMA ${sql.identifier(schema)} CASCADE`;
+});
+```
+
+The shared `libs/test-config` library (see §1.5) hides this boilerplate
+behind a single helper.
+
+## 1.4 The OSS stack
+
+| Concern                                   | Tool                                                          | Why this one                                                                                                                                                                                                                                                                                                                                                                                                        | License          |
+| ----------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| Test runner (all layers)                  | **Vitest 4**                                                  | Already in repo. Workspaces fit NX. Native TS, Jest-compat API, browser mode.                                                                                                                                                                                                                                                                                                                                       | MIT              |
+| Database for integration                  | **testcontainers-node**                                       | Real Postgres; no mocking lies. \~2s startup per worker.                                                                                                                                                                                                                                                                                                                                                            | MIT              |
+| API/HTTP mocking                          | **MSW** (Mock Service Worker)                                 | Intercepts at fetch boundary; same handlers in node + browser. WebSocket handlers (added 2024) cover Zero sync. Industry standard.                                                                                                                                                                                                                                                                                  | MIT              |
+| Browser / E2E                             | **Playwright**                                                | Trace viewer, Chromium + Firefox + WebKit, parallel, `--trace=on-first-retry`. Auth fixtures via `storageState`; native `toHaveScreenshot()` for ad-hoc visual diffs.                                                                                                                                                                                                                                               | Apache 2.0       |
+| Accessibility                             | **@axe-core/playwright** + **vitest-axe**                     | One axe pass per E2E spec; component-level a11y assertions in Vitest. Catches what manual review misses.                                                                                                                                                                                                                                                                                                            | MPL-2.0          |
+| Desktop (Tauri) E2E — automated suite     | **tauri-driver** + Playwright WebDriver                       | The supported CI path for `apps/papercusp-desktop`. Browser-only matrix doesn't reach the Tauri shell. Linux + Windows; macOS still blocked on tauri-apps#7068.                                                                                                                                                                                                                                                     | Apache 2.0 / MIT |
+| Desktop (Tauri) E2E — agent-driven manual | **tauri-agent-tools** (`npm i -g tauri-agent-tools`)          | Primary tool when an AI agent verifies the operator UI ad-hoc. Talks to a debug-only Rust dev-bridge inside `papercusp-desktop` (`src-tauri/src/dev_bridge.rs`, `#[cfg(debug_assertions)]`). Real DOM access, JS `eval`, `click`, `type`, `ipc-monitor`, console capture, Rust logs, `check`-style assertions — without focus-stealing and without OCR. See [agent-e2e playbook](/internal/docs/testing/agent-e2e). | MIT              |
+| Load / perf regression                    | **k6** (HTTP) + **Vitest bench** (micro)                      | k6 for nightly baseline on hot paths (wholesale grid, Typesense queries); Vitest bench for `libs/papergrid` render-path micro-benchmarks.                                                                                                                                                                                                                                                                           | AGPL-3.0 / MIT   |
+| Test-data factories                       | **`makeFixture` / `makeFixtures`** (`@papercusp/test-config`) | Shipped primitive — counter-keyed fixture builders in `libs/test-config/src/make-fixture.ts`. `drizzle-seed` / `@snaplet/copycat` remain aspirational (not installed); see §1.16 Q2.                                                                                                                                                                                                                                | MIT              |
+| Public-page / ad-hoc                      | **verdict** (already adopted)                                 | Token-efficient agent-driven verification of **arbitrary external web pages** (marketing site, third-party links, MDX renderer hitting an external URL). For operator-side checks use **tauri-agent-tools** instead — the operator only renders correctly inside the Tauri shell.                                                                                                                                   | —                |
+| Component testing                         | **Storybook 10 + Test addon**                                 | Components in isolation, doubles as "see all components" UI; addon runs Vitest in browser.                                                                                                                                                                                                                                                                                                                          | MIT              |
+| Visual regression                         | **Lost Pixel**                                                | OSS, integrates with Storybook + Playwright, runs locally; no SaaS lock-in.                                                                                                                                                                                                                                                                                                                                         | MIT              |
+| React / DOM assertions                    | **@testing-library/react** + **user-event**                   | Standard React testing utilities.                                                                                                                                                                                                                                                                                                                                                                                   | MIT              |
+| Property-based                            | **fast-check**                                                | For payload encoders, validators, slug rewriters — anywhere example tests undercount.                                                                                                                                                                                                                                                                                                                               | MIT              |
+| Mutation testing (quarterly)              | **Stryker**                                                   | Health check on critical libs (`libs/papergrid` and internal packages). Not in PR gate.                                                                                                                                                                                                                                                                                                                             | Apache 2.0       |
+| Dead-test detection                       | **Knip**                                                      | Finds unused exports, files, deps, tests. Soft warning in CI.                                                                                                                                                                                                                                                                                                                                                       | ISC              |
+| Coverage                                  | **@vitest/coverage-v8**                                       | Native to Vitest, tracks trend without gating %.                                                                                                                                                                                                                                                                                                                                                                    | MIT              |
+| Orchestration                             | **NX** (`nx affected -t test`)                                | Already adopted; computes the dependency graph.                                                                                                                                                                                                                                                                                                                                                                     | MIT              |
+| Best-practices reference                  | **goldbergyoni/javascript-testing-best-practices**            | Style canon for `CLAUDE.md` to cite.                                                                                                                                                                                                                                                                                                                                                                                | CC-BY-SA         |
+
+**Versions**: pin to `latest` at install time; renovate-bot or weekly
+dependabot keeps them current. We do not pin individual minor
+versions — the test stack moves as a unit.
+
+**Accessibility rule**: every Playwright E2E spec runs `await new AxeBuilder({ page }).analyze()` against the page-under-test and asserts zero `serious` or `critical` violations. Component tests in Vitest use `vitest-axe`'s `toHaveNoViolations()` matcher. A11y is part of the suite, not a separate audit.
+
+**Rejected from v1**:
+
+* **Cypress** — Playwright covers the same ground with a better trace
+  viewer and parallel-by-default execution. No reason to carry both.
+* **Jest** — Vitest is feature-parity-plus and faster. Existing Vitest
+  configs stay.
+* **Chromatic / Percy / Applitools** — paid; lock-in. Lost Pixel covers
+  the same need locally.
+* **Ladle** — lighter than Storybook but slowing down (last
+  meaningful release Dec 2025). Storybook is the safer bet.
+* **pg-mem** — see §1.3.
+* **nock** — MSW supersedes it for fetch-layer mocking. Keep `nock` as
+  a fallback only if MSW can't reach a specific case.
+* **Currents / Buildkite Test Analytics** — paid. Trunk Flaky Tests
+  (free tier) is the OSS-friendly hosted option if we ever need
+  flake analytics; not in v1.
+
+## 1.5 Shared `libs/test-config` library
+
+A library at `libs/test-config/` exports the shared bits every project
+consumes. The shipped surface grew past the original three-export goal —
+it now covers config, three testcontainers (PG/Redis/Typesense), the
+baseline-schema globalSetup + admin-test-runs reporter paths, MSW,
+fixture factories, and the hono/nest test clients:
+
+```ts
+// libs/test-config/src/index.ts (abridged)
+export { defineVitestConfig } from './vitest-config';
+export type { TestLayer, DefineVitestConfigOptions } from './vitest-config';
+// globalSetup + reporter paths (defineVitestConfig auto-wires the reporter)
+export const BASELINE_SCHEMA_GLOBAL_SETUP_PATH = …;
+export const ADMIN_TEST_RUNS_REPORTER_PATH = …;
+// Postgres
+export { getTestPg, teardownTestPg, withTestSchema } from './pg-container';
+export { createFreshTestDb, createMigratedTestDb, provisionRestartTestDb } from './pg-migrate';
+// Redis + Typesense
+export { getTestRedis, teardownTestRedis } from './redis-container';
+export { getTestTypesense, teardownTestTypesense } from './typesense-container';
+// HTTP mocking
+export { setupMsw, msw } from './msw';
+// fixture factories
+export { makeFixture, makeFixtures, _resetFixtureCounters } from './make-fixture';
+// hono test client (Nest client via the '/nest' subpath: bootNestTestApp)
+export { honoTestClient } from './hono-test-client';
+```
+
+### `defineVitestConfig`
+
+A function that returns a Vitest config with project-level overrides
+applied on top of the shared baseline:
+
+```ts
+// apps/shop-api/vitest.config.ts
+import { defineVitestConfig } from '@papercusp/test-config';
+
+export default defineVitestConfig({
+  layer: 'integration', // 'unit' | 'integration' | 'browser'
+  setupFiles: ['./test-setup.ts'],
+});
+```
+
+The baseline sets: TypeScript paths via `vite-tsconfig-paths`, coverage
+provider, `pool: 'forks'` for integration (process isolation per file),
+`pool: 'threads'` for unit (faster), JUnit XML reporter for CI, default
+timeouts (5s unit, 30s integration, 60s E2E).
+
+The `layer` accepts `'unit' | 'integration' | 'browser'` — the third,
+`browser`, runs component tests in Vitest browser mode (`*.browser.test.ts`
+under `vitest.browser.config.ts`). The misroute guard in `vitest-config.ts`
+also routes a stray `*.browser.test.*` run to the browser config rather
+than failing it under the unit config.
+
+### Testcontainers — `getTestPg` / `getTestRedis` / `getTestTypesense`
+
+Worker-scoped container management for Postgres (`getTestPg` /
+`teardownTestPg` / `withTestSchema`, plus `createFreshTestDb` /
+`createMigratedTestDb` / `provisionRestartTestDb`), Redis (`getTestRedis`
+/ `teardownTestRedis`), and Typesense (`getTestTypesense` /
+`teardownTestTypesense`). Used by the Vitest `globalSetup` for
+integration projects. Integration projects also pull
+`BASELINE_SCHEMA_GLOBAL_SETUP_PATH` (stands up the shared schema once,
+exposes `inject('baselineSchemaDsn')`) and the auto-wired
+`ADMIN_TEST_RUNS_REPORTER_PATH` (one `test_runs` row per file → the admin
+status chips).
+
+### `setupMsw` / `msw`
+
+MSW server bootstrap with a shared handler registry. Per-test handler
+overrides via `msw.use(...)`.
+
+### Fixtures + test clients
+
+`makeFixture` / `makeFixtures` (counter-keyed builders, resettable via
+`_resetFixtureCounters`) are the shipped test-data primitive. HTTP-level
+testing uses `honoTestClient`; NestJS apps import `bootNestTestApp` from
+the `@papercusp/test-config/nest` subpath (kept off the main entry so
+non-Nest projects never load `@nestjs/*`).
+
+## 1.6 File and directory conventions
+
+```
+apps/<app>/
+  src/
+    foo.ts
+    foo.test.ts                    ← unit, colocated with source
+  test/
+    foo.integration.test.ts        ← integration, sibling dir
+  e2e/
+    smoke.spec.ts                  ← Playwright E2E, separate dir
+    fixtures/
+      seed-data.json
+  TESTING.md                       ← per-project test guide (§1.8)
+  vitest.config.ts                 ← uses defineVitestConfig
+  vitest.integration.config.ts     ← separate config for integration layer
+  playwright.config.ts             ← only if app has E2E
+```
+
+**Why unit colocated, integration in `test/`**: unit tests reference the
+source directly so colocation removes import friction. Integration tests
+boot containers, share fixtures, and are run as a group — a sibling
+`test/` dir keeps them out of source listings and makes "run all
+integration" a literal directory glob. This matches what's actually
+shipped in `apps/operator/test/` rather than the originally-proposed
+fully-colocated layout.
+
+**Why separate `e2e/` dir**: Playwright specs reference URLs and
+fixtures, not source files. Different runner, different config,
+different mental model — keep them apart.
+
+**Why two Vitest configs per app**: unit and integration have
+different `pool`, `globalSetup`, and `testMatch`. One config trying to
+do both adds branching that obscures both. The cost of a second config
+file is \~10 lines.
+
+## 1.7 NX integration
+
+Each project's `project.json` declares three test targets:
+
+```jsonc
+{
+  "targets": {
+    "test": {
+      "executor": "@nx/vite:test",
+      "options": { "configFile": "vitest.config.ts" }
+    },
+    "test:integration": {
+      "executor": "@nx/vite:test",
+      "options": { "configFile": "vitest.integration.config.ts" }
+    },
+    "test:e2e": {
+      "executor": "@nx/playwright:playwright",
+      "options": { "config": "playwright.config.ts" }
+    }
+  }
+}
+```
+
+Per-PR CI runs:
+
+```bash
+nx affected -t lint test test:integration --base=origin/main
+```
+
+Nightly runs:
+
+```bash
+nx run-many -t test test:integration test:e2e
+```
+
+`nx affected` is the load-bearing primitive for "agents only run
+relevant tests." The affected graph is built from the project
+dependency graph plus file-touch detection. Agents do not need to
+guess which tests apply — NX computes it.
+
+**One caveat**: NX's affected graph misses changes to files outside
+the dependency graph (e.g., a Drizzle migration in
+`libs/papercusp/libs/db/sql/` that no project explicitly imports as a
+TS module). The fix is in §1.8 — per-project `TESTING.md` lists "what to
+also run when these files touch."
+
+The shipped runner is **`scripts/affected-tests.mjs`**, not raw `nx affected`.
+It reads the same git-diff signal but skips the NX CLI bootstrap (\~2s
+saving per run) and adds quarantine-list support out-of-the-box. The
+npm scripts (`test:affected`, `test:affected:integration`,
+`test:all`, `test:all:integration`) are the public-facing entry
+points; `nx affected` examples below are the conceptual equivalent.
+
+## 1.8 Agent workflow + per-project `TESTING.md`
+
+Every app and lib ships a `TESTING.md` at its root. Format:
+
+```markdown
+# TESTING — <project name>
+
+## What this project's tests cover
+
+- <one-line summary per test file or test cluster>
+
+## What they don't cover
+
+- <gaps; e.g., "we don't test the Stripe webhook signature path because
+  it requires a Stripe CLI session — covered by manual smoke instead">
+
+## Run after editing
+
+- Editing `src/com/*.ts` → `nx test:integration <project>`
+- Editing `migrations/*.sql` → `nx run-many -t test:integration` (the
+  shared schema affects every project; affected graph misses this)
+- Editing `e2e/*.spec.ts` → `nx test:e2e <project>`
+
+## Local dev
+
+- `nx test <project> --watch` for fast unit iteration
+- `nx test:integration <project> --ui` to debug a failing integration
+  test in Vitest UI
+- `npx playwright test --ui` for E2E debugging with the trace viewer
+```
+
+### Agent instruction in root `CLAUDE.md`
+
+A single block added to root `CLAUDE.md` and `AGENTS.md`:
+
+````markdown
+## Tests after editing
+
+After completing any file edit, run the affected tests before committing:
+
+```bash
+npm run test:affected               # unit only — fast, default
+npm run test:affected:integration   # adds *.integration.test.ts
+````
+
+The script is git-diff based (`scripts/affected-tests.mjs`), defaulting
+its base to `origin/main` (override via the `AFFECTED_BASE` env var).
+
+If your edit touches:
+
+* `libs/papercusp/libs/db/**` (schema / migrations under
+  `libs/papercusp/libs/db/sql`) — also run `npm run
+  test:all:integration`; the dependency graph won't catch them.
+* `infra/**` or `Procfile*` — manually verify; no automated coverage
+
+Consult the project's `TESTING.md` for what's covered and what to run
+for non-graph file changes. Do NOT run `npm run test:all` for routine
+edits — it's slow and produces noise.
+
+````
+
+This is the entire agent-facing surface. No memory entries, no plugin,
+no skill — one paragraph in the file every agent already reads on
+session start.
+
+## 1.9 CI pipeline
+
+**Assumption**: GitHub Actions. (Buildkite or GitLab CI map cleanly;
+the shape is the same.)
+
+### Per-PR workflow
+
+```yaml
+# .github/workflows/test.yml
+name: Test
+on: [pull_request]
+jobs:
+  affected:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: nrwl/nx-set-shas@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: 'npm' }
+      - run: npm ci
+      - uses: docker/setup-buildx-action@v3
+      - run: npx playwright install --with-deps chromium
+      - run: npx nx affected -t lint test test:integration --parallel=3
+      - run: npx nx affected -t test:e2e --parallel=1
+        if: contains(github.event.pull_request.labels.*.name, 'run-e2e')
+      - uses: dorny/test-reporter@v2
+        if: always()
+        with:
+          name: vitest
+          path: '**/junit.xml'
+          reporter: java-junit
+````
+
+E2E is **opt-in via PR label** (`run-e2e`) by default — full E2E on
+every PR is too slow for routine doc/copy/refactor work. CODEOWNERS
+for `apps/**/e2e/**` adds the label automatically when a spec file
+itself is touched.
+
+### What the shipped per-PR pipeline actually runs
+
+The YAML above is illustrative. The real `.github/workflows/test.yml`
+affected job does far more than `nx affected -t test`, and it provisions
+Postgres rather than relying solely on testcontainers:
+
+* **Generated-surface drift gates** — `gen:contract:check`,
+  `gen:borrowable:check`, and the `gen:doc-*` checks
+  (`gen:doc-blueprint-catalog:check`, `gen:doc-role-registry:check`,
+  `gen:doc-tool-catalog:check`, `gen:doc-insights-index:check`,
+  `gen:doc-plans-index:check`) fail if a committed artifact drifted from
+  its generator. Drizzle / Zero schema-drift checks run here too.
+* **Code-hygiene + plan lints** — `lint:plans`, `lint:plans-pg`,
+  `lint:tests` (the coverage guard from §1.0a), `lint:mdx`,
+  `lint:env-feature-gates:strict`, `lint:no-restart`, `lint:no-sql-json`,
+  `lint:no-conflict-markers`, `lint:smart-quotes`, and a baseline-gated
+  `lint:tsc`. `knip` runs as a soft warning (§1.14).
+* **Dev-box-parity Postgres** — a `pgvector/pgvector:pg16` **service**
+  container on `5432:5432`, provisioned by `scripts/ci-provision-pg.mjs`,
+  so the \~unit-tier suites that transitively resolve the default
+  `:5432/papercusp` URL hit a real Postgres. Integration suites still
+  use testcontainers on top of this.
+
+### Nightly workflow
+
+```yaml
+# .github/workflows/test-nightly.yml
+on:
+  schedule:
+    - cron: '0 7 * * *'  # 07:00 UTC
+  workflow_dispatch:
+jobs:
+  full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # ... same setup ...
+      - run: npx nx run-many -t test test:integration test:e2e
+      - run: npx nx run-many -t test --coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+```
+
+### Caching
+
+* `actions/setup-node` caches `node_modules`.
+* `actions/cache` keyed on `package-lock.json` for the NX cache
+  (`.nx/cache`).
+* `actions/cache` keyed on `package-lock.json` for the Playwright
+  browser cache (`~/.cache/ms-playwright`).
+* Testcontainers reuses Docker layer cache via `actions/cache`'s
+  `~/.docker/buildx`.
+
+A cold cache PR run is \~8 min; a warm-cache run is \~3 min. Nightly
+full run is \~25 min cold, \~12 min warm.
+
+### Flaky-test handling
+
+* Vitest `retry: 0` for integration (testcontainers-per-worker is
+  deterministic; relax only if a measured flake forces it); `retry: 2`
+  for E2E. Locally, retry is off.
+* Tests that fail then pass are surfaced in the PR comment via
+  `dorny/test-reporter`'s "flaky" status.
+* A test that's been flaky three times in seven days is auto-quarantined
+  by a nightly job that adds it to a `quarantine.txt` file. The CI
+  affected job reads `quarantine.txt` and runs those tests with
+  `--reporter=verbose` but doesn't gate on them. PRs that touch the
+  test's source file are required to address quarantine before merge.
+* We do not silently skip flakes. The quarantine list is visible in the
+  repo and grows in PRs reviewed by humans.
+* **`vitest-fail-on-console`** is enabled at the shared-config level —
+  unexpected `console.error` / `console.warn` during a test fails it.
+  Closes one of the most common silent-flake sources before it can
+  hide in the suite.
+
+## 1.10 Test UI
+
+Three free, idiomatic surfaces. **No custom dashboard inside the
+operator.** A cross-project status dashboard on an **internal reference app's
+admin web app** (`:3001`) is explicitly in scope and already shipped at
+`/tests`, `/load-tests`, `/tester` — those pages aggregate JUnit
+output, drive k6 runs, and proxy ad-hoc API calls. They complement,
+do not replace, the three surfaces below.
+
+* **Vitest UI** — `nx test <project> --ui`. Opens at `http://localhost:51204`.
+  Per-project test browser, watch mode, coverage, in-browser stack
+  traces. Use during local dev.
+* **Storybook 10** — `nx storybook <project>`. Component browser +
+  in-browser test runner via the Test addon. Doubles as the
+  see-all-components UI.
+* **Playwright HTML report** — `npx playwright show-report`. After any
+  E2E run; full trace viewer, screenshots, network log per failure.
+
+**Aggregation**: `nx graph` (CLI) or **NX Console** (VS Code extension)
+shows the affected graph + last-run status per project. That is the
+"all tests across the monorepo" view.
+
+If we ever outgrow these — hundreds of E2E specs, dozens of teams,
+real test-flakiness analytics — **Trunk Flaky Tests** (free tier) is
+the next step. Not in v1.
+
+## 1.11 Visual regression with Lost Pixel
+
+For projects with rendered UI (`apps/web`, `apps/shop`,
+`apps/papercup`, `apps/operator`):
+
+```js
+// lostpixel.config.js per app
+import { defineConfig } from 'lost-pixel';
+
+export default defineConfig({
+  storybookShots: { storybookUrl: '.storybook-static' },
+  generateOnly: process.env.CI === 'true',
+  failOnDifference: true,
+  threshold: 0.1,
+  imagePathBaseline: '.lost-pixel/baseline',
+  imagePathCurrent: '.lost-pixel/current',
+});
+```
+
+Workflow:
+
+1. Storybook stories are the test cases. Adding a story = adding a
+   visual test.
+2. CI builds Storybook static, runs Lost Pixel against it.
+3. On baseline mismatch: PR comment with side-by-side images; the
+   author either accepts (commits new baselines) or fixes.
+4. Baselines live in the repo at `apps/<app>/.lost-pixel/baseline/`
+   under `git lfs` (binary blobs).
+
+Visual regression is **opt-in per app** via a PR label (`run-visual`)
+plus auto-applied when story files touch. Same model as E2E.
+
+**For apps without Storybook**: Playwright's built-in
+`expect(page).toHaveScreenshot()` is the answer. Lighter than Lost
+Pixel; baselines live alongside the spec. Lost Pixel stays the choice
+for Storybook-driven apps where a story is the test case.
+
+## 1.12 Property-based and mutation testing
+
+### fast-check
+
+For:
+
+* Slug rewrite logic (snapshot spec §15.6 step 9 — known to have edge
+  cases).
+* Manifest canonical-hash generation (RFC 8785 JCS canonicalizer).
+* COM payload encoder/decoder symmetry (encode → decode == identity).
+* Date / timezone math anywhere it appears.
+* Drizzle schema validators with custom regex.
+
+Pattern — files are named `*.property.test.ts` (so they sit in the unit
+layer's glob) and import **plain `fast-check`** (the `@fast-check/vitest`
+wrapper is *not* a dependency; only `fast-check` itself is installed, in
+4 `package.json`s):
+
+```ts
+// e.g. libs/generic/plan-parser/src/parser.property.test.ts
+import fc from 'fast-check';
+import { test, expect } from 'vitest';
+
+test('rewrite handles arbitrary slugs', () => {
+  fc.assert(
+    fc.property(fc.string(), fc.string(), (a, b) => {
+      expect(rewriteSlug(rewriteSlug(text, a, b), b, a)).toBe(text);
+    }),
+  );
+});
+```
+
+One property test catches what twenty hand-rolled examples would miss.
+Existing property suites live across the repo (e.g.
+`libs/generic/plan-parser/src/parser.property.test.ts`,
+`libs/papercusp-publish-auth/src/jcs.property.test.ts`,
+`packages/operator-core/lib/device-jwt.property.test.ts`).
+
+### Stryker
+
+Quarterly health check on:
+
+* `libs/com/`
+* `libs/papergrid/`
+* `libs/db/`
+* The snapshot capture/restore code in `apps/papercusp` once it lands.
+
+Run via `nx run libs/com:mutate` (custom target). Result is a HTML
+report; threshold is 80 % mutation score for the listed libs. Below
+80 % triggers an issue, not a CI failure. Run is **not** in PR CI;
+it's slow (10–30 min per lib).
+
+### Performance regression (k6 + Vitest bench)
+
+Correctness alone misses "this PR made the wholesale grid 2× slower."
+Two layers, both nightly-only (never per-PR):
+
+* **k6 HTTP baselines** for `apps/shop-api` Typesense search, wholesale
+  grid filter aggregation, and internal-app request paths. Scripts
+  live colocated with their owning project (`apps/<app>/perf/*.js`)
+  *or* in a workspace-root `load-tests/scripts/` directory when they
+  cross project boundaries. The internal reference app's `/load-tests` dashboard
+  on `:3001` is the runner — it reads from `<projectRoot>/load-tests/scripts/`
+  per the `?project=` switcher (see §1.10) and falls back to the
+  workspace-root location for legacy scripts. Nightly job runs against
+  a dev-mode full stack and asserts p95 within ±20 % of the recorded
+  baseline.
+* **Vitest bench** for `libs/papergrid` render-path micro-benchmarks
+  (RichGrid row mount, virtual-scroll resize, cell-renderer churn).
+  Pattern: `*.bench.ts` colocated with source. Vitest's built-in
+  `bench()` API; results upload as a CI artifact, regressions surface
+  as a PR comment.
+
+Neither gates merges. Both produce a daily trend graph; >20 % drift
+opens an issue.
+
+## 1.13 Coverage policy
+
+* `@vitest/coverage-v8` reports unit + integration combined.
+* Coverage is **tracked, not gated**. We do not block merges on a
+  percentage.
+* Trends are reviewed monthly. A drop of >5 % in a project triggers
+  a discussion, not an automatic revert.
+* Coverage reports upload to GH Actions artifacts; nightly job
+  aggregates to a single HTML report for browsing.
+
+Why no gate: coverage gates produce test theater (assertion-free tests
+that touch lines for a number to go up). Trend tracking gives the same
+signal without the bad incentive.
+
+## 1.14 Risks worth naming up front
+
+**Testcontainers + Docker-in-CI fragility.** GH Actions Linux runners
+have Docker available out-of-box; Mac runners don't. Restricting
+integration tests to Linux runners (which is the default anyway)
+sidesteps this. Local Mac dev requires Docker Desktop or Colima
+installed; documented in CLAUDE.md.
+
+**E2E flakiness.** Playwright is more stable than Cypress but still
+network/timing-dependent. Mitigated by `retry: 2`, the trace viewer
+for diagnosis, and the quarantine policy in §1.9. Without active
+flaky-test management, the E2E suite degrades to background noise
+within a quarter.
+
+**Test-DB schema drift.** Migrations applied to the test DB must match
+production exactly. Same migration code path runs in CI integration
+setup. Drift produces "passes locally fails in CI" — caught by the
+nightly full run on a clean container.
+
+**Coverage theater.** Mitigated by the no-gate policy (§1.13). If a
+team starts gating coverage anyway, the policy explicitly says not to.
+
+**`@papercusp/test-config` library bloat.** The library has already
+grown well past its original three-export goal (§1.5) — config,
+PG/Redis/Typesense containers, globalSetup + reporter paths, MSW,
+fixtures, and the hono/nest clients. The discipline now is: keep it to
+*cross-project* testing primitives. Project-specific helpers belong in
+the project, not here.
+
+**Slow PR CI.** If the affected-graph runs creep past 5 min, parallel
+worker count goes up before scope shrinks. Affected scope is already
+the minimum honest set.
+
+**Storybook bundle size growth.** Each app's Storybook can balloon to
+hundreds of MB of stories. Mitigation: per-app `.storybook/main.ts`
+declares which paths to scan; lazy-load story files; drop unused
+addons.
+
+**Visual-regression baseline rot.** Baselines that nobody re-approves
+quietly become noise. Mitigation: any PR with a visual diff must
+either include the regenerated baseline (intentional change) or fix
+the regression. Stale baselines auto-flag after 30 days of zero
+review.
+
+**Stryker false positives.** Mutation testing surfaces "tests that
+don't catch this mutation," some of which are equivalent mutants
+(semantically identical changes). Stryker has equivalent-mutant
+detection but it's not perfect. Mitigation: Stryker output is a
+discussion input, not a CI failure.
+
+**Knip too aggressive.** Knip can flag legitimately-unused exports
+that exist for type-narrowing or runtime-only consumption. Mitigation:
+soft warning, not error; per-project `knip.json` overrides for known
+false positives.
+
+## 1.15 Implementation plan
+
+Phased delivery, each phase ships standalone value.
+
+### Phase 1 — `libs/test-config` + reference suite (\~1 week)
+
+Goal: one app has the full three-layer suite; pattern is portable.
+
+| Step                                                              | Estimated time | Notes                                 |
+| ----------------------------------------------------------------- | -------------- | ------------------------------------- |
+| Bootstrap `libs/test-config` with `defineVitestConfig`            | 4h             | Wraps existing Vitest config          |
+| `getTestPg` testcontainers helper                                 | 4h             | Includes worker-scoped lifecycle      |
+| MSW shared handler registry                                       | 4h             | Empty handlers; per-project registers |
+| Convert `apps/shop-api` Vitest config to use `defineVitestConfig` | 2h             | Smoke-test the shared config          |
+| Add `*.integration.test.ts` example to `apps/shop-api`            | 4h             | Real DB call, real Drizzle            |
+| Add Playwright config + first `.spec.ts` to `apps/shop-api`       | 4h             | Cover one critical flow               |
+| Write `apps/shop-api/TESTING.md`                                  | 2h             | Template for other projects           |
+| **Subtotal**                                                      | **\~3 days**   |                                       |
+
+### Phase 2 — root agent instruction + CI gate (\~3 days)
+
+Goal: PRs are gated by affected tests; agents know the command.
+
+| Step                                                            | Estimated time | Notes                               |
+| --------------------------------------------------------------- | -------------- | ----------------------------------- |
+| Add Tests-after-editing block to root `CLAUDE.md` + `AGENTS.md` | 1h             | Single paragraph; cite §1.8         |
+| `.github/workflows/test.yml` — per-PR affected pipeline         | 4h             | dorny/test-reporter for PR comments |
+| `.github/workflows/test-nightly.yml` — full run                 | 2h             | Coverage upload to artifacts        |
+| Cache wiring (NX, Playwright, node\_modules)                    | 4h             | Cold→warm benchmarks                |
+| **Subtotal**                                                    | **\~2 days**   |                                     |
+
+### Phase 3 — coverage rollout to remaining projects (\~1 week)
+
+Goal: every existing project has at least unit + integration suites.
+
+For each of `apps/web`, `apps/shop`, `apps/ingest-service`,
+`apps/api-gateway`, `libs/com`, `libs/papergrid`:
+
+| Step per project                                | Estimated time | Notes      |
+| ----------------------------------------------- | -------------- | ---------- |
+| Convert Vitest config to `defineVitestConfig`   | 1h             |            |
+| Write 3–5 integration tests covering core paths | 4h             |            |
+| Write `TESTING.md`                              | 1h             |            |
+| **Subtotal per project**                        | **\~1 day**    |            |
+| **Subtotal Phase 3**                            | **\~6 days**   | 6 projects |
+
+### Phase 4 — Storybook + Lost Pixel (\~3 days)
+
+Goal: visual regression on UI apps.
+
+| Step                                                | Estimated time | Notes                           |
+| --------------------------------------------------- | -------------- | ------------------------------- |
+| Storybook 8 init in `apps/web` + `apps/shop`        | 4h each        |                                 |
+| Move existing components into stories               | **2 days**     | Real work; varies wildly by app |
+| Lost Pixel config + first baselines                 | 4h             |                                 |
+| CI workflow: build Storybook static, run Lost Pixel | 2h             | Behind `run-visual` label       |
+| **Subtotal**                                        | **\~3 days**   |                                 |
+
+### Phase 5 — fast-check + Knip + flaky quarantine (\~2 days)
+
+Goal: opportunistic correctness improvements.
+
+| Step                                                                 | Estimated time | Notes |
+| -------------------------------------------------------------------- | -------------- | ----- |
+| Add `fast-check` to relevant lib(s); migrate 3–5 example-based tests | 4h             |       |
+| Add Knip config; address top 20 unused-export warnings               | 4h             |       |
+| Quarantine workflow + `quarantine.txt` reader in CI                  | 4h             |       |
+| **Subtotal**                                                         | **\~1.5 days** |       |
+
+### Total: \~3 weeks
+
+This is the realistic time for one engineer to ship the full stack.
+Two engineers in parallel can compress to \~2 weeks; agents can
+parallelize Phase 3 across projects further.
+
+**Implementation order on day 1 of Phase 1:**
+
+1. `libs/test-config` skeleton (\~2h) — types every project depends on.
+2. `getTestPg` testcontainers helper (\~4h) — unblocks integration
+   tests immediately.
+3. Convert one existing app's Vitest config to `defineVitestConfig` (\~2h)
+   — proves the pattern works before scaling.
+
+## 1.16 Open questions
+
+1. **Docker-in-CI on self-hosted runners.** If we ever move CI off GH
+   Actions to a self-hosted runner without Docker, integration tests
+   break. Likely answer: stay on GH Actions for the foreseeable
+   future; document the Docker dependency.
+
+2. **Test-data factories.** *Shipped primitive is `makeFixture` /
+   `makeFixtures`* exported from `@papercusp/test-config`
+   (`libs/test-config/src/make-fixture.ts`) — counter-keyed builders
+   with `_resetFixtureCounters` for deterministic-across-workers reuse.
+   The originally-proposed **`drizzle-seed`** (schema-aware seeding) +
+   **`@snaplet/copycat`** (deterministic fakes) are **not installed in
+   any `package.json`** — aspirational, not adopted. `fishery` was also
+   rejected. Per-project factories remain allowed for project-specific
+   composition.
+
+3. **Browser matrix in nightly E2E.** Do we run Chromium only (fast,
+   \~80 % of users), or Chromium + Firefox + WebKit (slow, complete)?
+   Proposed: Chromium per PR (via `run-e2e` label), all three nightly.
+
+4. **MSW for COM mocking — or Pact contracts?** *Resolved: MSW only,
+   Pact won't-do.* The pi/agent-mcp toolchain already locks COM
+   contracts at the schema level (Zod + JSON Schema generation), so
+   Pact's consumer-driven contract value is largely already captured.
+   MSW handlers at the fetch boundary cover the remaining "avoid a
+   real COM round-trip" cases in unit tests. Adding Pact would mean
+   another dep, another CLI, another report format — for value the
+   integration tests + schema generation already provide.
+
+5. **Trunk Flaky Tests adoption.** Free tier exists; cost is wiring
+   the Trunk CLI into CI plus signing up for an account.
+   Proposed: defer until quarantine list reaches 10 entries.
+
+6. **Test-time secrets.** Some integration tests need API keys
+   (Stripe, OpenAI). Test mode keys live where? GH Actions secrets is
+   the default; document the convention. Proposed: `TEST_<service>_KEY`
+   naming, documented in root `CLAUDE.md`.
+
+## 1.17 Prior art and references
+
+| Pattern                                        | Source                              |
+| ---------------------------------------------- | ----------------------------------- |
+| NX affected-graph for monorepo CI              | NX docs                             |
+| Testcontainers for integration tests           | testcontainers.com docs             |
+| Vitest workspaces + per-project config         | Vitest 3 release notes              |
+| MSW handler-registry pattern                   | mswjs.io examples                   |
+| Playwright `--trace=on-first-retry`            | Playwright docs                     |
+| Storybook 8 Test addon (Vitest under the hood) | storybook.js.org                    |
+| Lost Pixel Storybook integration               | lost-pixel.com docs                 |
+| Quarantine policy + flaky-test handling        | Google Test Engineering blog series |
+| `@vitest/coverage-v8` trend tracking           | Vitest docs                         |
+| Three-export library limit pattern             | informal; cf. `libs/com`            |
+
+**Surveyed but not adopted, with reasoning:**
+
+* *Cypress*: Playwright covers the same use cases with better tooling.
+* *Jest*: Vitest is faster and feature-equivalent.
+* *pg-mem*: lies about Postgres semantics; integration tests must hit
+  real Postgres.
+* *Chromatic / Percy*: paid SaaS lock-in; Lost Pixel covers it.
+* *Currents / Buildkite Test Analytics*: paid; deferred.
+* *Custom test dashboard inside a docs page*: rebuilds what Vitest UI
+  * Storybook + Playwright report already do.
+* *Bazel / Pants*: heavier than NX; switching cost not worth it.
+
+## 1.18 Related sections
+
+* **Distribution** — snapshot capture/restore is heavy integration-test
+  territory; the snapshot spec's CI matrix (`§15.22`) is a special
+  case of the framework defined here.
+* **Plugins** — plugin authors get a `TESTING.md` template and the
+  shared `libs/test-config` exports.
+* **Capabilities** — the capability runtime is a load-bearing dependency
+  of every integration test that boots a harness; covered first under
+  Phase 3.

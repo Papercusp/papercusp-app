@@ -1,0 +1,655 @@
+<title>Where a "needs you" card lives inside the conversation popup</title>
+<style>
+  /* ─────────────────────────────────────────────────────────────
+     TWO REGISTERS, ON PURPOSE.
+
+     The page is an annotation OF a product surface, so it sets the
+     two apart typographically instead of by box-drawing:
+
+       · the argument  — a serif, generous measure, theme-aware
+       · the product   — the popup's OWN chrome: UI sans + mono,
+                         fixed dark in both themes, because these
+                         frames are renderings of a dark surface,
+                         not page furniture. A screenshot does not
+                         change color when you flip your theme.
+
+     Every value inside a .pop frame is copied from the real files:
+     _semantic.frost.css (theme tokens) and chat-controls.css (the
+     zone vocabulary + its color-mix derivations, reproduced here
+     verbatim rather than eyeballed).
+     ───────────────────────────────────────────────────────────── */
+
+  :root {
+    color-scheme: light dark;
+
+    /* page (the argument) — a paper that leans the same cold blue as
+       the product, so the frames sit ON it rather than in front of it */
+    --paper:      #eef1f5;
+    --paper-2:    #ffffff;
+    --ink:        #16202b;
+    --ink-2:      #4a5b6b;
+    --ink-3:      #75879a;
+    --rule:       #d3dbe4;
+    --mark:       #1c5f80;
+    --mark-soft:  #e2eef4;
+    --flag:       #8a5a12;
+    --good:       #1f6b4c;
+    --bad:        #8f3b36;
+
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --ui:    system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono:  ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:     #0f151c;
+      --paper-2:   #151d26;
+      --ink:       #e2e9f0;
+      --ink-2:     #a3b4c4;
+      --ink-3:     #7183931;
+      --ink-3:     #718393;
+      --rule:      #253240;
+      --mark:      #7fc3e6;
+      --mark-soft: #16303e;
+      --flag:      #d8a54a;
+      --good:      #5cba90;
+      --bad:       #d8827c;
+    }
+  }
+  :root[data-theme="light"] {
+    --paper: #eef1f5; --paper-2: #ffffff; --ink: #16202b; --ink-2: #4a5b6b;
+    --ink-3: #75879a; --rule: #d3dbe4; --mark: #1c5f80; --mark-soft: #e2eef4;
+    --flag: #8a5a12; --good: #1f6b4c; --bad: #8f3b36;
+  }
+  :root[data-theme="dark"] {
+    --paper: #0f151c; --paper-2: #151d26; --ink: #e2e9f0; --ink-2: #a3b4c4;
+    --ink-3: #718393; --rule: #253240; --mark: #7fc3e6; --mark-soft: #16303e;
+    --flag: #d8a54a; --good: #5cba90; --bad: #d8827c;
+  }
+
+  body {
+    margin: 0; padding: 44px 24px 110px;
+    background: var(--paper); color: var(--ink);
+    font-family: var(--serif); font-size: 16px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; gap: 0; }
+  h1, h2, h3 { margin: 0; text-wrap: balance; font-weight: 600; }
+  h1 { font-size: 33px; line-height: 1.18; letter-spacing: -.015em; }
+  h2 { font-size: 22px; letter-spacing: -.01em; }
+  h3 { font-size: 16px; }
+  p  { margin: 0; }
+  .measure { max-width: 68ch; }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--ink-3);
+  }
+  header.page { border-bottom: 1px solid var(--rule); padding-bottom: 26px; }
+  .lede { color: var(--ink-2); font-size: 17px; margin-top: 13px; }
+  section { margin-top: 46px; display: flex; flex-direction: column; gap: 14px; }
+  .note { color: var(--ink-2); font-size: 15px; }
+  code {
+    font-family: var(--mono); font-size: .84em; color: var(--mark);
+    background: var(--mark-soft); padding: .1em .34em; border-radius: 2px;
+  }
+
+  .finding {
+    border-left: 2px solid var(--flag); background: var(--paper-2);
+    padding: 16px 20px; display: flex; flex-direction: column; gap: 9px;
+  }
+  .finding strong { color: var(--ink); }
+
+  /* ── the product frames ───────────────────────────────────────
+     Fixed dark on purpose (see the note at the top of this file).  */
+  .pop {
+    --accent-strong: #7dd3fc;
+    --bg-popover: #0d1829;
+    --bg-raised: #112235;
+    --bg-raised-high: #143049;
+    --fg: #e7f7ff;
+    --fg-dim: #b9d4e8;
+    --fg-mute: #7f9bb4;
+    --border: rgba(125, 211, 252, .15);
+    --warn: #fbbf24;
+    --good-p: #34d399;
+
+    /* chat-controls.css, verbatim */
+    --pc-zone-rule:       color-mix(in oklab, var(--accent-strong) 48%, var(--bg-popover));
+    --pc-zone-fill:       color-mix(in oklab, var(--accent-strong) 35%, var(--bg-popover));
+    --pc-zone-label:      color-mix(in oklab, var(--accent-strong), white 50%);
+    --pc-zone-fill-warn:  color-mix(in oklab, var(--warn) 35%, var(--bg-popover));
+    --pc-zone-label-warn: color-mix(in oklab, var(--warn), white 30%);
+
+    font-family: var(--ui); color: var(--fg-dim);
+    background: var(--bg-popover);
+    border: 1px solid var(--pc-zone-rule); border-radius: 4px;
+    display: grid; grid-template-columns: 92px minmax(0,1fr) 104px;
+    height: 372px; overflow: hidden;
+    box-shadow: 0 14px 40px -26px rgba(0,0,0,.9);
+  }
+  .pop * { box-sizing: border-box; }
+
+  .rail { display: flex; flex-direction: column; min-width: 0; }
+  .rail--l { border-right: 1px solid var(--pc-zone-rule); }
+  .rail--r { border-left:  1px solid var(--pc-zone-rule); }
+  .zone-title {
+    flex: none; padding: 3px 8px; font-size: 10.5px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .04em;
+    background: var(--pc-zone-fill); color: var(--pc-zone-label);
+    border-bottom: 1px solid var(--pc-zone-rule);
+  }
+  .zone-title.warn { background: var(--pc-zone-fill-warn); color: var(--pc-zone-label-warn); }
+  .rail-body { padding: 7px; display: flex; flex-direction: column; gap: 7px; min-height: 0; }
+  .sec-cap {
+    font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    background: var(--pc-zone-fill); color: var(--pc-zone-label);
+    padding: 2px 5px; border-radius: 2px; align-self: flex-start;
+  }
+  .sec-cap.warn { background: var(--pc-zone-fill-warn); color: var(--pc-zone-label-warn); }
+  .rail-line { font-size: 11px; color: var(--fg-mute); line-height: 1.35; }
+  .rail-line b { color: var(--fg-dim); font-weight: 500; }
+
+  .center { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+  /* status band — .pc-ctl-band, 26px control height */
+  .band {
+    flex: none; display: flex; align-items: center; gap: 6px;
+    padding: 4px 8px; min-height: 34px;
+    border-bottom: 1px solid var(--pc-zone-rule);
+  }
+  .cap {
+    flex: none; padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .03em;
+    background: var(--pc-zone-fill); color: var(--pc-zone-label);
+  }
+  .cap.warn { background: var(--pc-zone-fill-warn); color: var(--pc-zone-label-warn); }
+  .state {
+    font-size: 11px; color: var(--fg-mute); display: inline-flex; align-items: center; gap: 4px;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--good-p); flex: none; }
+  .spacer { flex: 1 1 auto; }
+
+  /* transcript */
+  .stream { flex: 1 1 auto; overflow: hidden; padding: 9px 10px; display: flex; flex-direction: column; gap: 9px; }
+  .msg { display: flex; gap: 7px; font-size: 12.5px; line-height: 1.45; }
+  .who {
+    flex: none; width: 15px; height: 15px; border-radius: 3px; margin-top: 1px;
+    font-family: var(--mono); font-size: 8px; display: grid; place-items: center;
+    background: var(--bg-raised-high); color: var(--fg-mute);
+  }
+  .msg p { color: var(--fg-mute); }
+  .msg.self .who { background: color-mix(in oklab, var(--accent-strong) 30%, var(--bg-popover)); color: var(--pc-zone-label); }
+  .fade { position: relative; }
+  .fade::after {
+    content: ""; position: absolute; inset: auto 0 0 0; height: 34px; pointer-events: none;
+    background: linear-gradient(to bottom, transparent, var(--bg-popover));
+  }
+
+  /* composer */
+  .composer {
+    flex: none; border-top: 1px solid var(--pc-zone-rule); padding: 7px 8px;
+    display: flex; gap: 6px; align-items: center;
+  }
+  .field {
+    flex: 1 1 auto; height: 26px; border: 1px solid var(--border); border-radius: 3px;
+    background: var(--bg-raised); color: var(--fg-mute);
+    font-size: 12px; padding: 0 8px; display: flex; align-items: center;
+  }
+  .send {
+    flex: none; height: 26px; padding: 0 10px; border-radius: 3px; font-size: 11.5px;
+    border: 1px solid color-mix(in oklab, var(--accent-strong) 40%, var(--bg-popover));
+    color: var(--pc-zone-label); background: color-mix(in oklab, var(--accent-strong) 14%, var(--bg-popover));
+    display: grid; place-items: center;
+  }
+
+  /* THE CARD — one anatomy, reused in every placement */
+  .ask {
+    border: 1px solid color-mix(in oklab, var(--warn) 42%, var(--bg-popover));
+    border-left-width: 3px;
+    background: color-mix(in oklab, var(--warn) 7%, var(--bg-popover));
+    border-radius: 3px; padding: 8px 9px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .ask-q { font-size: 12.5px; line-height: 1.4; color: var(--fg); }
+  .ask-meta {
+    display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: 9.5px; color: var(--fg-mute);
+  }
+  .chip {
+    font-family: var(--mono); font-size: 9px; padding: 1px 5px; border-radius: 2px;
+    letter-spacing: .04em; white-space: nowrap;
+  }
+  .chip.age   { background: rgba(251,113,133,.16); color: #fb7185; }
+  .chip.block { background: rgba(251,191,36,.15);  color: var(--warn); }
+  .chip.q     { background: color-mix(in oklab, var(--warn) 18%, var(--bg-popover)); color: var(--pc-zone-label-warn); }
+  .opts { display: flex; gap: 5px; flex-wrap: wrap; }
+  .opt {
+    font-size: 11px; height: 22px; padding: 0 9px; border-radius: 3px;
+    border: 1px solid var(--border); color: var(--fg-dim); background: var(--bg-raised);
+    display: inline-grid; place-items: center;
+  }
+  .opt.primary {
+    border-color: color-mix(in oklab, var(--warn) 45%, var(--bg-popover));
+    background: color-mix(in oklab, var(--warn) 15%, var(--bg-popover));
+    color: var(--pc-zone-label-warn);
+  }
+  .opt.ghost { color: var(--fg-mute); background: transparent; }
+  .ask.collapsed { flex-direction: row; align-items: center; gap: 7px; padding: 6px 9px; }
+  .ask.collapsed .ask-q { font-size: 12px; flex: 1 1 auto; }
+
+  .pinned {
+    flex: none; border-bottom: 1px solid var(--pc-zone-rule);
+    padding: 7px 8px; display: flex; flex-direction: column; gap: 6px;
+    background: color-mix(in oklab, var(--warn) 3.5%, var(--bg-popover));
+  }
+  .pin-head { display: flex; align-items: center; gap: 6px; }
+  .jump {
+    font-family: var(--mono); font-size: 9.5px; padding: 2px 7px; border-radius: 2px;
+    background: color-mix(in oklab, var(--warn) 18%, var(--bg-popover));
+    color: var(--pc-zone-label-warn); border: 1px solid color-mix(in oklab, var(--warn) 38%, var(--bg-popover));
+  }
+  .anchor-note { font-size: 10.5px; color: var(--fg-mute); font-style: italic; }
+
+  /* ── option blocks ─────────────────────────────────────────── */
+  .opt-block { display: flex; flex-direction: column; gap: 14px; margin-top: 34px; }
+  .opt-head { display: flex; align-items: baseline; gap: 11px; flex-wrap: wrap; }
+  .badge {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
+    padding: 3px 7px; border-radius: 2px; white-space: nowrap;
+    background: var(--mark-soft); color: var(--mark);
+  }
+  .badge.rec { background: color-mix(in srgb, var(--good) 15%, transparent); color: var(--good); }
+  .pair { display: grid; gap: 18px; grid-template-columns: minmax(0,1fr); align-items: start; }
+  @media (min-width: 900px) { .pair { grid-template-columns: minmax(0,1.35fr) minmax(0,1fr); } }
+  .crit { display: flex; flex-direction: column; gap: 13px; }
+  .crit dl { margin: 0; display: flex; flex-direction: column; gap: 3px; }
+  .crit dt {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .11em;
+    text-transform: uppercase; color: var(--ink-3);
+  }
+  .crit dd { margin: 0; font-size: 14.5px; color: var(--ink-2); line-height: 1.55; }
+  .crit dd.cost { color: var(--flag); }
+
+  /* ── anatomy callouts ──────────────────────────────────────── */
+  .slots { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); margin-top: 4px; }
+  .slot {
+    background: var(--paper-2); border: 1px solid var(--rule); border-radius: 3px;
+    padding: 11px 13px; display: flex; flex-direction: column; gap: 4px;
+  }
+  .slot .k { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--mark); }
+  .slot .v { font-size: 13.5px; color: var(--ink-2); line-height: 1.5; }
+
+  /* ── table ─────────────────────────────────────────────────── */
+  .tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 3px; background: var(--paper-2); }
+  table { border-collapse: collapse; width: 100%; min-width: 700px; font-family: var(--ui); font-size: 13.5px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  thead th {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 500;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.y { color: var(--good); } td.n { color: var(--bad); } td.p { color: var(--flag); }
+  td .m { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
+
+  .rec {
+    border: 1px solid color-mix(in srgb, var(--good) 45%, var(--rule));
+    background: color-mix(in srgb, var(--good) 6%, var(--paper-2));
+    border-radius: 4px; padding: 22px 24px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .rec ol { margin: 0; padding-left: 21px; display: flex; flex-direction: column; gap: 9px; color: var(--ink-2); font-size: 15px; }
+  .rec ol strong { color: var(--ink); }
+  .foot {
+    margin-top: 34px; padding-top: 17px; border-top: 1px solid var(--rule);
+    font-size: 13px; color: var(--ink-3); font-family: var(--ui);
+  }
+  :focus-visible { outline: 2px solid var(--mark); outline-offset: 2px; }
+</style>
+
+<div class="wrap">
+
+<header class="page">
+  <p class="eyebrow">Session popup · placement study</p>
+  <h1>Where does a question that&rsquo;s waiting on you sit inside the conversation?</h1>
+  <p class="lede measure">
+    You picked <strong>D</strong> — questions become <code>decision</code>-tier cards in <code>Needs you</code>,
+    plus a counter in the chrome, no new tab. Clicking one opens this popup. So the popup is
+    where the answering actually happens, and it needs somewhere to put the card. Four placements below,
+    drawn in the popup&rsquo;s own chrome at its real type sizes.
+  </p>
+</header>
+
+<section>
+  <p class="eyebrow">Before designing — what is already built</p>
+  <h2>The popup already has this region. It just filters your questions out.</h2>
+
+  <div class="finding measure">
+    <p><strong><code>SessionChatModal.tsx:1668</code> renders a pending-cards region</strong> between the
+      status band and the transcript — <code>data-testid="session-chat-pending-escalations"</code>, capped at
+      45% height, scrollable, one <code>OtherDetail</code> card per item, fed by the same
+      <code>plans.attention</code> feed the board reads.</p>
+    <p><strong>Its filter is the whole problem.</strong> Line 929: <code>i.kind === 'coord-escalation'
+      &amp;&amp; isEscalationWithOptions(i)</code>. Both questions that sat unanswered are
+      <code>kind: 'conversation'</code>, so they are excluded twice over — wrong kind, and no
+      <code>ref.options</code> to expand into buttons.</p>
+    <p>Nothing server-side drops them: <code>useInboxAttention</code> flattens the entire feed, and the answer
+      path already exists (<code>answerAttentionItem</code> → <code>resolveConversationAnswer</code>, plus
+      <code>replyToAttentionItem</code>, which delivers the reply to a live asker&rsquo;s coord inbox and wakes
+      them). <strong>This is a repair, not a new surface</strong> — which is why the options below argue about
+      <em>placement</em>, not about whether to build a renderer.</p>
+  </div>
+
+  <p class="eyebrow" style="margin-top:14px">The four slots that exist</p>
+  <div class="slots">
+    <div class="slot"><span class="k">A · pinned band</span><span class="v">Between the status band and the transcript. Where the region already is.</span></div>
+    <div class="slot"><span class="k">B · in the stream</span><span class="v">Inline in the transcript, at the turn where the agent asked.</span></div>
+    <div class="slot"><span class="k">C · composer dock</span><span class="v">Directly above the input, sharing its edge.</span></div>
+    <div class="slot"><span class="k">D · activity rail</span><span class="v">A section in the right-hand column, beside the conversation.</span></div>
+  </div>
+</section>
+
+<section>
+  <p class="eyebrow">The options</p>
+  <h2>Four placements, same card</h2>
+  <p class="note measure">Each frame is the real popup: Orders rail, conversation, Activity rail; status band
+    at 26px control height; caps at 10.5px, body at 12.5px. The card content is the two questions actually
+    waiting on you.</p>
+
+  <!-- ── A ────────────────────────────────────────────────── -->
+  <div class="opt-block">
+    <div class="opt-head">
+      <span class="badge">A · pinned band</span>
+      <h3>Widen the filter, keep the slot — and give it a zone cap</h3>
+    </div>
+    <div class="pair">
+      <div class="pop">
+        <div class="rail rail--l">
+          <div class="zone-title">Orders</div>
+          <div class="rail-body">
+            <span class="sec-cap">Plan</span>
+            <p class="rail-line"><b>session-popup-<br>compaction</b></p>
+            <span class="sec-cap">Lane</span>
+            <p class="rail-line">P-001 · P-004</p>
+          </div>
+        </div>
+        <div class="center">
+          <div class="band">
+            <span class="cap">Status</span>
+            <span class="state"><span class="dot"></span>live</span>
+            <span class="state">ctx 41%</span>
+            <span class="spacer"></span>
+          </div>
+          <div class="pinned">
+            <div class="pin-head">
+              <span class="cap warn">Needs you &middot; 2</span>
+            </div>
+            <div class="ask">
+              <p class="ask-q">Three direct session buttons, or one <em>Session…</em> menu?</p>
+              <div class="ask-meta">
+                <span class="chip age">17h</span><span class="chip block">blocks P-001 P-004 P-005</span>
+              </div>
+              <div class="opts">
+                <span class="opt primary">Three buttons</span><span class="opt">One menu</span><span class="opt ghost">Reply…</span>
+              </div>
+            </div>
+            <div class="ask collapsed">
+              <p class="ask-q">Header caps at 35% — calm enough?</p>
+              <span class="chip age">7h</span>
+              <span class="opt ghost">Open</span>
+            </div>
+          </div>
+          <div class="stream fade">
+            <div class="msg"><span class="who">su</span><p>…so I did not build it either way — both options are your own words.</p></div>
+            <div class="msg self"><span class="who">A</span><p>Lets go with option D.</p></div>
+          </div>
+          <div class="composer">
+            <span class="field">Message this agent…</span><span class="send">Send</span>
+          </div>
+        </div>
+        <div class="rail rail--r">
+          <div class="zone-title">Activity</div>
+          <div class="rail-body">
+            <span class="sec-cap">Plan</span>
+            <p class="rail-line"><b>Phase 5</b> complete</p>
+            <span class="sec-cap">Health</span>
+            <p class="rail-line">loop 120s</p>
+          </div>
+        </div>
+      </div>
+      <div class="crit">
+        <dl><dt>What changes</dt><dd>Two lines of filter, plus a <code>Needs&nbsp;you</code> zone cap in the warn variant so the cards read as a named zone rather than as loose furniture above the transcript. Head card open, the rest one-liners.</dd></dl>
+        <dl><dt>Why it works</dt><dd>It cannot scroll away, it is above the fold the moment the popup opens, and it reuses a region that already handles queueing, resolution and refresh. Cheapest true fix on the list.</dd></dl>
+        <dl><dt>Honest cost</dt><dd class="cost">It spends the transcript&rsquo;s vertical budget permanently. Two open questions plus the status band and you are reading the conversation through a letterbox — and the 45% cap means it is allowed to take nearly half.</dd></dl>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── B ────────────────────────────────────────────────── -->
+  <div class="opt-block">
+    <div class="opt-head">
+      <span class="badge">B · in the stream</span>
+      <h3>Render it where the agent asked it</h3>
+    </div>
+    <div class="pair">
+      <div class="pop">
+        <div class="rail rail--l">
+          <div class="zone-title">Orders</div>
+          <div class="rail-body">
+            <span class="sec-cap">Plan</span>
+            <p class="rail-line"><b>session-popup-<br>compaction</b></p>
+          </div>
+        </div>
+        <div class="center">
+          <div class="band">
+            <span class="cap">Status</span>
+            <span class="state"><span class="dot"></span>live</span>
+            <span class="spacer"></span>
+            <span class="jump">1 waiting ↓</span>
+          </div>
+          <div class="stream">
+            <div class="msg"><span class="who">su</span><p>Your 2026-07-27 ask says three direct buttons. The deck item folds two of them into a menu — that reverses it.</p></div>
+            <div class="ask">
+              <p class="ask-q">Three direct session buttons, or one <em>Session…</em> menu?</p>
+              <div class="ask-meta">
+                <span class="chip q">asked 17h ago</span><span class="chip block">blocks 3 items</span>
+              </div>
+              <div class="opts">
+                <span class="opt primary">Three buttons</span><span class="opt">One menu</span><span class="opt ghost">Reply…</span>
+              </div>
+            </div>
+            <div class="msg"><span class="who">su</span><p>Meanwhile I finished P-010 and left this one untouched.</p></div>
+          </div>
+          <div class="composer">
+            <span class="field">Message this agent…</span><span class="send">Send</span>
+          </div>
+        </div>
+        <div class="rail rail--r">
+          <div class="zone-title">Activity</div>
+          <div class="rail-body">
+            <span class="sec-cap">Plan</span>
+            <p class="rail-line"><b>Phase 5</b> complete</p>
+          </div>
+        </div>
+      </div>
+      <div class="crit">
+        <dl><dt>What changes</dt><dd>The card is a message. It sits at the turn that produced it, so the reasoning is the paragraph directly above it. A <code>1&nbsp;waiting&nbsp;↓</code> chip appears in the status band whenever it is scrolled out of view, and scrolls you to it.</dd></dl>
+        <dl><dt>Why it works</dt><dd>It is the only placement that answers <em>why are you asking me this</em> without a click. Every other option shows you a question stripped of the argument that produced it — and that argument is usually what decides the answer.</dd></dl>
+        <dl><dt>Honest cost</dt><dd class="cost">It needs an anchor. A durable ask carries a conversation id, not a transcript position, so mapping it to a turn is real work and will sometimes miss — the fallback is the bottom of the stream, which is nearly option C with none of C&rsquo;s guarantees. And it scrolls away, which is exactly how the first one lasted 17 hours.</dd></dl>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── C ────────────────────────────────────────────────── -->
+  <div class="opt-block">
+    <div class="opt-head">
+      <span class="badge">C · composer dock</span>
+      <h3>Dock it to the input, because answering is typing</h3>
+    </div>
+    <div class="pair">
+      <div class="pop">
+        <div class="rail rail--l">
+          <div class="zone-title">Orders</div>
+          <div class="rail-body">
+            <span class="sec-cap">Plan</span>
+            <p class="rail-line"><b>session-popup-<br>compaction</b></p>
+            <span class="sec-cap">Lane</span>
+            <p class="rail-line">P-001 · P-004</p>
+          </div>
+        </div>
+        <div class="center">
+          <div class="band">
+            <span class="cap">Status</span>
+            <span class="state"><span class="dot"></span>live</span>
+            <span class="state">ctx 41%</span>
+            <span class="spacer"></span>
+            <span class="cap warn">2 for you</span>
+          </div>
+          <div class="stream fade">
+            <div class="msg"><span class="who">su</span><p>Phase 5 is complete — P-006 through P-010 are done and live-verified.</p></div>
+            <div class="msg"><span class="who">su</span><p>Both remaining items are gated on one question, so neither is startable.</p></div>
+            <div class="msg self"><span class="who">A</span><p>Lets go with option D.</p></div>
+          </div>
+          <div class="ask" style="margin:0 8px 0; border-radius:3px 3px 0 0; border-bottom:0;">
+            <p class="ask-q">Three direct session buttons, or one <em>Session…</em> menu?</p>
+            <div class="ask-meta">
+              <span class="chip age">17h</span><span class="chip block">blocks 3</span>
+              <span style="font-family:var(--ui);font-size:10.5px">· 1 more after this</span>
+              <span class="spacer"></span>
+              <span style="font-family:var(--ui);font-size:10.5px;text-decoration:underline">see where this was asked ↑</span>
+            </div>
+            <div class="opts">
+              <span class="opt primary">Three buttons</span><span class="opt">One menu</span>
+            </div>
+          </div>
+          <div class="composer" style="border-top-color: color-mix(in oklab, var(--warn) 42%, var(--bg-popover));">
+            <span class="field" style="color:var(--pc-zone-label-warn)">Answer in your own words…</span><span class="send">Answer</span>
+          </div>
+        </div>
+        <div class="rail rail--r">
+          <div class="zone-title">Activity</div>
+          <div class="rail-body">
+            <span class="sec-cap">Plan</span>
+            <p class="rail-line"><b>Phase 5</b> complete</p>
+            <span class="sec-cap">Health</span>
+            <p class="rail-line">loop 120s</p>
+          </div>
+        </div>
+      </div>
+      <div class="crit">
+        <dl><dt>What changes</dt><dd>The head question docks onto the composer and takes it over: preset options become buttons, the placeholder becomes <em>Answer in your own words</em>, and Send becomes Answer. A <code>2&nbsp;for&nbsp;you</code> cap in the status band carries the count; a queue line carries the rest.</dd></dl>
+        <dl><dt>Why it works</dt><dd>The question and the thing you answer it with become one object, at the one place your cursor already is. It never scrolls away, it costs the transcript nothing above the fold, and free text is a first-class answer rather than a fallback — which matters, because most of these are not really multiple-choice.</dd></dl>
+        <dl><dt>Honest cost</dt><dd class="cost">It re-points the composer, and the composer means something already. You must always be able to just say a thing — so this needs a visible way out (<em>Just send a message</em>) and it must never swallow a message you meant as a message. That is the one real risk on this page.</dd></dl>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── D ────────────────────────────────────────────────── -->
+  <div class="opt-block">
+    <div class="opt-head">
+      <span class="badge">D · activity rail</span>
+      <h3>A section in the right rail</h3>
+    </div>
+    <div class="pair">
+      <div class="pop">
+        <div class="rail rail--l">
+          <div class="zone-title">Orders</div>
+          <div class="rail-body">
+            <span class="sec-cap">Plan</span>
+            <p class="rail-line"><b>session-popup-<br>compaction</b></p>
+          </div>
+        </div>
+        <div class="center">
+          <div class="band">
+            <span class="cap">Status</span>
+            <span class="state"><span class="dot"></span>live</span>
+            <span class="state">ctx 41%</span>
+            <span class="spacer"></span>
+          </div>
+          <div class="stream fade">
+            <div class="msg"><span class="who">su</span><p>Phase 5 is complete — P-006 through P-010 are done and live-verified.</p></div>
+            <div class="msg"><span class="who">su</span><p>Both remaining items are gated on one question, so neither is startable.</p></div>
+            <div class="msg self"><span class="who">A</span><p>Lets go with option D.</p></div>
+          </div>
+          <div class="composer"><span class="field">Message this agent…</span><span class="send">Send</span></div>
+        </div>
+        <div class="rail rail--r">
+          <div class="zone-title warn">Waiting on you &middot; 2</div>
+          <div class="rail-body">
+            <div class="ask" style="padding:6px 7px;gap:4px">
+              <p class="ask-q" style="font-size:11.5px">Three buttons, or one menu?</p>
+              <div class="ask-meta"><span class="chip age">17h</span></div>
+              <div class="opts"><span class="opt primary" style="height:20px;font-size:10.5px">Answer</span></div>
+            </div>
+            <div class="ask collapsed" style="padding:5px 7px">
+              <p class="ask-q" style="font-size:11px">Caps at 35%?</p>
+              <span class="chip age">7h</span>
+            </div>
+            <span class="sec-cap">Health</span>
+            <p class="rail-line">loop 120s</p>
+          </div>
+        </div>
+      </div>
+      <div class="crit">
+        <dl><dt>What changes</dt><dd>A <code>Waiting on you</code> section takes the top of the Activity rail, above Plan and Health, with the zone title in the warn variant.</dd></dl>
+        <dl><dt>Why it works</dt><dd>It costs the transcript nothing at all, and it inherits the rail&rsquo;s existing section vocabulary — collapse state, sticky caps, scrolling — for free.</dd></dl>
+        <dl><dt>Honest cost</dt><dd class="cost">Two problems, and I would not ship it. The Activity rail is the <em>did</em> zone — a pending question is not history, so it fights the popup&rsquo;s own reading order of told → talking → did. And the rail is the first thing that collapses at narrow widths, so the item most likely to be missed lands in the column most likely to be hidden. Included because it is the obvious suggestion, and it is worth writing down why it is wrong.</dd></dl>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <p class="eyebrow">Side by side</p>
+  <h2>What each placement costs</h2>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th>&nbsp;</th><th>Survives scrolling</th><th>Carries the reasoning</th>
+          <th>Transcript height</th><th>Handles 2+</th><th>Free-text answer</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><span class="m">A · pinned band</span></td><td class="y">Yes</td><td class="n">No — stripped of it</td><td class="n">Up to 45%</td><td class="y">Stacks</td><td class="p">Via Reply</td></tr>
+        <tr><td><span class="m">B · in the stream</span></td><td class="n">No — needs the chip</td><td class="y">Yes, natively</td><td class="y">None</td><td class="p">Scattered</td><td class="y">Yes</td></tr>
+        <tr><td><span class="m">C · composer dock</span></td><td class="y">Yes</td><td class="p">Via a jump link</td><td class="p">One card</td><td class="p">Queued, one at a time</td><td class="y">Yes — it is the input</td></tr>
+        <tr><td><span class="m">D · activity rail</span></td><td class="y">Yes</td><td class="n">No</td><td class="y">None</td><td class="y">Stacks</td><td class="n">Not at that width</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="rec">
+  <span class="badge rec">Recommendation</span>
+  <h2>C, with B&rsquo;s anchor as a link — and A as the fallback when more than one is open</h2>
+  <p class="measure" style="color:var(--ink-2)">
+    The thing these questions need is not a bigger card, it is to be <em>adjacent to the act of answering</em>.
+    Docking to the composer gets that, and it is the only option where a typed answer is the primary path
+    instead of an escape hatch — which matters, because both real examples are judgement calls, not menus.
+    Keep B&rsquo;s <em>see where this was asked</em> as a link rather than a placement: it buys the reasoning
+    without paying the anchoring cost or the scroll-away risk.
+  </p>
+  <ol>
+    <li><strong>Widen the filter first, and ship only that.</strong> Include <code>kind: 'conversation'</code>
+      and option-less escalations in the popup&rsquo;s pending set. The existing region renders them today —
+      one predicate, and both of mine appear.</li>
+    <li><strong>Then move the head card to the composer dock</strong> and re-point the composer to
+      <code>replyToAttentionItem</code>, which already delivers to a live asker and wakes them. Keep a plain
+      <em>Just send a message</em> out, always visible.</li>
+    <li><strong>Overflow stays in the pinned band</strong> — one docked, the rest collapsed above the
+      transcript with the <code>Needs you</code> cap. Nothing new; A becomes the queue rather than the answer.</li>
+    <li><strong>Skip D.</strong> Right rail is the wrong zone for a pending thing, and it is the first column
+      to disappear.</li>
+  </ol>
+</section>
+
+<p class="foot measure">
+  Read before designing: <code>SessionChatModal.tsx</code> (pending region L1668, filter L929),
+  <code>attention-card.ts</code> (<code>isEscalationWithOptions</code>, <code>answerAttentionItem</code>,
+  <code>replyToAttentionItem</code>), <code>AskChoiceCard.tsx</code>, <code>PendingCardsBar.tsx</code>,
+  <code>chat-controls.css</code> (zone tokens, reproduced here as-written),
+  <code>_semantic.frost.css</code> (theme values). Tracked as <code>WI-7315</code>.
+  Frames are drawn narrower than the real popup; type sizes and control heights are the real ones.
+</p>
+
+</div>

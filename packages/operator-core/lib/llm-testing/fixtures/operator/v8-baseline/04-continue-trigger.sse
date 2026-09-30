@@ -1,0 +1,12 @@
+event: heartbeat
+data: {"tsMs":1778741215222}
+
+event: heartbeat
+data: {"tsMs":1778741231149}
+
+event: heartbeat
+data: {"tsMs":1778741246845}
+
+event: heartbeat
+data: {"tsMs":1778741262629}
+

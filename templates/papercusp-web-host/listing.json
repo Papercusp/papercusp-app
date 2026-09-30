@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-web-host",
+  "id": "papercusp-web-host",
+  "title": "Papercusp Official: Web Host (Next.js Chassis)",
+  "description": "Aspect template: the web app chassis — Next.js standalone host (monorepo tracing + workspace transpile), operator.json discovery, auth seam stubs, Dockerfile builder, serial-PG test rig. The web twin of the desktop shell. Docs: /internal/docs on your install.",
+  "category": "shell",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

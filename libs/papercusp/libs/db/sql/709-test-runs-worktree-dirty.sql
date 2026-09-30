@@ -1,0 +1,36 @@
+-- 709-test-runs-worktree-dirty.sql
+--
+-- EI-18795303393201472: the harness-scoped ad-hoc test runner
+-- (endpoint-route/routes/harness/testing.ts's POST .../testing/run, backing the
+-- `testing:run` MCP tool) executes vitest directly against the shared, CONCURRENTLY
+-- EDITED working tree (not an isolated checkout), then stamps the resulting row's
+-- `commit_sha` with `git rev-parse HEAD` sampled AFTER the run finishes. Between the
+-- run starting and that sample, a peer's edit or a git-sync commit can change what's
+-- on disk — so the stamped commit_sha can name a sha whose actual committed content
+-- never contained what vitest just executed (a torn read), misattributing a red to an
+-- innocent commit. Observed live: a failing row stamped 49ec984a named two tests that
+-- exist in NO nearby commit, only in a LATER one (f0c9154604) — the run had executed a
+-- mid-edit intermediate (new test + old impl) that was never a commit and never will be.
+--
+-- This matters beyond the one false-attribution report: `ledgerFilesForCandidate` /
+-- `verifyGateVerdict` (why-chain.ts, WI-4533/EI-17603) treat `harness_shared.test_runs`
+-- rows matched by `commit_sha` as FIRST-HAND evidence to cross-check the release gate's
+-- own named failures for the EXACT candidate under verdict — so a torn-read row can
+-- poison that very cross-check for an unrelated commit that happens to share its stamp.
+--
+-- Fix: the runner now snapshots commit sha + `git status --porcelain -- <files>`
+-- BEFORE and AFTER the vitest run; any mismatch (a different HEAD, or the tested files
+-- carrying uncommitted changes at either snapshot) marks the row `worktree_dirty = true`.
+-- Consumers that treat test_runs as first-hand evidence for a SPECIFIC commit
+-- (ledgerFilesForCandidate) exclude dirty rows; time-windowed proxies (recentFailingFiles)
+-- keep them, since "something failed recently" doesn't depend on sha precision.
+--
+-- DEFAULT false, mirroring 701's discipline: every existing row, and every insertion
+-- path that doesn't set this explicitly (the green-checkpoint isolated-worktree path,
+-- which never has this hazard), is assumed clean — this column only ever SUPPRESSES a
+-- row from commit-scoped trust, never manufactures a new failure signal.
+--
+-- Idempotent: safe to re-run. Applied by the runner (`db:migrate`), never a raw psql -f.
+
+ALTER TABLE harness_shared.test_runs
+  ADD COLUMN IF NOT EXISTS worktree_dirty boolean NOT NULL DEFAULT false;

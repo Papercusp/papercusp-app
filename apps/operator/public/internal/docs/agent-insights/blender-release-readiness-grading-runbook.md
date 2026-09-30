@@ -1,0 +1,265 @@
+# Grading Blender public-release readiness
+URL: /internal/docs/agent-insights/blender-release-readiness-grading-runbook
+
+Deterministic runbook for the blender-release-readiness rubric (v2): watermark-windowed instruments, generation-parity stamps, both drill modes, DBOS grading-watchdog liveness, coverage floors, red-path integrity, and complete scorecard filing.
+
+# Grading Blender public-release readiness
+
+This is the rubric-level `methodRef` for `blender-release-readiness` (**v2**,
+ratified 2026-07-16 under rubric-system-hardening-2026-07-14 P-008). The active
+rubric owns the exact model, bar, drift markers, and replication procedure for
+each criterion; this page owns the shared grading sequence and the evidence
+rules that keep seven individually-correct checks from becoming a misleading
+release verdict.
+
+Release is **GO only when one complete, fresh scorecard rates all seven
+criteria `pass`**. `at-risk`, `fail`, or `unknown` is NO-GO. An empty window
+never certifies health, and old evidence does not substitute for an on-demand
+drill.
+
+## Scope, machine mappings, grading boundary & relationship to the composite profile
+
+(Made explicit 2026-07-17, rubric-system-and-auto-loop-release-profile-2026-07-15
+P-008 — the same statement is also folded into the rubric itself, appended onto
+the `generation-parity` criterion's `method` field via `rubrics:amend`, so it
+travels with the live rubric object, not just this doc.)
+
+* ⚠ **Three of the sibling rubrics named below now grade a RETIRED tier.**
+  `mug-pot-coordination-health`, `cup-lifecycle-durability` and
+  `kettle-supervision-health` cover the Mug · Kettle · Cup tier, retired
+  2026-08-09 ([details](/agent-insights/mug-kettle-cup-tier-is-retired)) — so they
+  have no live subject to grade and a low/absent score from them is expected, not a
+  regression. **This runbook's own subject is unaffected:** Scout and Blender survive
+  UNGATED and the learning pipeline it grades is fully live.
+* **Scope.** This rubric grades ONLY the scout/blender learning pipeline
+  (ideation → routing → grading → learning). It does **not** grade Mug/Pot
+  placement, Cup lifecycle/restart durability, Kettle supervision,
+  owner/autonomy controls, deploy/release-pipeline integrity, or production
+  soak — those are each their own dedicated component rubric
+  (`mug-pot-coordination-health`, `cup-lifecycle-durability`,
+  `kettle-supervision-health`, `autonomy-owner-controls`,
+  `release-integrity-health`, `production-soak-health`; all ratified under
+  this plan's P-007).
+* **Machine mappings.** Every criterion's evidence is measured against the
+  **running bg-host generation** (`papercup-bg-host.service`;
+  `runningGeneration{sha,hostStartedAt}` echoed by `blender:success-metrics`)
+  — never the `:3070`/`:3170` operator/deploy hosts. When cross-checking
+  `gradedGeneration`, compare against the bg-host's `ActiveEnterTimestamp`,
+  not a deploy-host timestamp.
+* **Grading boundary.** GO for this leg requires ONE complete, fresh (≤6h)
+  scorecard rating all seven criteria `pass`; `at-risk`/`fail`/`unknown` on
+  ANY single criterion is a whole-rubric NO-GO — an average across criteria
+  never substitutes for the worst one (see also the per-criterion GRADING
+  BOUNDARY notes inline below).
+* **Relationship to the composite profile.** This rubric is exactly ONE LEG,
+  composed in **two independent places**:
+
+  1. the manually-graded `autoloop-release-readiness` rubric, where it is the
+     `blender-leg-health` criterion — a NO-GO here is transitively a
+     composite NO-GO, never overridden by a fresher-but-incomplete leg
+     scorecard (see
+     [autoloop-release-readiness-grading-runbook](/internal/docs/agent-insights/autoloop-release-readiness-grading-runbook));
+  2. the mechanical `apps/operator/lib/release/release-profile.ts`
+     `buildAutoloopReleaseProfile` (P-008), which composes this rubric's own
+     scorecard via `rubricReleaseComponent('blender-release-readiness')`
+     alongside the 6 P-007 component rubrics + the deploy-staleness hard
+     gate, applying its own independent staleness/lineage refusal.
+
+  A red here therefore blocks public auto-loop release through **two
+  independent paths at once** — grading it dishonestly, or letting it go
+  stale, does not get around either gate.
+
+**v2 machinery this runbook assumes** (all landed in
+rubric-system-hardening-2026-07-14):
+
+* Every criterion carries a structured `window`
+  (`{ kind: 'rolling', ms }` or `{ kind: 'post-watermark', watermarkRef }`),
+  resolved by `resolveCriterionWindow()` — the rubric's window IS the
+  instrument's window; never re-hardcode one in prose.
+* `blender:success-metrics` accepts `sinceMs`/`watermarkRef`
+  (`'bg-host-restart'` = the running bg-host's start instant) and echoes
+  `resolvedWindow` + `runningGeneration { sha, hostStartedAt }` on every
+  explicitly-windowed read.
+* Every rubric-graded scorecard is server-stamped
+  `gradedGeneration { sha, hostStartedAt }` at capture time; callers cannot
+  forge it.
+* The rubric is `releaseGating: true`, so the rubric-staleness watchdog pages
+  when no complete scorecard lands within the threshold (default 6h,
+  `PAPERCUSP_RUBRIC_STALENESS_THRESHOLD_SEC`). A page is a dead-grader alarm,
+  not noise — grade or explain, never silence.
+
+## One grading pass
+
+1. Read `rubrics:get { rubricRef: 'blender-release-readiness' }`. Never grade a
+   remembered revision; this rubric is deliberately improved as live defects
+   teach us better probes.
+2. Run `blender:success-metrics { watermarkRef: 'bg-host-restart' }` and record
+   `resolvedWindow` + `runningGeneration` verbatim — they are the pass's
+   generation identity. Cross-check the live host:
+   `systemctl --user show papercup-bg-host.service -p ActiveEnterTimestamp --value`
+   must equal `runningGeneration.hostStartedAt`. A mid-pass bg-host restart
+   invalidates the window: re-read and re-cite.
+3. Gather the criterion-specific evidence below. Scope every raw ledger query
+   to `workspace_id='papercusp-workspace'` and its real `harness_slug`. A
+   workspace-wide count silently mixes `@singleton`, `papercusp`, and other
+   Pots and is not admissible release evidence. **Know each partition's real
+   slug** (verified 2026-07-16): `origin='scout'` routed rows write under
+   `harness_slug='@singleton'` (the singleton scout install — the newest
+   `papercusp`-scoped scout row is 2026-06-11, a pre-migration relic), while
+   `origin='su-ideate'` rows carry `harness_slug='papercusp'`. Filtering scout
+   rows on `'papercusp'` returns weeks-stale rows and reads as a dead pipeline
+   when it is not.
+4. File one complete rubric observation (all seven keys), then read the
+   scorecard back and verify its `gradedGeneration` stamp matches step 2's
+   `runningGeneration` (the generation-parity replication). Then read
+   `rubrics:trend`. Worsening is surfaced immediately; it is not deferred to
+   the next wake.
+5. Act on an actionable failure — file the defect
+   (`improvements:capture { kind: 'bug' }`) and cite it in the rating. Passive
+   waiting is valid only while the criterion's own eligibility window is
+   genuinely empty.
+
+## Deterministic evidence bundle
+
+### Cycle error rate
+
+Grade over the criterion's rolling 48h window, or sharpen with
+`watermarkRef: 'bg-host-restart'` after a fix ships (a rolling window keeps
+failing on pre-fix errors for up to 48h — EI-12148). The newest-N sampling
+defect the v1 rubric warned about is FIXED (P-002); the instrument time-boxes
+by default. Split cycles into typed no-capacity (outside the genuine-error
+numerator), timeouts (inside it — asymmetry of harm, see the criterion model),
+and other errors. Always pull the error COMPOSITION
+(`detail->>'error'` grouped) — a single dominant class is a fileable defect,
+not background noise (e.g. EI-12940, the OAuth credential-loss class).
+
+### Multi-lens routing
+
+Two bars in v2: the v1 floor (at least two distinct lenses across the newest 20
+`origin='scout'` routed rows, no `budget-exhausted + 0 routed` streak) is the
+FAIL line; PASS additionally requires **at least four distinct lenses over the
+trailing 7 days** — two or three grades `at-risk`. Judge the configured
+roster's outcome; do not turn an owner cost choice into a hardcoded
+roster-size requirement.
+
+### Grading-loop closure
+
+The ungraded-filings sweep is **not** a `harness_shared.routines` row. It is the
+DBOS step `su-ideate-ungraded-sweep` inside the scheduled `routinesTick`
+workflow. Absence from `routines:list` therefore proves nothing.
+
+Prove the real execution path:
+
+```sql
+SELECT count(*) AS executions,
+       max(o.completed_at_epoch_ms) AS latest_completed_ms,
+       count(*) FILTER (WHERE o.error IS NOT NULL) AS errors
+FROM dbos.operation_outputs o
+JOIN dbos.workflow_status w ON w.workflow_uuid = o.workflow_uuid
+WHERE w.name = 'routinesTick'
+  AND o.function_name = 'su-ideate-ungraded-sweep'
+  AND o.started_at_epoch_ms >
+      extract(epoch FROM now() - interval '15 minutes') * 1000;
+```
+
+Then scope the teaching signal:
+
+```sql
+SELECT origin,
+       count(*) FILTER (WHERE human_grade IS NOT NULL) AS graded,
+       count(*) AS total
+FROM harness_shared.scout_routed_ideas
+WHERE workspace_id = 'papercusp-workspace'
+  AND harness_slug = 'papercusp'
+GROUP BY origin;
+```
+
+Count eligible rows using the **live** `suIdeateUngradedStaleSec` value (default
+seven days; a deployed environment override wins), the enablement epoch
+`2026-07-11T00:00:00Z`, `origin='su-ideate'`, `human_grade IS NULL`, and a
+pending/null outcome. **v2 coverage floor: PASS requires eligible-stale = 0 —
+a positive count is `fail`, not `at-risk` (the loop is open now).** Watchdog
+liveness alone is necessary but not sufficient. Zero watchdog fires is healthy
+only when the DBOS step is executing without errors and eligible rows are zero.
+Once eligible rows exist, require a fire, grades landing afterward,
+priming/win-rate refresh, and one observed low-grade-with-feedback revision
+wake.
+
+### On-demand drill (both modes)
+
+v2 requires **both** `blender:run-drill` modes green, each run on the CURRENT
+running generation (the criterion's `post-watermark` window — a drill that
+predates the running bg-host's start proves nothing about the code that will
+ship):
+
+* `mode: 'rubric-seeding'` — an `origin='drill'` signal flows through digest,
+  rubric-seeded ideation, routing, and the grading surface, while organic
+  metrics remain unchanged.
+* `mode: 'capacity-storm'` — three synthetic failure legs through the deployed
+  scheduler: a typed `rate-limit-blocked` denial must gate `'no-capacity'`; a
+  real cycle timeout and a `no-free-slot` admission defect (dressed in
+  capacity-looking prose) must stay errors on write AND read-back; zero
+  non-drill-origin leakage. Require `ok: true`, `failures: []`.
+
+Cite both drillIds plus the `runningGeneration` current at run time. No live
+drill run after the release-candidate generation is `fail`, not "previously
+tested."
+
+### Ledger reconciliation
+
+For each recent routed Scout cycle, compare the tick's claimed routed count to
+`scout_routed_ideas` grouped by `cycle_id` (not `cycle`). Exclude rows with
+`cycle_id IS NULL`; su-ideate rows legitimately have no Scout cycle. Drill
+routes are `origin='drill'` and stay excluded. Any mismatch fails. If no
+post-fix cycle routed anything, rate `unknown` instead of reusing an older
+pass.
+
+### Instrument integrity
+
+Every bar needs a demonstrated red path. The capacity classifier's standing
+red-path prover is `blender:run-drill { mode: 'capacity-storm' }` — its three
+legs are reintroduced-bug fixtures, and its unit suite
+(`capacity-storm-drill.test.ts`) proves the drill itself goes red on a broken
+classification, a provenance leak, or a lost ledger write. For every other
+criterion, point to a failing fixture or a live `origin='drill'` break, then
+show it returns green after the break is removed. A declared guard with no
+call site, a cited test that does not exist, a lifetime window masking current
+collapse, or a zero-row query that cannot distinguish healthy from dead all
+fail this criterion.
+
+### Generation parity (new in v2)
+
+The judged evidence and the running code must be the same generation — three
+identities have to match on every pass:
+
+1. the instrument's `runningGeneration { sha, hostStartedAt }` (from the
+   watermark-windowed `blender:success-metrics` read),
+2. the deployed pin (`dev:pipeline_position` `deployedSha`), and
+3. the live host (`systemctl --user show papercup-bg-host.service -p
+   ActiveEnterTimestamp --value`).
+
+After filing, read the scorecard back and require its server-authored
+`gradedGeneration` stamp to equal (1). A missing/null stamp on a fresh
+scorecard means the stamp path broke — that is itself a `fail` here. A pending
+restart or sha divergence is `at-risk`, explicitly accounted, never silently
+ignored.
+
+## Filing the scorecard
+
+Use `improvements:capture` with `lane:'observation'` and:
+
+```text
+observation: {
+  kind: 'reinforce',
+  rubricRef: 'blender-release-readiness',
+  ratings: { <all seven criterion keys>: { rating, evidence } },
+  linkTo: [{ targetId: '<defect or follow-up EI-/WI->', rel: 'relates' }]
+  // Use [] when this pass has no defect or follow-up work-item to link.
+}
+```
+
+Every criterion is mandatory and every rating needs concrete evidence. Use
+`unknown` when there was no activity to measure. After the write, read
+`scorecards:list` and require `missingKeys: []` **and a `gradedGeneration`
+stamp matching the pass's `runningGeneration`**, then read `rubrics:trend` for
+direction. The scorecard is the release record; a prose status report is not.

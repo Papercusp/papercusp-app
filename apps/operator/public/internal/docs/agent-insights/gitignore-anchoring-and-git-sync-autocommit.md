@@ -1,0 +1,92 @@
+# A gitignore pattern with a slash is anchored — and git-sync auto-commits whatever it misses
+URL: /internal/docs/agent-insights/gitignore-anchoring-and-git-sync-autocommit
+
+`.papercusp/scratch/` in the root .gitignore does NOT match packages/foo/.papercusp/scratch/. Because git-sync auto-commits the whole tree, every path the anchored pattern misses is committed automatically — and then shipped. This is how 529 agent scratch files and a live LevelDB carrying the owner's home path got into release bundles.
+
+Two ordinary facts combine into a leak that nobody chose:
+
+1. **A gitignore pattern containing a slash is ANCHORED to the directory of the
+   `.gitignore` that holds it.** So `.papercusp/scratch/` in the *root*
+   `.gitignore` matches `<repo-root>/.papercusp/scratch/` — and **nothing else**.
+   It does *not* match `packages/operator-core/.papercusp/scratch/`.
+2. **git-sync auto-commits the whole tree** (superproject *and* every submodule),
+   on a schedule, with no human in the loop.
+
+Therefore: **anything the anchored pattern fails to match is committed
+automatically, forever.** There is no moment where someone decides to commit it.
+
+## What it actually cost (WI-4419)
+
+The desktop bundles tar the working tree into `sidecar/source.tar.zst`. Because
+the nested agent-state dirs were *tracked*, they shipped in every release:
+
+* `packages/operator-core/.papercusp/` — **530 tracked files, 529 of them `scratch/`**.
+* `apps/operator/.papercusp/papercusp/hyperbee/` — a **live LevelDB, committed**
+  (it has a `LOCK` and a `SESSION_ID`). Its `LOG` embeds the build box's **home
+  path and hostname**.
+
+The commits that carried them in are literally `chore(git-sync): auto-commit`.
+Root `.papercusp/scratch/` was ignored and never committed; the nested copies were
+invisible to the pattern and sailed straight in.
+
+## The trap has three layers, and each one looks fixed from the layer above
+
+**Layer 1 — "`.papercusp` is excluded, I can see the pattern."** True at the root.
+False one directory down. Reading the `.gitignore` does not tell you what it
+*matches*; only `git check-ignore` does.
+
+**Layer 2 — "the release allowlist won't include it."** The staging allowlist
+names *top-level* dirs (`apps`, `libs`, `packages`, …). Nested `.papercusp/` dirs
+live **inside** them, so an allowlist of top-level dirs includes them **by
+definition**. An allowlist constrains the top of the tree; it says nothing about
+the bottom.
+
+**Layer 3 — "the submodules inherit the root .gitignore."** They do not. **The
+superproject's `.gitignore` does not reach inside a submodule**, and git-sync
+commits every submodule. Probing all 37 here found **37/37 unguarded**.
+
+## The fix: depth-match, and repeat it in every submodule
+
+```gitignore
+# anchored — matches ONLY <this .gitignore's dir>/.papercusp/scratch/
+.papercusp/scratch/
+# depth-matching twin — matches at ANY depth
+**/.papercusp/scratch/
+```
+
+Repeat the block in **each submodule's own `.gitignore`**. The repo had already
+learned this once for `.vitest-tmp` (`**/.vitest-tmp/` sits right beside the bare
+pattern) — the lesson simply never got applied to `.papercusp`.
+
+## Two things that will mislead you while fixing it
+
+**A `.gitignore` edit never untracks.** Adding the pattern stops the *bleeding*;
+it does not clean the *wound*. Already-committed files keep shipping until you
+either exclude them at the producer (`tar --exclude='.papercusp'` — tar matches at
+every depth) or de-track them. The precedent for de-tracking is WI-2911:
+`git rm --cached`, *"files stay on disk; these entries keep it from re-entering."*
+
+**Do not delete the files to make the gate pass.** Some of this "junk" is *live* —
+the hyperbee store has open handles, and `.papercusp/scratch/` is an agent state
+dir on a shared, concurrently-edited tree. Exclude it from the *tar*; don't `rm`
+it out from under a running fleet.
+
+## The generalizable rule
+
+> Gate on the **built artifact**, not on the source tree, and **run the gate** —
+> don't reason about what it would find.
+
+Scanning the repo would have passed. Reading the `.gitignore` would have passed.
+Reasoning about the allowlist would have passed. The leak only exists once the tar
+sweeps up what the pattern missed — so the only honest check is to run the auditor
+against the real bytes about to ship and require **exit 0**:
+
+```bash
+python3 papercusp-desktop/bin/audit-release-bundle.py <bundle>.tar.zst ; echo "EXIT=$?"
+```
+
+Every intuitive shortcut on this bug gave the *wrong* answer three times running: a
+names-only scan said "the mac bundle is clean" (its contents held the owner's
+email); root-level reasoning said "`.papercusp` is excluded by construction" (the
+nested copies were tracked *and* inside the allowlist); and the allowlist itself
+looked like it closed the hole (it cannot reach nested dirs). Run the gate.

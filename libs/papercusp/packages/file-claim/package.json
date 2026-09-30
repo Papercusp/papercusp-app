@@ -1,0 +1,32 @@
+{
+  "name": "@papercusp/file-claim",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Shared FileClaimCoordinator vocabulary + conformance suite. Both backends (in-process FileLockQueue + PG-backed SU-locks) satisfy this interface via thin adapters. Vocabulary-aligning, not implementation-sharing — the backends correctly remain separate (Map vs PG). file-locking-improvements #11.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./conformance": {
+      "types": "./src/conformance.ts",
+      "import": "./src/conformance.ts",
+      "default": "./src/conformance.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit --incremental false -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@papercusp/test-config": "*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  }
+}

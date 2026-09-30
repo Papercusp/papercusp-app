@@ -1,0 +1,63 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 / pair service.listening-ports (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T13:34:00Z",
+  "totalAtoms": 83,
+  "totalSessions": 27,
+  "sample": [
+    {
+      "sid": "su-cd450e2a-a441-442a-afe6-f112522cbde8",
+      "ts": "2026-07-20T08:19:36.424Z",
+      "atom": "lsof -iTCP:3070 -sTCP:LISTEN -P -n 2>/dev/null"
+    },
+    {
+      "sid": "su-cd450e2a-a441-442a-afe6-f112522cbde8",
+      "ts": "2026-07-20T08:19:36.424Z",
+      "atom": "lsof -iTCP:3170 -sTCP:LISTEN -P -n 2>/dev/null"
+    },
+    {
+      "sid": "su-e7df908e-b996-4da8-967c-0d655e68c8c8",
+      "ts": "2026-07-20T10:40:28.545Z",
+      "atom": "netstat -tlnp 2>/dev/null"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T20:00:03.310Z",
+      "atom": "ss -lptn 2>/dev/null"
+    },
+    {
+      "sid": "su-cd450e2a-a441-442a-afe6-f112522cbde8",
+      "ts": "2026-07-20T08:19:36.424Z",
+      "atom": "ss -ltn"
+    },
+    {
+      "sid": "su-6f7850f2-2112-4e72-bb09-e8983af3f851",
+      "ts": "2026-07-20T01:57:12.836Z",
+      "atom": "ss -ltn 2>/dev/null"
+    },
+    {
+      "sid": "su-6068642b-af11-4a12-a98e-7ab80fde7c2c",
+      "ts": "2026-07-26T07:13:29.302Z",
+      "atom": "ss -ltnH \"sport = :3270\""
+    },
+    {
+      "sid": "su-e15fb42f-6686-41e7-8368-37f5ec26ef3c",
+      "ts": "2026-07-26T05:24:28.417Z",
+      "atom": "ss -ltnH 'sport = :3270'"
+    },
+    {
+      "sid": "su-e15fb42f-6686-41e7-8368-37f5ec26ef3c",
+      "ts": "2026-07-26T05:23:47.897Z",
+      "atom": "ss -ltnp 2>/dev/null"
+    },
+    {
+      "sid": "su-ccb43bf4-89a3-4222-88e8-0c345cea2749",
+      "ts": "2026-07-21T00:25:23.023Z",
+      "atom": "ss -tlnH \"sport = :3270\" 2>/dev/null"
+    },
+    {
+      "sid": "su-ccb43bf4-89a3-4222-88e8-0c345cea2749",
+      "ts": "2026-07-21T02:18:28.031Z",
+      "atom": "ss -tlnp 2>/dev/null"
+    }
+  ]
+}

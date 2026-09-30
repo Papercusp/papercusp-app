@@ -1,0 +1,64 @@
+# The `transfer` blueprint — deterministic-blueprints-migration-2026-06-13 (P-121).
+#
+# The transfer harness (self-learning-frontier P-022 / FB-08): nightly, distill
+# candidate lessons from the day's transcripts (an `llmCall` distiller), admit them
+# FREE at memory tier 'probationary', then student-transfer-test them via a GOVERNED
+# replay battery (an `llmCall` via lib/replay, ledgered on `frontier:replay-harness`)
+# that promotes/demotes/retires via the pure gate.
+#
+# The plan framed the replay family as "hybrid (det select → AGENT replay → det
+# persist)". In the CODE the agent legs are governed `llmCall`s — there is NO
+# spawnInvokeOnce path anywhere in lib/transfer (D-009). So transfer is structurally a
+# DETERMINISTIC pipeline — one step whose op internally runs the distiller + governed
+# battery — and this migration is BEHAVIOR-NEUTRAL (D-004), not a re-route of the
+# replay onto the fleet launch chokepoint (D-005/P-131 is owner-gated; not done here).
+#
+# Same flag (`papercusp-transfer-harness`, default OFF) + governor (loop
+# `frontier:transfer-harness`, lifetime budget) gates as the bespoke routine — the op
+# runs them; dark stays dark. SEEDED INACTIVE.
+id: transfer
+extends: base
+version: 0.1.0
+description: >-
+  Transfer harness: distill transferable lessons from the day's transcripts (admitted
+  probationary), then student-transfer-test them via a governed replay battery to
+  promote/demote/retire — on a nightly cadence.
+
+workItem:
+  kind: distillation-run
+  idPrefix: TRF
+
+# Program-mode spine: one deterministic step, NO gate ⇒ deterministic pipeline.
+# `payload.*` are the transfer tunables the routine's payload_template carries
+# (absent ⇒ the op's defaults).
+spine:
+  steps:
+    - id: distill
+      op: transfer:distill
+      args:
+        windowHours: "{{ payload.windowHours }}"
+        maxTranscriptsPerTick: "{{ payload.maxTranscriptsPerTick }}"
+        maxLessonsPerTranscript: "{{ payload.maxLessonsPerTranscript }}"
+        maxTestsPerTick: "{{ payload.maxTestsPerTick }}"
+        minDelta: "{{ payload.minDelta }}"
+        maxFailsBeforeRetire: "{{ payload.maxFailsBeforeRetire }}"
+        memoryScope: "{{ payload.memoryScope }}"
+      bind: transfer
+
+knobs:
+  harnessKind: learning
+  requiresRepo: false
+
+# Scheduled trigger (D-004): byte-identical to the bespoke `system:transfer-distill`
+# routine (nightly at 03:35, offset from the deploy rhythm). The routine fires
+# `system:blueprint-run { blueprintId: transfer }`; the handler detects program-mode
+# and runs the step inline. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 35 3 * * *"
+      action: system:blueprint-run
+      singleton: true  # P-144/D-018: workspace-singleton cadence — one dark @singleton routine per workspace
+
+dependencies:
+  tools: []
+  plugins: []

@@ -1,0 +1,65 @@
+# papercusp-tauri-desktop-shell — aspect: the deterministic app chassis. Machine twin:
+# @papercusp/template-kit src/reference-templates.ts
+# TAURI_DESKTOP_SHELL_TEMPLATE — the kit's suite pins this file to it.
+id: papercusp-tauri-desktop-shell
+version: "0.1.0"
+scope: aspect
+category: shell
+summary: >-
+  The deterministic app chassis: a thin Tauri 2 shell (a HOST, not the app)
+  spawning a Node/Hono sidecar that serves the SPA + /api on a free localhost
+  port, embedded Postgres with migrations on boot and discovery-file
+  connection resolution, operator.json for shell/CLI discovery, graceful
+  SIGTERM shutdown, and the tauri-release-kit build/release pipeline. Plain
+  TypeScript packages — Tier A throughout: compose and modify freely.
+components:
+  - id: tauri-shell
+    version: "0.0.1"
+  - id: hono-host
+    version: "0.0.1"
+  - id: embedded-postgres-server
+    version: "0.0.1"
+  - id: tauri-release-kit
+    version: "0.1.0"
+contracts: []
+decisionPoints:
+  - id: ui-shape
+    prompt: >-
+      What SPA surface does the deterministic plane need (grids, approvals
+      view, streams)? FREE tier — compose as judged best.
+  - id: app-identity
+    prompt: >-
+      App name, bundle identifier, app-home directory, and release channels
+      (feeds tauri.conf + tauri-release-kit config).
+composesWith:
+  - papercusp-ops-pots
+  - papercusp-app
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+checks:
+  - id: boot-e2e
+    run: checks/boot-e2e.test.ts
+    summary: >-
+      native Cargo/config/icon inputs exist, composed app builds, sidecar
+      spawns, discovery file written, health returns 200
+musts:
+  - id: thin-shell
+    rule: "No domain logic in Rust — the shell is a HOST; packaged sidecar resolution is resource_dir()/dist-sidecar + vendored bin/node + bundled_path_env, dev is the repo dist-sidecar"
+    enforcedBy: prose-only
+  - id: native-bundle-inputs
+    rule: "Cargo.toml + committed Cargo.lock + tauri.conf.json + every explicitly configured bundle icon exist and are non-empty before native compilation"
+    enforcedBy: boot-e2e
+  - id: discovery-file
+    rule: "Port + pid written to the app home at boot and removed on shutdown — the shell polls it, the CLI reads it"
+    enforcedBy: boot-e2e
+  - id: graceful-shutdown
+    rule: "SIGTERM ordering host close, sync stop, PG stop, discovery-file removal, with a force-exit timer; the final unlink is synchronous (WI-2866/WI-2667 lessons)"
+    enforcedBy: boot-e2e
+  - id: embedded-pg-lifecycle
+    rule: "Embedded Postgres boot/stop bound to the sidecar, migrations on boot, connection via @papercusp/embedded-pg-discovery, portable initdb flags (WI-2649)"
+    enforcedBy: boot-e2e
+  - id: env-gated-planes
+    rule: "Booting with no optional-plane config changes nothing — an unset operator URL means the plane is off, never a crash"
+    enforcedBy: boot-e2e

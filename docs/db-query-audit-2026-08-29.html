@@ -1,0 +1,769 @@
+<title>Papercusp Database Audit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+  :root {
+    --ground: #F6F8FB;
+    --surface: #FFFFFF;
+    --surface-2: #EEF2F8;
+    --ink: #141A24;
+    --ink-soft: #5A6478;
+    --rule: #DCE2EC;
+    --accent: #2F5DD1;
+    --accent-soft: #E6ECFA;
+    --good: #0E7A63;
+    --good-soft: #DFF1EC;
+    --warn: #9C5A08;
+    --warn-soft: #FBEEDA;
+    --crit: #AE3A32;
+    --crit-soft: #FBE7E5;
+    --shadow: 0 1px 2px rgba(20, 26, 36, .06), 0 8px 24px -12px rgba(20, 26, 36, .12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0D131B;
+      --surface: #151D27;
+      --surface-2: #1C2632;
+      --ink: #E7ECF4;
+      --ink-soft: #94A1B5;
+      --rule: #263140;
+      --accent: #7DA0F5;
+      --accent-soft: #1B2740;
+      --good: #4FC3A5;
+      --good-soft: #102A26;
+      --warn: #E0A44A;
+      --warn-soft: #2E2413;
+      --crit: #E8796E;
+      --crit-soft: #331A19;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px -12px rgba(0, 0, 0, .5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0D131B;
+    --surface: #151D27;
+    --surface-2: #1C2632;
+    --ink: #E7ECF4;
+    --ink-soft: #94A1B5;
+    --rule: #263140;
+    --accent: #7DA0F5;
+    --accent-soft: #1B2740;
+    --good: #4FC3A5;
+    --good-soft: #102A26;
+    --warn: #E0A44A;
+    --warn-soft: #2E2413;
+    --crit: #E8796E;
+    --crit-soft: #331A19;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px -12px rgba(0, 0, 0, .5);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "Source Serif 4", Georgia, serif;
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 28px 96px; }
+  .measure { max-width: 68ch; }
+
+  h1, h2, h3, .label, th, .chip, .stat-v, .big-n {
+    font-family: Archivo, "Helvetica Neue", Arial, sans-serif;
+  }
+  h1 { font-size: clamp(2rem, 4.4vw, 3rem); line-height: 1.06; font-weight: 700; letter-spacing: -.022em; margin: 0; text-wrap: balance; }
+  h2 { font-size: 1.5rem; font-weight: 700; letter-spacing: -.014em; margin: 0; text-wrap: balance; }
+  h3 { font-size: 1.06rem; font-weight: 600; letter-spacing: -.006em; margin: 0; text-wrap: balance; }
+  p { margin: 0; }
+  code, .mono, td.n, .big-n, .stat-v { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; }
+  code {
+    font-size: .86em; background: var(--surface-2); color: var(--ink);
+    padding: .12em .38em; border-radius: 4px; border: 1px solid var(--rule);
+    word-break: break-word;
+  }
+  .label {
+    font-size: .69rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .1em; color: var(--ink-soft);
+  }
+
+  /* ---- masthead ---- */
+  header { padding: 72px 0 40px; border-bottom: 2px solid var(--ink); }
+  .kicker { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+  .dek { font-size: 1.16rem; color: var(--ink-soft); margin-top: 18px; max-width: 62ch; }
+
+  /* ---- instrument band ---- */
+  .band {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+    gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+    border-radius: 10px; overflow: hidden; margin: 28px 0 0;
+  }
+  .stat { background: var(--surface); padding: 15px 17px; display: flex; flex-direction: column; gap: 5px; }
+  .stat-v { font-size: 1.42rem; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .stat-k { font-size: .74rem; color: var(--ink-soft); font-family: Archivo, sans-serif; line-height: 1.35; }
+
+  section { margin-top: 60px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--rule); margin-bottom: 24px; flex-wrap: wrap; }
+  .stack { display: flex; flex-direction: column; gap: 18px; }
+
+  /* ---- chips ---- */
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; font-size: .68rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .07em; padding: 4px 9px; border-radius: 999px;
+    border: 1px solid transparent; white-space: nowrap;
+  }
+  .chip.fixed { background: var(--good-soft); color: var(--good); border-color: var(--good); }
+  .chip.open { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
+  .chip.crit { background: var(--crit-soft); color: var(--crit); border-color: var(--crit); }
+  .chip.info { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+  .chip.ghost { background: transparent; color: var(--ink-soft); border-color: var(--rule); }
+
+  /* ---- finding cards ---- */
+  .finding { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; }
+  .f-head { display: flex; gap: 16px; padding: 18px 20px; align-items: flex-start; border-bottom: 1px solid var(--rule); }
+  .f-rank {
+    font-family: "IBM Plex Mono", monospace; font-size: .8rem; font-weight: 600; color: var(--ink-soft);
+    background: var(--surface-2); border: 1px solid var(--rule); border-radius: 6px;
+    padding: 3px 8px; font-variant-numeric: tabular-nums; flex-shrink: 0; margin-top: 2px;
+  }
+  .f-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .f-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .cost { font-family: "IBM Plex Mono", monospace; font-size: .78rem; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+  .cost b { color: var(--ink); font-weight: 600; }
+  .f-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; font-size: .95rem; }
+  .f-body p { max-width: 72ch; }
+
+  /* ---- tables ---- */
+  .scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: .86rem; min-width: 380px; }
+  th {
+    text-align: left; font-size: .69rem; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--ink-soft); font-weight: 600; padding: 9px 13px;
+    background: var(--surface-2); border-bottom: 1px solid var(--rule); white-space: nowrap;
+  }
+  td { padding: 9px 13px; border-bottom: 1px solid var(--rule); vertical-align: top; font-family: Archivo, sans-serif; font-size: .84rem; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr.hl td { background: var(--crit-soft); font-weight: 600; }
+  tr.win td { background: var(--good-soft); font-weight: 600; }
+
+  /* ---- callout ---- */
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--surface);
+    border-top: 1px solid var(--rule); border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+    border-radius: 0 10px 10px 0; padding: 20px 22px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.good { border-left-color: var(--good); }
+  .callout p { max-width: 72ch; font-size: .95rem; }
+
+  /* ---- verdict ---- */
+  .verdict { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .v-card { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 17px 19px; display: flex; flex-direction: column; gap: 8px; }
+  .v-card .big-n { font-size: 1.9rem; font-weight: 600; letter-spacing: -.03em; font-variant-numeric: tabular-nums; line-height: 1; }
+  .v-card .cap { font-size: .87rem; color: var(--ink-soft); }
+  .yes { color: var(--good); }
+  .no { color: var(--crit); }
+
+  ul { margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: 8px; }
+  li { font-size: .95rem; max-width: 72ch; }
+  li::marker { color: var(--ink-soft); }
+  a { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+  hr.soft { border: none; border-top: 1px solid var(--rule); margin: 0; }
+  footer { margin-top: 72px; padding-top: 22px; border-top: 1px solid var(--rule); color: var(--ink-soft); font-size: .85rem; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <div class="kicker">
+      <span class="chip info">Database audit</span>
+      <span class="chip ghost">9.2-day measurement window</span>
+      <span class="chip fixed">1 fix shipped &amp; verified</span>
+    </div>
+    <h1>What the database is actually spending its time on</h1>
+    <p class="dek">
+      A single expression in one plan-index query was consuming <strong>16.2% of all database
+      execution time</strong> — recomputing a boolean 16.4 million times by detoasting a column
+      it never returned. It is fixed, measured at 39× faster. Here is that finding, the eight
+      behind it, and what does and doesn't travel into a shipped build.
+    </p>
+
+    <div class="band">
+      <div class="stat"><span class="stat-v">74 GB</span><span class="stat-k">Database size</span></div>
+      <div class="stat"><span class="stat-v">588</span><span class="stat-k">Tables across 268 schemas</span></div>
+      <div class="stat"><span class="stat-v">1,563</span><span class="stat-k">Indexes</span></div>
+      <div class="stat"><span class="stat-v">2,537 h</span><span class="stat-k">Query time in 9.2 days</span></div>
+      <div class="stat"><span class="stat-v">11.5</span><span class="stat-k">Backends busy, continuously</span></div>
+    </div>
+  </header>
+
+  <section>
+    <div class="sec-head"><h2>How this was measured</h2></div>
+    <div class="stack measure">
+      <p>
+        Everything below rests on <code>pg_stat_statements</code>, which had been accumulating
+        since <strong>2026-08-20 16:39 UTC</strong> — a 220-hour window. Across it the instance
+        executed <strong>9,134,843 seconds</strong> of query time. Divided by the window, that is
+        <strong>11.5 backends running SQL continuously, day and night</strong>, which is the number
+        every percentage here is a share of.
+      </p>
+      <p>
+        Findings are ranked by measured share of that total, so the numbering is real ordering,
+        not decoration. Every performance claim was confirmed with <code>EXPLAIN (ANALYZE, BUFFERS)</code>
+        against the live database rather than inferred from the query text.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Do index and tuning decisions reach release builds?</h2>
+      <span class="chip info">Direct answer</span>
+    </div>
+    <div class="stack">
+      <div class="verdict">
+        <div class="v-card">
+          <span class="label">Schema &amp; indexes</span>
+          <span class="big-n yes">Yes</span>
+          <span class="cap">Embedded Postgres applies the same <code>libs/papercusp/libs/db/sql/*.sql</code>
+          files when its own server boots. Anything in a migration ships.</span>
+        </div>
+        <div class="v-card">
+          <span class="label">Server tuning</span>
+          <span class="big-n no">No</span>
+          <span class="cap">Planner and memory settings do not live in migrations. They are
+          host-scaled at runtime, and this dev box is nothing like a laptop.</span>
+        </div>
+        <div class="v-card">
+          <span class="label">Field telemetry</span>
+          <span class="big-n no">No</span>
+          <span class="cap"><code>pg_stat_statements</code> is not in the embedded extension set,
+          so none of this is measurable on a user's machine.</span>
+        </div>
+      </div>
+
+      <p class="measure">
+        So the good half is genuinely good: I checked all <strong>1,003</strong> non-primary-key
+        indexes in the live database against the full migration corpus. Only <strong>2</strong> are
+        real drift in the core <code>harness_shared</code> schema — <code>plugin_configs_plugin_idx</code>
+        and <code>plugin_enables_plugin_idx</code>, both on <code>plugin_slug</code>, both present
+        here and in no migration file. A shipped install would not get them.
+      </p>
+
+      <div class="callout warn">
+        <h3>The half that doesn't travel is the one that changes query plans</h3>
+        <p>
+          This box runs <code>shared_buffers = 62.9 GB</code> and
+          <code>effective_cache_size = 188.7 GB</code>. A shipped build derives its settings from
+          the host at boot, falling back to roughly <code>128 MB</code>. That is a
+          <strong>~500× difference in cache assumptions</strong>, and the planner chooses different
+          plans on each side of it. An index that looks redundant here — because the whole table is
+          resident in RAM — may be the only thing standing between a user and a table scan.
+        </p>
+        <p>
+          Separately: <strong><code>random_page_cost</code> is never set anywhere in the repository.</strong>
+          Both dev and shipped therefore run PostgreSQL's default of <code>4.0</code>, a value
+          calibrated for 2000s-era spinning disks. On SSD or NVMe it is normally lowered to about
+          <code>1.1</code>. At 4.0 the planner systematically overestimates the cost of random I/O
+          and prefers sequential scans — which is worth weighing against the sequential-scan volumes
+          in finding 5 below.
+        </p>
+      </div>
+
+      <p class="measure">
+        Two smaller notes for completeness. The five <code>*_embedding_mode_idx</code> indexes
+        initially looked like drift but are <em>not</em> — migration 530 creates them through
+        <code>EXECUTE format()</code>, so their names are assembled at runtime and no text search of
+        the migrations can find them. And the remaining 71 name mismatches belong to
+        <code>dbos</code> (18, third-party), the retired <code>zero_0/cvr</code> sync engine (8),
+        <code>papercusp_marketplace</code> (28) and the plugin/auth schemas — none governed by these
+        migrations.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Findings, ranked by measured cost</h2>
+      <span class="chip ghost">share of all database time</span>
+    </div>
+
+    <div class="stack">
+
+      <article class="finding">
+        <div class="f-head">
+          <span class="f-rank">01</span>
+          <div class="f-title">
+            <h3>A boolean recomputed 16.4 million times by detoasting a column it never returns</h3>
+            <div class="f-meta">
+              <span class="chip fixed">Fixed &amp; verified</span>
+              <span class="cost"><b>16.2%</b> of all DB time · 1,475,779 s · 16,449,742 calls</span>
+            </div>
+          </div>
+        </div>
+        <div class="f-body">
+          <p>
+            Plan index reads projected <code>content LIKE '…origin: scout…' AS is_blender_origin</code>
+            inline. <code>harness_plans.content</code> averages 10 kB and is TOASTed — 78 MB of TOAST
+            sitting behind a 2.8 MB heap — so evaluating that <code>LIKE</code> forces PostgreSQL to
+            detoast <code>content</code> for every candidate row, on every read, even though
+            <code>content</code> is never in the result set.
+          </p>
+          <p>
+            This was the single most expensive statement on the instance. Isolating each expression
+            against identical rows shows where the time actually went:
+          </p>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>Query variant</th><th class="n">Execution</th><th class="n">Buffers</th></tr></thead>
+              <tbody>
+                <tr><td>Baseline — neither expression</td><td class="n">1.4 ms</td><td class="n">360</td></tr>
+                <tr><td>Plus the correlated <code>EXISTS</code> subquery</td><td class="n">1.3 ms</td><td class="n">361</td></tr>
+                <tr class="hl"><td>Plus <code>content LIKE …</code> only</td><td class="n">88.0 ms</td><td class="n">7,609</td></tr>
+                <tr><td>Both, as shipped</td><td class="n">93.3 ms</td><td class="n">7,610</td></tr>
+                <tr class="win"><td>After the fix</td><td class="n">2.37 ms</td><td class="n">321</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            The <code>EXISTS</code> subquery everyone would suspect is free. The <code>LIKE</code> is
+            <strong>98.5% of the cost</strong>, and its 7,250 extra buffers are roughly 58 MB of TOAST
+            read per call. The measured 93.3 ms also matches the production mean of 89.7 ms almost
+            exactly, which is what confirms the bench reproduces the real thing. The punchline: only
+            <strong>24 of 1,612 plans</strong> actually match the marker.
+          </p>
+          <div class="callout good">
+            <h3>What shipped</h3>
+            <p>
+              The flag is a pure function of <code>content</code>, so it belongs in the write path.
+              Migration <code>1024</code> adds it as a <code>STORED</code> generated column, computed
+              once per plan write instead of 16.4 million times per nine days. The two primary read
+              paths in <code>source.ts</code> now select the column; the two legacy fallbacks still
+              compute it inline <em>on purpose</em>, since that path exists precisely for a database
+              where 1024 has not applied.
+            </p>
+            <p>
+              Equivalence was verified across all 1,612 rows before and during the migration —
+              24 true either way, zero mismatches — and a new pin test ties the SQL literal to the
+              TypeScript constant, with four fixture controls proving the test can actually fail.
+              Without that pin, editing the marker in TypeScript would silently leave the stored
+              column computing the old one forever.
+            </p>
+          </div>
+        </div>
+      </article>
+
+      <article class="finding">
+        <div class="f-head">
+          <span class="f-rank">02</span>
+          <div class="f-title">
+            <h3><code>work_items</code> carries 39 indexes and cannot do a single HOT update</h3>
+            <div class="f-meta">
+              <span class="chip crit">Open · highest remaining</span>
+              <span class="cost"><b>3.5%</b> of all DB time · 318,879 s · 145.6 ms per update</span>
+            </div>
+          </div>
+        </div>
+        <div class="f-body">
+          <p>
+            The hot <code>jsonb_set</code> update on <code>work_items</code> takes <strong>145.6 ms</strong>
+            to modify a single row. The reason is index maintenance, and the statistics are stark:
+          </p>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>Measure</th><th class="n">Value</th><th>Reading</th></tr></thead>
+              <tbody>
+                <tr><td>Indexes on the table</td><td class="n">39</td><td>Every update must maintain all of them</td></tr>
+                <tr class="hl"><td>Index bytes vs heap bytes</td><td class="n">1,887 MB / 1,826 MB</td><td>Indexes outweigh the table itself</td></tr>
+                <tr class="hl"><td>HOT updates</td><td class="n">131 of 2,569,941</td><td><strong>0.0%</strong> — the optimisation never engages</td></tr>
+                <tr><td>Dead tuples</td><td class="n">13.7%</td><td>Churn the vacuum is chasing</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            A HOT (heap-only tuple) update lets PostgreSQL modify a row without touching any index,
+            but only when no indexed column changed and the page has free space. At 39 indexes
+            covering <code>status</code> and friends, that condition is essentially never satisfiable —
+            so all 2.57 million updates pay the full write amplification.
+          </p>
+          <p>
+            Index usage over the window shows real slack: <code>hfc_see_also_gin</code> (4.5 MB) and
+            <code>hfc_audit_pending_idx</code> have <strong>zero scans</strong>, and several more sit
+            under 500. The GIN index is the notable one — GIN maintenance is among the most expensive
+            write costs in Postgres, and this one has never served a read.
+          </p>
+          <p>
+            <strong>Recommended:</strong> drop the two zero-scan indexes (the GIN first) and review the
+            sub-500-scan tier. Then examine whether the <code>jsonb_set</code> path needs to write
+            indexed columns at all — if <code>payload</code> could be updated without touching
+            <code>status</code>, HOT becomes reachable and the write cost largely disappears. I have
+            deliberately not dropped anything: index drops are destructive DDL and a zero-scan index
+            may still serve a monthly job, so that call is yours.
+          </p>
+        </div>
+      </article>
+
+      <article class="finding">
+        <div class="f-head">
+          <span class="f-rank">03</span>
+          <div class="f-title">
+            <h3>An issues query with 18 opaque boolean parameters, permanently pinned at its row cap</h3>
+            <div class="f-meta">
+              <span class="chip open">Open</span>
+              <span class="cost"><b>2.6%</b> of all DB time · 235,944 s · 2,092 ms per call</span>
+            </div>
+          </div>
+        </div>
+        <div class="f-body">
+          <p>
+            The hot <code>engineer_issues</code> read takes <strong>two full seconds</strong> and
+            returns <strong>exactly 500.0 rows on every one of its 112,742 calls</strong> — the
+            signature of a <code>LIMIT</code> being hit every single time, never a natural result size.
+            Its <code>WHERE</code> clause ends with eighteen consecutive bare parameters:
+          </p>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>The shape</th></tr></thead>
+              <tbody><tr><td><code>WHERE workspace_id = $1 AND kind = ANY($2) AND state = $3 AND $6 AND $7 AND $8 … AND $23</code></td></tr></tbody>
+            </table>
+          </div>
+          <p>
+            These are optional filters passed as booleans that are either a real condition or a no-op
+            <code>true</code>. Because the planner sees opaque parameters rather than constants, it
+            cannot use them to select an index or prune rows early, so the query scans broadly and
+            truncates at 500.
+          </p>
+          <p>
+            <strong>Recommended:</strong> build the <code>WHERE</code> clause dynamically so only active
+            predicates appear in the SQL. This makes the conditions sargable and lets existing indexes
+            apply. Worth pairing with a check on whether callers actually want a 500-row cap or are
+            silently receiving a truncated answer — a capped result read as a complete one is the
+            failure mode this repo's own guidance warns about.
+          </p>
+        </div>
+      </article>
+
+      <article class="finding">
+        <div class="f-head">
+          <span class="f-rank">04</span>
+          <div class="f-title">
+            <h3>The claim path builds a 57,000-row temp table and takes nine seconds</h3>
+            <div class="f-meta">
+              <span class="chip open">Open</span>
+              <span class="cost"><b>1.1%</b> of all DB time · 104,330 s · 8,997 ms per call</span>
+            </div>
+          </div>
+        </div>
+        <div class="f-body">
+          <p>
+            <code>CREATE TEMP TABLE claim_candidate_snapshot</code> averages <strong>9.0 seconds</strong>
+            and materialises <strong>57,142 rows per call</strong> across 11,596 calls. Every agent
+            claiming a work item waits on this, which makes it a latency problem felt directly by the
+            fleet as well as a load problem.
+          </p>
+          <p>
+            <strong>Recommended:</strong> this deserves its own investigation rather than a guess from
+            the statement text — the question is whether the snapshot genuinely needs all 57k candidate
+            rows materialised, or whether the selection can be pushed into the query that consumes it.
+          </p>
+        </div>
+      </article>
+
+      <article class="finding">
+        <div class="f-head">
+          <span class="f-rank">05</span>
+          <div class="f-title">
+            <h3>A 3.6 GB audit log written 15 million times and read only by scanning it whole</h3>
+            <div class="f-meta">
+              <span class="chip open">Open</span>
+              <span class="cost">13.5M rows · 39.9 billion tuples read sequentially</span>
+            </div>
+          </div>
+        </div>
+        <div class="f-body">
+          <p>
+            <code>route_invocations</code> holds 13.5 million rows in 3.6 GB and carries exactly two
+            indexes: the primary key, and <code>(workspace_id, invoked_at DESC)</code>. Over the window
+            it took <strong>14.9 million inserts</strong> and served only <strong>2,658 index
+            scans</strong> — against 5,676 sequential scans that read <strong>39.9 billion
+            tuples</strong>, roughly half the table per scan.
+          </p>
+          <p>
+            Reads are rare but each is enormous, and the 975 MB index that exists is barely used, so it
+            is being paid for on every insert and almost never repaid.
+          </p>
+          <p>
+            <strong>Correction:</strong> an earlier draft of this report said this table had no
+            evident retention. That was wrong. <code>telemetry-retention</code> registers it at
+            <strong>7 days and is enforcing exactly</strong> — the oldest row is 7 days old. The
+            3.6 GB is not neglect, it is <strong>ingest rate</strong>: 13.5 million rows in seven
+            days is roughly 22 inserts per second, sustained.
+          </p>
+          <p>
+            <strong>Recommended:</strong> index for the predicate the rare reads actually use rather
+            than keeping one the workload has shown it does not want — and, for release builds,
+            shorten the window rather than adding a policy that already exists.
+          </p>
+        </div>
+      </article>
+
+      <article class="finding">
+        <div class="f-head">
+          <span class="f-rank">06</span>
+          <div class="f-title">
+            <h3>The optional-predicate pattern is systemic, not local</h3>
+            <div class="f-meta">
+              <span class="chip open">Open · pattern</span>
+              <span class="cost">4 sites in plans · 18 parameters in issues</span>
+            </div>
+          </div>
+        </div>
+        <div class="f-body">
+          <p>
+            Findings 1 and 3 share a root shape: <code>AND (${flag} OR column = ${value})</code>,
+            repeated four times in the plans source and taken to its extreme in the issues read. The
+            intent is a reusable query with optional filters; the effect is a <code>WHERE</code> clause
+            the planner cannot reason about.
+          </p>
+          <p>
+            It is worth treating as one fix rather than several. A small helper that composes only the
+            active predicates would remove the whole class, and the two query builders are the natural
+            place to put it.
+          </p>
+        </div>
+      </article>
+
+      <article class="finding">
+        <div class="f-head">
+          <span class="f-rank">07</span>
+          <div class="f-title">
+            <h3>Autovacuum is falling behind on the busiest tables</h3>
+            <div class="f-meta">
+              <span class="chip open">Open</span>
+              <span class="cost">15.7% dead tuples at worst</span>
+            </div>
+          </div>
+        </div>
+        <div class="f-body">
+          <div class="scroll">
+            <table>
+              <thead><tr><th>Table</th><th class="n">Live rows</th><th class="n">Dead</th><th>Last autovacuum</th></tr></thead>
+              <tbody>
+                <tr class="hl"><td><code>agent_activity</code></td><td class="n">1,371,148</td><td class="n">15.7%</td><td>2026-08-27 — two days stale</td></tr>
+                <tr><td><code>substrate_outbox</code></td><td class="n">1,401,339</td><td class="n">15.5%</td><td>2026-08-29</td></tr>
+                <tr><td><code>work_items</code></td><td class="n">865,580</td><td class="n">13.7%</td><td>2026-08-29</td></tr>
+                <tr><td><code>session_turns</code></td><td class="n">1,023,420</td><td class="n">9.2%</td><td>2026-08-27 — two days stale</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            Dead tuples are read by every sequential scan, so this compounds findings 2 and 5 rather
+            than sitting beside them. <strong>Recommended:</strong> lower
+            <code>autovacuum_vacuum_scale_factor</code> on these specific tables — the default 20%
+            threshold is far too loose at a million rows.
+          </p>
+        </div>
+      </article>
+
+      <article class="finding">
+        <div class="f-head">
+          <span class="f-rank">08</span>
+          <div class="f-title">
+            <h3>Retention works — but the session family was never registered for it</h3>
+            <div class="f-meta">
+              <span class="chip open">Open</span>
+              <span class="cost">32 GB unbounded · a 3-line fix</span>
+            </div>
+          </div>
+        </div>
+        <div class="f-body">
+          <div class="scroll">
+            <table>
+              <thead><tr><th>Table</th><th class="n">Rows</th><th class="n">Total size</th></tr></thead>
+              <tbody>
+                <tr><td><code>session_archive_files</code></td><td class="n">76,511</td><td class="n">17 GB</td></tr>
+                <tr><td><code>tool_invocations</code></td><td class="n">6,136,053</td><td class="n">12 GB</td></tr>
+                <tr><td><code>session_turns</code></td><td class="n">1,023,420</td><td class="n">9.3 GB</td></tr>
+                <tr><td><code>session_turn_chunks</code></td><td class="n">916,216</td><td class="n">5.7 GB</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            <strong>Correction.</strong> An earlier draft called this "44 GB with no evident
+            retention". That was wrong and worth stating plainly, because it pointed at the wrong
+            fix. The retention machinery exists, is registered against five categories, and is
+            enforcing them to the day:
+          </p>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>Table</th><th class="n">Oldest row</th><th class="n">Target</th><th>Verdict</th></tr></thead>
+              <tbody>
+                <tr><td><code>route_invocations</code></td><td class="n">7 days</td><td class="n">7 days</td><td>Enforced exactly</td></tr>
+                <tr><td><code>tool_invocations</code></td><td class="n">14 days</td><td class="n">14 days</td><td>Enforced exactly</td></tr>
+                <tr><td><code>agent_activity</code></td><td class="n">7 days</td><td class="n">7 days</td><td>Enforced exactly</td></tr>
+                <tr class="hl"><td><code>session_archive_files</code></td><td class="n">50 days</td><td class="n">none</td><td>Not registered</td></tr>
+                <tr class="hl"><td><code>session_turns</code></td><td class="n">45 days</td><td class="n">none</td><td>Not registered</td></tr>
+                <tr class="hl"><td><code>session_turn_chunks</code></td><td class="n">26 days</td><td class="n">none</td><td>Not registered</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            So the real finding is narrower and much more actionable: the session-archive family
+            (32 GB and growing without bound) is simply <em>absent from</em>
+            <code>DEFAULT_RETENTION_TARGETS</code>. The fix is three entries in an existing table,
+            not a new subsystem — and on a laptop running the shipped app, unbounded growth here is
+            the difference between shipping and not.
+          </p>
+        </div>
+      </article>
+
+      <article class="finding">
+        <div class="f-head">
+          <span class="f-rank">09</span>
+          <div class="f-title">
+            <h3>Query-safety review: nothing alarming</h3>
+            <div class="f-meta">
+              <span class="chip fixed">No action needed</span>
+              <span class="cost">611 <code>.unsafe()</code> sites reviewed</span>
+            </div>
+          </div>
+        </div>
+        <div class="f-body">
+          <p>
+            I checked the injection surface across roughly 735 raw SQL call sites and found
+            <strong>no confirmed SQL injection</strong>. Of 611 <code>.unsafe()</code> uses, none
+            interpolate a template variable into the SQL string. The variable-argument cases pass
+            either pre-built parameterised SQL with a separate params array, or code-controlled
+            identifiers such as column-list constants and table-alias prefixes — I traced a
+            representative sample to confirm rather than assuming.
+          </p>
+          <p>
+            Two things genuinely worth noting on the positive side: the <code>dev:pg_query</code> tool
+            actively warns when a query against a tenant-scoped table omits its
+            <code>workspace_id</code> predicate, which is a good guardrail against cross-tenant reads;
+            and roughly 66 code sites show a possible query-inside-a-loop shape that would be worth a
+            focused N+1 pass, though I did not verify these individually and some will be legitimate.
+          </p>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Hardening this for release builds</h2>
+      <span class="chip info">Extend what exists</span>
+    </div>
+    <div class="stack">
+      <p class="measure">
+        Almost everything needed here is already built. The retention system works, a tuning-drift
+        checker exists, and migrations already carry schema to the embedded database. The gaps are
+        narrower than they first look — and one of them is structural rather than missing.
+      </p>
+
+      <div class="callout warn">
+        <h3>The structural one: the tuning check is blind on exactly the target that ships</h3>
+        <p>
+          <code>pg-tuning-drift.ts</code> deliberately skips embedded Postgres, and its stated reason
+          is sound: <em>"an embedded/desktop Postgres is launched by us with <code>-c</code> flags fed
+          from the SAME derivation at every boot, so it cannot accumulate this drift."</em> True — an
+          embedded cluster cannot drift.
+        </p>
+        <p>
+          But that means it can also never <em>alarm</em>. The check validates "does the live config
+          still match the derivation", when the shipped risk is not drift at all — it is that
+          <strong>the derivation itself is wrong or incomplete on hardware we never run</strong>.
+          <code>random_page_cost</code> is exactly that failure: not drift, an omission from the
+          derivation, permanent, and with no detector anywhere in the system. Being unable to drift is
+          precisely what makes a bad derivation invisible forever.
+        </p>
+        <p>
+          <strong>Proposal:</strong> keep drift-checking native-only, and add a separate
+          <em>derivation sanity check</em> that <em>does</em> run on embedded — asserting the derived
+          values are coherent for the detected host rather than merely unchanged. Is
+          <code>shared_buffers</code> a sane fraction of real RAM? Does
+          <code>random_page_cost</code> match the detected storage class? Does
+          <code>work_mem</code> &times; <code>max_connections</code> stay inside RAM? Those are
+          answerable at boot on any machine, and they catch the class of fault drift-checking
+          structurally cannot.
+        </p>
+      </div>
+
+      <div class="verdict">
+        <div class="v-card">
+          <span class="label">Extend, don't build</span>
+          <span class="big-n">3</span>
+          <span class="cap">Entries to add to <code>DEFAULT_RETENTION_TARGETS</code> for the session
+          family. The machinery already enforces its five registered categories to the day; these
+          three were simply never registered, and they are the 32 GB.</span>
+        </div>
+        <div class="v-card">
+          <span class="label">One line, both targets</span>
+          <span class="big-n">1</span>
+          <span class="cap">Add <code>random_page_cost</code> (and likely
+          <code>effective_io_concurrency</code>) to the derivation, so the fix reaches dev and every
+          shipped install from the same place.</span>
+        </div>
+        <div class="v-card">
+          <span class="label">Field visibility</span>
+          <span class="big-n">0</span>
+          <span class="cap">Statements we can currently observe on a user's machine.
+          <code>pg_stat_statements</code> is not in the embedded extension set, so this entire audit
+          would have been impossible there.</span>
+        </div>
+      </div>
+
+      <p class="measure">
+        The remaining gap is <strong>where we measure</strong>. Every number in this report comes from
+        one machine with 62.9 GB of cache and a 74 GB database. Users begin at zero rows on a laptop
+        with roughly 128 MB. Neither extreme is where the danger lives — the danger is the middle: a
+        table large enough to genuinely need an index, on a machine where nothing is cached, with
+        <code>random_page_cost = 4.0</code> actively advising the planner not to use one.
+      </p>
+      <p class="measure">
+        <strong>Proposal:</strong> add a release-gate check that runs the top statement shapes against
+        a fixture started with the <em>shipped fallback GUCs</em> and small data, asserting
+        <strong>plan shape</strong> — index scan versus sequential scan — rather than timing. Plan
+        shape is deterministic and CI-safe where wall-clock is not, and it is the property that
+        actually differs between this box and a user's.
+      </p>
+      <p class="measure">
+        Finally, the live-versus-migration index comparison that found the two drifted indexes was
+        hand-rolled for this audit. It is a short query against <code>pg_indexes</code> and the
+        migration corpus, and it answers the exact question you asked — <em>will a fresh install have
+        the schema this box has?</em> That belongs in the gate as a standing guard, not in an audit
+        somebody happens to run.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>What I would do next, in order</h2></div>
+    <div class="stack measure">
+      <ul>
+        <li><strong>Set <code>random_page_cost</code> to ~1.1</strong> and ship it as part of the host-scaled tuning. It is one line, it affects every query on both dev and user machines, and today the value is an unexamined default calibrated for hardware nobody runs.</li>
+        <li><strong>Take finding 2 (the 39 indexes).</strong> It is the largest remaining share of database time and the fix is mostly deletion.</li>
+        <li><strong>Fix the optional-predicate pattern once</strong>, covering findings 3 and 6 together rather than one query at a time.</li>
+        <li><strong>Decide retention for the four archive tables</strong> — this is a shipping requirement, not housekeeping, because unbounded growth on a user's laptop is a far worse outcome than it is here.</li>
+        <li><strong>Add the two drifted plugin indexes to a migration</strong>, so the live database and a fresh install stop disagreeing.</li>
+        <li><strong>Consider shipping <code>pg_stat_statements</code></strong> in the embedded extension set. Without it there is no way to learn what a real user's database is doing, and everything in this report would have been invisible.</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    <p>
+      Audit recorded as <strong>WI-871555</strong>. Fix shipped as migration
+      <code>1024-plan-is-blender-origin-generated-column.sql</code> plus
+      <code>packages/operator-core/lib/agent-tools/plans/source.ts</code> and a new pin test at
+      <code>packages/operator-core/lib/doc-claims/plan-blender-origin-column.test.ts</code>.
+      Source for this page: <code>.papercusp/scratch/db-query-audit.html</code>.
+      Measurements taken 2026-08-29 against the live operator database, PostgreSQL 18.4.
+    </p>
+  </footer>
+
+</div>

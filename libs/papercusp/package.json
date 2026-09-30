@@ -1,0 +1,17 @@
+{
+  "name": "papercusp",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Papercusp — open standard for autonomous-harness frameworks",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "libs/*"
+  ],
+  "scripts": {
+    "gen:su-decomposition": "tsx packages/orchestrator/bin/gen-su-decomposition.ts",
+    "gen:su-decomposition:check": "tsx packages/orchestrator/bin/gen-su-decomposition.ts --check",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  }
+}

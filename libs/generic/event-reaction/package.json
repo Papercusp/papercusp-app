@@ -1,0 +1,22 @@
+{
+  "name": "@papercusp/event-reaction",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A generic, durable ECA reaction engine over any dispatcher. Register reaction rules { id, on, when, fire, args } plus execution metadata (mode, onlyOnSuccess, capability, dedupKey); given a settled event, match -> loop-guard (depth + cycle) -> schedule (durable enqueue or in-process), with an idempotent durable executor over an injected store. Builds on @papercusp/rules (the pure matcher); dispatch, the durable runner, and the dedup store are injected as ports, so it has zero coupling to any host.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@papercusp/rules": "*"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

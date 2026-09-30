@@ -1,0 +1,40 @@
+{
+  "_doc-honeycomb": {
+    "$description": "Honeycomb theme — selectable The Swarm color system. Charcoal surfaces with muted honey accents; restrained enough for dense operator UI."
+  },
+  "honeycomb": {
+    "bg-deepest":      { "$value": "#030303", "$type": "color", "$description": "Near-black depth from the swarm identity demo" },
+    "bg-deeper":       { "$value": "#050504", "$type": "color" },
+    "bg-deep":         { "$value": "#080806", "$type": "color" },
+    "bg":              { "$value": "#070704", "$type": "color", "$description": "Charcoal page base with only a faint warm cast" },
+    "bg-1":            { "$value": "#0D0D08", "$type": "color" },
+    "bg-2":            { "$value": "rgba(255, 255, 255, 0.045)", "$type": "color", "$description": "Neutral low glass tier; avoids amber-washing every panel" },
+    "bg-3":            { "$value": "rgba(255, 255, 255, 0.070)", "$type": "color" },
+    "bg-4":            { "$value": "rgba(198, 142, 36, 0.120)", "$type": "color" },
+    "bg-popover":      { "$value": "#11100B", "$type": "color", "$description": "Solid elevated comb surface" },
+    "bg-raised":       { "$value": "#15130B", "$type": "color" },
+    "bg-raised-high":  { "$value": "#1D190D", "$type": "color" },
+    "fg":              { "$value": "#F4EBD4", "$type": "color" },
+    "fg-dim":          { "$value": "#CDBC98", "$type": "color" },
+    "fg-mute":         { "$value": "#9F9378", "$type": "color" },
+    "border":          { "$value": "rgba(196, 143, 45, 0.16)", "$type": "color" },
+    "border-strong":   { "$value": "rgba(214, 166, 74, 0.34)", "$type": "color" },
+    "accent":          { "$value": "#C68E24", "$type": "color", "$description": "Muted honey primary accent" },
+    "accent-rgb":      { "$value": "198, 142, 36", "$type": "color", "$description": "RGB triplet of --accent for rgba() alpha composition — every theme that overrides accent must override this too, or the frost sky triplet leaks through :root" },
+    "accent-strong":   { "$value": "#D6A64A", "$type": "color", "$description": "Restrained honey hover/focus accent" },
+    "accent-strong-rgb": { "$value": "214, 166, 74", "$type": "color", "$description": "RGB triplet of --accent-strong for rgba() alpha composition (same leak rule as accent-rgb)" },
+    "accent-cool":     { "$value": "#E8D9B5", "$type": "color", "$description": "Cream highlight for glows and linework" },
+    "accent-soft":     { "$value": "#E0C071", "$type": "color", "$description": "Soft honey signal tint" },
+    "accent-soft-rgb": { "$value": "224, 192, 113", "$type": "color", "$description": "RGB triplet of --accent-soft for rgba() alpha composition (same leak rule as accent-rgb)" },
+    "accent-deep":     { "$value": "#8B5E16", "$type": "color", "$description": "Burnt honey active tint" },
+    "accent-deeper":   { "$value": "#5F3F12", "$type": "color", "$description": "Deep amber shadow tint" },
+    "accent-ink":      { "$value": "#130D03", "$type": "color", "$description": "Text on honey fills" },
+    "good":            { "$value": "#68D391", "$type": "color" },
+    "warn":            { "$value": "#D6A64A", "$type": "color" },
+    "bad":             { "$value": "#E06F69", "$type": "color" },
+    "warn-bg":         { "$value": "rgba(198, 142, 36, 0.11)", "$type": "color" },
+    "warn-border":     { "$value": "rgba(214, 166, 74, 0.34)", "$type": "color" },
+    "good-bg":         { "$value": "rgba(104, 211, 145, 0.11)", "$type": "color" },
+    "bad-bg":          { "$value": "rgba(224, 111, 105, 0.11)", "$type": "color" }
+  }
+}

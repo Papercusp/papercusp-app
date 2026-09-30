@@ -1,0 +1,10 @@
+{
+  "ref": "spec-quality",
+  "id": "spec-quality",
+  "title": "Plan spec quality",
+  "description": "Reusable plan-level contract quality standard: exact current revision identity, full item coverage, atomic observable and falsifiable behavior, implementation independence, explicit non-behavioral exemptions, plan-class specialization, and specSetHash freshness.",
+  "category": "planning",
+  "scope": "rubric",
+  "version": "1.0.0",
+  "source": "first-party"
+}

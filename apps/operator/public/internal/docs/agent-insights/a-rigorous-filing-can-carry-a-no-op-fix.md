@@ -1,0 +1,94 @@
+# A rigorous filing can carry a no-op fix - verify the REMEDY separately from the diagnosis
+URL: /internal/docs/agent-insights/a-rigorous-filing-can-carry-a-no-op-fix
+
+EI-20019309044931698 was an exemplary bug report (end-to-end measurements, timestamps, log line numbers, its own probe, even a 'why the obvious fix does not work' section) whose proposed remedy AND stated mechanism were both wrong. The remedy - hypercore-storage storage.flush() - flushes the 'default' RocksDB column family while ALL hypercore data lives in the 'corestore' one, so it is a silent no-op: measured 0 new SSTs vs 1 for storage.db.flush(). The stated mechanism ('the unflushed memtable makes just-appended blocks invisible to a read-only open') is false: a read-only RocksDB open uses walRecoveryMode POINT_IN_TIME and REPLAYS the WAL, so the blocks were already visible - measured 245/245 cross-process with no flush at all. The filing's own ENOENT evidence was on a WAL file, which corroborated the WAL dependence and was read as its opposite. The recurrence guard the filing specified would have PASSED with and without the fix.
+
+## The shape
+
+A filing's evidence quality does **not** transfer to its proposed remedy, but it reads as
+though it does. A report carrying real measurements, real timestamps and real line numbers
+buys enormous credibility, and the fix section at the bottom inherits all of it for free -
+even though the fix is usually the one part the filer did **not** measure.
+
+`EI-20019309044931698` is the clean example. It was among the best-evidenced filings on this
+fleet. Both its remedy and its mechanism were wrong.
+
+## Trap 1: a rocksdb-native flush is COLUMN-FAMILY scoped
+
+`hypercore-storage` exposes two flushes and only one of them touches hypercore's data:
+
+| call                                        | what it flushes                   | measured effect               |
+| ------------------------------------------- | --------------------------------- | ----------------------------- |
+| `storage.flush()` (-> `this.rocks.flush()`) | the **'default'** column family   | **0 new SSTs - silent no-op** |
+| `storage.db.flush()`                        | the **'corestore'** column family | 1 new SST                     |
+
+The mechanism: `rocksdb-native/lib/state.js` flushes with
+`binding.flush(this._handle, db._columnFamily._handle, ...)` - scoped to the column family of
+the session it is called on. The root `rocks` session is pinned to `'default'`
+(`columnFamily = new ColumnFamily('default')`, and `getColumnFamily(!c)` returns
+`columnFamilies[0]`), while every hypercore byte lives under
+`COLUMN_FAMILY = 'corestore'`. Corestore's own `suspend()` gets this right
+(`index.js:312`: `if (!this.storage.readOnly) await this.storage.db.flush()`).
+
+A no-op that typechecks is the worst available failure shape: it ships, changes nothing, and
+surfaces an hour into the next release cut looking like the **diagnosis** was wrong rather
+than the fix.
+
+**Durable fix: make the wrong call uncompilable.** `storage.flush()` is deliberately NOT
+declared on `Corestore` in `holepunch.d.ts`, with the measurement in its doc comment. A
+comment saying "do not call this" loses to a comment that cannot be called.
+
+## Trap 2: the stated mechanism was falsified by the filing's own evidence
+
+The filing said the unflushed memtable made the just-appended snapshot blocks *invisible* to
+the cutter's fresh read-only open. Measured cross-process, writer held open, using the exact
+`new Corestore(path, { readOnly: true })` form the cutter uses:
+
+```
+positive-control-stale-copy   writer 245, child saw 200   <- probe CAN detect staleness
+none (no flush at all)        writer 245, child saw 245   <- ALREADY VISIBLE
+```
+
+A read-only RocksDB open uses `walRecoveryMode POINT_IN_TIME` and **replays the WAL**, so
+unflushed data is visible. The filing's own direct evidence agreed and was read as its
+opposite: its `ENOENT` was on `002810.log` - a **WAL file**. The open was *reading* the WAL,
+not missing the data.
+
+That distinction changes what the fix may promise. Flushing does not buy visibility; it buys
+**independence from the WAL segments a live writer rotates underneath the reader** - a
+mitigation of the open-time race, not a fix for it. The root-cause fix is to cut from a
+RocksDB checkpoint (a consistent hard-linked dir), which removes the race class outright.
+
+## Trap 3: a guard derived from a wrong mechanism inherits the wrongness
+
+The filing specified a recurrence guard: *"after `appended:true`, a fresh read-only open MUST
+resolve the just-appended snapshot set."* That assertion was **already true without the fix**,
+so the guard would have passed against the un-fixed code. A guard that passes in both states
+is worse than no guard - it converts an open question into false confidence.
+
+Before writing a guard a filing asks for, check it can **fail** against the un-fixed code.
+
+## The method that caught all three
+
+**A probe whose every arm passes is measuring nothing.** The first probe here reported
+"visible" in all three arms and was worthless. It only became evidence after adding a
+positive control - freeze a *copy* of the store, append past it, point the reader at the copy -
+which correctly reported 200 against a writer at 245. Only then did the "visible" verdicts
+mean anything.
+
+This is the same family as the repo's other zero-work false greens: `tsc -p .` checking zero
+files, `test:affected` selecting zero suites, a `-t` filter matching zero tests. All of them
+report success for having done nothing.
+
+Falsifiability of the shipped guard was proven the same way, without touching the shared tree:
+`boot.ts` was copied **out** of the tree, mutated (`db.flush()` -> `flush()`), and the guard was
+pointed at the copy via `PROBE_BOOT_TS`. It failed on the mutant and passes on the real file.
+
+## Checklist when a well-evidenced filing hands you a fix
+
+1. Read the writer of the proposed call. Does it operate on the object you think it does?
+2. Ask what the fix would change if it were a no-op. Would anything fail loudly? If not, prove
+   it acts.
+3. Re-derive the stated mechanism from the filing's own raw evidence - the evidence is often
+   right while the interpretation is wrong.
+4. Check the proposed guard can fail against un-fixed code before you write it.

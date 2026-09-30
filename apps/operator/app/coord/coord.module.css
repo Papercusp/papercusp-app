@@ -1,0 +1,412 @@
+.root {
+  width: min(100%, 72rem);
+  margin-inline: auto;
+  padding: 24px;
+  color: var(--fg);
+}
+
+.header {
+  margin-bottom: 16px;
+}
+
+.title {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 650;
+  line-height: 1.2;
+  color: var(--fg);
+}
+
+.description {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+
+.tabNav {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tabButton {
+  min-height: 36px;
+  padding: 8px 16px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tabButton:hover {
+  color: var(--fg);
+}
+
+.tabButtonActive {
+  border-bottom-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.alert {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--bad), transparent 54%);
+  border-radius: 6px;
+  background: var(--bad-bg);
+  color: var(--bad);
+  font-size: 13px;
+}
+
+.warningAlert {
+  margin-bottom: 16px;
+  padding: 8px 16px;
+  border: 1px solid var(--warn-border);
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 13px;
+}
+
+.strong {
+  font-weight: 650;
+}
+
+.sectionTitle {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.sectionTitleMuted {
+  color: var(--fg-mute);
+}
+
+.mutedCopy {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+
+.emptyCopy {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg-mute);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+  margin: 0 0 24px;
+  list-style: none;
+}
+
+.listCompact {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.staleList {
+  opacity: 0.5;
+}
+
+.cardRow {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-1), transparent 44%);
+}
+
+.cardRowPadded {
+  padding: 8px 12px;
+}
+
+.rowHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rowTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rowMeta {
+  flex: 0 0 auto;
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+
+.rowBody {
+  margin-top: 2px;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.pillRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.miniBadge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.miniBadgeMuted {
+  color: var(--fg-mute);
+}
+
+.inboxItem {
+  padding: 8px 12px;
+}
+
+.inboxItemEscalation {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+
+.inlineRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.kindBadge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.kindBadgeNeutral {
+  background: var(--bg-2);
+  color: var(--fg);
+}
+
+.kindBadgeEscalation {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.truncateText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summaryText {
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.rowButton {
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rowButton:hover {
+  background: color-mix(in srgb, var(--bg-2), transparent 58%);
+}
+
+.contentColumn {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.planTitle {
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.payloadPre {
+  max-height: 60vh;
+  margin: 0;
+  overflow: auto;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg), transparent 24%);
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.button {
+  min-height: 28px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--bg-3);
+}
+
+.button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.filterBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-1), transparent 46%);
+}
+
+.filterGroup,
+.filterControl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filterLabel,
+.resultCount {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.filterInput {
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+}
+
+.sourcePill {
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sourcePillInactive {
+  background: var(--bg-2);
+  color: var(--fg-mute);
+}
+
+.sourcePillInactive:hover {
+  color: var(--fg);
+}
+
+.sourceBadgePlanEvent {
+  background: color-mix(in srgb, var(--accent), transparent 78%);
+  color: var(--accent-ink);
+}
+
+.sourceBadgeMessage {
+  background: var(--bg-2);
+  color: var(--fg);
+}
+
+.sourceBadgeEscalation {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.sourceBadgeHandoff {
+  background: color-mix(in srgb, var(--good), transparent 82%);
+  color: var(--good);
+}
+
+.eventButton {
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.eventButton:hover {
+  background: color-mix(in srgb, var(--bg-2), transparent 58%);
+}
+
+.eventTitleRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.eventSummary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.historyPayload {
+  white-space: pre;
+}

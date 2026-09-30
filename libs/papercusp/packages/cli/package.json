@@ -1,0 +1,19 @@
+{
+  "name": "@papercusp/cli",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "papercusp": "./bin/papercusp"
+  },
+  "scripts": {
+    "test": "node --test src/**/*.node-test.ts"
+  },
+  "dependencies": {
+    "@papercusp/blueprint-distribution": "*",
+    "@papercusp/plan-parser": "*",
+    "@papercusp/plugin-loader": "*",
+    "postgres": "^3.4.9",
+    "tsx": "^4.7.0"
+  }
+}

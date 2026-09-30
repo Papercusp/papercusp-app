@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: Elastic-2.0
+//
+// papercup:plugin@0.1.0 — minimum viable WIT for plugin lifecycle.
+//
+// Phase 1 ships exactly two interfaces:
+//   - logging  (host import) — plugins call log({level, message, fields})
+//   - lifecycle (plugin export) — host calls init() / shutdown()
+//
+// Future packages (kv, fs, http, secrets, events, oauth, process, ui)
+// add their interfaces under the same papercup:plugin/<name> path and
+// extend the `plugin` world via additive imports/exports. Plugins pin
+// to a `papercup-plugin = "<range>"` in their manifest's
+// [plugin.protocol] block; the host loads the matching versioned
+// directory at instantiate time.
+
+package papercup:plugin@0.1.0;
+
+interface logging {
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    record log-record {
+        level: log-level,
+        message: string,
+        // Structured key/value pairs the plugin wants attached to the
+        // record. Host serializes these alongside the message.
+        fields: list<tuple<string, string>>,
+    }
+
+    // Emit a log record. Host never fails this call — log emission is
+    // always best-effort. If the plugin spams, host applies rate
+    // limits silently.
+    log: func(entry: log-record);
+}
+
+interface lifecycle {
+    // Plugin metadata returned from `init`.
+    record plugin-info {
+        // Plugin id (e.g. "papercup.slack-notifier"). Must match manifest.
+        id: string,
+        // Human-readable name.
+        name: string,
+        // Semver string of the plugin (e.g. "0.1.0").
+        version: string,
+        // Protocol version this plugin was built against (e.g. "0.1.0").
+        protocol: string,
+    }
+
+    // Reasons `init` may fail. Plugin can return a structured error or
+    // a freeform message; host surfaces both to the user.
+    variant init-error {
+        // Required configuration (secret, OAuth, etc.) not yet provided.
+        config-missing(string),
+        // Capability needed by the plugin not granted by host.
+        capability-denied(string),
+        // Internal plugin error.
+        internal(string),
+    }
+
+    // Called once after the plugin component is instantiated and the
+    // host's preopened work-dir is wired into WASI. Plugin should
+    // perform any one-time setup here, register handlers, etc., and
+    // return its plugin-info.
+    init: func() -> result<plugin-info, init-error>;
+
+    // Called when the plugin is being unloaded (uninstall, host
+    // shutdown, hot-replace). Plugin should drain in-flight work and
+    // release external resources. After return, the wasmtime store is
+    // dropped.
+    shutdown: func();
+}
+
+interface http {
+    // Outbound HTTP from a plugin. Gated by the `http:fetch:<host>`
+    // capability — the host parses the URL, extracts the hostname, and
+    // checks the plugin's manifest + the user-granted set both allow
+    // it. The wildcard rules from papercup-plugin-protocol apply
+    // (`*.example.com` for subdomain prefix; `*` for any host with
+    // explicit user opt-in at install time).
+    //
+    // v0.1.0 is intentionally minimal: GET / POST text bodies only.
+    // Streaming, multipart, custom verbs land in later WIT versions.
+
+    enum http-method {
+        get,
+        post,
+        put,
+        delete,
+        patch,
+    }
+
+    record http-request {
+        method: http-method,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    variant http-error {
+        // Capability not granted (manifest didn't declare it OR host
+        // didn't grant it). Two-tier check failed; the message names
+        // which tier.
+        capability-denied(string),
+        // Network/DNS/TLS error. Message is host-readable.
+        transport(string),
+        // URL didn't parse, scheme wasn't http/https, etc.
+        invalid-request(string),
+    }
+
+    fetch: func(req: http-request) -> result<http-response, http-error>;
+}
+
+world plugin {
+    import logging;
+    import http;
+    import secrets;
+    import events;
+    export lifecycle;
+    export actions;
+}
+
+interface secrets {
+    // Read a host-stored secret by name. Gated per-name by the
+    // `secrets:read:<NAME>` capability — host derives the cap from the
+    // call argument at invoke time. A plugin that declares
+    // `secrets:read:OPENAI_API_KEY` cannot read STRIPE_KEY without
+    // also declaring it.
+    //
+    // Returns the raw secret bytes; plugin is expected to never log,
+    // serialize, or persist the value beyond the call. v0.1.0 is
+    // read-only — secret rotation / write APIs land in v0.2.
+
+    variant secret-error {
+        // Cap check failed. Message names the requested name + which
+        // tier (manifest/granted) blocked it.
+        capability-denied(string),
+        // No secret with that name exists in the host store.
+        not-found(string),
+        // Secret name failed validation (empty, bad chars, too long).
+        invalid-name(string),
+    }
+
+    get: func(name: string) -> result<string, secret-error>;
+}
+
+interface events {
+    // Emit an event into the host's event bus. Fire-and-forget; no
+    // delivery confirmation. Two error variants:
+    //   - invalid-name: event name must start with the plugin's id
+    //     followed by a dot, e.g. plugin "papercup.foo" can emit
+    //     "papercup.foo.bar" but not "other.bar". This prevents one
+    //     plugin from impersonating another's events.
+    //   - rate-limited: per-plugin token bucket (default 100 events/sec,
+    //     burst 100). Overage is dropped + audited per-window-tally;
+    //     this variant is returned to the plugin so it can back off.
+
+    variant emit-error {
+        invalid-name(string),
+        rate-limited(string),
+    }
+
+    emit: func(name: string, payload: list<u8>) -> result<_, emit-error>;
+}
+
+interface actions {
+    // Plugin-exported invoke entrypoint. Host calls this to dispatch
+    // a UI-level action declared in the plugin's manifest.actions[].
+    // Payload is opaque bytes (CBOR/JSON/etc., plugin-defined); the
+    // result-payload is similarly opaque. v0.2 will replace with
+    // typed records derived from per-action JSON Schemas.
+
+    variant action-error {
+        // Action name not in the plugin's actions registry.
+        not-found(string),
+        // Plugin's own error inside the handler.
+        plugin-error(string),
+        // Plugin determined the payload was malformed.
+        invalid-payload(string),
+    }
+
+    invoke: func(name: string, payload: list<u8>) -> result<list<u8>, action-error>;
+}

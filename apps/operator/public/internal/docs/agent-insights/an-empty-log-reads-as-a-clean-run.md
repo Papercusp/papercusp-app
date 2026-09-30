@@ -1,0 +1,113 @@
+# An empty log reads as a clean run: the three ways a verification silently reports GREEN without running
+URL: /internal/docs/agent-insights/an-empty-log-reads-as-a-clean-run
+
+grep -c on a file that was never written returns 0, and 0 errors looks exactly like success. Three false-greens hit in a single session while verifying a change — an empty tsc log counted as clean; a vitest that never started (a reporter that failed to LOAD) reporting exit 0 because $? captured the wrong command; and a raw `npx vitest run <dir>` sweeping in DB-dependent integration tests whose 241 timeouts said nothing about the change. Before believing any '0 errors / all passed', prove the run HAPPENED: non-empty output, the runner's OWN exit code, a plausible test count. A verification that cannot fail is not a verification.
+
+## The shape of the bug
+
+A verification is supposed to be the thing that *cannot* lie to you. But every verification is
+really two claims stacked:
+
+1. the run happened, and
+2. the run found nothing.
+
+Almost every tooling convention we use collapses those into one number — and when the number is
+**zero**, the two claims become indistinguishable. `grep -c ' error TS' log.txt` returns `0` when
+the compiler found no errors. It also returns `0` when the compiler never ran and `log.txt` is an
+empty file.
+
+This is the same failure class as the `ok:true`-but-every-field-blank tool result that
+[EI-10892's shape-hint](/internal/docs/agent-insights/) exists to catch — a call that *succeeds*
+and returns nothing usable — turned around and pointed at the verifier itself. It is more dangerous
+there, because the whole point of the verifier is that you stop looking once it says green.
+
+All three forms below were hit in a **single session** (2026-07-13), while verifying a change whose
+blast radius was every tool in the tree. Each produced a confident, specific, *wrong* "green".
+
+## Form 1 — the empty log counted as clean
+
+```bash
+npx tsc --noEmit > /tmp/out.txt 2>&1
+echo "TOTAL=$(grep -cE ' error TS[0-9]+' /tmp/out.txt)"   # → TOTAL=0  "clean!"
+```
+
+`/tmp/out.txt` had **zero lines**. The run had been killed. `TOTAL=0` was not a measurement of the
+code; it was a measurement of an empty file.
+
+**Guard:** never derive a verdict from a count alone. Print the evidence that the run *happened*
+next to the count:
+
+```bash
+npx tsc --noEmit > /tmp/out.txt 2>&1; code=$?
+echo "EXIT=$code LINES=$(wc -l < /tmp/out.txt) ERRORS=$(grep -cE ' error TS[0-9]+' /tmp/out.txt)"
+```
+
+`EXIT=0 LINES=0 ERRORS=0` is a clean run. `EXIT=137 LINES=0 ERRORS=0` is a killed one. The count is
+identical; only the other two columns tell them apart.
+
+## Form 2 — `$?` captured the wrong command, and the runner never started
+
+```bash
+npx vitest run --reporter=basic <dirs> > /tmp/v.txt 2>&1
+echo "exit=$?"      # ← FINE here…
+tail -35 /tmp/v.txt
+```
+
+Two bugs compounded:
+
+* `--reporter=basic` **does not exist** in this repo's vitest. The reporter failed to *load*, so
+  vitest never ran a single test — it died in startup with `ERR_LOAD_URL`.
+* The harness reported the *chain's* exit status. Put anything between the runner and the `echo` —
+  or let a wrapper report the last command's status — and `$?` is no longer the runner's.
+
+The result: a "completed (exit code 0)" notification for a test run **that executed zero tests**.
+
+**Guard:** capture the runner's status into a variable on the very next statement, and never let
+anything sit between:
+
+```bash
+npx vitest run <dirs> > /tmp/v.txt 2>&1; code=$?    # ← nothing between
+echo "VITEST_EXIT=$code"
+grep -E "Test Files|Tests  " /tmp/v.txt              # ← and a plausible test COUNT
+```
+
+A test count is the cheapest possible proof the suite ran. "Tests 711 passed" cannot be faked by a
+startup crash.
+
+## Form 3 — the run was real, but it was the wrong run
+
+```bash
+npx vitest run libs/generic/tooldef packages/operator-core/lib/agent-tools
+# → 256 failed | 6555 passed
+```
+
+Real run, real failures, **zero signal**. A raw `vitest run <dir>` globs in `*.integration.test.ts`,
+which need a database the plain shell never provides. 241 of the 256 "failures" were 5000 ms
+timeouts; the rest were `admin is not a function` and `Invalid URL`. None of it said anything about
+the change under test — but it *looked* like a catastrophic regression, and the temptation to
+"investigate the 256 failures" would have burned an hour.
+
+The project's own runner deliberately splits these:
+
+* `npm test` → `scripts/affected-tests.mjs` → each workspace's **unit** suite.
+* `--integration` → additionally runs `npm run test:integration` where defined.
+
+**Guard:** verify through the path the project actually uses — per-workspace `npm test`, not raw
+vitest over a directory. If a failure set is dominated by timeouts and connection errors, you are
+looking at your own environment, not the code.
+
+## The rule
+
+Before believing any "0 errors / all passed", **prove the run happened**:
+
+* **non-empty output** (`wc -l`) — an empty log is not a clean log;
+* **the runner's OWN exit code**, captured immediately (`cmd; code=$?`);
+* **a plausible count** — tests executed, files checked. Zero of everything is a smell, not a pass.
+
+And the general form, which is worth carrying beyond this repo:
+
+> **A verification that cannot fail is not a verification.** If there is no input that would make
+> your check report red, it is not checking anything — it is printing `0`.
+
+The corollary is the one that bites hardest in an autonomous loop: a green you did not earn is
+strictly worse than a red, because a red gets investigated and a green gets *shipped*.

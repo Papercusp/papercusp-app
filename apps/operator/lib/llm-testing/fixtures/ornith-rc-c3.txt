@@ -1,0 +1,15 @@
+ornith COMPREHENSION-test fixture RC-C3 — throwaway, safe to overwrite between runs.
+
+BUG: firstOrDefault(arr, def) must return the FIRST element of arr, or def only
+when arr is empty. Right now, when the first element is a falsy value like 0 or "",
+it wrongly returns def instead of that element. Read it, understand the falsy trap,
+and fix it so the expectations below all pass. Change ONLY what is needed.
+
+function firstOrDefault(arr, def) {
+  return arr[0] || def;
+}
+
+EXPECTED after fix:
+  firstOrDefault([0, 1], 9)    === 0
+  firstOrDefault([], 9)        === 9
+  firstOrDefault(["", 2], "x") === ""

@@ -1,0 +1,65 @@
+# Decompose federation "X never crossed" reds in ONE query — group substrate_outbox by scope × drained-state
+URL: /internal/docs/agent-insights/federation-never-crossed-outbox-decompose-query
+
+A live differential (WI-971) separated three co-mingled causes behind identical federation-matrix reds (smoke wrong-workspace writes / receive-side backfill latency / joiner home-view drain gap) in minutes, once the LIVE pair's substrate_outbox was grouped by (workspace_id, harness_slug, table_name, drained_at IS NULL). Prior sessions burned hours theorizing from smoke stdout alone.
+
+## What
+
+When a federation/replication test reports "content never crossed A→B" (or a
+whole matrix of federation smokes goes red at once), the instinct is to
+theorize from the smoke test's own stdout — but the smoke output can't
+distinguish three completely different root causes that all present as the
+same symptom. A live WI-971 differential separated all three in minutes by
+querying the LIVE pair's `harness_shared.substrate_outbox` directly instead:
+
+```sql
+SELECT workspace_id, harness_slug, table_name,
+       (drained_at IS NULL) AS undrained,
+       count(*)
+  FROM harness_shared.substrate_outbox
+ GROUP BY workspace_id, harness_slug, table_name, (drained_at IS NULL)
+ ORDER BY workspace_id, harness_slug, table_name, undrained;
+```
+
+## Reading the result — three distinct root causes, one query
+
+* **Undrained rows sit in a scope with NO booted substrate handle** → this is
+  a **capture/scope bug on the SEND side** (writes are landing in the outbox
+  under the wrong scope, or a scope that was never wired to a running
+  handle). The send side is otherwise fine — the row is captured, it's just
+  captured under a scope nothing is draining.
+* **Rows show `drained_at` set (drained INSTANTLY) but are still missing on
+  the peer** → this is a **RECEIVE-side problem**: the row left the sender's
+  outbox correctly, so look at backfill latency or the joiner's home-view
+  drain gap on the receiving end, not the sender.
+* **The undrained/missing pattern is per-TABLE selective** (some tables
+  cross fine, others never do) → this is almost always a **mapping or scope
+  bug** for the affected table specifically — never "the drain is down"
+  globally, since a globally-down drain would affect every table uniformly.
+
+## Where to get the LIVE pair's DSN
+
+The two-instance smoke tests leave the pair **running** after they finish —
+don't tear them down to theorize, query them directly. Their connection
+strings live in `instances.env`:
+`harness_admin:harness_admin_pwd@localhost:<pg-port>/papercusp` (one DSN per
+instance). Point `dev:pg_query` (or a direct `psql`) at each pair member with
+the query above before writing a single line of theory.
+
+## The detector this spec-shapes (WI-183-class)
+
+The "undrained rows sitting in a scope with no booted handle, forever" case
+above is exactly the input shape for a **replication-liveness detector**:
+alert when `undrained_age = now() - min(ts) WHERE drained_at IS NULL` exceeds
+a threshold, grouped per `(workspace_id, harness_slug, table_name)` scope. No
+such detector exists yet (as of this doc) — this query is effectively its
+manual, on-demand form. If you're about to build that detector, the GROUP BY
+shape above is the query to automate.
+
+## Consequence
+
+Before spending more than a few minutes theorizing about a federation "never
+crossed" red from smoke-test output alone, run the GROUP BY query above
+against the live pair. It costs one query and immediately tells you WHICH of
+the three root-cause classes you're in, instead of guessing from indirect
+symptoms.

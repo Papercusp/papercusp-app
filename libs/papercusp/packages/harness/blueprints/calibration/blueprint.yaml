@@ -1,0 +1,63 @@
+# The `calibration` blueprint — deterministic-blueprints-migration-2026-06-13 (bucket A).
+#
+# The calibration-markets resolution sweep (mature open bets against their domain
+# probes; resolve, or void past the grace window) as a SCHEDULED DETERMINISTIC
+# blueprint, mirroring the negative-space pilot (P-110). A program-mode spine
+# whose single step fires a registered typed function (`calibration:resolve`)
+# wrapping the shipped sweep logic — same flag, same governor budget, same sweep
+# (behavior-neutral, D-004). No decision gate ⇒ a DETERMINISTIC PIPELINE. The
+# bespoke `system:calibration-resolve` routine action delegates to the SAME shared
+# orchestration (`runCalibrationResolve`).
+#
+# Dark stays dark: the op runs the SAME `papercusp-calibration-markets` flag +
+# learning-governor preflight the routine did — the loop is triple-gated
+# (inactive seed + dark flag + unbudgeted governor) until the self-learning-frontier
+# P-001 arming gate closes.
+id: calibration
+extends: base
+version: 0.1.0
+description: >-
+  Deterministic learning loop: mature open calibration bets against their domain
+  probes, resolving or voiding past the grace window (the calibration-markets
+  resolution sweep) on a cadence. Pure SQL, no agent.
+
+# A descriptive work-item kind (the deterministic pipeline does not create rows —
+# it resolves/voids open bets directly); the schema requires the field.
+workItem:
+  kind: mining-run
+  idPrefix: CAL
+
+# Program-mode spine (P-010): one deterministic step, NO gate ⇒ deterministic
+# pipeline. `payload.maxPerTick` is the sweep batch cap the routine's
+# payload_template carries (absent ⇒ the op's default of 200). A whole-string
+# `{{ payload.x }}` that is unset interpolates to undefined → the op's optional
+# arg is omitted → its default applies.
+spine:
+  steps:
+    - id: resolve
+      op: calibration:resolve
+      args:
+        maxPerTick: "{{ payload.maxPerTick }}"
+      bind: sweep
+
+knobs:
+  harnessKind: learning
+  # SQL-only resolution sweep needs no repo.
+  requiresRepo: false
+
+# Scheduled trigger (D-004): the sweep cadence, byte-identical to the bespoke
+# `system:calibration-resolve` routine (every 6h at :50, offset from the deploy
+# rhythm). The routine fires `system:blueprint-run` with
+# `{ blueprintId: calibration }`; the handler detects program-mode and runs the
+# steps inline. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 50 */6 * * *"
+      action: system:blueprint-run
+      singleton: true  # P-144/D-018: workspace-singleton cadence — one dark @singleton routine per workspace
+
+# No agent roles (pure-deterministic) and no agent-tool deps — the step calls a
+# registered function, not an agent.
+dependencies:
+  tools: []
+  plugins: []

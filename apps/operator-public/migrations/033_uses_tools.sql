@@ -1,0 +1,26 @@
+-- Cupboard migration 033 — add `uses_tools`, the CONSUMPTION half of the tool axis.
+-- Work-item: WI-10001747. Owner ruling (owner, 2026-09-17): "Add a uses_tools field."
+--
+-- `provides_tools` (migration 006) means PROVISION: the MCP tools a unit
+-- REGISTERS when installed. The tool→provider resolver (pack-catalog /
+-- pack-model) parses it to answer "which Cupboard unit provides tool X?", and
+-- installing a unit RESOLVES those tools. Only the installable kinds
+-- (plugin|pack) may declare it, and that gate is deliberately UNCHANGED here.
+--
+-- A recipe / plan / goal is the other shape: it ORCHESTRATES tools it does not
+-- provide. The operator was sending that consumption list in `provides_tools`,
+-- which the route correctly refused as `plugin_or_pack_kind_only` — so
+-- `cupboard:publish-recipe` returned HTTP 400 on EVERY call and the browsable
+-- `recipe` kind has been empty since it was introduced (WI-10001747: both
+-- sides' test suites were green while the wire contract was broken).
+--
+-- Rather than overload one column with two meanings by kind — which would also
+-- let a future installer try to RESOLVE tools a recipe never provided — this
+-- adds a separate column carrying the same bounded shape: JSON TEXT holding a
+-- string[] of 1..200 non-empty tool names, each ≤128 chars.
+--
+-- ALTER-add, NOT a table rebuild: the rest of the column set is untouched, and
+-- migration-column-preservation.test.ts asserts that invariant across the full
+-- unpinned chain (see 029's header for why a rebuild here is hazardous).
+
+ALTER TABLE harnesses ADD COLUMN uses_tools TEXT;

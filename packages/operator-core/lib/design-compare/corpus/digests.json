@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "Committed identity of the design-compare validation corpus (P-002).",
+    "Each value is a SHA-256 over the raw RGBA pixel buffer of the rendered image,",
+    "NOT over the encoded PNG file. PNG bytes travel through zlib and can change",
+    "legitimately across Node/pngjs versions without a pixel moving, so a file",
+    "digest would false-fail on another machine. A pixel digest is stable under any",
+    "encoder change and still catches every change to the drawing code.",
+    "Regenerate deliberately, and only when a corpus change is intended: every",
+    "calibration number in this plan is measured against these exact images.",
+    "Three keys share a digest on purpose — artifact/reference, mockup/faithful and",
+    "dimension/reference are all the unmodified base scene."
+  ],
+  "artifact/reference": "798a945cf2278110c0fb0e21bc7edb8c360afda88d09614191688047414a33c0",
+  "artifact/faithful": "da5379799e04d29d23d45af1b8159a5dadb0536285f7ff5ff7e63937748c15c9",
+  "artifact/drifted": "9a27ae82f9ccd9412c67f9b5174832afb3b687b3841d3f724e648e7971e551c3",
+  "figma/reference": "8fb50fe374d011389c9ca52197cdcb3499991dbe2d013f731f9d996c537d8a25",
+  "figma/faithful": "02f717a41a15253364d59200d480d03dc04b08783ecbeac803fb12d4a916d69c",
+  "figma/drifted": "e009c6015958dada3daa6ece0ae278e4f385745e299961eae56daa042bcc3104",
+  "mockup/reference": "7d4ac799ba594d74ec657b6f742bbdb29ab758803f77a941cfbbc13d643ca8ea",
+  "mockup/faithful": "798a945cf2278110c0fb0e21bc7edb8c360afda88d09614191688047414a33c0",
+  "mockup/drifted": "8d1af0607704b9ee47578ef64647f168092ca47909e4b633524828c510904b65",
+  "dimension/reference": "798a945cf2278110c0fb0e21bc7edb8c360afda88d09614191688047414a33c0",
+  "dimension/wider-same-content": "2fd64faa0c7bf5e4fae86ab918b07970839c34bb5e15e59db04bcff15845527c"
+}

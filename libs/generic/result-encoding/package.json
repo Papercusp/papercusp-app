@@ -1,0 +1,22 @@
+{
+  "name": "@papercusp/result-encoding",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic token-efficient serialization for structured tool results: a lossless TOON encoder/decoder plus opt-in CSV/TSV/markdown-table encoders, and a static schema→capability-set eligibility analyzer (which formats a given JSON-Schema data shape can be safely rendered in). Domain-free; no host coupling. Wraps @toon-format/toon.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@toon-format/toon": "^2.3.1"
+  },
+  "devDependencies": {
+    "fast-check": "^3.23.1",
+    "vitest": "^4.1.4"
+  }
+}

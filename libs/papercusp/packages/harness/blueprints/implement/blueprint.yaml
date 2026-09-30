@@ -1,0 +1,108 @@
+# The `implement` launch blueprint — unify-agent-launches-as-blueprints-2026-06-04 (P2, D-003).
+#
+# A SINGLE-ROLE LAUNCH BLUEPRINT (D-007), SCHEDULED + RISK-GATED. The
+# self-improvement auto-implement loop (papercusp-self-improvement-loop-2026-06-04
+# Phase 3): take an auto-eligible captured improvement (kind=bug, safe surface) and
+# implement it — reproduce, fix with a regression test, keep it self/inline-sized;
+# the change lands via the release gate.
+#
+# Before this plan the launch was a hand-wired invoke-caller: the
+# `system:improvement-implement` routine action hardcoded `loopbackFetch(/invoke?
+# role=worker)` against a dedicated runner harness. Now the LAUNCH is declarative —
+# the routine fires THIS blueprint via `fireLaunchBlueprint('implement')`, which
+# resolves the role from here. The risk-gate (the pure `planImplementRun`: flag ON,
+# runner configured, kind=bug, cap) STAYS in the routine (legitimately the trigger's
+# concern); the implement contract lives inside the worker agent.
+#
+# DOUBLY GATED: the routine is seeded INACTIVE *and* the
+# `papercusp-improvement-auto-implement` flag defaults OFF — this launch is
+# unreachable until an owner explicitly enables both (D-004 / Phase 3).
+id: implement
+extends: single-agent
+version: 0.1.0
+description: >-
+  Auto-implement an eligible captured improvement (kind=bug): reproduce, fix with a
+  regression test, keep it self/inline-sized; lands via the release gate. Flag-gated
+  OFF + seeded inactive.
+
+workItem:
+  kind: improvement
+  idPrefix: IMP
+
+# Spine + planner (the single-role run-to-done shape) are inherited from the
+# `single-agent` parent; override the decider role (worker) and lift maxTurns.
+#
+# EI-7635/EI-7524 (2026-07-05): the inherited single-agent default (40) is
+# undersized for this role's actual contract (reproduce + fix + regression test +
+# `test:affected` + `improvements:resolve`). Live dispatch-ledger evidence across
+# multiple items (EI-7524, EI-7196, EI-7517, EI-7534 — all `worker-exit-backedge`,
+# exit 0, ~250-950s runtime, output cut off mid-verification e.g. "Now let me run
+# the affected suite to confirm nothing else broke.") shows the worker doing real,
+# correct work and then exiting cleanly one step before ever calling
+# `improvements:resolve` — the shape of hitting a turn ceiling near the finish
+# line, not a crash/timeout/env failure (those are already separately classified
+# and excluded from lane-breakage signaling). Charged as a real attempt AND
+# feeding the "auto-implement lane is broken" watchdog signal every time. Doubling
+# to 80 (matching the `bee` blueprint's budget) gives real headroom for the final
+# verify+resolve steps without approaching the heavier multi-role budgets (200).
+spine:
+  decider: worker
+  maxTurns: 80
+
+roles:
+  - id: worker
+    description: >-
+      Reproduce + fix one auto-eligible improvement (kind=bug) with a regression
+      test, self/inline-sized; VERIFY (tests green) then close the loop via
+      improvements:resolve (outcome fixed | could-not-fix | needs-human — the
+      back-edge that takes a fixed bug out of the queue); escalate instead if it
+      would touch operator-core safety / the deploy machinery / a migration.
+      Prompt: blueprints/implement/prompts/worker.md (blueprint-owned, resolved
+      via BLUEPRINT_ID=implement — close-the-self-improvement-loop D-001).
+
+# Per-blueprint gym config (self-learning-frontier P-048 / FB-23): the implement
+# worker is a registered learning-system gym target, judged on DRILL ground truth —
+# red-queen's planted frictions (drillResolveRate / drillMttsh read the drill
+# corpus's known answers; lib/gym/drill-signals.ts) plus the standard regression
+# guardrail. Trace = the fix diff (it is a coding role). Dark until P-001 arming:
+# the autoloop row registerLearningGymTargets creates is disabled + unbudgeted.
+gym:
+  collectTrace: git-diff
+  signals: [regressionsFromTests, drillResolveRate, drillMttsh]
+
+knobs:
+  harnessKind: implement
+  requiresRepo: true
+
+# Scheduled trigger (D-004): the auto-implement cadence. The routine fires
+# `system:blueprint-run` with payload `{ blueprintId: implement }`. SEEDED INACTIVE
+# + flag-gated OFF (seed-improvement-routines.ts) — see the doubly-gated note above.
+triggers:
+  schedule:
+    - cron: "0 */30 * * * *"
+      action: system:blueprint-run
+
+# Dependencies (official-blueprints-cupboard-publish D-002): derived from the
+# blueprint-local worker persona (scripts/derive-blueprint-deps.mjs) —
+# the improvements intake/resolve pair plus the standard work/coord surface.
+dependencies:
+  tools:
+    - agent_tools:list
+    - artifacts:load
+    - artifacts:save
+    - coord:ask
+    - features:get
+    - features:list_related
+    - harness:phase_path
+    - improvements:capture
+    - improvements:resolve
+    - work_items:claim
+    - work_items:create
+    - work_items:get
+    - work_items:comment
+    - session:request-compaction
+    - topics:feed
+    - topics:list
+    - watch:create
+    - work_items:list
+  plugins: []

@@ -1,0 +1,18 @@
+{
+  "name": "@papercusp/pot-app-seam",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A host-injected seam for agentic apps that bootstrap one or more pots, launch deterministic app requests as canonical plan runs, and ingest judged pot outputs through explicit parser/storage ports. The package is framework-agnostic and imports no Papercusp operator internals; the host supplies the pot, plan-run, and ingestion adapters.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  }
+}

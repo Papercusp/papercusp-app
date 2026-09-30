@@ -1,0 +1,5 @@
+# Per-run perf result logs (durable record lives per-run; not source).
+results/
+
+# Local wdio install (this runner is kept out of the npm workspace on purpose).
+node_modules/

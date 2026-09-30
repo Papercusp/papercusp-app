@@ -1,0 +1,101 @@
+# A quiet, healthy account gets marked unavailable — token-refresh timeouts weren't tagged transport
+URL: /internal/docs/agent-insights/token-refresh-timeout-false-penalty
+
+\"API errors across all accounts\" + an account with 0% utilization but a huge penaltyCount and available:false — a second call site for the same transport-vs-penalty bug the 2026-06-22 ownerhandle incident supposedly fixed.
+
+## Symptom
+
+The owner: *"I'm getting a lot of api errors across all accounts. Why? \[...] They
+are pinned to the ownerhandle account and it's a very quiet account now so I don't
+think it could be real rate limit issue."*
+
+`accounts:status` confirmed it: account `ownerhandle` had `utilization: 0` (genuinely
+idle — zero real usage) but `penaltyCount: 84` accumulated in a \~15 minute
+window and `available: false` (paused). Zero usage but 84 "rate-limit
+penalties" is a contradiction — you cannot get rate-limited on zero traffic.
+
+## This is the SAME bug class the 2026-06-22 ownerhandle incident already fixed once
+
+`account-pool-store.ts` has an explicit guard, with an explicit prior-incident
+comment, for exactly this shape:
+
+```ts
+observerUnsub = onGovernorPause((ev) => {
+  const { accountId } = parseGovernorKey(ev.key);
+  if (!accountId) return;
+  // A TRANSPORT pause (egress-proxy circuit) is NOT a budget/rate signal — the
+  // account's Anthropic quota is fine; its proxy briefly flapped. Counting it
+  // toward the sustained-penalty threshold falsely marks a healthy account
+  // "sustainedly limited / exhausted" ... (2026-06-22: ownerhandle at 6% 5h-util
+  // paused 6.7h, penaltyCount 32 — overwhelmingly its flaky Rayobyte proxy).
+  if (ev.source === 'transport') return;
+  ...
+```
+
+`RateLimitGovernor.penalize({transport: true})` tags the resulting pause event
+`source: 'transport'` so this exemption applies; every other penalize call
+defaults to `source: 'penalty'` (or `'headers'` for a real 429 response) and
+counts fully.
+
+**The gap**: this exemption only helps if every call site that penalizes for a
+*transport-class* failure actually sets `transport: true`. `gateway.ts`'s OAuth
+token-refresh path didn't:
+
+```ts
+try {
+  token = await withDeadline(active.token(), tokenTimeoutMs, `token refresh '${active.accountId}'`);
+} catch (e) {
+  gov.penalize({ retryAfterMs: bare429FailoverBackoffMs, resetAt: Date.now() + bare429FailoverBackoffMs });
+  // ^ no `transport: true` — EVERY token-refresh timeout counted as a real penalty
+```
+
+`withDeadline` bounds an otherwise deadline-less `active.token()` call — if the
+network round-trip to refresh the OAuth token (which goes through the same
+per-account egress proxy as everything else) doesn't complete in
+`tokenTimeoutMs` (default 20s), this throws. That is unambiguously the same
+"flaky proxy" transport symptom the 2026-06-22 fix targeted — just reached via
+a *different* code path (token refresh, which runs before any real API
+request) instead of the main upstream fetch. Every such timeout inflated
+`penaltyCount` with no transport exemption, and also fired `recordStall` (the
+`beeTokenStall` 503 path) — so the SAME event both (a) surfaced as a "gateway
+error" / "API error" to whatever session's request needed the refresh, and (b)
+falsely counted toward the account's `sustainedPenaltyThreshold`, eventually
+parking a healthy, zero-usage account.
+
+## The fix
+
+`withDeadline` throws two distinguishable shapes: its own `` `${label} timed
+out after ${ms}ms` `` Error when the DEADLINE fires, vs re-throwing whatever
+`active.token()` itself rejected with when the refresh call fails on its own
+(e.g. a genuinely revoked/invalid credential — a real reason to penalize).
+Match on the timeout message and pass `transport: true` only for that case:
+
+```ts
+const isTimeout = /timed out after \d+ms$/.test((e as Error).message ?? '');
+gov.penalize({
+  retryAfterMs: bare429FailoverBackoffMs,
+  resetAt: Date.now() + bare429FailoverBackoffMs,
+  ...(isTimeout ? { transport: true } : {}),
+});
+```
+
+A genuine `active.token()` rejection (not a timeout) keeps the real penalty —
+that credential may actually be broken and deserves rotation-out.
+
+## Why the two incidents looked different but are the same root pattern
+
+2026-06-22 was the MAIN upstream-fetch path (the per-request Anthropic call
+itself transport-failing). 2026-07-01 (this one) was the OAuth token-refresh
+path (a *prerequisite* network call that runs before the main fetch). Same
+account-pool exemption existed; this call site just predated it, or was added
+after without carrying the flag. **Lesson: `transport: true` is a property of
+the FAILURE (a local/network/proxy problem, not a provider-issued signal), not
+of any one call site — grep every `gov.penalize(` / `.penalize({` call when
+auditing this class of bug, not just the one that broke last time.**
+
+## Verify
+
+`packages/operator-core/lib/inference-gateway/gateway.test.ts` — new test
+constructs a `RateLimitGovernor` with an `onPause` spy and asserts every pause
+raised by a stalled token refresh carries `source: 'transport'`. Full file:
+88/88 green.

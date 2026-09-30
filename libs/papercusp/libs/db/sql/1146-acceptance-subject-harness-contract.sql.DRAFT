@@ -1,0 +1,29 @@
+-- WI-10000549 P002 CONTRACT: allow independent same-slug subject harnesses.
+-- SOURCE-ONLY DRAFT: do not arm until 1145 EXPAND has applied AND every serving
+-- acceptance-rubric reader/writer understands subjectHarnessSlug. The database
+-- guard below proves only the index prerequisite, NOT deployed-code readiness.
+-- Rollout requires separate authorization. Test on isolated Postgres only.
+-- FORWARD-COMPAT: PARKED CONTRACT ONLY; legacy readers/writers are incompatible.
+-- Keep .DRAFT until all serving code uses subjectHarnessSlug and no longer relies
+-- on migration 1004's broader arbiter; verify that deployment before arming.
+--
+-- Keep the scoped uniqueness invariant throughout the transition; never drop
+-- the old invariant if EXPAND is absent or its replacement is not usable.
+DO $contract$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_index
+     WHERE indexrelid = to_regclass('harness_shared.harness_plans_one_active_acceptance_per_scoped_subject')
+       AND indrelid = 'harness_shared.harness_plans'::regclass
+       AND indisunique AND indisvalid AND indisready
+  ) THEN
+    RAISE EXCEPTION '1146 requires the valid scoped acceptance index from 1145 EXPAND';
+  END IF;
+END
+$contract$;
+
+DROP INDEX IF EXISTS harness_shared.harness_plans_one_active_acceptance_per_subject_plan;
+
+-- No rubric row is modified or resurrected here. Migration-1004 retirees stay
+-- retired; ambiguous legacy subjects remain unbound and scoped readers refuse
+-- them. A second application is safe while the scoped invariant remains valid.

@@ -1,0 +1,2219 @@
+{
+  "version": 1,
+  "updated": "2026-08-12T20:48:36.747Z",
+  "files": {
+    "apps/operator-vite/src/__tests__/vite-build-singleflight.test.ts": {
+      "timers": 0,
+      "handles": 3
+    },
+    "apps/operator-vite/src/__tests__/vite-watch-singleton.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator-vite/src/components/NavigationProgress.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator-vite/src/components/adv/AdvConversationsTab.clickflow.test.tsx": {
+      "timers": 1,
+      "handles": 0
+    },
+    "apps/operator-vite/src/components/adv/AgentsRunningPill.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator-vite/src/components/adv/HealthTab.test.tsx": {
+      "timers": 1,
+      "handles": 2
+    },
+    "apps/operator-vite/src/components/adv/LearningTab.test.tsx": {
+      "timers": 3,
+      "handles": 4
+    },
+    "apps/operator-vite/src/components/adv/SignalsPanel.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator-vite/src/components/dev-admin-rail/panels/NotificationsPanel.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator-vite/src/components/dev-admin-rail/panels/ToolUsagePanel.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator-vite/src/components/left-sidebar/AutomationPane.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator-vite/src/components/left-sidebar/ConversationsTab.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator-vite/src/components/left-sidebar/PapercupTab.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator-vite/src/components/left-sidebar/useModelOverride.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/BacklinksPanel.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/BrandSwitcher.test.tsx": {
+      "timers": 2,
+      "handles": 2
+    },
+    "apps/operator/app/_components/CommandPalette.test.tsx": {
+      "timers": 14,
+      "handles": 14
+    },
+    "apps/operator/app/_components/ConsoleLauncherButton.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/DecisionLog.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/GlobalCommandPalette.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/GlobalShortcutsHelp.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/OperatorChat.user-avatar.test.tsx": {
+      "timers": 2,
+      "handles": 2
+    },
+    "apps/operator/app/_components/SetupWizard/SetupWizard.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/SetupWizard/StepOsPermissions.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/ShortcutsCheatSheet.test.tsx": {
+      "timers": 6,
+      "handles": 6
+    },
+    "apps/operator/app/_components/ThemeSelector.test.tsx": {
+      "timers": 2,
+      "handles": 2
+    },
+    "apps/operator/app/_components/UpdateChip.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/_components/WorkspaceSwitcher.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/_components/__tests__/HowSharingWorks.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/_components/__tests__/ProvisionalOwnerExplainer.test.tsx": {
+      "timers": 12,
+      "handles": 12
+    },
+    "apps/operator/app/_components/chat/ChatConversation.memo.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/_components/chat/ChatConversation.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/_components/chat/FleetLaunchRow.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/chat/SessionChatModal.test.tsx": {
+      "timers": 2,
+      "handles": 2
+    },
+    "apps/operator/app/_components/chat/WorkRefPill.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/_components/elevenlabs-libsamplerate-cdn.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/monaco-cdn.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/porcupine-cdn.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/vditor-cdn.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/vditor-plantuml-guard.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/_components/voice/voice-mode-capture.test.ts": {
+      "timers": 15,
+      "handles": 15
+    },
+    "apps/operator/app/_components/voice/voice-mode.test.ts": {
+      "timers": 15,
+      "handles": 25
+    },
+    "apps/operator/app/_components/work-items/WorkItemPopupModal.test.tsx": {
+      "timers": 3,
+      "handles": 4
+    },
+    "apps/operator/app/admin/features/FeaturesAdmin.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/admin/plans/AssignDialog.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/admin/plans/LintBanner.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/admin/plans/NewPlanButton.test.tsx": {
+      "timers": 2,
+      "handles": 2
+    },
+    "apps/operator/app/admin/plans/PlanDetail.test.tsx": {
+      "timers": 3,
+      "handles": 3
+    },
+    "apps/operator/app/admin/plans/PlanJumpToItem.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/admin/plans/PlanRail.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/admin/plans/__tests__/PlanConflictModal.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/admin/plans/plan-renderers.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/admin/plans/usePlan.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/admin/testing/_components/MemoryTab.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/adv/create/PlansListPanel.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/adv/harnesses/AdvDocsTab.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/adv/harnesses/AdvSyncHealthPanel.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/adv/harnesses/DepGraphPanel.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/adv/harnesses/PotBeaconToggle.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/adv/hud/GoalComposer.test.tsx": {
+      "timers": 1,
+      "handles": 2
+    },
+    "apps/operator/app/adv/hud/GoalDetailPanel.test.tsx": {
+      "timers": 11,
+      "handles": 11
+    },
+    "apps/operator/app/adv/hud/GoalEndsSection.test.tsx": {
+      "timers": 5,
+      "handles": 5
+    },
+    "apps/operator/app/adv/hud/GoalSettingsSection.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/adv/hud/HudBoard.test.tsx": {
+      "timers": 4,
+      "handles": 4
+    },
+    "apps/operator/app/adv/sessions/NewSessionLauncher.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/cupboard/__tests__/ToolsSection.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/dev/_components/AuditTab.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/dev/_components/BackupsTab.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/dev/_components/HarnessesTab.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/dev/_components/ProcessesTab.test.tsx": {
+      "timers": 6,
+      "handles": 6
+    },
+    "apps/operator/app/dev/_components/SqlTab.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/dev/_components/TerminalTab.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/gym/__tests__/GymDashboard.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/harness/AgentInspectorModal.test.tsx": {
+      "timers": 9,
+      "handles": 9
+    },
+    "apps/operator/app/harness/Button.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/harness/ConfirmModal.test.tsx": {
+      "timers": 7,
+      "handles": 8
+    },
+    "apps/operator/app/harness/FeatureEditor.test.tsx": {
+      "timers": 3,
+      "handles": 3
+    },
+    "apps/operator/app/harness/HarnessSettingsPanel.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/harness/Modal.test.tsx": {
+      "timers": 5,
+      "handles": 5
+    },
+    "apps/operator/app/harness/PiTerminalsDock.test.tsx": {
+      "timers": 4,
+      "handles": 4
+    },
+    "apps/operator/app/harness/Popover.test.tsx": {
+      "timers": 9,
+      "handles": 9
+    },
+    "apps/operator/app/harness/PromptModal.test.tsx": {
+      "timers": 5,
+      "handles": 5
+    },
+    "apps/operator/app/harness/__tests__/Combobox.test.tsx": {
+      "timers": 23,
+      "handles": 23
+    },
+    "apps/operator/app/harness/__tests__/CreateHarnessPicker.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/harness/__tests__/SharePotDialog.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/harness/brainstorm/WriteView.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/harness/dock/AddPanelCatalog.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/harness/dock/useNavShortcuts.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/harness/filters/ColumnFilterBar.test.tsx": {
+      "timers": 3,
+      "handles": 3
+    },
+    "apps/operator/app/harness/insights/__tests__/ClaimAttemptTimelineClient.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/harness/insights/__tests__/InsightsTab.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/app/login/page.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/prompt-studio/PromptStudioPanel.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/res/page.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/settings/autonomy/RecentAutoDecisions.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/settings/pot-customization/page.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/settings/storage/page.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/app/settings/user/memory/meta-fetch-timeout.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "apps/operator/bin/host-spa.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/bin/serve.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "apps/operator/lib/cache-proxy/proxy.test.ts": {
+      "timers": 0,
+      "handles": 3
+    },
+    "apps/operator/lib/dev-source-extract.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/lib/mcp-proxy/proxy.test.ts": {
+      "timers": 0,
+      "handles": 4
+    },
+    "apps/operator/lib/release/deploy-gate.test.ts": {
+      "timers": 1,
+      "handles": 2
+    },
+    "apps/operator/lib/release/deploy.test.ts": {
+      "timers": 2,
+      "handles": 2
+    },
+    "apps/operator/lib/release/green-checkpoint.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/lib/release/release-config.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/lib/release/seed-identity-guard.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/lib/release/sync-staging-checkout.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/lib/statusline-fleet.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/lib/use-state-snapshots.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/scripts/__tests__/bghost-watchdog.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/scripts/__tests__/docs-build-singleflight.test.ts": {
+      "timers": 0,
+      "handles": 5
+    },
+    "apps/operator/scripts/check-vitest-mock-paths.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/ask-gate-mirror.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/bash-resource-gate.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/pc-heavy.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/posttoolbatch-midturn-context.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/posttooluse-activity-report-bundle.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/pretooluse-content-lint-identity.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/pretooluse-locks-decision.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/pretooluse-plans-read-guard-decision.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/pretooluse-plans-read-guard.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/proxy-bypass.test.ts": {
+      "timers": 0,
+      "handles": 3
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/userpromptsubmit-memory.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/scripts/hooks/cc/__tests__/userpromptsubmit-mode-autoreg.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "apps/operator/scripts/hooks/inject/__tests__/dispatcher.test.ts": {
+      "timers": 1,
+      "handles": 3
+    },
+    "apps/operator/scripts/hooks/omp/__tests__/coord-hook.test.ts": {
+      "timers": 1,
+      "handles": 2
+    },
+    "apps/operator/scripts/hooks/omp/__tests__/inject-hook.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "apps/operator/scripts/hooks/omp/__tests__/lock-key-derivation.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/flags/src/client.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/generic/sync/src/transports/polling/query-fetcher.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "libs/generic/sync/src/transports/polling/usePollingQuery.test.tsx": {
+      "timers": 15,
+      "handles": 15
+    },
+    "libs/generic/sync/src/transports/sse/SSEAdapter.test.tsx": {
+      "timers": 4,
+      "handles": 4
+    },
+    "libs/marketplace-public-ui/src/SnapshotStateTab.test.tsx": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/bus-posts.test.ts": {
+      "timers": 2,
+      "handles": 4
+    },
+    "libs/papercusp/packages/orchestrator/src/chunk-loop-driver.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/feature-debug-notes.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/feature-notes.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/invoke.test.ts": {
+      "timers": 2,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/log.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/pg-bootstrap.test.ts": {
+      "timers": 1,
+      "handles": 3
+    },
+    "libs/papercusp/packages/orchestrator/src/restart-resilient-output.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/scratch-env.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/state.test.ts": {
+      "timers": 1,
+      "handles": 4
+    },
+    "libs/papercusp/packages/orchestrator/src/tmpfs.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/worker-chunk-loop.concurrent.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/worker-chunk-loop.edge.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/worker-chunk-loop.recovery.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/papercusp/packages/orchestrator/src/worker-chunk-loop.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/test-config/src/admin-test-runs-reporter.test.ts": {
+      "timers": 2,
+      "handles": 2
+    },
+    "libs/test-config/src/fake-timers-real-io-contract.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "libs/test-config/src/testcontainer-start-lock.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/__tests__/fs-mutex.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/__tests__/harness-test-ingestion.test.ts": {
+      "timers": 3,
+      "handles": 3
+    },
+    "packages/operator-core/lib/__tests__/no-server-imports-in-client.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/__tests__/testing-branch-resolve.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/__tests__/testing-domain-glob.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/__tests__/testing-run-store-cancel.test.ts": {
+      "timers": 4,
+      "handles": 1
+    },
+    "packages/operator-core/lib/__tests__/testing-run-store.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/__tests__/tsx-runtime-imports.test.ts": {
+      "timers": 0,
+      "handles": 4
+    },
+    "packages/operator-core/lib/agent-kickoff/__tests__/prompt-file.test.ts": {
+      "timers": 4,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/__tests__/backup-tools.test.ts": {
+      "timers": 4,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/__tests__/hono-shim-dispatch.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/__tests__/misc.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/__tests__/requires-preconditions.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/__tests__/search-tools.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/accounts/accounts.test.ts": {
+      "timers": 3,
+      "handles": 2
+    },
+    "packages/operator-core/lib/agent-tools/backup/snapshot_create.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/behaviour/run.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/blueprint/__tests__/blueprint-catalog.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/blueprint/__tests__/blueprint-tools.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/brief-limit-normalization.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/build/typecheck.test.ts": {
+      "timers": 6,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/capability/bash-code-mode-shape.test.ts": {
+      "timers": 1,
+      "handles": 6
+    },
+    "packages/operator-core/lib/agent-tools/capability/bash-desktop-env.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/agent-tools/capability/bash-jobs.test.ts": {
+      "timers": 6,
+      "handles": 2
+    },
+    "packages/operator-core/lib/agent-tools/cert/battery.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/chat/ask_choice-autonomy.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/chat/ask_choice.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/code/run.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/context-gauge-annotator.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/coordination/__tests__/agent-question-gate.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/coordination/__tests__/inbox-durable-escalation.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/coordination/compaction-staleness.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/coordination/relay-provenance.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/coordination/roles.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/coordination/tools/glance.test.ts": {
+      "timers": 2,
+      "handles": 2
+    },
+    "packages/operator-core/lib/agent-tools/coordination/tools/read.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/cross_harness/__tests__/docs.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/dev/__tests__/dev.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/dev/state_counter.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/docs/__tests__/search-rrf-fusion.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/docs/_guidance-adapter.live.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/docs/_guidance-adapter.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/events/catalog.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/fleet_registry/launch-on-plan.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/gateway/gateway.test.ts": {
+      "timers": 3,
+      "handles": 5
+    },
+    "packages/operator-core/lib/agent-tools/memory/recover-from-transcripts.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/memory/remember-neighbour-search-guard.test.ts": {
+      "timers": 6,
+      "handles": 5
+    },
+    "packages/operator-core/lib/agent-tools/memory/remember.test.ts": {
+      "timers": 3,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/mug-kettle-tool-gate.test.ts": {
+      "timers": 5,
+      "handles": 10
+    },
+    "packages/operator-core/lib/agent-tools/oracle/prompts.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/plan-items/barrel-boot.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/plans/__tests__/git-history.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/agent-tools/plans/__tests__/set-content-shrink-guard.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/plans/set-status.bulk.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/pot/tools.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/processes/__tests__/list.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/provisioner/provisioner.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/release/deploy.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/routines/group-set.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/routines/routines.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/scheduler/get_next.checkpoint-hint.test.ts": {
+      "timers": 2,
+      "handles": 3
+    },
+    "packages/operator-core/lib/agent-tools/scheduler/get_next.concurrency-diagnosis.test.ts": {
+      "timers": 2,
+      "handles": 3
+    },
+    "packages/operator-core/lib/agent-tools/scheduler/get_next.divergence-recheck.test.ts": {
+      "timers": 2,
+      "handles": 3
+    },
+    "packages/operator-core/lib/agent-tools/scheduler/get_next.fleet-scope-concurrency.test.ts": {
+      "timers": 2,
+      "handles": 3
+    },
+    "packages/operator-core/lib/agent-tools/scheduler/get_next.result-envelope.test.ts": {
+      "timers": 2,
+      "handles": 3
+    },
+    "packages/operator-core/lib/agent-tools/scheduler/get_next.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/scheduler/get_next.warning.test.ts": {
+      "timers": 2,
+      "handles": 3
+    },
+    "packages/operator-core/lib/agent-tools/scheduler/idle-loop-recipe-pin.test.ts": {
+      "timers": 2,
+      "handles": 3
+    },
+    "packages/operator-core/lib/agent-tools/search/embedder.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/search/overfetch-slice.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/search/prose-handlers.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/session/request-compaction.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/sessions/read.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/agent-tools/templates/new-app.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/agent-tools/work_items/checkpoint.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/authority/__tests__/authority-rpc-swarm-real-wire.test.ts": {
+      "timers": 39,
+      "handles": 36
+    },
+    "packages/operator-core/lib/authority/__tests__/authority-rpc-swarm-transport.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/bash-substitution/replay.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/blueprint-steps/negative-space-marketplace-roundtrip.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/blueprint/launch-blueprint.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/bootstrap-su-bearer-non-transit.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/branch-action-bus.test.ts": {
+      "timers": 2,
+      "handles": 0
+    },
+    "packages/operator-core/lib/branch-action-manifest.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/branch-actions.test.ts": {
+      "timers": 15,
+      "handles": 1
+    },
+    "packages/operator-core/lib/bundled-node.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/carry-doc.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/cell-falsifier-reality.test.ts": {
+      "timers": 7,
+      "handles": 9
+    },
+    "packages/operator-core/lib/cell-read-door-shaping.test.ts": {
+      "timers": 7,
+      "handles": 0
+    },
+    "packages/operator-core/lib/cell-read.test.ts": {
+      "timers": 121,
+      "handles": 0
+    },
+    "packages/operator-core/lib/child-output.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/claude-sessions-cache.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/claude-sessions.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/commands/__tests__/delegation.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/commands/audit.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/commands/defs/harness.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/commands/registry.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/compaction-usage.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/completion-audit.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/coord/condition-bridge.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/coord/condition-object.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/coord/derived-signal-census.test.ts": {
+      "timers": 2,
+      "handles": 3
+    },
+    "packages/operator-core/lib/cpu-task-worker.test.ts": {
+      "timers": 0,
+      "handles": 18
+    },
+    "packages/operator-core/lib/cross-hive-swarm-transport.test.ts": {
+      "timers": 8,
+      "handles": 0
+    },
+    "packages/operator-core/lib/cupboard/bundle-manifest-io.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/cupboard/install-blueprint-core.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/cupboard/install-plugin-core.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/cupboard/materialize-template-core.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/cupboard/resolve-and-install.e2e.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/cupboard/rubric-store.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/cupboard/template-store-shadowing.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/cupboard/template-store.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/custom-themes.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/deployment/account-link-cli.test.ts": {
+      "timers": 2,
+      "handles": 0
+    },
+    "packages/operator-core/lib/deployment/frame-vnc.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/deployment/runtime-pack.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/desktop-health.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/desktop-install/__tests__/omp-integration.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/desktop-install/__tests__/papercusp-files.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/desktop-install/claude-integration.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/desktop-install/compaction-strategy.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/desktop-install/inject-hooks-provenance.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/desktop-install/install-provenance.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/desktop-install/linux-tutorial-desktop.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/desktop-install/papercusp-files.shim-runtime.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/desktop-install/papercusp-files.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/desktop-install/persona-tier.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/dev-deploy-state.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/embedded-pg-seed.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-ipc-discovery.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-ipc/dev_ipc_echo_e2e.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/admin.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/agent-chats-messages.test.ts": {
+      "timers": 12,
+      "handles": 8
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/agent-config-strict.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/agent-mcp-operator-converse.test.ts": {
+      "timers": 30,
+      "handles": 29
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/agent-tools-catchall.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/agent-tools-device-auth.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/desktop.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/external-bench-preserved-route.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/harness-escalation-resolve.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/mcp-handler-deadline-receipt.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/mcp-handler-gating-matrix.test.ts": {
+      "timers": 3,
+      "handles": 3
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/oauth-callback.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/oauth-verify-paste.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/operator-card-response.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/operator-run-cancel.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/operator-silence-nudge.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/operator-state-snapshot.test.ts": {
+      "timers": 9,
+      "handles": 8
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/plugin-runtime-catchall.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/project-docs.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/provision.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/route-stack.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/__tests__/su-locks.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/routes/admin/coord-csrf.test.ts": {
+      "timers": 2,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/routes/adv/launch-su.test.ts": {
+      "timers": 1,
+      "handles": 2
+    },
+    "packages/operator-core/lib/endpoint-route/routes/agent-chats/messages-item-harness-scoping.test.ts": {
+      "timers": 57,
+      "handles": 30
+    },
+    "packages/operator-core/lib/endpoint-route/routes/agent-chats/messages-project-dir.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/routes/agent-chats/messages-spawn-tracking.test.ts": {
+      "timers": 15,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/routes/agent-mcp/mid-turn-context.p018-acceptance.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/routes/agent-mcp/voice-local-live.test.ts": {
+      "timers": 4,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/routes/cupboard-template-routes.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/routes/desktop/docs-qa.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/routes/flags/stream.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/routes/misc/health-deep.test.ts": {
+      "timers": 0,
+      "handles": 5
+    },
+    "packages/operator-core/lib/endpoint-route/routes/transport/__tests__/mcp-deadline.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/routes/transport/bee-tool-boundary.test.ts": {
+      "timers": 4,
+      "handles": 0
+    },
+    "packages/operator-core/lib/endpoint-route/routes/transport/mcp-handler-poststream-leak.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/endpoint-route/routes/transport/role-principal-caps.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/ensure-omp-su-cache.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/events/await/emitter-coverage.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/events/await/pid-reuse-reachability-gap.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/events/await/psu-pty-discovery.test.ts": {
+      "timers": 31,
+      "handles": 1
+    },
+    "packages/operator-core/lib/events/await/wake-executor-matrix.test.ts": {
+      "timers": 4,
+      "handles": 0
+    },
+    "packages/operator-core/lib/events/await/wake-resume-isolation.test.ts": {
+      "timers": 2,
+      "handles": 3
+    },
+    "packages/operator-core/lib/events/await/warm-inject-carry-seam.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/flag-bus.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/fleet/classic-dining-philosophers.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/fleet/git-stdin-sidecar-handoff.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/fleet/git-via-sidecar.test.ts": {
+      "timers": 2,
+      "handles": 1
+    },
+    "packages/operator-core/lib/fleet/operator-spawn.test.ts": {
+      "timers": 2,
+      "handles": 0
+    },
+    "packages/operator-core/lib/fleet/spawner-ipc-client.test.ts": {
+      "timers": 0,
+      "handles": 3
+    },
+    "packages/operator-core/lib/fleet/spawner-sidecar-spawn.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/git-pipeline-position.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/goals/stop-fanout-installed.test.ts": {
+      "timers": 9,
+      "handles": 1
+    },
+    "packages/operator-core/lib/gym/operator-ready.test.ts": {
+      "timers": 2,
+      "handles": 2
+    },
+    "packages/operator-core/lib/gym/qd/local-elite-signer.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness-fs-watcher.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/harness-log-bus.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/harness-ops/transport-dispatch.test.ts": {
+      "timers": 2,
+      "handles": 4
+    },
+    "packages/operator-core/lib/harness/__tests__/clone-repo-authed.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/__tests__/join-default-boot-wiring.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/__tests__/join-shared-harness.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/bootstrap-papercusp-hive-selfadmit.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/clone-github.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/completion-ref-verifier.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/docs/doc-fs.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/docs/git-runner.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/docs/okf-expiry.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/git-sync/code-plane-federation.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/git-sync/git-sync-action.test.ts": {
+      "timers": 1,
+      "handles": 2
+    },
+    "packages/operator-core/lib/harness/git-sync/git-sync-checkpoint-resume.test.ts": {
+      "timers": 4,
+      "handles": 0
+    },
+    "packages/operator-core/lib/harness/git-sync/multi-peer-convergence.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/git-sync/oversized-blob-boundary.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/git-sync/run-git-sync.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/hive-repo-init.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/harness/improvements/insight-staleness.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/harness/improvements/ship-link.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/harness/init-local-dir.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/join-hive.test.ts": {
+      "timers": 28,
+      "handles": 14
+    },
+    "packages/operator-core/lib/harness/join-leave-roundtrip.test.ts": {
+      "timers": 28,
+      "handles": 14
+    },
+    "packages/operator-core/lib/harness/papercusp-workspace.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/plan-markdown-render/index.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/register-papercusp.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/routines/cargo-test-action.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/harness/routines/gc-verify-instances.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/routines/hive-canary-action.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/routines/loop-wake-recipe.test.ts": {
+      "timers": 12,
+      "handles": 0
+    },
+    "packages/operator-core/lib/harness/routines/release-actions.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/harness/routines/release-self-heal-prebind.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/harness/routines/stalled-loops-guard.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/hive-directory-boot.test.ts": {
+      "timers": 35,
+      "handles": 35
+    },
+    "packages/operator-core/lib/hive-publish.test.ts": {
+      "timers": 35,
+      "handles": 35
+    },
+    "packages/operator-core/lib/identity/gh-token.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/identity/octokit-client.test.ts": {
+      "timers": 2,
+      "handles": 0
+    },
+    "packages/operator-core/lib/identity/swarm-keypair.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/inference-gateway/account-routing-e2e.test.ts": {
+      "timers": 8,
+      "handles": 6
+    },
+    "packages/operator-core/lib/inference-gateway/codex-oauth-proxy.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/inference-gateway/credential-store.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/inference-gateway/egress-providers/secret-ref.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/inference-gateway/gateway-egress-circuit.test.ts": {
+      "timers": 11,
+      "handles": 5
+    },
+    "packages/operator-core/lib/inference-gateway/gateway-egress-false-recovery.test.ts": {
+      "timers": 4,
+      "handles": 5
+    },
+    "packages/operator-core/lib/inference-gateway/gateway-openai-proxy.test.ts": {
+      "timers": 28,
+      "handles": 3
+    },
+    "packages/operator-core/lib/inference-gateway/gateway-priority-tiers.test.ts": {
+      "timers": 5,
+      "handles": 8
+    },
+    "packages/operator-core/lib/inference-gateway/gateway-scout-delegated-failover.test.ts": {
+      "timers": 4,
+      "handles": 6
+    },
+    "packages/operator-core/lib/inference-gateway/gateway-sidecar-spawn.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/inference-gateway/gateway-thorough.test.ts": {
+      "timers": 21,
+      "handles": 6
+    },
+    "packages/operator-core/lib/inference-gateway/gateway.test.ts": {
+      "timers": 48,
+      "handles": 7
+    },
+    "packages/operator-core/lib/inference-gateway/launch.test.ts": {
+      "timers": 11,
+      "handles": 2
+    },
+    "packages/operator-core/lib/inference-gateway/load-test-rig.test.ts": {
+      "timers": 3,
+      "handles": 5
+    },
+    "packages/operator-core/lib/inference-gateway/local-backend-gateway.test.ts": {
+      "timers": 29,
+      "handles": 9
+    },
+    "packages/operator-core/lib/interactive-claude-config.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/interactive-usage/ingest-claude-transcripts.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/js-syntax-guard.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/knowledge-packs/default-pack.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/knowledge-packs/domain-default-packs.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/knowledge-packs/export.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/knowledge-packs/install-from-repo.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/knowledge-packs/load-packs.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/knowledge-packs/pack-format.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/listen-with-eaddrinuse-retry.test.ts": {
+      "timers": 0,
+      "handles": 3
+    },
+    "packages/operator-core/lib/llm-testing/__tests__/authoring-doc-paths.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/llm-testing/__tests__/parallelism-smoke.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/log-events.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/maxturn-sweep-cli.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/memory/audit-anchors.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/memory/claim-port.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/memory/configure.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/memory/corpus-recall-io.test.ts": {
+      "timers": 3,
+      "handles": 3
+    },
+    "packages/operator-core/lib/memory/embed-sidecar-server.test.ts": {
+      "timers": 2,
+      "handles": 4
+    },
+    "packages/operator-core/lib/memory/embed-sidecar-wiring.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/memory/insights-index.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/memory/knowledge-read.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/memory/op-deadline.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/memory/warm.test.ts": {
+      "timers": 7,
+      "handles": 6
+    },
+    "packages/operator-core/lib/migration-runner-deploy-guard.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/modes/store.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/native-compaction-audit.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/native-session-id-roundtrip.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/oauth/storage-fs.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/p2p/delegated-spawn-honor.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/p2p/foreign-git-sync.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/p2p/foreign-supervision.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/p2p/sandbox/network-egress.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/perf-anti-patterns.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/plugin-api-mount.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/plugin-catalog.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/plugin-enables-pg.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/plugin-slug.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/pot-eval/ground-truth.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/pot-eval/outcome-metrics.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/pot/session-audit.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/pot/wake-defaults.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/process-supervision/sidecar-shutdown-registration-on-spawn.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/projected-tool-deps.agent-state-stamp.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/projected-tool-deps.invoked-at.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/projected-tool-deps.telemetry-health.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/provision/hashes.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/provision/single-user.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/provisioner/hardware-detect.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/provisioner/llama-binary.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/provisioner/whisper-binary.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/psu-prompt-isolation.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/pty-bridge.test.ts": {
+      "timers": 4,
+      "handles": 3
+    },
+    "packages/operator-core/lib/pty-ws.test.ts": {
+      "timers": 7,
+      "handles": 5
+    },
+    "packages/operator-core/lib/release/origin-freshness-watchdog.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/residual-carry-pass-live.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/role-registry.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/run-chunk-bus.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/schedule-federation.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/scout/code-search-deps.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/scout/coord-tier-gate.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/scout/cycle-deps.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/scout/error-streak-alarm.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/scout/generation-watermark.test.ts": {
+      "timers": 4,
+      "handles": 6
+    },
+    "packages/operator-core/lib/scout/nudge-recipient.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/scout/observation-consumption-wiring.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/search/self-session.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/search/session-ingest-adv-metadata.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/search/session-ingest-backfill.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/search/session-ingest-dedup.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/search/session-ingest-usage.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/search/session-ingest-walker.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/search/session-ingest-yield.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/service-health.test.ts": {
+      "timers": 2,
+      "handles": 5
+    },
+    "packages/operator-core/lib/session-archive-hook.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/session-archive-read.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/session-archive-reconciler.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/session-archive.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/session-dir-gc.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/session-port/artifact.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/session-port/service.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/session-port/source.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/session-transcript-resolvers.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/storage/disk.test.ts": {
+      "timers": 1,
+      "handles": 2
+    },
+    "packages/operator-core/lib/sync-resolver/learning-retain-read.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync-resolver/table-to-query-names.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/a003-scope-buffer-replay.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/admission-pending-retry.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/admit-merge-gate.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/boot-all-merge-cursor-injection.test.ts": {
+      "timers": 5,
+      "handles": 5
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/boot-all.test.ts": {
+      "timers": 51,
+      "handles": 66
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/boot-revoke-production-path.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/boot.test.ts": {
+      "timers": 9,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/cold-boot-resume.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/corestore-cache.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/federation-threat-model.test.ts": {
+      "timers": 8,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/head-snapshot-flush-before-answer.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/hive-directory-live-two-peer.test.ts": {
+      "timers": 19,
+      "handles": 15
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/hive-two-peer-federation.test.ts": {
+      "timers": 47,
+      "handles": 39
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/join-scoped-stall.test.ts": {
+      "timers": 40,
+      "handles": 36
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/n-peer-scale-churn.test.ts": {
+      "timers": 52,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/on-demand-head-snapshot.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/reverify-admitted.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/revocation-enforcement.test.ts": {
+      "timers": 2,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/revocation-prior-row-semantics.test.ts": {
+      "timers": 2,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/revocation-propagation.test.ts": {
+      "timers": 14,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/swarm-chaos.test.ts": {
+      "timers": 5,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/swarm-join-retry.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/swarm-self-heal-reconnect.test.ts": {
+      "timers": 39,
+      "handles": 36
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/swarm.test.ts": {
+      "timers": 30,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/two-hive-shared-swarm.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/two-peer-swarm-bidi.test.ts": {
+      "timers": 39,
+      "handles": 36
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/two-peer-swarm.test.ts": {
+      "timers": 39,
+      "handles": 36
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/two-peer.test.ts": {
+      "timers": 6,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/__tests__/version-gate-merge.test.ts": {
+      "timers": 2,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/announce-channel-multihive.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/boot-all-swarm-recovery-rewire.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/content-peer-count.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/local-announce-identity.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/peer-log-post-connection-attach.test.ts": {
+      "timers": 2,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/peer-log.test.ts": {
+      "timers": 4,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/perf/merge-scaling.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/read-merge-apply-timeout.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/hyperbee/read-merge-incremental.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/seed-provider-git.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/shared-socket-multi-corestore-clobber.test.ts": {
+      "timers": 0,
+      "handles": 8
+    },
+    "packages/operator-core/lib/sync/hyperbee/shipped-seed-artifact.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/hyperbee/substrate-ipc-client.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/sync/hyperbee/substrate-sidecar-host.test.ts": {
+      "timers": 4,
+      "handles": 7
+    },
+    "packages/operator-core/lib/sync/pot-git/fetch-transport-idle-ceiling.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/sync/pot-git/fetch-transport.test.ts": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/sync/pot-git/peer-dial-registry-dial-gap.test.ts": {
+      "timers": 2,
+      "handles": 0
+    },
+    "packages/operator-core/lib/sync/pot-git/storage-run-git.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/system-health/perf-budgets-incident-capture.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/task-manager/reconcile-tick.test.ts": {
+      "timers": 0,
+      "handles": 2
+    },
+    "packages/operator-core/lib/template-kind.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/templates-mirror-sync-cli.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/testing-run-store.test.ts": {
+      "timers": 5,
+      "handles": 2
+    },
+    "packages/operator-core/lib/testing/live-integration.test.ts": {
+      "timers": 3,
+      "handles": 3
+    },
+    "packages/operator-core/lib/turn-journal-psu-transcript-resolve.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/turn-journal.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/turn-provenance/turn-ref.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/txn-timeouts-config.test.ts": {
+      "timers": 1,
+      "handles": 0
+    },
+    "packages/operator-core/lib/ui/built-in-intents.test.tsx": {
+      "timers": 1,
+      "handles": 1
+    },
+    "packages/operator-core/lib/verdict-cli-startup-error.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/voice-node/agent-brain.test.ts": {
+      "timers": 3,
+      "handles": 0
+    },
+    "packages/operator-core/lib/voice-node/kokoro-local.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/voice-node/local-audio-socket.test.ts": {
+      "timers": 0,
+      "handles": 3
+    },
+    "packages/operator-core/lib/voice-node/local-voice-provision.test.ts": {
+      "timers": 2,
+      "handles": 1
+    },
+    "packages/operator-core/lib/voice-node/local-whisper-service.test.ts": {
+      "timers": 1,
+      "handles": 2
+    },
+    "packages/operator-core/lib/voice-node/operator-voice-bus-routing.test.ts": {
+      "timers": 0,
+      "handles": 3
+    },
+    "packages/operator-core/lib/voice-node/operator-voice-multiclient.test.ts": {
+      "timers": 0,
+      "handles": 3
+    },
+    "packages/operator-core/lib/voice-node/operator-voice-session.test.ts": {
+      "timers": 6,
+      "handles": 6
+    },
+    "packages/operator-core/lib/voice-node/operator-voice-synthetic-audio.test.ts": {
+      "timers": 0,
+      "handles": 5
+    },
+    "packages/operator-core/lib/work-item-prior-work.cross-surface.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/operator-core/lib/work-items-urgent.test.ts": {
+      "timers": 5,
+      "handles": 4
+    },
+    "packages/plugin-loader/src/loader.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/plugin-loader/src/pack-validate.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/plugin-loader/src/tools.test.ts": {
+      "timers": 3,
+      "handles": 2
+    },
+    "packages/plugin-loader/src/tui-pane-validate.test.ts": {
+      "timers": 0,
+      "handles": 1
+    },
+    "packages/plugin-loader/src/wasm/transpile.test.ts": {
+      "timers": 0,
+      "handles": 1
+    }
+  },
+  "postMortemFires": {}
+}

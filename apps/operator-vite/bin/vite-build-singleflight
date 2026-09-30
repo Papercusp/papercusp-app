@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+# vite-build-singleflight — the ONE seam every operator-vite bundle build goes
+# through (`npm --workspace @papercusp/operator-vite run build`: the rebuild
+# timer, build-desktop-sidecar.sh, setup-release-checkout.sh, and any agent
+# running it by hand). It does two things:
+#
+#   1. SERIALIZES concurrent one-shot builds (EI-9836, below).
+#   2. STAGES the build and swaps it over dist/ only on SUCCESS (EI-10539,
+#      below) — so dist/ is never empty, never half-written, and never
+#      destroyed by a build that fails.
+#   3. Gives the measured full operator graph enough V8 heap to finish
+#      (EI-22614955223428270, below) while preserving a larger caller pin.
+#
+# ── (1) EI-9836: two one-shot builds must not race the same dist/ ────────────
+# vite CLEARS outDir before writing. Two one-shot builds running concurrently
+# (the systemd papercup-vite-rebuild.timer racing a manual/agent `npm run
+# build`, or a build kicked off from a sibling worktree) interleave their
+# writes/removes into the SAME dist/ — during the build window dist/assets goes
+# empty, and any webview load landing in that window either 404s (empty dist,
+# the SPA 503 "not built") or imports a stale/removed chunk ("Importing a module
+# script failed"). Hit repeatedly 2026-07-12 verifying WI-4216 in the Tauri app:
+# `ls dist/assets | wc -l` observed going 1513 -> 0 -> 1513 across a build, with
+# two concurrent `vite build` procs confirmed live via pgrep.
+#
+# Unlike the watch singleton (which REFUSES a second watcher outright — a live
+# watcher already serves your edits, so refusing is correct), two one-shot
+# builds should QUEUE: whichever build's source changes just landed still
+# deserves to run, so a second invocation BLOCKS (bounded) until the first
+# finishes — never a hard refuse.
+#
+# ── (2) EI-10539: a FAILING build must not destroy the working bundle ────────
+# vite empties outDir in a `renderStart` (order:'pre') hook — i.e. AFTER the
+# module graph is built, but BEFORE any chunk is written. So whether a red build
+# leaves you with a working app depends on WHICH PHASE it dies in. Measured on
+# vite 8.0.16 (the version this app builds with), previous bundle in dist/:
+#
+#     failure mode              exit  previous dist/
+#     ───────────────────────── ────  ─────────────────────────────────
+#     unresolvable import         1   SURVIVES  (dies before renderStart)
+#     syntax error                1   SURVIVES  (dies before renderStart)
+#     MISSING NAMED EXPORT        1   DESTROYED (dies after the empty) ←
+#     killed / OOM mid-write     ≠0   DESTROYED (half-written)
+#
+# The destructive row is not hypothetical: it is exactly what took the owner's
+# desktop down on 2026-07-12. A stray `pnpm install` hijacked node_modules and
+# left `@assistant-ui/store` without its `tapClientResource` export — a LINK-time
+# error, which fires after dist/ has already been emptied. Result: a dead app
+# serving `503 operator-vite is not built. Run <the very build that just
+# failed>.` — advice that cannot work, on a bundle that was fine minutes earlier.
+# (It also means a casual repro with a typo'd import shows dist/ surviving, and
+# concludes there is no bug. There is.)
+#
+# The cure: never let a build write into the live dist/ at all. Build into
+# `dist.next/`, and only when the build EXITS 0 and actually produced an
+# index.html do we swap it over dist/. A failed build leaves the running bundle
+# untouched — the desktop keeps working, and the failure is recorded (see
+# .vite-build-failure.json) so host-spa.ts can tell the truth if there is no
+# bundle at all.
+#
+# NOT staged: a RETAIN-regime build (`--watch`, or PAPERCUSP_RETAIN_DIST_CHUNKS=1
+# — the desktop rebuild timer). Those set `emptyOutDir:false` (vite.config.ts) and
+# deliberately ACCUMULATE hashed chunks in dist/ so an open webview never 404s a
+# lazy import it is pinned to. They never empty dist/, so a failed watch rebuild
+# is already harmless — and staging them would defeat the retention (a fresh
+# dist.next has none of the old chunks). Passthrough is correct there.
+#
+# Sibling guards that do NOT cover either of the above:
+#   - dist-wipe-guard.ts (a Vite plugin) refuses a one-shot build ONLY when a
+#     live `vite build --watch` singleton holds the SAME dist — no opinion on two
+#     one-shot builds, and none on a build dying half-way. (It still runs: the
+#     swap below would yank an open webview's chunks just as an in-place empty
+#     would, so vite.config points the guard at the FINAL dist/, not the staging
+#     dir.)
+#   - bin/vite-watch-singleton (EI-306) enforces "only one WATCHER at a time" —
+#     it does not gate a plain `vite build` at all.
+#
+# Test seams (src/__tests__/vite-build-singleflight.test.ts):
+#   VITE_BUILD_CMD       stand in for the real vite invocation
+#   VITE_BUILD_OUT_ROOT  put dist/ + dist.next/ + the markers in a tmp dir
+#   PAPERCUSP_VITE_BUILD_HEAP_MB  override the default heap floor
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# EI-22462478663416972: a production Vite build can transform the whole graph
+# successfully and still die while copying public assets into dist/ when the
+# filesystem is already under pressure. Refuse before the expensive transform,
+# using the shared reservation-aware guard so concurrent builds cannot consume
+# the last safe bytes together. The 10 GiB floor is the documented operator
+# build precondition; it is overrideable for a deliberately sized host.
+DISK_PREFLIGHT_LIB="${PAPERCUSP_DISK_PREFLIGHT_LIB:-$REPO_ROOT/papercusp-desktop/bin/lib/disk-preflight.sh}"
+if [ ! -f "$DISK_PREFLIGHT_LIB" ]; then
+  echo "ERROR: operator-vite disk preflight helper is missing: $DISK_PREFLIGHT_LIB" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$DISK_PREFLIGHT_LIB"
+
+CMD="${VITE_BUILD_CMD:-npx vite build}"
+WAIT_SECS="${VITE_BUILD_WAIT_SECS:-300}"
+
+# EI-22614955223428270: the full operator graph transformed all 13,126 modules
+# and then exhausted Node's inherited ~4 GiB old-space ceiling during output
+# generation. The same private-output build completed with an 8 GiB ceiling.
+# Put that measured default at the ONE maintained build seam instead of making
+# every verifier, release script, and human remember an ad-hoc NODE_OPTIONS.
+#
+# NODE_OPTIONS is additive: non-heap flags survive, a smaller effective heap is
+# raised by a final (therefore winning) flag, and a larger caller pin is kept
+# byte-for-byte. PAPERCUSP_VITE_BUILD_HEAP_MB is an explicit operator override
+# for a differently sized graph/host; malformed input falls back to the known
+# working default rather than handing Vite another predictable OOM.
+VITE_BUILD_HEAP_MB="${PAPERCUSP_VITE_BUILD_HEAP_MB:-8192}"
+if ! [[ "$VITE_BUILD_HEAP_MB" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[vite-build-singleflight] invalid PAPERCUSP_VITE_BUILD_HEAP_MB='$VITE_BUILD_HEAP_MB'; using 8192" >&2
+  VITE_BUILD_HEAP_MB=8192
+fi
+
+NODE_OPTIONS_CURRENT="${NODE_OPTIONS:-}"
+EXISTING_HEAP_MB=""
+read -r -a NODE_OPTION_PARTS <<< "$NODE_OPTIONS_CURRENT"
+for ((i = 0; i < ${#NODE_OPTION_PARTS[@]}; i++)); do
+  case "${NODE_OPTION_PARTS[$i]}" in
+    --max-old-space-size=*)
+      candidate="${NODE_OPTION_PARTS[$i]#*=}"
+      [[ "$candidate" =~ ^[1-9][0-9]*$ ]] && EXISTING_HEAP_MB="$candidate"
+      ;;
+    --max-old-space-size)
+      candidate="${NODE_OPTION_PARTS[$((i + 1))]:-}"
+      [[ "$candidate" =~ ^[1-9][0-9]*$ ]] && EXISTING_HEAP_MB="$candidate"
+      ;;
+  esac
+done
+
+if [ -z "$EXISTING_HEAP_MB" ] || [ "$EXISTING_HEAP_MB" -lt "$VITE_BUILD_HEAP_MB" ]; then
+  export NODE_OPTIONS="${NODE_OPTIONS_CURRENT:+$NODE_OPTIONS_CURRENT }--max-old-space-size=$VITE_BUILD_HEAP_MB"
+  if [ -n "$EXISTING_HEAP_MB" ]; then
+    echo "[vite-build-singleflight] raised Node old-space ceiling from ${EXISTING_HEAP_MB} MiB to ${VITE_BUILD_HEAP_MB} MiB" >&2
+  else
+    echo "[vite-build-singleflight] set Node old-space ceiling to ${VITE_BUILD_HEAP_MB} MiB" >&2
+  fi
+fi
+
+# Where dist/ lives. Overridable so the tests can exercise the real swap
+# mechanics against a throwaway tree instead of the app's live bundle.
+OUT_ROOT="${VITE_BUILD_OUT_ROOT:-$PWD}"
+# Serialize writers of the same physical output tree. A global lock made an
+# isolated release time out behind a staging build writing unrelated files.
+# Resolve aliases before hashing, and keep the lock outside the output tree so
+# a checkout cleanup cannot unlink a live lock. Explicit shared locks still win.
+LOCK="${VITE_BUILD_LOCK:-}"
+if [ -z "$LOCK" ]; then
+  mkdir -p "$OUT_ROOT"
+  LOCK_ROOT="$(cd "$OUT_ROOT" && pwd -P)"
+  LOCK_KEY="$(node -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(process.argv[1]).digest("hex"))' "$LOCK_ROOT")"
+  LOCK="${TMPDIR:-/tmp}/papercup-operator-vite-build-${LOCK_KEY}.lock"
+fi
+DIST="$OUT_ROOT/dist"
+STAGE="$OUT_ROOT/dist.next"
+PREV="$OUT_ROOT/dist.prev"
+FAILURE="$OUT_ROOT/.vite-build-failure.json"
+LOG="${VITE_BUILD_LOG:-$OUT_ROOT/.vite-build.log}"
+# Optional packaging handoff. When set, capture the completed bundle into this
+# separate directory BEFORE releasing the singleflight lock. A caller that
+# needs a stable artifact (the desktop sidecar builder) can then consume the
+# snapshot without racing the next Vite build that updates dist/.
+SNAPSHOT="${VITE_BUILD_SNAPSHOT_DIR:-}"
+SNAPSHOT_TMP="${SNAPSHOT:+$SNAPSHOT.tmp.$$}"
+
+VITE_BUILD_MIN_FREE_GB="${PAPERCUSP_VITE_BUILD_MIN_FREE_GB:-10}"
+if ! [[ "$VITE_BUILD_MIN_FREE_GB" =~ ^[0-9]+$ ]]; then
+  echo "[vite-build-singleflight] invalid PAPERCUSP_VITE_BUILD_MIN_FREE_GB='$VITE_BUILD_MIN_FREE_GB'; using 10" >&2
+  VITE_BUILD_MIN_FREE_GB=10
+fi
+
+# Release the reservation even when the build is interrupted. The shared helper
+# also treats a dead owner as stale, so this is hygiene rather than correctness.
+MKDIR_LOCK=""
+trap 'papercusp_release_disk_reservation 2>/dev/null || true; rm -rf ${MKDIR_LOCK:+"$MKDIR_LOCK"} ${SNAPSHOT_TMP:+"$SNAPSHOT_TMP"} 2>/dev/null || true' EXIT
+
+papercusp_require_free_gb "$OUT_ROOT" "$VITE_BUILD_MIN_FREE_GB" "operator-vite dist build"
+
+# A retain-regime build never empties dist/ (vite.config: emptyOutDir:false), so
+# it is already crash-safe AND depends on the old chunks still being there.
+# Passthrough — do not stage it.
+#
+# MUST mirror shouldRetainDistChunks() in dev-dist-prune.ts exactly: this script
+# decides whether to STAGE, vite.config decides emptyOutDir, and if the two
+# disagree about the regime a staged build would silently lose the retention (a
+# fresh dist.next/ has none of the old chunks). Retention is the DEFAULT — only
+# an explicit `=0` opts out, and never for a watcher. See that function's comment
+# for why the old opt-in shape failed (plan dist-chunk-retention-default-2026-07-26).
+RETAIN=1
+if [ "${PAPERCUSP_RETAIN_DIST_CHUNKS:-}" = "0" ] && [[ "$CMD" != *--watch* ]] && [[ "$CMD" != *" -w"* ]]; then
+  RETAIN=0
+fi
+
+# A wiping build DELETES every old hashed chunk when it swaps dist.next/ over
+# dist/. Any desktop window opened before that swap is pinned to chunks that no
+# longer exist, so its next lazy import dead-ends on "Importing a module script
+# failed" — the owner hit exactly this on 2026-07-26 after an agent ran a plain
+# `npm run build` on the shared tree. That is why retention is now the DEFAULT
+# and reaching this branch takes a deliberate `PAPERCUSP_RETAIN_DIST_CHUNKS=0`.
+# It is still worth saying out loud, because the opt-out is correct for a
+# PACKAGING build (a shipped dist must be clean) and wrong for anything running
+# against a tree with live windows.
+if [ "$RETAIN" -eq 0 ]; then
+  echo "[vite-build-singleflight] NOTE: PAPERCUSP_RETAIN_DIST_CHUNKS=0 — wiping build. Old hashed chunks in" >&2
+  echo "[vite-build-singleflight]       dist/ will be DELETED on swap, so any desktop window open right now" >&2
+  echo "[vite-build-singleflight]       will 404 its pinned lazy chunks (\"Importing a module script failed\")." >&2
+  echo "[vite-build-singleflight]       Correct when PACKAGING a shipped bundle; drop the =0 on a live tree." >&2
+fi
+
+# Append-open: never truncate a live holder's pid record while we're still
+# waiting for the lock.
+exec 9>>"$LOCK"
+# Serialize concurrent one-shot builds. flock(1) where present; on macOS — which
+# ships NO flock(1) (WI-3307/EI-160, the same gap build-desktop-sidecar.sh and
+# stage-source-tree.sh fall back for) — a mkdir spinlock with stale-PID reclaim,
+# BOTH bounded by WAIT_SECS so a wedged holder can never block a build forever.
+# Without this fallback the mac `flock` invocation is "command not found", the
+# `if !` fires 0s in, and the build dies with a MISLEADING "TIMED OUT after 300s"
+# — exactly what broke the mac release leg on the 2026-07-13 0.0.9 cut.
+LOCKDIR="$LOCK.lockdir"
+# Set to LOCKDIR only when WE created it, so the trap removes only our own.
+took_lock=0
+if command -v flock >/dev/null 2>&1; then
+  if flock -w "$WAIT_SECS" 9; then took_lock=1; fi
+else
+  deadline=$(( $(date +%s) + WAIT_SECS ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+      echo "$$" > "$LOCKDIR/pid"
+      MKDIR_LOCK="$LOCKDIR"
+      took_lock=1
+      break
+    fi
+    holder="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$LOCKDIR"   # stale holder — reclaim and retry immediately
+      continue
+    fi
+    sleep 2
+  done
+fi
+if [ "$took_lock" -ne 1 ]; then
+  HOLDER="$(head -n 1 "$LOCK" 2>/dev/null || true)"
+  echo "[vite-build-singleflight] TIMED OUT after ${WAIT_SECS}s waiting for a concurrent 'vite build' (pid ${HOLDER:-unknown}) to finish writing dist/." >&2
+  echo "[vite-build-singleflight] Two one-shot builds interleaving into one dist/ is EI-9836 — this lock exists to queue them instead of racing." >&2
+  echo "[vite-build-singleflight] If pid ${HOLDER:-unknown} is actually dead/wedged, remove $LOCK and retry." >&2
+  exit 1
+fi
+
+# Record the holder pid — diagnostic only (the flock wait above is what actually
+# serializes builds; this is just so a timed-out waiter can name who it was
+# waiting on). A fresh fd, not fd 9 — writing through fd 9 would fight the
+# append-mode open above.
+echo "$$" > "$LOCK"
+
+# Clear any staging debris a previously KILLED build left behind (we hold the
+# lock, so no live build owns these).
+rm -rf "$STAGE" "$PREV"
+
+# Run the build. `set -e` off around it so we always reach the swap/cleanup and
+# propagate the build's own exit status. Output is tee'd so a failure leaves a
+# readable log behind for the 503 (below) — PIPESTATUS[0] is the BUILD's status,
+# not tee's.
+set +e
+if [ "$RETAIN" -eq 1 ]; then
+  bash -c "$CMD" 2>&1 | tee "$LOG"
+  status=${PIPESTATUS[0]}
+else
+  # PAPERCUSP_VITE_OUT_DIR   → vite writes the bundle HERE (vite.config.ts)
+  # PAPERCUSP_VITE_FINAL_OUT_DIR → the dist/ the swap will land on, so
+  #   dist-wipe-guard still refuses to clobber a LIVE watcher's dist.
+  PAPERCUSP_VITE_OUT_DIR="$STAGE" PAPERCUSP_VITE_FINAL_OUT_DIR="$DIST" \
+    bash -c "$CMD" 2>&1 | tee "$LOG"
+  status=${PIPESTATUS[0]}
+fi
+set -e
+
+if [ "$RETAIN" -eq 0 ]; then
+  if [ "$status" -eq 0 ] && [ -f "$STAGE/index.html" ]; then
+    # SUCCESS — swap the new bundle in. Two renames, so there is a sub-millisecond
+    # window where dist/ does not exist; that is the whole exposure, versus the
+    # ~30s (or permanent, on a red build) window of writing in place. Both sides
+    # are complete bundles, so nothing can observe a HALF-built dist/ either way.
+    if [ -d "$DIST" ]; then mv "$DIST" "$PREV"; fi
+    mv "$STAGE" "$DIST"
+    rm -rf "$PREV"
+    rm -f "$FAILURE"
+  elif [ "$status" -eq 0 ]; then
+    # Exited 0 but produced no bundle (a no-op/`--help`/test-seam command).
+    # Nothing to swap — and emphatically DO NOT touch the live dist/.
+    rm -rf "$STAGE"
+  else
+    # FAILURE — the live dist/ was never touched and keeps serving. The failure
+    # record itself is written below for BOTH regimes (EI-10539 / WI-10003916).
+    rm -rf "$STAGE"
+  fi
+fi
+
+# Failure evidence is REGIME-INDEPENDENT and must OUTLIVE the next build
+# (WI-10003916). Two defects combined to destroy it on a failed release deploy:
+# the record lived only in the RETAIN=0 branch above, so a default (retain)
+# build failed with no marker and no stderr line; and $LOG is truncated by the
+# very next build, which setup-release's rollback runs within minutes. Callers
+# that discard stdout (setup-release: `npm run build 1>/dev/null`) therefore
+# lost the vite error entirely. So: keep a copy the next build cannot
+# overwrite, point the marker at it, and put the tail on STDERR where every
+# caller's log sees it. A success in either regime clears the stale marker.
+FAIL_TAIL_LINES="${VITE_BUILD_FAIL_TAIL_LINES:-80}"
+if [ "$status" -ne 0 ]; then
+  FAILED_LOG="$OUT_ROOT/.vite-build-failed.log"
+  cp -f "$LOG" "$FAILED_LOG" 2>/dev/null || FAILED_LOG="$LOG"
+  printf '{"failedAt":"%s","exitCode":%s,"log":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$status" "$FAILED_LOG" > "$FAILURE" 2>/dev/null || true
+  echo "[vite-build-singleflight] build FAILED (exit $status) — dist/ left intact (EI-10539). Log: $FAILED_LOG" >&2
+  echo "[vite-build-singleflight] last ${FAIL_TAIL_LINES} line(s) of the failed build:" >&2
+  { tail -n "$FAIL_TAIL_LINES" "$FAILED_LOG" 2>/dev/null | sed 's/^/[vite-build-singleflight] | /' >&2; } || true
+elif [ "$RETAIN" -eq 1 ] && [ -f "$DIST/index.html" ]; then
+  rm -f "$FAILURE"
+fi
+
+# Capture a packaging snapshot while fd 9 still holds the singleflight lock.
+# The lock release below happens as this process exits; taking the snapshot
+# here closes the gap where a second build could replace dist/ between the
+# successful build and a caller's copy step.
+if [ "$status" -eq 0 ] && [ -n "$SNAPSHOT" ] && [ -f "$DIST/index.html" ]; then
+  rm -rf "$SNAPSHOT_TMP"
+  mkdir -p "$(dirname "$SNAPSHOT")" "$SNAPSHOT_TMP"
+  cp -a "$DIST/." "$SNAPSHOT_TMP/"
+  rm -rf "$SNAPSHOT"
+  mv "$SNAPSHOT_TMP" "$SNAPSHOT"
+  echo "[vite-build-singleflight] captured stable bundle snapshot at $SNAPSHOT"
+fi
+
+# Best-effort: blank the pid record now that we're done. Cosmetic, not
+# load-bearing — flock releases automatically when this process's fds close on
+# exit, which is what actually unblocks the next waiter.
+: > "$LOCK" 2>/dev/null || true
+
+exit "$status"

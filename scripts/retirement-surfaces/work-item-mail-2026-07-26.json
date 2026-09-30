@@ -1,0 +1,39 @@
+{
+  "name": "work-item-mail (WI-6097, retired 2026-07-26)",
+  "description": "Worked example for scan-retirement-surface.mjs — the exact surface retired in WI-6097 (retire-work-item-mail-surface-2026-07-26), reconstructed from _retired/work-item-mail/RESTORE.md. A bare-word grep for 'messages' on this same retirement returned 68-113 files of noise; this config demonstrates the identifier + allowlist shape that avoids it.",
+  "identifiers": [
+    "messages:send",
+    "messages:dismiss",
+    "messages:inbox",
+    "messages:outbox",
+    "cross_harness:inbox",
+    "cross_harness:outbox",
+    "send_message",
+    "mark_message_status",
+    "mark_campaign_published"
+  ],
+  "allowlist": [
+    {
+      "file": "**/device-push-dispatcher.ts",
+      "match": "messages:send",
+      "reason": "Google FCM push-notification endpoint URL segment — unrelated to the retired work-item-mail tool of the same name (found during WI-6097's original bare-substring sweep)."
+    },
+    {
+      "file": "**",
+      "match": "agent_chats:send_message",
+      "reason": "a different, still-LIVE tool (the agent-to-agent chat surface) whose name happens to end in the retired op-code's bare identifier `send_message` — a same-string, different-surface collision, not a residual reference."
+    },
+    {
+      "file": "_retired/work-item-mail/**",
+      "reason": "the retired surface's own preserved source — expected to still name itself; not a live reference."
+    },
+    {
+      "file": "**/RESTORE.md",
+      "reason": "retirement documentation describing what was removed and how to restore it — expected to name the retired identifiers."
+    },
+    {
+      "file": "apps/operator-docs/src/content/docs/system/repo-conventions.mdx",
+      "reason": "this file's own 'retired surfaces' table names the retired identifiers by design."
+    }
+  ]
+}

@@ -1,0 +1,144 @@
+{
+  "$comment": "Baseline for scripts/check-no-cdn-egress.mjs (egress-monitor-origin-axis-2026-08-02 P-004). RATCHET, NOT AMNESTY: entries are expected to be removed as fixes land. Every entry needs a `reason`; `status` is one of inert | not-live-verified | unresolved. A bundle hit is a DISCOVERY, never a verdict — establish liveness at runtime before acting on one (sibling plan cdn-egress-fixes-2026-08-02 D-004). Regenerate with: npm run lint:no-cdn-egress:update",
+  "generated": "2026-08-02",
+  "entries": [
+    {
+      "file": "internal/docs/agent-insights/auditing-cdn-egress-in-this-repo.html",
+      "url": "https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs",
+      "status": "inert",
+      "reason": "Documentation example, not a loader call. Established inert by reading the SOURCE (apps/operator-docs/src/content/docs/agent-insights/auditing-cdn-egress-in-this-repo.mdx:45): the URL is a backticked inline-code span in a markdown TABLE CELL listing which libraries ship a CDN default. It renders as a <code> text node — not a script src, not a loader.config() path, not a fetch argument, not even an <a href>. This doc TEACHES CDN-egress auditing, so it necessarily quotes the exact URLs it warns about; that is why the bundle scan sees them. WI-7319."
+    },
+    {
+      "file": "internal/docs/agent-insights/auditing-cdn-egress-in-this-repo.html",
+      "url": "https://cdn.jsdelivr.net/npm/@emoji-mart/data@latest/",
+      "status": "inert",
+      "reason": "Same doc, same shape (…auditing-cdn-egress-in-this-repo.mdx:48): a backticked inline-code span in the markdown table cell for emoji-mart's CDN default. Renders as <code> text; no loader, src, or fetch reaches it. WI-7319."
+    },
+    {
+      "file": "internal/docs/agent-insights/auditing-cdn-egress-in-this-repo.html",
+      "url": "https://github.com/owner/repo/blob/master/thing.js",
+      "status": "inert",
+      "reason": "A deliberately FICTIONAL placeholder (owner/repo/thing.js) in a prose bullet (…auditing-cdn-egress-in-this-repo.mdx:152) whose own text explains that a /blob/ URL is an HTML page, not a fetchable asset — the doc's worked example of an inert hit. Backticked inline code; renders as <code> text. WI-7319."
+    },
+    {
+      "file": "internal/docs/agent-insights/auditing-cdn-egress-in-this-repo.html",
+      "url": "https://raw.githubusercontent.com/ajv-validator/ajv/.../data.json#",
+      "status": "inert",
+      "reason": "Elided, non-resolvable example URL — the literal '...' path segment and trailing '#' make it unfetchable by construction. Appears in the adjacent prose bullet (…auditing-cdn-egress-in-this-repo.mdx:154) as backticked inline code illustrating the same inert-hit class. WI-7319."
+    },
+    {
+      "file": "assets/chunk-K2UTITRG-<hash>.js",
+      "url": "https://embed.reddit.com/widgets.js",
+      "status": "unresolved",
+      "reason": "Excalidraw's embeddable-element feature injects the Reddit widget script when a user embeds a reddit post on a canvas. Real egress, but only on an explicit user embed action — never on load. Not covered by cdn-egress-fixes-2026-08-02. Tracked: WI-7115."
+    },
+    {
+      "file": "assets/chunk-K2UTITRG-<hash>.js",
+      "url": "https://platform.twitter.com/widgets.js",
+      "status": "unresolved",
+      "reason": "Excalidraw's embeddable-element feature injects the Twitter widget script when a user embeds a tweet on a canvas. Real egress, user-triggered only. Tracked: WI-7115."
+    },
+    {
+      "file": "assets/dist-<hash>.js",
+      "url": "https://cdn.jsdelivr.net/npm/@alexanderolsen/libsamplerate-js@2.1.2/dist/libsamplerate.worklet.js",
+      "status": "not-live-verified",
+      "reason": "libsamplerate-js's default AudioWorklet source, from @elevenlabs/client's addLibsamplerateModule(). PROVEN NOT LIVE by full reachability trace (WI-7116, not a bundle grep — that is precisely what D-004 forbids treating as a verdict): addLibsamplerateModule is only ever called from the SDK's setupInputOutput(), which short-circuits to the LiveKit-native connection.input/output for a WebRTCConnection and only constructs the MediaDeviceInput/Output (the sole callers of addLibsamplerateModule) for a WebSocketConnection. Both of our two live Conversation.startSession() call sites (packages/operator-core/lib/voice-engines/elevenlabs-conv.ts, apps/operator/app/el-min/page.tsx) hardcode connectionType:'webrtc' — no runtime fallback exists between the two connection types once resolved, so the fetch cannot fire under any input. Guarded going forward by apps/operator/app/_components/elevenlabs-libsamplerate-cdn.test.ts (asserts every live call site stays pinned, and pins the SDK's own dispatch shape so a future @elevenlabs/client bump that changes it fails loudly here). No fix applied: mirroring the worklet to wire a libsampleratePath override would be dead-code busywork for an unreachable path — if a future call site legitimately needs connectionType:'websocket', wire libsampleratePath/workletPaths (AudioWorkletConfig) at the same time; the guard test will fail first and point here."
+    },
+    {
+      "file": "assets/dist-<hash>.js",
+      "url": "https://github.com/rochars/wavefile/blob/master/lib/codecs/mulaw.js",
+      "status": "inert",
+      "reason": "Source-attribution link in a wavefile comment ('derived from ...'). A github /blob/ HTML page URL, not a fetchable asset, and it appears in a comment rather than a loader call."
+    },
+    {
+      "file": "assets/es-<hash>.js",
+      "url": "https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs",
+      "status": "not-live-verified",
+      "reason": "@monaco-editor/loader's built-in default CDN base. Overridden at every call site by loader.config({ paths: { vs } }) pointing at our local /monaco/vs mirror; enforced by apps/operator/app/_components/monaco-cdn.test.ts. Runtime-verified in cdn-egress-fixes-2026-08-02 P-001 (mirror 151/151, only local /monaco/vs/* requests observed). The string cannot leave the bundle — it is the library's default constant."
+    },
+    {
+      "file": "assets/forms-<hash>.js",
+      "url": "https://raw.githubusercontent.com/ajv-validator/ajv/master/lib/refs/data.json#",
+      "status": "inert",
+      "reason": "ajv's $id for its data-reference meta-schema. A JSON-Schema $id is an IDENTIFIER used as a registry key, never dereferenced — ajv resolves it against its own bundled copy. The trailing '#' is the empty JSON-pointer fragment, which is the giveaway that this is a schema id rather than a download URL."
+    },
+    {
+      "file": "assets/module-<hash>.js",
+      "url": "https://cdn.jsdelivr.net/npm/@emoji-mart/data@latest/i18n/${r}.json",
+      "status": "not-live-verified",
+      "reason": "emoji-mart's built-in remote-data fallback. Proven NOT LIVE at runtime in cdn-egress-fixes-2026-08-02 P-005 (dropped): BlockNote supplies emoji data via a bare-specifier import that Vite resolves at build time, and a driven picker loaded only local chunks. Retained here because the fallback branch survives in the bundle by construction."
+    },
+    {
+      "file": "assets/module-<hash>.js",
+      "url": "https://cdn.jsdelivr.net/npm/@emoji-mart/data@latest/sets/${t}/${n}.json",
+      "status": "not-live-verified",
+      "reason": "Same emoji-mart remote-data fallback as the i18n row; proven not live in cdn-egress-fixes-2026-08-02 P-005. Note the unpinned '@latest' — if this branch ever DID become reachable it would also mean unversioned, silently-drifting upstream data, so treat any change here as high-severity."
+    },
+    {
+      "file": "excalidraw/chunk-<hash>.js",
+      "url": "https://embed.reddit.com/widgets.js",
+      "status": "unresolved",
+      "reason": "The vendored copy of the same Excalidraw embeddable-widget code as the assets/ chunk row. Tracked: WI-7115."
+    },
+    {
+      "file": "excalidraw/chunk-<hash>.js",
+      "url": "https://platform.twitter.com/widgets.js",
+      "status": "unresolved",
+      "reason": "The vendored copy of the same Excalidraw embeddable-widget code as the assets/ chunk row. Tracked: WI-7115."
+    },
+    {
+      "file": "vditor/dist/js/flowchart.js/flowchart.min.js",
+      "url": "http://adrai.github.io/flowchart.js",
+      "status": "inert",
+      "reason": "The project homepage in flowchart.js's banner comment. Plain http, no asset path, inside a comment — a credit line, not a loader."
+    },
+    {
+      "file": "vditor/dist/js/highlight.js/styles/a11y-dark.min.css",
+      "url": "https://github.com/isagalaev/highlight.js/blob/master/src/styles/tomorrow-night-eighties.css",
+      "status": "inert",
+      "reason": "Source-attribution comment in the stylesheet naming the theme it was derived from. A /blob/ HTML page URL in a CSS comment; CSS cannot fetch it."
+    },
+    {
+      "file": "vditor/dist/js/highlight.js/styles/a11y-light.min.css",
+      "url": "https://github.com/isagalaev/highlight.js/blob/master/src/styles/tomorrow-night-eighties.css",
+      "status": "inert",
+      "reason": "Same attribution comment as the a11y-dark stylesheet."
+    },
+    {
+      "file": "vditor/dist/js/highlight.js/third-languages.js",
+      "url": "https://cdn.jsdelivr.net/npm/highlightjs-sap-abap@0.2.0/dist/abap.min.js",
+      "status": "inert",
+      "reason": "The jsDelivr URL is provenance in a comment only. The vendored file registers the ABAP grammar inline with the already-local highlight.js runtime; it has no fetch/XHR or script-element loader. Verified by WI-7118 recurrence test."
+    },
+    {
+      "file": "vditor/dist/js/highlight.js/third-languages.js",
+      "url": "https://cdn.jsdelivr.net/npm/highlightjs-solidity@2.0.5/dist/solidity.min.js",
+      "status": "inert",
+      "reason": "The jsDelivr URL is provenance in a comment only. The vendored file registers the Solidity grammar inline with the already-local highlight.js runtime; it has no fetch/XHR or script-element loader. Verified by WI-7118 recurrence test."
+    },
+    {
+      "file": "vditor/dist/js/highlight.js/third-languages.js",
+      "url": "https://cdn.jsdelivr.net/npm/highlightjs-solidity@2.0.5/dist/yul.min.js",
+      "status": "inert",
+      "reason": "The jsDelivr URL is provenance in a comment only. The vendored file registers the Yul grammar inline with the already-local highlight.js runtime; it has no fetch/XHR or script-element loader. Verified by WI-7118 recurrence test."
+    },
+    {
+      "file": "vditor/dist/js/highlight.js/third-languages.js",
+      "url": "https://github.com/highlightjs/highlightjs-hlsl/blob/master/dist/hlsl.min.js",
+      "status": "inert",
+      "reason": "A /blob/ HTML page URL in the same registry file — a source reference rather than the CDN asset URL its siblings use. Fetching it would return HTML, so it is not a working loader entry."
+    },
+    {
+      "file": "vditor/dist/js/mathjax/sre/sre_browser.js",
+      "url": "https://cdn.jsdelivr.net/npm/wicked-good-xpath@1.3.0/dist/wgxpath.install.js",
+      "status": "not-live-verified",
+      "reason": "Inside speech-rule-engine, which ships in vditor's MathJax bundle. We pin math.engine=KaTeX, so the MathJax bundle is never loaded. Proven not live at runtime in cdn-egress-fixes-2026-08-02 P-006 (dropped): real math rendered katexNodes=4, mathjaxNodes=0, zero mathmaps/jsdelivr requests. Note EI-19370965762703309 — one warm-up Vditor.preview call pins no engine explicitly."
+    },
+    {
+      "file": "vditor/dist/js/mermaid/mermaid.min.js",
+      "url": "https://github.com/jquery/jquery/blob/master/src/event.js",
+      "status": "inert",
+      "reason": "Source-attribution comment inside mermaid's bundled event-handling code. A /blob/ HTML page URL in a comment."
+    }
+  ]
+}

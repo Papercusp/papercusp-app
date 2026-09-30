@@ -1,0 +1,55 @@
+id: papercusp-project-history
+version: "0.1.0"
+scope: aspect
+category: data
+summary: >-
+  A reusable project History plane: the installed papercusp project-history
+  generator reads the chosen Papercusp harness plus Git, writes a disposable
+  versioned artifact, and leaves each app with only a thin static-file or
+  server-import adapter. @papercusp/plan-parser owns the product-neutral schema
+  and assembler.
+components:
+  - { id: plan-parser, version: 0.1.0 }
+contracts: []
+decisionPoints:
+  - id: history-scope
+    prompt: >-
+      Which harness is authoritative, and should the default <harness>- plan-prefix
+      filter be kept or disabled with --prefix= to export the whole harness?
+  - id: project-identity
+    prompt: What stable project id/name and repository web URL should the artifact expose?
+  - id: artifact-adapter
+    prompt: >-
+      Will the host serve JSON statically or import the generated TypeScript artifact
+      through a thin API adapter, and at what committed path?
+  - id: regeneration-gate
+    prompt: >-
+      Which build/test command regenerates the artifact, and where does --check fail
+      stale committed output?
+composesWith:
+  - papercusp-app
+  - papercusp-ui
+docs:
+  - build-system/project-history
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+checks:
+  - id: project-history-artifact
+    run: checks/project-history-artifact.test.ts
+    summary: >-
+      the configured generated JSON or TypeScript artifact is schema v1, belongs
+      to the expected project/harness, and names the canonical generator
+musts:
+  - id: derived-read-model
+    rule: "The generated artifact is disposable derived output; Papercusp ledgers and Git remain authoritative"
+    enforcedBy: project-history-artifact
+  - id: installed-generator
+    rule: "Generation invokes the installed papercusp project-history CLI, never a path into a Papercusp source checkout"
+    enforcedBy: prose-only
+  - id: versioned-contract
+    rule: "Consumers reject unknown schema versions instead of guessing a compatible shape"
+    enforcedBy: project-history-artifact
+  - id: thin-consumer-adapter
+    rule: "Project-specific code only selects config, transports the artifact, and composes UI; it never forks the assembler"
+    enforcedBy: prose-only

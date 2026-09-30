@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow---dev-bridge-result"
+description = "Enables the __dev_bridge_result command without any pre-configured scope."
+commands.allow = ["__dev_bridge_result"]
+
+[[permission]]
+identifier = "deny---dev-bridge-result"
+description = "Denies the __dev_bridge_result command without any pre-configured scope."
+commands.deny = ["__dev_bridge_result"]

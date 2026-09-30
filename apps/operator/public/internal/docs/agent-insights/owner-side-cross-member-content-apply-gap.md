@@ -1,0 +1,118 @@
+# Cross-member content federates to JOINERS but not the OWNER — the owner's home harness resolved hiveHomeSlug=undefined
+URL: /internal/docs/agent-insights/owner-side-cross-member-content-apply-gap
+
+WI-259 STEP 2 (the membership-aware content-apply guard) worked for a JOINER but silently dropped EVERY cross-member op on the pot OWNER, because boot's resolveHiveHomeProjectionSlug only resolves the JOINER rebind (joinerHiveHomeSlug → null for an owner). STEP-1 admit resolved the owner home via hiveHomeSlugForHarness; STEP-2 apply didn't → decideMemberContentOp hit its no-hiveHome 'drop' branch → fed-b→fed-a 'discovers 0'. Fix: an owner-home fallback for the content-guard hiveHomeSlug, GATED on bindingResolvesHiveHomeProjection so non-pot boots pay zero extra getOrgPg cost.
+
+## What
+
+A shared pot federates a MEMBER's feature/plan/issue content across its members
+(WI-259, plan `shared-pot-member-content-federation-2026-06-20`). STEP 1 admits a
+same-pot cross-member LOG by author identity; STEP 2 — the membership-aware apply
+guard (`decideMemberContentOp` in `member-content-guard.ts`) — applies a cross-member
+op iff its verified source-log device ∈ the pot's current members.
+
+STEP 2 was unit-green and worked for a **JOINER** receiving the owner's content
+(A→B). But the **OWNER** receiving a member's content (B→A) silently materialized
+**zero** rows: the live symptom reported as *"fed-b → fed-a discovers 0"*.
+
+## Why (the admit/apply asymmetry — the keystone)
+
+`decideMemberContentOp` needs a `hiveHomeSlug` to engage; without one it returns
+`'drop'` via its **no-hiveHome** branch (member-content-guard.ts: *"a non-pot
+harness — there are no members to admit from → drop"*). For an op to apply on the
+receiver, the receiver's content projections must have been built with a
+`hiveHomeSlug`.
+
+* **Joiner** (member harness): boot resolves `hiveHomeProjectionSlug` via the 2c
+  rebind (`joinerHiveHomeSlug`, reads the `remote_hive` view), so its content
+  projections get `hiveHomeSlug = <pot-home>` → the guard engages → A→B applies. ✅
+* **Owner** (the pot-home harness, slug *IS* the pot home): `joinerHiveHomeSlug`
+  reads `remote_hive` — and the owner is **not** a remote pot of itself → returns
+  `null` → `hiveHomeProjectionSlug = undefined` → its content projections ran with
+  `hiveHomeSlug = undefined` → the guard hit **no-hiveHome 'drop'** for **every**
+  cross-member op → the owner discovers 0. ❌
+
+The tell: STEP-1 admission (`resolveSameHiveMember` in boot.ts) ALREADY resolves the
+owner's home — it uses `hiveHomeProjectionSlug ?? hiveHomeSlugForHarness(ws, slug)`
+(and `hiveHomeSlugForHarness` returns the own slug for an owner via
+`getHiveBySlug`). So the owner **admitted** the member's log but then **dropped** its
+content. STEP-1 resolved the home; STEP-2 didn't. Same harness, two different
+pot-home resolutions — that gap is the bug.
+
+This is why the plan's A→B-centric diagnosis (D-013→D-016) "eliminated hiveHomeSlug
+resolution": for the A→B direction the receiver is a joiner, whose hiveHomeSlug IS
+set. The owner-receiving (B→A) direction has the distinct undefined.
+
+## Current behavior (2026-06-25)
+
+The owner fallback is now part of `bootHarnessSubstrate`: when
+`bindingResolvesHiveHomeProjection(opts.swarmBinding)` is true, boot resolves
+`hiveHomeSlugForHarness(workspaceId, harnessSlug)` and keeps it only when
+`home === harnessSlug`. Both the scoped apply path (`buildHarnessProjectionApply`)
+and the global projection registration pass `hiveHomeSlug:
+hiveHomeProjectionSlug ?? ownHiveHomeSlug`, so an owner's home harness engages
+the membership-aware content guard while a joiner keeps its remote-home rebind.
+
+The current wiring also keeps the two apply paths aligned: `boot.ts` passes the
+same fallback into `buildHarnessProjectionApply` and
+`registerAllHarnessProjections`, and both share the boot-scoped
+`PendingMembershipContent` buffer. That means guarded content can defer until
+the corresponding `hive_members` row arrives on either path. The fallback stays
+behind the `bindingResolvesHiveHomeProjection` gate, so ordinary private/local/gh
+harness boots still avoid the owner-home lookup.
+
+## Fix
+
+Resolve the OWNER's own pot-home for the content-guard `hiveHomeSlug` too — the same
+way STEP-1 admit does — and thread it as a fallback into `buildScopedApply` +
+`registerAllHarnessProjections` (boot.ts):
+
+```ts
+const ownHiveHomeSlug = await (async () => {
+  // GATED — the same gate the joiner resolution uses — so a non-pot boot pays ZERO
+  // extra getOrgPg cost (the common path stays byte-identical).
+  if (!bindingResolvesHiveHomeProjection(opts.swarmBinding)) return undefined;
+  try {
+    const { hiveHomeSlugForHarness } = await import('../../pot-federation');
+    const home = await hiveHomeSlugForHarness(opts.workspaceId, opts.harnessSlug);
+    return home === opts.harnessSlug ? home : undefined; // only when THIS harness owns the pot
+  } catch { return undefined; }
+})();
+// …
+hiveHomeSlug: hiveHomeSlug ?? ownHiveHomeSlug, // joiner keeps its rebind ⇒ the `??` is a no-op
+```
+
+Scoped to `home === own slug` so a joiner keeps its rebound `hiveHomeProjectionSlug`
+(the `??` never fires) and `hiveHomeProjectionSlug` itself — used by A-003 slug-scope,
+admit, and rekey — is left **untouched**. Setting `hiveHomeSlug = ownSlug` for the
+owner is a no-op for the `hiveScoped` remap (`ownSlug === harnessSlug` ⇒ no remap) and
+only newly engages the 6 content projections' guard.
+
+## The two traps (don't repeat these)
+
+1. **Don't add an UNGATED getOrgPg call to the boot hot path.** The first cut resolved
+   `ownHiveHomeSlug` unconditionally. For a private/`local`-binding harness (the common
+   case + most boot tests) that added a brand-new boot-time `getOrgPg` query, which under
+   load hit the real PG and pushed timing-sensitive boots over their windows
+   (`admission-pending-retry.test.ts` went 1s → 18s and failed). Gate it on
+   `bindingResolvesHiveHomeProjection(binding)` (`kind==='pot' || 'topic'`): only a
+   harness actually peered on a pot topic — where it can receive cross-member content —
+   does the one-shot lookup. (See `/internal/docs/performance` on per-boot PG opens.)
+2. **Don't trust a STEP-2 test that stubs `resolveAuthorDevice`.** The existing green
+   close-gate test passes `applyOverride` with a hardcoded `hiveHomeSlug` and a stubbed
+   `resolveAuthorDevice`, so it never exercised boot's real resolution — which is exactly
+   why the owner gap survived. The regression test for this fix boots the OWNER with the
+   REAL `bootHarnessSubstrate` scopedApply (NO `applyOverride`, NO stub) so boot's real
+   `admittedIdentities → resolveAuthorDevice → resolveHiveMemberDeviceSet` chain AND the
+   owner-home resolution are on the path. It boots both peers on a `pot` binding (a real
+   shared owner is on the pot topic, never `local`) and env-routes `getOrgPg` at a
+   migrated org DB (harness\_admin → RLS-bypass) so the owner's real projections write
+   there. Teeth-verified: it FAILS pre-fix at "never reached the OWNER's PG" and passes
+   post-fix.
+
+## Note
+
+This is the CONTENT-apply (code) layer only. A live 2-machine witness additionally
+needs the swarm peered (FED-2 self-heal / `substrate-swarm-self-heal-no-restart`) and
+the build deployed to both VMs (the rig — `federation-rig-restart-runbook`); those are
+separate lanes from this fix.

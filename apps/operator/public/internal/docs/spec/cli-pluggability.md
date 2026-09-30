@@ -1,0 +1,92 @@
+# 16. CLI pluggability
+URL: /internal/docs/spec/cli-pluggability
+
+
+
+import { Aside } from '@astrojs/starlight/components';
+
+The substrate invokes role agents by spawning a CLI subprocess. The deployed default is `claude -p` via `AGENT_BACKEND=claude-code` — and it is also the code-level fallback: `resolveAgentCmd()` returns `$AGENT_CMD ?? $CLAUDE ?? 'claude -p'`, and the backend constant defaults to `claude-code`. Two other backends are fully wired and supported: `omp -p` (pi / oh-my-pi, which routes through its own Meridian router + Claude Max OAuth) and `codex` (OpenAI's Codex CLI). That CLI is a **substitution point**, not a hard dependency. Anything that satisfies a small contract can drive a role.
+
+## The CLI contract
+
+To be usable as a Papercusp role driver, a CLI must:
+
+1. Accept a non-interactive flag that prints the model's response and exits (e.g. `claude -p`, `pi -p`, `aider --message`).
+2. Accept a system prompt as a flag or file (`--system-prompt`, `--append-system-prompt`, etc.). Papercusp injects the role prompt this way.
+3. Read the user prompt from stdin **or** from a positional argument.
+4. Be stateless across invocations by default (or have a flag that forces stateless, e.g. `--no-session`). The substrate's "fresh context per role" contract ([§3.2](/spec/harness-contract/#32-fresh-context-per-role)) demands no carryover between calls.
+5. Optionally emit a structured event stream the substrate can parse for cost, tool calls, and decision verbs (`stream-json`, JSONL, JSON-RPC, etc.).
+
+CLIs that satisfy 1–4 work today as-is. Item 5 is required only for full audit/cost integration; without it the substrate falls back to plain-text parsing.
+
+### Auth pass-through
+
+The CLI subprocess inherits the user's shell environment, so the substrate never sees credentials. For interactive spawns the `claude` CLI resolves auth from `$CLAUDE_CONFIG_DIR/.credentials.json` (the substrate symlinks the user's `~/.claude/.credentials.json` into a per-spawn config dir), so a logged-in Claude Code session drives `claude -p` and `pi -p` alike — **Claude Max subscriptions are usable through any compliant CLI** without API keys flowing through the substrate. Anything else (OpenAI keys, Gemini, Bedrock profile, `codex`'s `~/.codex/auth.json`, etc.) flows the same way: the user's env is the source of truth.
+
+For **autonomous (fleet) spawns** the substrate does *not* simply inherit the owner's interactive session. It injects a dedicated, non-rotating Claude OAuth token via `CLAUDE_CODE_OAUTH_TOKEN` (minted with `claude setup-token`, staged at `~/.papercusp/claude-token` — see `fleet-claude-token.ts`). This keeps fleet token refreshes from invalidating the owner's terminals; absent the token, the spawn falls back to the config-dir credentials unchanged.
+
+### Structured output modes
+
+CLIs that satisfy item 5 expose richer integration. The reference runtime models these as a `StreamFormat` enum in `invoke.ts` — the values below are the actual enum members, not conceptual labels:
+
+| `StreamFormat`                                   | Use                                                                                                                                                                                                                      | Shape                                                                                                                        |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `none` (default)                                 | Plain output to stdout — no flags injected. Parser scrapes the decision verb from the tail.                                                                                                                              | Loose.                                                                                                                       |
+| `claude-stream-json` / `omp-json` / `codex-json` | One JSON event per line. Session header, then tool calls, message deltas, completion. `claude` uses `--output-format stream-json`; `omp` (pi) uses `--mode json --no-session`; `codex` uses `codex exec --json` (JSONL). | Tightly typed; substrate can plumb individual events into the audit log.                                                     |
+| `rpc` (JSON-RPC)                                 | Handshake-first bidirectional protocol. Driver sends method calls; CLI emits events with ids.                                                                                                                            | Strongest; lets the substrate steer mid-call (e.g. cancel a long-running tool). *Not yet implemented — future optimization.* |
+
+`selectStreamFormat()` picks the flag set per backend (and yields `none` when the command is bare bash or already names its own mode). The reference runtime parses claude's `stream-json` today; pi emits a compatible JSONL event stream under `--mode json` (verified empirically), and codex emits JSONL via `codex exec --json`. The `rpc` mode is a future optimization for richer driving — there is no `rpc` `StreamFormat` member yet.
+
+## Three substitution patterns
+
+### Whole-harness substitution
+
+Set `CLAUDE` (or its equivalent) at startup and the entire harness runs through the chosen CLI. Lowest-friction path; useful for whole-harness experiments (e.g. validating a different model family).
+
+### Per-role substitution
+
+Per-role CLI substitution is **already implemented** — but via the `aiBackend.roles.<role>` block, not a `cliBin` field (there is no `cliBin` config key anywhere in the orchestrator). The effective harness config is no longer an on-disk `.papercusp/config.json`; that file is deprecated to zero and never read. The config (including `aiBackend.roles`, `models.<role>`, `timeouts.<role>`, `promptOverrides.<role>`) is delivered to the orchestrator solely via the `HARNESS_CONFIG_JSON` env-transport, which the operator assembles from the `coding` blueprint's knobs plus the workspace instance store.
+
+Each role entry carries a full `agentCmd` (e.g. `pi -p`, `claude -p --model sonnet`) plus optional `extraArgs`; `resolveAgentForRole()` resolves `roles[role].agentCmd ?? default.agentCmd ?? fallbackCmd`, merging `default.extraArgs` then `roles[role].extraArgs`. So a single role can run on a different CLI than its peers:
+
+```json
+// effective harness config (HARNESS_CONFIG_JSON), not an on-disk file
+{
+  "aiBackend": {
+    "default": { "agentCmd": "claude -p" },
+    "roles": {
+      "worker": { "agentCmd": "pi -p", "extraArgs": ["--model", "opus"] }
+    }
+  }
+}
+```
+
+The intended pattern — `worker` on a strong-tool-harness CLI (e.g. `pi`) while `orchestrator` / `validator` / `planner` stay on `claude` for structured-decision reliability — is the right split: control roles are decision-heavy and short, worker roles are tool-heavy and long. Note that the specific **pi-as-worker pairing is a not-yet-shipped proposal** (Track A in [Pi integration](/internal/docs/implementation/pi-integration)); the per-role `agentCmd` mechanism it would ride on is wired, but the pi-on-worker substitution itself has not landed.
+
+### Embedded interactive driver
+
+The harness UI can host an interactive instance of the CLI (alongside the autonomous loop) so a human operator can drop in mid-mission and steer. The mechanism is a PTY in the sidecar bridged to an `xterm.js` pane in the dashboard. See [Pi integration](/internal/docs/implementation/pi-integration) for the reference design — it generalizes to any CLI that ships a TUI.
+
+## Two-layer pluggability (a worked example)
+
+Papercusp's role-CLI substitution is the outer layer. Modern CLIs increasingly expose their *own* model-pluggability layer underneath. Pi (`omp`) is the cleanest example — it has four model slots, each independently selectable:
+
+| Pi slot       | Flag / env                 | Intent                                                                      | Suggested papercusp pairing                                                            |
+| ------------- | -------------------------- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Default model | `--model` / (none)         | The agent's main reasoning model.                                           | Worker role's main calls.                                                              |
+| Smol model    | `--smol` / `PI_SMOL_MODEL` | Cheap fast model for lightweight subtasks (file lookups, short tool plans). | Cost-sensitive roles like the orchestrator's own tick or the validator's verdict scan. |
+| Slow model    | `--slow` / `PI_SLOW_MODEL` | Strong reasoning model for thorough analysis.                               | Architect role; debugger when feature attempts ≥ threshold.                            |
+| Plan model    | `--plan` / `PI_PLAN_MODEL` | Architectural planning model.                                               | Pre-loop scoper / planner role.                                                        |
+
+The result: **per-role CLI selection (papercusp) × per-slot model selection (pi) = a 16-cell cost/quality matrix** the user controls without writing code. A user can run orchestrator + worker on pi (with cheap smol + expensive worker) and validator on claude (for decision-trace consistency), all via config.
+
+This pattern isn't pi-specific. Any CLI that exposes role-flavored model selection composes the same way — papercusp's substitution layer doesn't need to know about it; the CLI's own flags carry the meaning.
+
+## Why this isn't in the harness contract
+
+CLI pluggability is a property of the **reference runtime**, not the substrate contract. A different runtime could embed an SDK directly, run a local model, or call a hosted endpoint — what makes it Papercusp is the four-role contract, structured state, fresh context, named decisions, and atomic checkout. The CLI subprocess pattern is one implementation choice the reference runtime makes for two reasons:
+
+1. **Auth pass-through.** The user's existing Claude Max / pi / aider session is reused without the substrate ever seeing API keys.
+2. **Provider-portability.** New CLIs ship monthly; swapping one in is a config change, not a substrate change.
+
+A future spec revision may codify a `RoleDriver` interface (`invoke(prompt, ctx) → AsyncIterable<Event>`) that wraps either a CLI subprocess or an in-process SDK. For now the contract is informal; the reference runtime's TS orchestrator (`libs/papercusp/packages/orchestrator/src/invoke.ts`) is the de-facto definition.

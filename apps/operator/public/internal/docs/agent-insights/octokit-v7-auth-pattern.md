@@ -1,0 +1,129 @@
+# Octokit 7+ changed the `auth:` API — use `hook.before('request')` instead of an async factory
+URL: /internal/docs/agent-insights/octokit-v7-auth-pattern
+
+The async-factory `auth: async () => token` pattern that worked in @octokit/rest v3-v5 throws `Token passed to createTokenAuth is not a string` on v7. Set the Authorization header in a `before('request')` hook instead.
+
+import { Aside } from '@astrojs/starlight/components';
+
+## The trap
+
+The v3-v5 docs (and most random snippets you'll find via search) tell
+you to lazy-resolve tokens like this:
+
+```ts
+import { Octokit } from '@octokit/rest';
+
+const oc = new Octokit({
+  auth: async () => {
+    const result = await getMyToken();
+    return result.token;
+  },
+});
+```
+
+In **@octokit/rest 7+** that throws immediately on construction:
+
+```
+[@octokit/auth-token] Token passed to createTokenAuth is not a string
+```
+
+The `auth:` option's contract changed: v7 expects either a string
+literal or a structured `{ strategy, ... }` object. Functions are
+no longer accepted as a shortcut for "I'll give you a token when
+asked." The error message blames `@octokit/auth-token`, which masks
+that the real culprit is your factory shape.
+
+## The fix
+
+Don't pass `auth:` at all. Use the request lifecycle hooks to set
+the `Authorization` header on every outgoing request:
+
+```ts
+import { Octokit } from '@octokit/rest';
+
+const oc = new Octokit({});
+
+oc.hook.before('request', async (options) => {
+  const result = await getMyToken();
+  if (result.kind !== 'ok') {
+    throw new Error('not authenticated');
+  }
+  if (!options.headers) options.headers = {};
+  options.headers.authorization = 'token ' + result.token;
+});
+```
+
+You keep the same per-request async resolution. You keep your
+token's cache layer hot. You don't fight the v7 type system.
+
+## Bonus: 401-retry without infinite-looping
+
+Pair the `before` hook with a `wrap` hook to handle revoked tokens
+gracefully:
+
+```ts
+oc.hook.wrap('request', async (request, options) => {
+  try {
+    return await request(options);
+  } catch (err) {
+    if (isUnauthorizedError(err)) {
+      const wasRetried = (options as { __retried?: boolean }).__retried;
+      if (!wasRetried) {
+        await refreshMyTokenCache();
+        return request({ ...options, __retried: true });
+      }
+    }
+    throw err;
+  }
+});
+```
+
+The retry flag short-circuits the second 401 so a genuinely revoked
+token doesn't loop forever. `before('request')` runs again on the
+retry (it always does for `request()` calls), so the refreshed token
+gets picked up automatically.
+
+## Why the v7 surface is structurally better
+
+The v3-v5 async-factory pattern conflated two concerns:
+
+1. *How* to authenticate (token, OAuth, JWT, app installation).
+2. *When* to resolve the credential (lazy, cached, refreshed).
+
+The new `authStrategy` option owns (1). Request hooks own (2). If
+you only need (2) — which is the common case — you don't have to
+build a strategy object.
+
+`hook.before('request')` also runs for *every* request including
+ones the strategy layer can't see (e.g. `oc.request('GET /custom')`).
+Setting the header in the hook means no path silently bypasses your
+auth.
+
+The test you write to verify the wiring will be the thing that
+catches this. A unit test that just calls `oc.hook.before(...)` and
+asserts on the hook object will pass; a test that actually issues
+`oc.users.getAuthenticated()` (with `gh auth status` succeeding
+locally) will throw the `createTokenAuth` error and force the
+rewrite. Lean on live integration smokes for SDKs with breaking
+auth changes.
+
+## See also
+
+* `packages/operator-core/lib/identity/octokit-client.ts` — the canonical
+  wrapper in this repo. Uses both `before('request')` for auth and
+  `wrap('request')` for 401-retry. Also wires a `makeTimeoutFetch` wrapper
+  (default 20 s, tunable via `PAPERCUSP_GITHUB_TIMEOUT_MS` env or the
+  `CreateOctokitOpts { timeoutMs?, fetch? }` arg to `createOctokit()`) into
+  `Octokit`'s `request.fetch` option — the single app-wide guard against a
+  stalled socket blocking the caller indefinitely (root cause: dogfood
+  pot-join froze at 5% because `resolveLocalAnnounceIdentity`'s GitHub
+  calls never resolved or rejected on a hung socket). The `fetch` option
+  also lets tests inject a fake fetch for deterministic timeout coverage.
+  (The repo now pins `@octokit/rest ^22`; the v7 `auth:`-shape break this
+  page documents persists unchanged in v22, so the `before('request')` fix
+  is still the right one.)
+* `packages/operator-core/lib/identity/gh-token.ts` — the token cache the
+  Octokit wrapper consumes (see also [`forward-defined-registry-entries`](/internal/docs/agent-insights/forward-defined-registry-entries/)
+  for the pattern of placing helpers ahead of their primary consumer).
+* [Octokit migration guide v6→v7](https://github.com/octokit/octokit.js/blob/main/CHANGELOG.md) —
+  the upstream changelog.

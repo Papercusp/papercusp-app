@@ -1,0 +1,20 @@
+diff --git a/node_modules/docker-modem/lib/modem.js b/node_modules/docker-modem/lib/modem.js
+index b45a798..1b7a1e3 100644
+--- a/node_modules/docker-modem/lib/modem.js
++++ b/node_modules/docker-modem/lib/modem.js
+@@ -69,9 +69,12 @@ var defaultOpts = function () {
+       opts.key = fs.readFileSync(path.join(process.env.DOCKER_CERT_PATH, 'key.pem'));
+     }
+ 
+-    if (process.env.DOCKER_CLIENT_TIMEOUT) {
+-      opts.timeout = parseInt(process.env.DOCKER_CLIENT_TIMEOUT, 10);
+-    }
++  }
++
++  // Response deadlines also apply to Unix sockets, named pipes and the default
++  // local socket. They must not depend on selecting a network Docker host.
++  if (process.env.DOCKER_CLIENT_TIMEOUT) {
++    opts.timeout = parseInt(process.env.DOCKER_CLIENT_TIMEOUT, 10);
+   }
+ 
+   return opts;

@@ -1,0 +1,27 @@
+{
+  "name": "@papercusp/tooldef-http",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HTTP transport adapter for @papercusp/tooldef — resolve an inbound request to a projected tool, build the context from headers/query (host-injected principal + harness-path resolution), and dispatch. Framework-neutral; Next.js/Hono/Express are thin shims on top.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "peerDependencies": {
+    "@papercusp/tooldef": "*",
+    "@papercusp/sse": "*"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*"
+  }
+}

@@ -1,0 +1,123 @@
+# The universal experiment API — run + add tests over eval-battery
+URL: /internal/docs/agent-insights/the-universal-experiment-api
+
+How the self-learning system A/B-tests a change: experiment:catalog (discover) → experiment:run (execute — offline replay by default, escalatable to shadow/live) → experiment:results (read back). The TestDescriptor registry, the unified knob space, the tier-escalation gate, and how to register a new test kind without touching the engine.
+
+## What
+
+The **universal experiment API** lets the self-learning loop make a change and test how
+it performs through one surface over the `@papercusp/eval-battery` engine — instead of
+each Subject (gym / replay / iq-battery / pot) owning a bespoke loop. Three verbs:
+
+* **`experiment:catalog`** — discover registered tests: each entry's `kind`, `fidelityTier`
+  (`offline` ≈ \~$0 replay, the default screen; `shadow`; `live`), the `knobSlice` it can
+  vary, its `metrics`, and `costClass`.
+* **`experiment:run`** — A/B a knob change against a battery; returns per-arm judge scores +
+  the `compareArms` verdict (`winner`). **`offline` replay is the default front door**
+  (`tier` defaults to `'offline'`, \~$0, deterministic); a caller can consciously escalate to
+  a test's own `shadow`/`live` tier (P-041 — see "Escalating to a spending tier" below).
+* **`experiment:results`** — read the `experiment_runs` ledger (how past runs performed).
+
+Plan of record: `experiment-registry-invocation-api-2026-06-14`. Code: the registry in
+`libs/generic/eval-battery/src/registry.ts`; everything else in
+`packages/operator-core/lib/experiment/`.
+
+## Running an experiment
+
+```text
+experiment:run {
+  testId: 'replay',
+  batteryId: 'try-terser-worker',
+  arms: [{ id: 'terser', knobs: { 'overlay.systemOverlay': 'Be terse; no preamble.' } }],
+  cases: [{ caseId: 'c1', context: '<mid-task context>', intent: 'finish the feature' }],
+  repeats: 3, budgetUsd: 0.50
+}
+→ { ok:true, result:{ arms:[{id:'baseline',meanScore:6.1},{id:'terser',meanScore:7.4}], winner:'terser', … } }
+```
+
+An arm with **empty `knobs` is the baseline** (the `compareArms` anchor) — run-core prepends
+one if you give only candidates. Every knob address must be inside the test's `knobSlice`
+(`experiment:catalog`), or the run is rejected **before any spend**.
+
+`testId` alone never reaches a spending tier: the requested `tier` (`experiment:run`'s `tier`
+arg) defaults to `'offline'` and **must match the resolved test's own `fidelityTier`** — naming
+`testId:'gym'` without `tier:'live'` is a refusal that points you at the offline screen instead
+(`run-core.ts`'s tier-match gate). Pass `dryRun:true` to validate + expand the battery (arm
+count × cases × repeats) and get the plan back with **zero spend and no escalation check** —
+useful for authoring/checking an experiment before arming spend.
+
+## Escalating to a spending tier (P-041)
+
+`shadow`/`live` are reachable, but only via a conscious, justified escalation
+(`lib/experiment/tier-escalation.ts`, `evaluateTierEscalation`) — never the default:
+
+```text
+experiment:run {
+  testId: 'gym', tier: 'live',
+  escalation: { offlineSignalRunId: 'run_123' },   // OR: { couldntIsolate: '<written reason, ≥12 chars>' }
+  arms: [...], cases: [...], payload: { tasks: [...] }   // subject-specific battery input for live tiers
+}
+```
+
+* Escalating off `offline` requires `escalation.offlineSignalRunId` (a prior offline run that
+  showed a measurable effect) **or** `escalation.couldntIsolate` (a written ≥12-char reason the
+  cheap tier can't isolate the variable, D-005/D-007). Neither ⇒ refused, zero spend.
+* The `whole-instance` / `whole-pot` kinds are the further **gated cost-exception** (D-002):
+  even with a signal/trigger they additionally require `escalation.costException: true`.
+* A live run also fail-closes on the learning-governor (`experiment:<testId>` budget, D-008)
+  **before** the descriptor runs — unarmed/exhausted ⇒ refused with no spend.
+* `payload` carries the subject-specific battery input for the live tiers (gym tasks / instance
+  `baseSpec`+corpus / pot scenario); the offline tier ignores it and builds its battery from
+  `cases`.
+
+## The two non-obvious load-bearing facts
+
+1. **Even "offline" replay SPENDS** — it calls the LLM for the replayed continuation + the
+   judge. `experiment:run` rides `frontier:replay-harness` (via `runGovernedReplay`): the
+   `papercusp-replay-harness` flag + its learning-governor budget gate it. Unarmed/unbudgeted ⇒
+   it **refuses with `ok:false, refused:{reason}` and zero spend** — that's the design, not a bug.
+2. **A winner is a PROPOSAL.** `experiment:run` only scores + records (`decision='proposed'`).
+   Applying a winner to live prompts/policy rides commit→reproject + the change ledger + trust
+   graduation (D-006) — never the run verb.
+
+## The unified knob space (what an arm may vary)
+
+Addresses span three axes (`lib/experiment/knob-space.ts`): `genome.*` (the ratified 5-dim
+system genome), `overlay.*` (component prompt/tool-guidance/weights), `model.<role>` (per-role
+model). The never-auto **safety set** (`budget`, `deploy`, `auth`, `credentials`, `governor`,
+`change-ledger`, `graduation`, …) is **structurally un-addressable** — `validateArm` rejects it
+and `partitionArm` throws; pinned by `safety-invariants.test.ts`. So you cannot author an
+experiment that varies budgets or the learning rails themselves.
+
+## Adding a new test kind
+
+A test is a **`TestDescriptor`**: declarative metadata + an opaque `run(request, ctx)` that
+**delegates to an existing battery runner** (never reconstruct a Subject). Register it with
+`registerTest(...)` (the host calls `registerExperimentDescriptors()` at boot). Pattern in
+`lib/experiment/descriptors.ts` — declare `kind`, `fidelityTier`, `knobSlice`, `metrics`, and a
+`run` that maps the request to the runner's config. The replay descriptor is the worked example
+for the `offline` tier (wired to `runReplayBattery`).
+
+The three `live` descriptors (gym / instance / pot) all follow the **same wired-but-staged
+pattern** (P-063, D-023 — un-staged from the original "gym only" deferral): each `run` validates
+the arm against its `knobSlice` + the safety set, then **delegates to its own live run-core**
+(`gym-run-core.ts` / `instance-run-core.ts` / `pot-run-core.ts`), which maps each arm onto a
+config-varied run (a `genome.*`/`overlay.*` delta + a `model.<role>` spawn override) and calls
+the injected live deps (`ctx.gym.abDeps` / `ctx.instance.deps` / `ctx.pot.ports`). Those live
+deps are heavy infra `experiment:run` does not provision itself — absent them, the run-core
+refuses with **no spend** ("discoverable-but-staged" until the owner arms the deps for that
+tier), so all three are reachable through the same API without a code change once armed. Keep
+the safety set out of any `knobSlice`.
+
+## Files
+
+* `libs/generic/eval-battery/src/registry.ts` — `TestDescriptor` + the registry + `knobInSlice`.
+* `lib/experiment/knob-space.ts` — the knob algebra + the safety exclusion.
+* `lib/experiment/descriptors.ts` — the 4 descriptors + `registerExperimentDescriptors`.
+* `lib/experiment/tier-escalation.ts` — the P-041 offline→shadow/live escalation gate.
+* `lib/experiment/gym-run-core.ts` / `instance-run-core.ts` / `pot-run-core.ts` — the live-tier
+  bindings each live descriptor delegates to (arm → config-varied run, staged until deps armed).
+* `lib/experiment/run-core.ts` — the pure run logic (tier-match, escalation, offline replay path,
+  governor-gated live path, ledgered).
+* `lib/experiment/ledger.ts` — `experiment_runs` (migration 287) read/write.
+* `lib/agent-tools/experiment/{catalog,run,results}.ts` — the three verbs.

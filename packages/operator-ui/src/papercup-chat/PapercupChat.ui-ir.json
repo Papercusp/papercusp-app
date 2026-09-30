@@ -1,0 +1,150 @@
+{
+  "irVersion": "0.1",
+  "surface": "papercup-chat",
+  "ecosystem": "react-tailwind",
+  "a11y": { "landmark": "region", "headingLevel": 2 },
+  "layout": {
+    "kind": "stack",
+    "direction": "vertical",
+    "ref": "PapercupChat",
+    "a11y": { "role": "region", "ariaLabel": { "key": "chat.region", "default": "Papercup chat" } },
+    "tokens": { "uses": ["papercup-chat.space.gap", "papercup-chat.color.surface"] },
+    "children": [
+      {
+        "kind": "component",
+        "ref": "capability-notice",
+        "copy": { "key": "chat.capabilityNotice", "default": "Papercup can read your workspace, ask you to confirm actions, and list what it looked at." },
+        "binding": { "slot": "capabilityNotice", "shape": "AskCapabilityContract" }
+      },
+      {
+        "kind": "list",
+        "ref": "transcript",
+        "a11y": { "role": "log", "ariaLive": "polite" },
+        "binding": { "slot": "turns", "repeats": true, "shape": "ChatTurn" },
+        "interactions": ["virtualized-scroll", "scroll-to-latest"],
+        "emptyState": {
+          "kind": "empty-state",
+          "ref": "transcript-placeholder",
+          "copy": { "key": "chat.placeholder.invite", "default": "Ask Papercup anything about this workspace." }
+        },
+        "item": {
+          "kind": "stack",
+          "direction": "vertical",
+          "ref": "turn",
+          "children": [
+            {
+              "kind": "stack",
+              "direction": "horizontal",
+              "ref": "message-line",
+              "children": [
+                { "kind": "component", "ref": "turn-avatar", "binding": { "slot": "role", "shape": "user|assistant|system" }, "a11y": { "ariaLabel": { "key": "chat.turn.role", "default": "Papercup" } } },
+                { "kind": "text", "ref": "turn-timestamp", "binding": { "slot": "createdAt", "shape": "time-today|short-date-time-older" } },
+                {
+                  "kind": "raw",
+                  "ref": "markdown-body",
+                  "ecosystem": "react-tailwind",
+                  "binding": { "slot": "text", "shape": "markdown" },
+                  "spec": {
+                    "why-raw": "react-markdown is the one markdown engine (parity rows md-*); the IR has no markdown kind",
+                    "engine": "react-markdown + remark-gfm + remarkWorkRefs",
+                    "rawHtml": "inert (no rehype-raw, no dangerouslySetInnerHTML) on BOTH hosts — D-005",
+                    "links": "URL-scheme allowlist https: mailto: only — D-005",
+                    "images": "off; owner host may opt in — D-005",
+                    "tables": "public=inert owner=render — D-005",
+                    "workRefs": "WI-/P-/EI- refs → HydratedWorkRefPill; public=inert owner=render"
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "list",
+              "ref": "tool-calls",
+              "binding": { "slot": "toolCalls", "repeats": true, "shape": "ChatToolCall" },
+              "item": { "kind": "tag", "ref": "tool-call-row", "icon": "wrench", "binding": { "slot": "name", "shape": "string" } }
+            },
+            {
+              "kind": "list",
+              "ref": "persisted-cards",
+              "binding": { "slot": "cards", "repeats": true, "shape": "CardSpec" },
+              "item": { "kind": "component", "ref": "card-renderer", "binding": { "slot": "card", "shape": "CardSpec" } }
+            },
+            {
+              "kind": "stack",
+              "direction": "horizontal",
+              "ref": "turn-footer",
+              "children": [
+                { "kind": "text", "ref": "provenance", "copy": { "key": "chat.provenance", "default": "{model} · {engine}" }, "binding": { "slot": "provenance", "shape": "ChatProvenance" } },
+                { "kind": "text", "ref": "looked-at", "copy": { "key": "chat.lookedAt", "default": "Looked at: {tools}" }, "binding": { "slot": "toolNames", "shape": "string[]" } }
+              ]
+            },
+            {
+              "kind": "component",
+              "ref": "host-action-bar",
+              "binding": { "slot": "actions", "shape": "HostInjectedActions" }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "component",
+        "ref": "pending-cards-bar",
+        "binding": { "slot": "pendingCards", "repeats": true, "shape": "OpenCardSnapshot" },
+        "motion": { "enter": "slide-up", "exit": "fade" }
+      },
+      {
+        "kind": "component",
+        "ref": "turn-error",
+        "copy": { "key": "chat.error", "default": "Papercup could not answer. {reason}" },
+        "binding": { "slot": "error", "shape": "AskErrorState" },
+        "children": [
+          { "kind": "component", "ref": "retry", "label": { "key": "chat.retry", "default": "Retry" }, "interactions": ["retry-turn", "retry-conversation"], "a11y": { "role": "button", "ariaLabel": { "key": "chat.retry", "default": "Retry" } } }
+        ]
+      },
+      {
+        "kind": "form",
+        "ref": "composer",
+        "a11y": { "role": "form", "ariaLabel": { "key": "chat.composer", "default": "Message Papercup" } },
+        "children": [
+          {
+            "kind": "component",
+            "ref": "composer-input",
+            "placeholder": { "key": "chat.composer.placeholder", "default": "Ask Papercup…" },
+            "interactions": ["submit-on-enter"],
+            "a11y": { "role": "textbox", "ariaLabel": { "key": "chat.composer.input", "default": "Message" }, "focusOrder": 0 }
+          },
+          { "kind": "component", "ref": "send", "label": { "key": "chat.send", "default": "Send" }, "icon": "send", "interactions": ["submit"], "a11y": { "role": "button", "ariaLabel": { "key": "chat.send", "default": "Send" } } }
+        ],
+        "slots": {
+          "trailing": { "kind": "component", "ref": "host-composer-chrome", "binding": { "slot": "composerChrome", "shape": "HostInjectedChrome" } }
+        }
+      }
+    ]
+  },
+  "states": {
+    "streaming": { "kind": "stack", "direction": "horizontal", "ref": "streaming-indicator", "children": [ { "kind": "spinner", "ref": "streaming-spinner" }, { "kind": "text", "copy": { "key": "chat.streaming", "default": "Papercup is thinking…" } } ] },
+    "refused": { "kind": "banner", "ref": "refusal", "copy": { "key": "chat.refused", "default": "This chat is not available from here." }, "binding": { "slot": "refusal", "shape": "AskTurnRefusalState" } },
+    "operator-down": { "kind": "banner", "ref": "operator-down", "copy": { "key": "chat.operatorDown", "default": "The operator is not reachable right now." } }
+  },
+  "components": [
+    { "id": "send", "registry": "action.primary", "props": { "label": "Send", "icon": "send" } },
+    { "id": "retry", "registry": "action.secondary", "props": { "label": "Retry", "variant": "ghost" } },
+    { "id": "composer-input", "registry": "control.text", "props": { "placeholder": "Ask Papercup…", "variant": "trailing-slot" } },
+    { "id": "turn-avatar", "registry": "host:PapercupChatHost#avatar", "props": { "note": "icon carries the visible sender identity; role name remains screen-reader-only (D-011)" } },
+    { "id": "capability-notice", "registry": "feedback.banner", "props": { "tone": "info" } },
+    { "id": "turn-error", "registry": "feedback.banner", "props": { "tone": "error" } },
+    { "id": "card-renderer", "registry": "@papercusp/chat-cards#CardRenderer", "props": { "note": "shared card layer (D-003); not in the v0.1 design registry" } },
+    { "id": "pending-cards-bar", "registry": "@papercusp/chat-cards#PendingCardsBar", "props": { "note": "the ONE pending-cards bar (parity sh-pending-cards-bar)" } },
+    { "id": "host-action-bar", "registry": "host:PapercupChatHost#actionBar", "props": { "note": "host-injected per-message actions (parity op-action-bar); optional" } },
+    { "id": "host-composer-chrome", "registry": "host:PapercupChatHost#composerChrome", "props": { "note": "host-injected trailing chrome: voice / audience / faces (parity op-voice, op-audience-mode); optional" } }
+  ],
+  "tokens": {
+    "uses": ["papercup-chat.space.gap", "papercup-chat.color.surface"],
+    "proposed": [
+      { "id": "papercup-chat.space.gap", "type": "dimension", "value": "var(--pc-chat-gap, 0.5rem)", "reason": "CSS custom-property seam (chat-cards pattern, D-003): hosts theme the shared component without a build-time stylesheet" },
+      { "id": "papercup-chat.color.surface", "type": "color", "value": "var(--pc-chat-surface, transparent)", "reason": "Same seam; the operator sidebar and the portal shell paint their own ground" },
+      { "id": "papercup-chat.color.bubble-user", "type": "color", "value": "var(--pc-chat-bubble-user, #eef2ff)", "reason": "User turn background; overridable per host" },
+      { "id": "papercup-chat.color.bubble-assistant", "type": "color", "value": "var(--pc-chat-bubble-assistant, #f7f7f8)", "reason": "Assistant turn background; overridable per host" },
+      { "id": "papercup-chat.duration.enter", "type": "duration", "value": "var(--pc-chat-enter-ms, 160ms)", "reason": "Pending-cards bar enter/exit motion" }
+    ]
+  }
+}

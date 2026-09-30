@@ -1,0 +1,130 @@
+/*
+ * Find-in-page (Ctrl/⌘+F) styles — APP-WIDE.
+ *
+ * Imported once from the operator-vite root shell (__root.tsx), beside
+ * command-palette.css. Two parts:
+ *   1. The ::highlight() pseudo rules for the CSS Custom Highlight API.
+ *      These MUST live in a document-level sheet — a ::highlight() selector
+ *      cannot be scoped to a CSS module. Names match `lib/find-in-page/engine.ts`
+ *      (HIGHLIGHT_NAME / ACTIVE_HIGHLIGHT_NAME).
+ *   2. The `.pc-find*` find-bar chrome — a SOLID, centered floating bar.
+ */
+
+/* ── Match highlighting ─────────────────────────────────────── */
+::highlight(papercup-find) {
+  background-color: color-mix(in oklab, var(--accent), transparent 45%);
+  color: var(--fg);
+}
+
+/* The current match: solid accent fill with ink-on-accent text. */
+::highlight(papercup-find-active) {
+  background-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* ── Find bar — solid, top-centered ─────────────────────────── */
+.pc-find {
+  position: fixed;
+  top: 60px; /* clears the ~56px header; centered horizontally */
+  left: 50%;
+  transform: translateX(-50%);
+  /* Below sonner's toaster (z 2147483646) but above all app chrome. */
+  z-index: 2147483645;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 12px;
+  /* SOLID surface — the popover tier. (Not the translucent --bg-2 glass,
+     which let page text bleed through and hurt legibility.) */
+  background: var(--bg-popover);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow:
+    0 16px 44px rgba(0, 0, 0, 0.55),
+    0 2px 8px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  animation: pc-find-in 120ms var(--ease-out, ease-out);
+}
+
+@keyframes pc-find-in {
+  from { opacity: 0; transform: translate(-50%, -6px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.pc-find__icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--fg-dim);
+}
+
+.pc-find__input {
+  min-width: 220px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pc-find__input::placeholder {
+  color: var(--fg-mute, color-mix(in oklab, var(--fg-dim), transparent 30%));
+}
+
+.pc-find__count {
+  flex-shrink: 0;
+  min-width: 46px;
+  text-align: right;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pc-find__count--none {
+  color: color-mix(in oklab, var(--fg-dim), red 35%);
+}
+
+.pc-find__note {
+  color: var(--fg-dim);
+  font-size: 12px;
+  padding: 0 4px;
+}
+
+/* Thin divider between the count and the nav buttons. */
+.pc-find__sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 2px;
+  background: var(--border);
+}
+
+.pc-find__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 140ms var(--ease-out), color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+.pc-find__btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--accent), transparent 55%);
+  background: var(--bg-raised-high);
+}
+
+.pc-find__btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "_about": "Curated support record rendered into every release unit's COMPATIBILITY.md by apps/tui/scripts/package-release.sh (P-011 / D-016). No target may read 'verified' here: this file is committed before the candidate it ships in exists, so it cannot hold that candidate's installed-product evidence, and the packager refuses it (R-10, D-017). Verified targets are advertised per candidate at the release stage (P-012). Runtime requirements are NOT recorded here: the packager measures them from each built binary.",
+  "backend": {
+    "requirement": "A Papercusp server endpoint, not the desktop GUI: install and start the separate Papercusp Server package on this machine, connect to a remote operator, or sign in to a Papercusp cloud workspace through the psu bundled here. PUI is the client; the server runs the agents.",
+    "packaging": "Get the separate Papercusp Server installer for your platform from the Papercusp release download page supplied with this PUI archive (Linux .deb, macOS .dmg, Windows setup .zip). The Server carries its own install and rollback; this archive does not duplicate it.",
+    "check": "`pui doctor` reports the selected endpoint and whether its source generation matches this PUI; with no endpoint, `pui` opens setup."
+  },
+  "targets": {
+    "linux-x86_64": {
+      "platforms": ["Linux x86_64 (glibc)", "Windows via WSL2 (x86_64)"],
+      "status": "built-unverified",
+      "evidence": null
+    },
+    "macos-aarch64": {
+      "platforms": ["macOS on Apple silicon (arm64)"],
+      "status": "built-unverified",
+      "evidence": null,
+      "blocker": "Installed-product acceptance needs a macOS host; this artifact is cross-built and has never been run."
+    },
+    "macos-x86_64": {
+      "platforms": ["macOS on Intel (x86_64)"],
+      "status": "built-unverified",
+      "evidence": null,
+      "blocker": "Installed-product acceptance needs a macOS host; this artifact is cross-built and has never been run."
+    }
+  },
+  "engines": {
+    "note": "Engines run inside the operator, not in PUI. Claude, Codex and OMP support is recorded per operator release; PUI selects among what the operator reports."
+  }
+}

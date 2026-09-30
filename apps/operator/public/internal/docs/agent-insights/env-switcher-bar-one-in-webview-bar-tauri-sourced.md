@@ -1,0 +1,129 @@
+# The env-switcher bar: ONE in-webview bar, Tauri-sourced, never self-hides (don't re-add a native/second-webview bar)
+URL: /internal/docs/agent-insights/env-switcher-bar-one-in-webview-bar-tauri-sourced
+
+The desktop env-switcher went through three implementations (native GTK bar, chrome-webview, in-webview). Only ONE survives: the in-webview EnvSwitcherBar, fed by the list_envs Tauri command so it can't self-hide on an /api misroute, with /api following the switch via on_page_load. Why the other two were deleted — including the HARD fact that wry set_bounds is a no-op for child webviews on X11, so a second-webview bar cannot be positioned on Linux — and where the escape hatch actually lives now.
+
+# The env-switcher bar is ONE thing now
+
+If you're about to "add back the native bar", "make the bar a separate webview so it
+survives switches", or "fix the bar that disappeared", read this first. The env
+switcher (`dev :3270` / `prod :3070` / `staging :3170` / `local :3055`) had **three**
+implementations. Two are deleted. Re-adding either is a known dead end.
+
+## The single surviving design
+
+* **The bar is the in-webview `EnvSwitcherBar`** (`apps/operator-vite/.../EnvSwitcherBar.tsx`),
+  mounted once in `__root.tsx`. It is a `position: fixed` top strip that reserves space TWO
+  ways, because `#root` padding alone is not enough: (1) it pads `#root` so the in-flow `<main>`
+  column starts below the bar, and (2) it publishes its measured height as `--pc-env-bar-h` on
+  `<html>`, which the app's viewport-anchored chrome consumes via `top: var(--pc-env-bar-h)` —
+  the sticky `.pc-header` (which otherwise slides UNDER the bar on scroll) and the fixed
+  `.pclsb` / `.pcdar` side rails (whose `top:0` inline style is overridden with `!important` in
+  `globals.css`). `#root` padding can't move fixed/sticky elements — they anchor to the
+  viewport, not `#root`. Each env button also shows its `CmdOrCtrl+Alt+N` shortcut badge.
+* **Its env list comes from the `list_envs` Tauri command** (`env_switch.rs`), NOT from the
+  `GET /api/desktop/dev-operators` HTTP fetch. `list_envs` returns the canonical four
+  targets (probed for reachability in Rust) and the bar renders them whenever the list is
+  non-empty. HTTP is used ONLY for enrichment (the deployed sha, the `↩ release` button, the
+  per-env enabled state) + the git-pipeline status line. **This is why it can't self-hide:**
+  a misrouted `/api` (see the "missing env bar = /api routing" trap) or a bad target build
+  can 404 the HTTP fetch, but the Tauri floor still renders the bar.
+* **`/api` follows the switch with no bar in the loop.** Switching is a top-level
+  `window.location.assign(origin)` (not CORS-bound). The desktop's `on_page_load(Started)`
+  calls `env_switch::retarget_for_url`, which points `SELECTED_API_PORT` at whatever env the
+  webview navigated to and persists it. So the bar, a manual reload, and any nav all retarget
+  `/api` identically. (A `PAPERCUSP_DEV_API_TARGET` pin, EI-296, is never overridden/persisted.)
+* **`env_switch.rs` REPLACED `dev_wrapper.rs`.** It keeps only the load-bearing plumbing
+  (TARGETS, `api_port_for_target`, persistence, `retarget_api`, reachability probe,
+  `apply_persisted_target`, the Linux `__PAPERCUSP_DEV_WRAPPER__` rail signal). The GTK bar,
+  its status poller, and the `dev-wrapper` Cargo feature are gone.
+
+## Why the other two are deleted — don't resurrect them
+
+**(A) The native GTK bar** (`dev_wrapper.rs`, packed into the window `default_vbox`): worked,
+but **Linux-only** — it never rendered on macOS/Windows, which is why it was retired. The
+in-webview bar is the cross-platform replacement. Reviving A means maintaining a second,
+platform-specific implementation of the same bar (the pipeline-status logic was duplicated in
+Rust and TS). Don't.
+
+**(B) The chrome-webview** (`install_env_chrome` / `Window::add_child`, the Tauri `unstable`
+feature): the idea was a second webview OUTSIDE the content so a switch couldn't unmount it.
+**It is structurally impossible on Linux/X11, proven from wry 0.55.1 source:**
+
+* The window's content webview ("main") is created `is_child=false`, so **its X11 window IS
+  the toplevel**. `WebView::set_bounds` on it calls `gtk_window.move_/resize` on the whole
+  toplevel — you cannot offset the content down to make room for a strip.
+* An `add_child` webview only has its bounds honored if `is_in_fixed_parent` or it owns an X11
+  child window; on the default GtkBox layout two `pack_start`'d webviews split the box 50/50
+  (both read back `1280x400` on an 800px window — the mid-window bar you'll see).
+* Net: `set_bounds()` returns `Ok(())` but is a **silent no-op** for these webviews.
+
+So a second-webview bar cannot be reliably positioned on Linux. This cost multiple sessions;
+the read-back proof is `bar.bounds()` disagreeing with the value just `set_bounds`'d.
+
+## Where the "escape hatch" actually lives
+
+A native menu backstop (`app.set_menu` with an "Env" submenu) was tried and **removed** — on
+Linux GTK it renders as an intrusive light menu bar ("a blank white bar that just says Env")
+above the real bar. **A menu is the WRONG tool for a keyboard escape hatch on Linux** — GTK
+accelerators require a *visible* menu to exist. Use the `global-shortcut` plugin instead: it
+registers keys at the OS level with no menu. The escape paths, in order:
+
+1. **Invisible global shortcuts** (`env_switch::register_backstop_shortcuts`, dev-only):
+   `CmdOrCtrl+Alt+1..4` → dev / prod / staging / local. Handled in **Rust**
+   (`navigate_to_env` calls `window.navigate`, carrying the current SPA route + query), so they
+   fire **even when the switched-to build white-screens or breaks its own IPC** — the exact case
+   the in-webview bar can't cover. Best-effort: a shortcut the desktop environment already owns
+   just fails to register (logged `not registered (DE may own it)`, non-fatal). This is why
+   switching INTO the immutable release build (old content whose bar self-hides + whose IPC
+   dies → a bogus "Windows/WSL setup" screen, `wsl_status not allowed. Plugin not found`) no
+   longer strands you: `CmdOrCtrl+Alt+1` navigates back to dev.
+2. **The durable bar itself** covers the common case (misrouted `/api` / self-hide bug) — it
+   renders from the Tauri floor whenever its content has this fix.
+3. **`install_load_failure_recovery`** (`main.rs`, WebKitGTK `connect_load_failed`) shows a
+   recovery page when a build fails to LOAD (dead operator / connection refused).
+
+Net: a "loads HTTP 200 but JS-crashes / self-hides" build (e.g. the old release package) is now
+covered by (1). Closing + relaunching also restores the persisted env as a last resort.
+
+## Only the dev `devUrl` origin gets full Tauri IPC — every other env is "remote"
+
+`tauri.conf.json` sets `build.devUrl = http://127.0.0.1:3270` (dev). In a dev build Tauri treats
+ONLY that origin as the app's *local* content with full command access. When the switcher
+navigates to prod (`:3070`) / staging (`:3170`) / local (`:3055`), those are **remote** origins:
+Tauri's runtime authority denies the app's own commands there (`"<cmd> not allowed. Plugin not
+found"`), even though the capability's `remote.urls` lists `http://127.0.0.1:*`. `withGlobalTauri`
+still injects `window.__TAURI__`, so `isTauri()` is TRUE but every `invoke` of an app command
+throws. Consequences + how they're handled:
+
+* **`WslOnboardingGate`** (`apps/operator/app/_components/WslOnboardingGate.tsx`) invoked
+  `wsl_status`; on a remote origin that throws, and the gate used to render its full-screen
+  "Papercup setup — Windows" wizard on the thrown error — so EVERY env except dev showed a bogus
+  Windows/WSL setup screen on Linux. Fixed by **failing safe**: a thrown `wsl_status` → render
+  the app (the dev origin resolves it to `NotSupported` on Linux; a throw only means the invoke
+  was denied, i.e. nothing to set up). The gate is Windows-only by intent.
+* **The bar's `list_envs` floor** is denied on remote origins too, so there the bar falls back to
+  its HTTP list (it loses the never-self-hide guarantee on non-dev envs). The GLOBAL SHORTCUTS
+  are the real backstop: they're Rust-level, so `CmdOrCtrl+Alt+1` recovers from a remote origin
+  even when its IPC (and the dev bridge's `eval`) is wedged — verified against the stuck staging
+  build.
+* **Why you can't just "grant app commands to the remote origins" (investigated + ruled out):**
+  the generated ACL (`src-tauri/gen/schemas/acl-manifests.json`) has manifests for `core:*` and
+  every *plugin* (`os`, `fs`, `global-shortcut`, …) — but **NONE for the app's own commands**.
+  `list_envs` / `wsl_status` / `retarget_*` have no permission identifier, so there is nothing to
+  list in a capability's `permissions` to expose them to a `remote.urls` origin. App
+  (non-plugin) commands are a **local-content-only** surface in Tauri v2; the `remote` capability
+  only ever grants *plugin/core* permissions. So the mitigations above ARE the fix, not a
+  stopgap: fail-safe gate + HTTP fallback for `list_envs` + Rust-level global shortcuts. Exposing
+  a desktop command to non-dev envs would mean converting it to a real Tauri *plugin* (with its
+  own ACL) — only worth it per-command if one genuinely must run cross-env.
+
+## Gotchas
+
+* `list_envs` returns `[]` when `!cfg!(debug_assertions)` — a packaged single-operator build
+  has nothing to switch, so the bar correctly hides there.
+* Off-desktop (plain browser / vitest) `invoke('list_envs')` throws; the bar falls back to the
+  HTTP list. The invoke is fired detached in `load()` so it can't block the HTTP path.
+* Changes propagate via **git-sync auto-commit** (both repos) + the deploy pipeline — you don't
+  hand-commit. `papercusp-desktop` is its OWN git repo (branch `main`); the monorepo content is
+  on `staging`.

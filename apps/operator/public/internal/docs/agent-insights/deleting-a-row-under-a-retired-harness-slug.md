@@ -1,0 +1,123 @@
+# Deleting a row under a retired harness slug deletes the CANONICAL row
+URL: /internal/docs/agent-insights/deleting-a-row-under-a-retired-harness-slug
+
+The substrate-outbox capture canonicalizes its routing key, so a DELETE against an aliased slug emits a tombstone against the live row. How it bit us, how to avoid it, and how to recover byte-exactly.
+
+## The one-line rule
+
+**On any table whose capture trigger canonicalizes its routing key, deleting a row under a
+retired/aliased key is indistinguishable — to every downstream consumer — from deleting the
+CANONICAL row.** Retire such rows by `UPDATE`, or bracket the `DELETE` with a
+`DISABLE`/`ENABLE` of the capture trigger. Never a bare `DELETE`.
+
+This cost 78 destroyed live plan rows on 2026-07-25 (WI-5720, migrations 656/657).
+
+## Why it happens
+
+`harness_shared.harness_plans` carries two things that are individually reasonable and
+together a trap:
+
+```sql
+CREATE TRIGGER capture_substrate_outbox_trg
+  AFTER INSERT OR DELETE ON harness_shared.harness_plans
+  FOR EACH ROW EXECUTE FUNCTION harness_shared.capture_substrate_outbox('plan_slug');
+```
+
+…and [migration 359](/internal/docs/system/repo-conventions) rewrote
+`capture_substrate_outbox()` so the routing slug is wrapped in
+`harness_shared.canonical_harness_slug()` — which maps `papercup` / `papercup-hive` →
+`papercusp`. That wrapper exists for a good reason: it stops a stale writer accreting
+undeliverable federation backlog under a dead hive.
+
+But it applies to **`del` ops too**. So:
+
+```sql
+-- looks like it only touches retired residue…
+DELETE FROM harness_shared.harness_plans WHERE harness_slug = 'papercup';
+```
+
+…emits a tombstone keyed `(papercusp, <plan_slug>)`. The federation projection applies it.
+The **live** plan is gone. In the real incident this produced 156 `del` ops and took
+`papercusp` from 973 plans to 909 — killing both the 64 rows that had canonical twins and
+the 14 rows the same migration had just correctly moved in.
+
+## Before you write a slug-cleanup migration
+
+Check for `AFTER DELETE` capture triggers on every table you touch:
+
+```sql
+SELECT tgname, pg_get_triggerdef(oid) LIKE '%DELETE%' AS fires_on_delete
+FROM pg_trigger
+WHERE tgrelid = 'harness_shared.<table>'::regclass
+  AND NOT tgisinternal AND tgname LIKE '%capture%';
+```
+
+As of this writing, in the plan family:
+
+| table                | capture fires on DELETE?  |
+| -------------------- | ------------------------- |
+| `harness_plans`      | **yes — the trap**        |
+| `harness_plan_parts` | no (INSERT/UPDATE only)   |
+| `plan_revisions`     | no capture trigger at all |
+
+## The safe pattern
+
+`harness_admin` owns these tables and runs migrations, so it can gate the trigger. A local
+residue cleanup is **not** a content deletion to federate, so turning the capture off is the
+semantically correct thing, not a hack:
+
+```sql
+ALTER TABLE harness_shared.harness_plans DISABLE TRIGGER capture_substrate_outbox_trg;
+
+DELETE FROM harness_shared.harness_plans
+WHERE harness_slug IN ('papercup', 'papercup-hive');
+
+ALTER TABLE harness_shared.harness_plans ENABLE TRIGGER capture_substrate_outbox_trg;
+```
+
+Prefer MOVE-then-DELETE with `ON CONFLICT DO NOTHING` for the move, so a live canonical row
+is never overwritten by the stale aliased one.
+
+## Recovery, if you already did it
+
+You are probably fine — **the capture writes the COMPLETE pre-image row into
+`substrate_outbox.row` as jsonb** (all 45 columns, including the derived `items` /
+`decisions` / `now_state` projections). Every lost row therefore has a byte-exact snapshot
+inside the very `del` op that destroyed it.
+
+Two ops exist per plan; pick the one whose pre-image was the canonical row:
+
+```sql
+SELECT DISTINCT ON (o.key)
+       (jsonb_populate_record(null::harness_shared.harness_plans, o.row)).*
+FROM harness_shared.substrate_outbox o
+WHERE o.table_name = 'harness_plans'
+  AND o.op = 'del'
+  AND o.row->>'harness_slug' = 'papercusp'   -- NOT the retired slug
+  AND o.ts BETWEEN <incident window>
+ORDER BY o.key, o.ts DESC;
+```
+
+List the insert columns explicitly — `_search` is `GENERATED ALWAYS` and cannot be written.
+Because the restore is a pure `INSERT`, the capture emits fresh `put` ops that **supersede
+the tombstones on federated peers by HLC**, so healing the local node heals the fleet.
+
+`plan_revisions.content_snapshot` is an independent second source; in the incident it agreed
+byte-for-byte, which is how the restore was validated (content lengths *and* version
+counters matched the pre-incident measurements exactly).
+
+## The sibling bug that created the residue in the first place
+
+Worth knowing, because it is the same class one level up: the **inbound** Hyperbee→PG
+projections (`sync/hyperbee/projections/harness-plans.ts`,
+`harness-plan-parts.ts`) applied a federated row under its **authored** `harness_slug`
+verbatim. Migration 359 had canonicalized only the **outbound** capture path. So any peer or
+log-replay still tagging `papercup` kept re-materialising plans under the dead slug — which
+is why 78 of them reappeared in July 2026, months after the rename was declared complete
+("harness\_plans: 539 papercusp / 0 papercup").
+
+The fix is `canonicalHarnessSlug()` at each projection's `decodeValue`, the single wire
+boundary every downstream consumer reads the slug from.
+
+**When you canonicalize a slug, fix both directions.** An outbound-only fix looks complete
+and quietly regrows the data it was meant to retire.

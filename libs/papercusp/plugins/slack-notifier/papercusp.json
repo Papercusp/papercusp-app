@@ -1,0 +1,76 @@
+{
+  "name": "@papercupai/slack-notifier",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "Post a message to a Slack channel on mission-done, action-failed, or via a manual toolbar action. Demonstrates the action primitive + capability-gated http:fetch + secrets:read.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "capabilities": [
+    "secrets:read:SLACK_WEBHOOK_URL",
+    "http:fetch:hooks.slack.com",
+    "events:listen:mission-done",
+    "events:listen:action-failed"
+  ],
+  "actions": [
+    {
+      "name": "notify",
+      "label": "Send to Slack",
+      "surfaces": [
+        "harness-toolbar",
+        "mission-done"
+      ],
+      "capabilities": [
+        "secrets:read:SLACK_WEBHOOK_URL",
+        "http:fetch:hooks.slack.com"
+      ],
+      "serverHandler": {
+        "timeoutSec": 10
+      },
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Message body. Required."
+          },
+          "channel": {
+            "type": "string",
+            "description": "Override the default channel (e.g. #ops-alerts)."
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "defaultChannel": {
+        "type": "string",
+        "default": "#ops",
+        "description": "Channel to post to when params.channel is unset."
+      },
+      "username": {
+        "type": "string",
+        "default": "papercusp",
+        "description": "Display name shown next to the message."
+      },
+      "icon": {
+        "type": "string",
+        "default": ":paperclip:",
+        "description": "Emoji shortcode used as the message icon."
+      },
+      "muteOk": {
+        "type": "boolean",
+        "default": true,
+        "description": "When true, on-mission-done routine fires only when status != 'ok'."
+      }
+    }
+  },
+  "icon": "MessageSquare",
+  "hidden": true,
+  "hiddenReason": "Not ready yet \u2014 outbound integration is functional against a mock; live wiring against real Jira/Linear/Notion/Slack tenants is not yet verified. Hidden from marketplace until v1.0."
+}

@@ -1,0 +1,18 @@
+{
+  "name": "@papercusp/papercusp-android-app-template",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:composition": "node checks/run-gate.mjs checks/composition-integrity.test.ts",
+    "check:composition:fixture": "vitest run checks/composition-integrity.fixture.test.ts",
+    "check:gate": "node checks/run-gate.mjs checks/composition-integrity.test.ts",
+    "check:union": "node checks/run-gate.mjs checks/"
+  },
+  "devDependencies": {
+    "@papercusp/template-kit": "file:./template-kit",
+    "@types/node": "^22.0.0",
+    "vitest": "^4.1.4",
+    "yaml": "^2.6.0"
+  }
+}

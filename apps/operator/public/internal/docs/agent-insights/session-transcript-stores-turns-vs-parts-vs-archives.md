@@ -1,0 +1,114 @@
+# Three transcript stores, not one — session_turns vs session_turn_parts vs session_archives
+URL: /internal/docs/agent-insights/session-transcript-stores-turns-vs-parts-vs-archives
+
+Which store answers which question about an agent session's transcript, why they are deliberately different, and the two traps that follow.
+
+There are **three** places an agent session's transcript lives, and they are not
+copies of each other. Picking the wrong one is the recurring mistake here —
+"the transcript is in Postgres, why does the pane read a file?" has been asked
+more than once, and the answer is that until 2026-07-28 the DB genuinely did
+not have the data the pane needed.
+
+## The three stores
+
+| store                               | contains                                                                       | window                         | indexed for                            |
+| ----------------------------------- | ------------------------------------------------------------------------------ | ------------------------------ | -------------------------------------- |
+| `harness_shared.session_turns`      | **text turns only** — user + assistant text parts, 8k/turn, secret-scrubbed    | 45 d                           | RECALL: gin tsv + hnsw embedding       |
+| `harness_shared.session_turn_parts` | **every renderable part** — text, `tool_use`, `tool_result`, thinking, 2k/part | 14 d                           | RENDER: PK + prune index, nothing else |
+| `harness_shared.session_archives`   | **byte-faithful** compressed copy of the source file                           | archive-at-death, sha-verified | nothing — it is a blob store           |
+
+Plus the source of truth we do not control: Claude Code writes
+`~/.claude/projects/<cwd-slug>/<session-id>.jsonl` natively, Codex writes
+rollout files. There is no setting that makes a CLI persist turns to Postgres
+instead, so **"stop using JSONL" can only ever mean "stop READING it"**.
+
+## Route your question to the right store
+
+* **"find the session where someone said X"** → `session_turns` (via
+  `sessions:search` / `search:semantic`). It is the only store that is indexed
+  for text, and it is deliberately free of tool noise so a search for `Bash`
+  does not match ten thousand tool calls.
+* **"render this session's history in the pane"** → `session_turn_parts`, then
+  `session_turns`, then the file. That order is what `backfillFromDb` in
+  `endpoint-route/routes/harness/streams.ts` implements.
+* **"what exactly did this session write, byte for byte"** → `session_archives`.
+
+## Trap 1 — `session_turns` is NOT the transcript, and its row count is not the turn count
+
+From `session-ingest.ts`'s own header: *"TEXT TURNS ONLY (v1) … tool\_use /
+tool\_result / thinking-only content is never stored there by design."* Two
+consequences bite regularly:
+
+* An assistant line consisting solely of tool calls produces **no row at all** —
+  `parseClaudeLine` returns null. A pane rendered from `session_turns` alone
+  shows a hole exactly where the work happened.
+* `count(*)` over it is not "how many turns did this session take". The real
+  counters (`prompt_count` / `response_count` / `tool_call_count`) are computed
+  by `classifyLine` across *every* raw line and stored on
+  `session_ingest_state`. This was EI-9970.
+
+`session_turn_parts` exists precisely to hold what the turns store drops. It is
+a **separate table on purpose** (`session-turn-storage-2026-07-28` D-001): about
+a dozen live call sites read `session_turns`, and a `part_kind` discriminator
+column would mean every one of them must remember to filter — the first that
+forgets silently starts matching recall on tool noise. A separate table cannot
+be forgotten. The index economics point the same way: `session_turns` measured
+2211 MB total against only 472 MB heap, so **79% of it is the hnsw + gin
+indexes** that bulk tool output must never enter.
+
+## Trap 2 — wall-clock ingest lag does not mean an adapter is broken
+
+On 2026-07-28 the corpus read: claude 59 s behind, **codex 2 d 9 h**, **omp
+6 d 8 h**. That looks like two dead adapters. It was not. Checking the disk
+found zero codex rollouts modified since the codex cursor and zero omp
+transcripts modified in 45 days — both adapters were healthy and fully caught
+up, and nobody had run those clients.
+
+**A quiet adapter and a wedged adapter are indistinguishable in the lag
+column.** So the ingest watchdog
+(`search/session-ingest-lag-watchdog.ts`) does not threshold on
+`now() - max(ts)` at all. It asks a source-relative question: are there bytes
+on disk past the adapter's stored `byte_offset`, are they above a floor (a live
+session always has a partially-written last line), and have they sat there past
+the threshold? That condition is silent forever on an adapter nobody uses,
+which is the correct behavior — and it means when it *does* fire, the alert is
+worth reading.
+
+If you are diagnosing ingest yourself, the same rule applies: compare
+`session_ingest_state.byte_offset` against the file's real size before
+concluding anything from a lag number.
+
+## Trap 3 — a fidelity upgrade can read as data loss
+
+When the parts store shipped, parts only began accruing from wherever the
+ingest cursor already was. A session that was already running therefore had a
+full turns history and only a short parts tail — measured live on the first
+sweep, one session had **13 parts against 85 turns**. Preferring the
+higher-fidelity store unconditionally would have quietly shortened that pane
+from 85 entries to 13.
+
+`preferHigherFidelityBackfill` (in `streams.ts`) is the guard: take parts only
+when they reach at least as far back as the turns window would, or when the
+parts window is already full. It self-heals — once a session accumulates a full
+window of parts, parts always win — so it is a cutover rule, not a permanent
+two-store read. The general lesson generalizes past this feature: **when you
+add a better store alongside an older one, the cutover window is the dangerous
+part, and "better" must be measured on reach as well as on quality.**
+
+## Freshness: the DB is up to \~2 minutes behind
+
+Ingest is a DBOS scheduled workflow on `crontab '30 */2 * * * *'`, incremental
+per `(source_kind, file_path) → byte_offset`. So Postgres cannot serve a live
+session's *current* turn. The thinking pane therefore splits the job
+(`session-turn-storage-2026-07-28` D-003): **history comes from the DB, the
+live tail keeps polling the file** from EOF. If you need read-time freshness
+for one specific file — `sessions:search { session:'self' }` does — call
+`ingestFileNow`, which tails that one file synchronously.
+
+## Retention: three tiers, each cheaper and lossier
+
+14 d faithful parts → 45 d text turns → the archive. A pane opening a session
+older than the parts window degrades to text-only rather than dead-clicking to
+"0 turns" (the WI-4194 behavior), and one older than the turns window falls
+through to the archive. Nothing in this chain should ever produce an empty pane
+for a session that produced output; if you see one, that is a bug worth filing.

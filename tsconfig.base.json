@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "$comment": "Repo-root base tsconfig. Used as the TypeDoc/typecheck fallback config for libs/generic/* packages that don't ship their own tsconfig.json (see scripts/gen-lib-api-docs.ts + apps/operator-docs/astro.config.mjs's starlightTypeDoc entry). Minimal compiler options sufficient for a package to typecheck on its own; apps (e.g. apps/operator) compile via their own tsconfig and ignore this file. (Formerly also referenced by the now-deleted libs/zero-harness/tsconfig.json — zero-decommission-2026-06-20.)",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true
+  }
+}

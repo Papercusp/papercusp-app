@@ -1,0 +1,25 @@
+{
+  "name": "@papercusp/docs-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Source-agnostic docs retrieval engine. Outline + get + search + MDX-to-markdown pipeline, operating on a pluggable DocSource adapter.",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./adapters/harness-fs": "./src/adapters/harness-fs.ts",
+    "./types": "./src/types.ts"
+  },
+  "scripts": {
+    "test": "vitest"
+  },
+  "dependencies": {
+    "js-yaml": "*",
+    "remark": "*",
+    "remark-gfm": "*",
+    "remark-mdx": "*"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*"
+  }
+}

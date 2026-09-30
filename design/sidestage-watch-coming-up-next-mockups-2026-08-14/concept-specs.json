@@ -1,0 +1,237 @@
+{
+  "artifact": {
+    "title": "SideStage Watch — Coming up next concepts",
+    "date": "2026-08-14",
+    "target": "React web Watch tab · Coming up / Next in the drop",
+    "ecosystem": "react-tailwind",
+    "sourcePlan": "sidestage-watch-coming-up-next-mockups-2026-08-14",
+    "validation": {
+      "schema": "UI IR v0.1",
+      "validated": 3,
+      "linted": 3,
+      "errors": 0,
+      "warnings": 0
+    },
+    "registrySearch": {
+      "ecosystem": "react-tailwind",
+      "queries": [
+        "product cards carousel horizontal rail badge progress timeline tabs segmented control",
+        "card",
+        "badge",
+        "tabs",
+        "action",
+        "progress"
+      ],
+      "matches": [
+        "action.primary",
+        "action.secondary"
+      ],
+      "note": "The current registry exposes action primitives for this surface; the product-queue composition remains SideStage-owned."
+    }
+  },
+  "concepts": [
+    {
+      "id": "next-spotlight",
+      "name": "Next Spotlight",
+      "thesis": "Make the immediate next item feel inevitable: one editorial hero card leads, while later products stay visibly queued beside it.",
+      "bestFor": "Strong anticipation and conversion on the next product",
+      "tradeoff": "Uses more vertical space than the compact alternatives",
+      "implementationNotes": [
+        "The first published lineup item becomes a 2:1 spotlight card with a clear Up next marker.",
+        "Items two and three use compact queue cards labeled After that and Later.",
+        "On narrow viewports the queue becomes a horizontal snap rail below the spotlight.",
+        "Secondary Hold item actions reuse the action.secondary registry primitive."
+      ],
+      "ir": {
+        "irVersion": "0.1",
+        "surface": "sidestage-watch-next-spotlight",
+        "ecosystem": "react-tailwind",
+        "layout": {
+          "kind": "stack",
+          "direction": "vertical",
+          "gap": { "token": "--ss-gap" },
+          "children": [
+            {
+              "kind": "header",
+              "title": { "key": "lineup.spotlight.title", "default": "Next in the drop" },
+              "copy": { "key": "lineup.spotlight.count", "default": "6 items · 4 available" },
+              "a11y": { "role": "banner" }
+            },
+            {
+              "kind": "stack",
+              "direction": "horizontal",
+              "align": "stretch",
+              "gap": { "token": "--ss-gap" },
+              "responsive": {
+                "viewport.narrow": { "direction": "vertical", "align": "stretch" }
+              },
+              "children": [
+                {
+                  "kind": "card",
+                  "padding": { "token": "--ss-pad" },
+                  "tokens": { "uses": ["--surface", "--border", "--shadow-card", "--brand-yellow"] },
+                  "children": [
+                    { "kind": "badge", "copy": { "key": "lineup.spotlight.next", "default": "Up next · #1" } },
+                    { "kind": "heading", "copy": { "key": "lineup.spotlight.product", "default": "Stage Varsity Jacket" }, "binding": { "slot": "items[0].title", "shape": "Text" } },
+                    { "kind": "text", "copy": { "key": "lineup.spotlight.subtitle", "default": "Chenille patch · heavyweight wool blend" }, "binding": { "slot": "items[0].subtitle", "shape": "Text" } },
+                    { "kind": "heading", "copy": { "key": "lineup.spotlight.price", "default": "$96.00" }, "binding": { "slot": "items[0].price", "shape": "Money" } },
+                    { "kind": "badge", "copy": { "key": "lineup.spotlight.stock", "default": "6 available" }, "binding": { "slot": "items[0].availableQuantity", "shape": "InventoryCount" }, "a11y": { "role": "status", "ariaLive": "polite" } },
+                    { "kind": "button", "label": { "key": "lineup.spotlight.hold", "default": "Hold item" }, "interactions": ["holdItem"], "a11y": { "role": "button", "ariaLabel": { "key": "lineup.spotlight.hold_label", "default": "Hold the Stage Varsity Jacket" } } }
+                  ]
+                },
+                {
+                  "kind": "list",
+                  "label": { "key": "lineup.spotlight.queue", "default": "After that" },
+                  "binding": { "slot": "items[1..2]", "repeats": true, "shape": "EventLineupItem" },
+                  "item": {
+                    "kind": "card",
+                    "children": [
+                      { "kind": "badge", "binding": { "slot": "sequenceLabel", "shape": "Text" } },
+                      { "kind": "heading", "binding": { "slot": "title", "shape": "Text" } },
+                      { "kind": "text", "binding": { "slot": "subtitle", "shape": "Text" } },
+                      { "kind": "text", "binding": { "slot": "price", "shape": "Money" } }
+                    ]
+                  },
+                  "emptyState": { "kind": "text", "copy": { "key": "lineup.spotlight.empty", "default": "The seller is lining up the next item." } }
+                }
+              ]
+            }
+          ]
+        },
+        "tokens": { "uses": ["--bg", "--surface", "--surface-soft", "--text", "--muted", "--brand-red", "--brand-yellow", "--success", "--border", "--ss-gap", "--ss-pad", "--shadow-card"] },
+        "states": {
+          "empty": { "kind": "banner", "copy": { "key": "lineup.spotlight.empty_state", "default": "More products are being added to this drop." }, "a11y": { "role": "status", "ariaLive": "polite" } },
+          "soldOut": { "kind": "badge", "copy": { "key": "lineup.spotlight.sold", "default": "Sold out" }, "a11y": { "role": "status", "ariaLive": "polite" } }
+        },
+        "a11y": { "landmark": "region", "headingLevel": 3 }
+      }
+    },
+    {
+      "id": "drop-runway",
+      "name": "Drop Runway",
+      "thesis": "Turn the lineup into a numbered visual runway so buyers understand sequence at a glance and can scan farther ahead without losing the immediate next item.",
+      "bestFor": "Fast scanning across a longer drop",
+      "tradeoff": "Individual products get less copy than the spotlight direction",
+      "implementationNotes": [
+        "A numbered sequence rail makes sale order explicit and keeps the next three items in one scan line.",
+        "The first card is accented in yellow and red; later cards progressively quiet down.",
+        "The rail scrolls horizontally with snap points on narrow viewports.",
+        "View all remains an action.secondary outline control."
+      ],
+      "ir": {
+        "irVersion": "0.1",
+        "surface": "sidestage-watch-drop-runway",
+        "ecosystem": "react-tailwind",
+        "layout": {
+          "kind": "stack",
+          "direction": "vertical",
+          "gap": { "token": "--ss-gap" },
+          "children": [
+            {
+              "kind": "header",
+              "title": { "key": "lineup.runway.title", "default": "Coming up in this drop" },
+              "copy": { "key": "lineup.runway.position", "default": "You’re watching item 2 of 8" },
+              "a11y": { "role": "banner" }
+            },
+            {
+              "kind": "progress",
+              "label": { "key": "lineup.runway.progress", "default": "2 of 8 items shown" },
+              "binding": { "slot": "lineupProgress", "shape": "EventLineupProgress" },
+              "a11y": { "role": "progressbar", "ariaLabel": { "key": "lineup.runway.progress_label", "default": "Drop progress" } }
+            },
+            {
+              "kind": "list",
+              "label": { "key": "lineup.runway.queue", "default": "Upcoming products in sale order" },
+              "binding": { "slot": "upcomingItems", "repeats": true, "shape": "EventLineupItem" },
+              "item": {
+                "kind": "card",
+                "children": [
+                  { "kind": "badge", "binding": { "slot": "sequenceNumber", "shape": "SequenceNumber" } },
+                  { "kind": "heading", "binding": { "slot": "title", "shape": "Text" } },
+                  { "kind": "text", "binding": { "slot": "price", "shape": "Money" } },
+                  { "kind": "badge", "binding": { "slot": "availabilityLabel", "shape": "InventoryCount" }, "a11y": { "role": "status", "ariaLive": "polite" } },
+                  { "kind": "button", "label": { "key": "lineup.runway.hold", "default": "Hold item" }, "interactions": ["holdItem"], "a11y": { "role": "button", "ariaLabel": { "key": "lineup.runway.hold_label", "default": "Hold this upcoming item" } } }
+                ]
+              },
+              "emptyState": { "kind": "text", "copy": { "key": "lineup.runway.empty", "default": "That’s the end of this drop." } }
+            },
+            { "kind": "button", "label": { "key": "lineup.runway.view_all", "default": "View all 8 items" }, "interactions": ["toggleAllItems"], "a11y": { "role": "button", "ariaLabel": { "key": "lineup.runway.view_all_label", "default": "View every item in this drop" } } }
+          ]
+        },
+        "tokens": { "uses": ["--bg", "--surface", "--surface-soft", "--text", "--muted", "--brand-red", "--brand-yellow", "--success", "--border", "--ss-gap", "--ss-pad", "--shadow-card"] },
+        "states": {
+          "empty": { "kind": "banner", "copy": { "key": "lineup.runway.empty_state", "default": "The drop lineup is not published yet." }, "a11y": { "role": "status", "ariaLive": "polite" } },
+          "held": { "kind": "badge", "copy": { "key": "lineup.runway.held", "default": "Held for you" }, "a11y": { "role": "status", "ariaLive": "polite" } }
+        },
+        "a11y": { "landmark": "region", "headingLevel": 3 }
+      }
+    },
+    {
+      "id": "queue-board",
+      "name": "Queue Board",
+      "thesis": "Use a compact editorial queue that behaves more like a setlist: dense, sortable-looking rows with one clear next state and minimal repeated chrome.",
+      "bestFor": "Information density and quick comparison",
+      "tradeoff": "Less visual merchandising than image-led cards",
+      "implementationNotes": [
+        "Each row exposes sequence, thumbnail, title, price, quantity, and hold state in one horizontal line.",
+        "The first row receives a red left rail and Up next label; later rows use quieter sequence numbers.",
+        "On mobile each row remains horizontal and hides subtitles before collapsing controls.",
+        "The compact action uses action.secondary while the persistent View full lineup control can use action.primary."
+      ],
+      "ir": {
+        "irVersion": "0.1",
+        "surface": "sidestage-watch-queue-board",
+        "ecosystem": "react-tailwind",
+        "layout": {
+          "kind": "stack",
+          "direction": "vertical",
+          "gap": { "token": "--ss-gap" },
+          "children": [
+            {
+              "kind": "header",
+              "title": { "key": "lineup.board.title", "default": "Next in the drop" },
+              "copy": { "key": "lineup.board.summary", "default": "4 available · sale order" },
+              "a11y": { "role": "banner" }
+            },
+            {
+              "kind": "list",
+              "label": { "key": "lineup.board.queue", "default": "Upcoming products in sale order" },
+              "binding": { "slot": "upcomingItems", "repeats": true, "shape": "EventLineupItem" },
+              "item": {
+                "kind": "stack",
+                "direction": "horizontal",
+                "align": "center",
+                "justify": "space-between",
+                "gap": { "token": "--ss-gap" },
+                "responsive": { "viewport.narrow": { "direction": "horizontal", "align": "center" } },
+                "children": [
+                  { "kind": "badge", "binding": { "slot": "sequenceLabel", "shape": "Text" } },
+                  {
+                    "kind": "stack",
+                    "direction": "vertical",
+                    "align": "start",
+                    "children": [
+                      { "kind": "heading", "binding": { "slot": "title", "shape": "Text" } },
+                      { "kind": "text", "binding": { "slot": "subtitle", "shape": "Text" } }
+                    ]
+                  },
+                  { "kind": "heading", "binding": { "slot": "price", "shape": "Money" } },
+                  { "kind": "badge", "binding": { "slot": "availabilityLabel", "shape": "InventoryCount" }, "a11y": { "role": "status", "ariaLive": "polite" } },
+                  { "kind": "button", "label": { "key": "lineup.board.hold", "default": "Hold" }, "interactions": ["holdItem"], "a11y": { "role": "button", "ariaLabel": { "key": "lineup.board.hold_label", "default": "Hold this upcoming item" } } }
+                ]
+              },
+              "emptyState": { "kind": "text", "copy": { "key": "lineup.board.empty", "default": "No more products are queued." } }
+            },
+            { "kind": "button", "label": { "key": "lineup.board.view_all", "default": "View full lineup" }, "interactions": ["toggleAllItems"], "a11y": { "role": "button", "ariaLabel": { "key": "lineup.board.view_all_label", "default": "View the full drop lineup" } } }
+          ]
+        },
+        "tokens": { "uses": ["--bg", "--surface", "--surface-soft", "--text", "--muted", "--brand-red", "--brand-yellow", "--success", "--border", "--ss-gap", "--ss-pad", "--shadow-card"] },
+        "states": {
+          "empty": { "kind": "banner", "copy": { "key": "lineup.board.empty_state", "default": "More products are being added to this drop." }, "a11y": { "role": "status", "ariaLive": "polite" } },
+          "soldOut": { "kind": "badge", "copy": { "key": "lineup.board.sold", "default": "Sold out" }, "a11y": { "role": "status", "ariaLive": "polite" } }
+        },
+        "a11y": { "landmark": "region", "headingLevel": 3 }
+      }
+    }
+  ]
+}

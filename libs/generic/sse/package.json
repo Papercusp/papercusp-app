@@ -1,0 +1,58 @@
+{
+  "name": "@papercusp/sse",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Spec-compliant Server-Sent Events primitives — server response builder, in-process channel bus, PG NOTIFY bridge, resilient EventSource client, React hook.",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./src/react.ts",
+      "import": "./src/react.ts",
+      "require": "./dist/react.js",
+      "default": "./dist/react.js"
+    },
+    "./postgres": {
+      "types": "./src/postgres.ts",
+      "import": "./src/postgres.ts",
+      "require": "./dist/postgres.js",
+      "default": "./dist/postgres.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "node -e \"const { spawnSync } = require('node:child_process'); const { existsSync, mkdirSync, rmSync, writeFileSync } = require('node:fs'); const { dirname, resolve } = require('node:path'); const manifestPath = require.resolve('@typescript/native/package.json'); const compiler = resolve(dirname(manifestPath), require(manifestPath).bin.tsc); rmSync('dist', { recursive: true, force: true }); mkdirSync('dist', { recursive: true }); const result = spawnSync(process.execPath, [compiler, '-p', 'tsconfig.json'], { stdio: 'inherit' }); const exitCode = result.status ?? 1; const emitted = existsSync('dist/index.js'); if (emitted) writeFileSync('dist/package.json', JSON.stringify({ type: 'commonjs' }, null, 2) + '\\n'); else console.error('ERROR: tsc did not emit dist/index.js; refusing to write dist/package.json'); process.exit(emitted ? exitCode : (exitCode || 1))\"",
+    "typecheck": "node -e \"const { spawnSync } = require('node:child_process'); const { dirname, resolve } = require('node:path'); const manifestPath = require.resolve('@typescript/native/package.json'); const compiler = resolve(dirname(manifestPath), require(manifestPath).bin.tsc); process.exit(spawnSync(process.execPath, [compiler, '-p', 'tsconfig.json', '--noEmit'], { stdio: 'inherit' }).status ?? 1)\"",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "react": ">=19.0.0",
+    "postgres": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true },
+    "postgres": { "optional": true }
+  },
+  "devDependencies": {
+    "@typescript/native": "npm:typescript@7.0.2",
+    "@papercusp/test-config": "*",
+    "@types/react": "^19.0.0",
+    "@testing-library/react": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "strip-literal": "^3.1.0",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "vitest": "^4.1.4"
+  }
+}

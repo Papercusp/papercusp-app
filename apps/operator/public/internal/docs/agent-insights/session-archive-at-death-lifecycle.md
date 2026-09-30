@@ -1,0 +1,147 @@
+# Session archive-at-death: ended sessions live in PG, not on disk
+URL: /internal/docs/agent-insights/session-archive-at-death-lifecycle
+
+Since session-db-archive-retire-dirs-2026-07-10, an ENDED claude/codex/omp session's files are zstd-archived into harness_shared.session_archives and DELETED from disk (~15s after end + an hourly reconciler backstop). Resume rematerializes byte-exact from PG; sessions:read falls through to the archive; the per-session dir population stays capped at ~live-session count. Anything that greps dead-session dirs on disk is reading a surface that no longer exists.
+
+## The inversion
+
+Before 2026-07-10 the on-disk JSONL was the permanent record and
+`session_turns` a derived 45-day index. The 17k+ dead
+`~/.papercusp/session-claude/<owner>/` dirs this accumulated fed the
+fs-watch/inotify meltdown (watch counts ×16 cluster workers → load 1126).
+Now the roles are inverted (plan `session-db-archive-retire-dirs-2026-07-10`,
+D-001):
+
+* **`harness_shared.session_archives`** (stamp/manifest) +
+  **`session_archive_files`** (zstd-9 blobs, sha256 of raw bytes, migration
+  539\) are the ONE permanent canonical copy of every ended session's files.
+* **`session_turns`** stays the bounded, 45d-pruned, redacted recall INDEX —
+  unchanged.
+* **Disk** holds ONLY live sessions (owner ruling: the per-session dir model
+  stays for ACTIVE sessions — population is capped at live-session count; no
+  shared-claude-dir migration will be filed).
+
+## The two-path lifecycle (mirrors the idle-session-reaper doctrine)
+
+1. **Fast path** — `markAdvSessionEnded` fires a detached hook
+   (`session-archive-hook.ts`): 15s settle → final `ingestFileNow` (the index
+   catches the tail) → `archiveAndDeleteSession`. Flag-gated by
+   `SESSION_ARCHIVE_AT_END` (default ON; kill-switch).
+2. **Hourly reconciler** (`session-archive-reconciler.ts`, DBOS
+   `sessionArchiveReconcile` @ :20) — the backstop for kill-9/OOM/host-crash
+   ghosts: sweeps ended-unarchived adv rows (bounded 500 scanned/50 archived
+   per tick) + unprotected disk dirs (100/tick, **1h quiet grace per session's
+   files** — a raw/untracked resumed session has no adv row and no presence,
+   so a fresh mtime is its only live signal) + stale omp files (200/tick, 24h
+   mtime grace). **A degraded protected-set skips the whole disk side**
+   (`skippedDisk: 'degraded-protected-set'`, mirrors session-dir-gc's abort) —
+   the reads fail open, and sweeping against an incomplete set would delete a
+   live session's files.
+
+**Interactive resume rematerializes too** (WI-3859 F4, owner-hit): `psu --resume <id>` restores an archived transcript via
+`POST /api/adv/sessions/rematerialize` on both miss points (tracked row with
+no transcript on disk; untracked uuid found nowhere) before declaring the
+session unresumable. Raw `claude --resume` outside psu still cannot — go
+through psu, or call the endpoint by hand.
+
+Safety invariants (hardened by the WI-3859 adversarial pass, 2026-07-10):
+**never follow symlinks** — at collect time (lstat/Dirent) AND at
+delete/rematerialize time (delete resolve-and-verifies `realpath(abs) ===
+realpath(root)/relpath`; rematerialize lstats the target — an existing
+symlink/dir is a conflict, never written through — and containment-checks the
+parent dir); **manifest relpaths are untrusted data** (`isUnsafeArchiveRelpath`
+rejects absolute/`..`/NUL — a poisoned stamp row can never unlink or write
+outside the session root); **delete only after a sha-verified committed
+stamp**; archive write = one PG tx; rematerialize never clobbers a differing
+existing file (disk wins); PG `mtime` strings are coerced to Dates before
+`utimes` (F6 — the silent-catch had been eating mtime restore on every real
+rematerialize).
+
+## What replaced each disk read
+
+| Need                                                         | Surface                                                                                                                   |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| Resume an ended session (`claude --resume` / `codex resume`) | `wake-executor.ts` rematerializes-on-miss from the archive (byte-exact, mtimes restored)                                  |
+| Read a dead session's turns                                  | `sessions:read` falls through to `readArchivedSessionTurns` (`session-archive-read.ts`) — same cap+redaction as the index |
+| iq-battery bee trace after a run                             | `bee-instance.ts` loadTranscript falls through to `session_archives` keyed by `owner = spawnId`                           |
+| Search content                                               | `sessions:search` stays INDEX-bounded by design (blobs are not a search index)                                            |
+
+## GC is code-owned now
+
+The seeded `session-dir-gc` routine was **never armed** — the root cause of
+the 17k accumulation. The cadence is now a DBOS periodic workflow
+(`sessionDirGc`, hourly @:50, `dbos/periodic-workflows.ts`), deploy-armed and
+immune to the seeded-but-never-enabled class. Retention picks by the flag:
+archive ON → 2h (deletion lossless; the gate is only a materialization-race
+guard), OFF → the legacy 7d (deletion lossy again). The routine action
+remains a manual/admin lever.
+
+**Cadence and retention are chosen together.** The steady-state dir population
+is `live + retention-window churn` whenever cadence ≤ retention — the
+*retention* sets the floor, not the cadence. A daily sweep with a 24h window
+floored this box at \~900 dirs; hourly @:50 (offset from the reconciler's @:20,
+so the archiver has committed the last hour's endings before the janitor looks)
+with a 2h window floors it at \~live count. Measured 2026-07-10: `session-claude`
+17,359 → 110, total dirs 17,962 → 554.
+
+## What actually makes the 24h retention safe: the archive guard
+
+Retention is a **race guard, not the safety net** — the archive is. So gc
+does not trust that the archiver ran: before deleting, `findUnarchivedSessionDirs`
+lists each collectible dir's session ids and checks for a **committed stamp**
+in `session_archives`. Any dir holding even one un-stamped session is diverted
+to `keptUnarchived` and survives; the reconciler archives it on a later tick
+and the next sweep collects it.
+
+This closes a real hole: the fast path can miss (`kill -9` between session-end
+and the hook), the reconciler's disk sweep is bounded per tick, and a `dbFailed`
+row archives nothing at all. Under the old 7d retention those cases had a week
+of slack; at 24h they would have been **permanently deleted a day later**.
+
+Three rules that must not drift:
+
+* The guard **fails CLOSED** — an unreadable dir or a failed stamp read keeps
+  the dir. A wrong "keep" costs an hour of disk; a wrong "remove" is forever.
+* `archiveGuard` must track the flag: ON with `DEFAULT_RETENTION_MS` (2h),
+  OFF only with `LEGACY_RETENTION_MS` (7d), because with the archive off there
+  is nothing to verify against. Both call sites (the DBOS workflow and the
+  routine action) pick them together from `SESSION_ARCHIVE_AT_END`.
+* **A degraded protected-set aborts the sweep.** `gatherProtectedSessionIdentity`
+  fails *open* (a dead PG contributes no protected ids), which would make the
+  sweep maximally aggressive exactly when it can least afford it. It now reports
+  `degraded: true` and `runSessionDirGc` returns `skipped:
+  'degraded-protected-set'` without scanning. The archive guard alone is not
+  enough here: a **bare** dir (a session mid-launch, before its first `.jsonl`
+  exists) has no files to verify, so only the protected set stands between it
+  and deletion. This is what makes the tight 2h window safe.
+
+A dir with **no** session files is safe to collect (nothing to lose) — which is
+why a healthy steady state reports `keptUnarchived=0`: the archiver already
+deleted the files it committed.
+
+## Traps for the next agent
+
+* A dir under `session-claude/` that "disappeared" is NOT data loss — check
+  `session_archives` first (`SELECT * FROM harness_shared.session_archives
+  WHERE session_id = …` or owner = the dir name).
+* `adv_sessions.archived_at` set + no archive rows = the "nothing to
+  archive" stamp (session left no files) — that's normal, not a bug.
+* Don't hand-write a new dead-dir walker: the reconciler + protected set
+  (`gatherProtectedSessionIdentity`, EI-311 liveness rules) already own that
+  sweep, and a walker that misses the protected set WILL delete a live
+  session's home — or, missing the archive guard, silently delete sessions the
+  archiver never committed.
+* `keptUnarchived > 0` in the gc log is **not** an error: it means the archiver
+  hasn't caught up with those dirs yet. Investigate only if it stays non-zero
+  across several hourly sweeps (that implies `dbFailed` rows or a wedged
+  reconciler), never by deleting the dirs by hand.
+* **`keptFresh` transiently over-counts right after a big archive run.** The
+  retention gate reads the dir's mtime as "last materialization", but deleting
+  the archived files *inside* a dir also bumps it. So a just-archived dead dir
+  looks freshly materialized and survives one more window. Harmless (the next
+  sweep collects it) — do not "fix" it by deleting on a younger mtime.
+* `skipped: 'degraded-protected-set'` in the log means a presence/PG read failed
+  and the sweep declined to run. That is the system working. Fix the PG read;
+  never bypass the guard to "catch up" on disk.
+* Storage cost is measured: \~69KB zstd per session (\~4.7×), \~46MB/day at
+  650 sessions/day ≈ 17GB/yr.

@@ -1,0 +1,129 @@
+# Rust build outputs
+#
+# NO TRAILING SLASH, deliberately (WI-39462). `src-tauri/target/` matches a
+# DIRECTORY only — it does NOT match a SYMLINK standing in for that directory,
+# which is how this box relocates the 193GB cargo target dir onto /mnt/data. So
+# the link itself was never ignored, and git-sync swept it into the index on
+# 2026-07-08 (5fd810f8). A symlink's git blob IS its target string, so that
+# committed an absolute build-machine path — the same leak class as the two
+# docs-viewer project links. Dropping the slash covers both shapes.
+src-tauri/target
+
+# Coverage reports — `cargo llvm-cov` (P-010) and any Vitest --coverage run.
+#
+# The SUPERPROJECT .gitignore already carries this exact rule set, but a
+# superproject ignore does NOT govern inside a submodule: `git check-ignore`
+# run from the repo root answers "is in submodule <p>" and declines, so the
+# rule silently stops at this boundary. Without a copy HERE, git-sync (which
+# commits the superproject AND every submodule) sweeps the generated report
+# into this repo. Same class as EI-22195215129102176, where a non-ignored
+# coverage dir swept 74 files / +54,104 lines into the tree during P-012.
+coverage/
+coverage-*/
+**/coverage/
+**/coverage-*/
+
+# Seed corestore reuse caches (PAPERCUSP_SEED_REUSE_CORESTORE=1 build workaround
+# writes ~100MB+ blobs that git-sync must never sweep — >100MB rejects the push)
+src-tauri/.seed-corestore-reuse-*/
+**/.seed-corestore-reuse-*/
+
+# Tauri-generated schema/permissions (regenerated on build)
+src-tauri/gen/
+
+# Bundled sidecar (produced by bin/build-desktop-sidecar.sh on every build)
+# — including the EI-160 atomic-publish temp trees + lock artifacts a live
+# or interrupted build leaves next to it (117MB node binaries; git-sync
+# must never sweep them). The atomic swap renames the current tree aside to
+# sidecar.old.<pid>/ before moving the new one in — those backups are the
+# same >100MB class as the .tmp trees and must be ignored too (git-sync hit
+# the GitHub 100MB cap excluding sidecar.old.55111/bin/node, 2026-07-10).
+src-tauri/sidecar/
+src-tauri/sidecar.tmp.*/
+src-tauri/sidecar.old.*/
+src-tauri/sidecar.lock
+src-tauri/sidecar.lockdir/
+
+# macOS term shim build output (SwiftPM; rebuilt per build)
+src-tauri/macos-term-shim/.build/
+src-tauri/resources/libPapercuspTermShim.dylib
+
+# WSL rootfs tarball (~250-400 MB, produced by scripts/build-rootfs.sh per
+# release; bundled as a Tauri resource — never committed)
+src-tauri/resources/papercup-runtime.tar.gz
+src-tauri/resources/papercup-runtime.tar.gz.tmp.*
+
+# Seed corestore (~1.9GB of machine-generated corestore DB blobs, 50–195MB
+# each; bundled into the .deb at build time from disk — NEVER committed.
+# 77 of these were accidentally tracked until 2026-07-05 (WI-3065): the
+# >100MB ones can't push (GitHub hard cap) and the 50–99MB ones bloat every
+# clone forever. Provision the seed out-of-band; git must not carry it.)
+src-tauri/seed/
+
+# Node
+node_modules/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Sidecar-extraction temp dirs (per-pid, created at app launch; >100MB —
+# git-sync must never sweep them)
+src-tauri/sidecar.tmp.*/
+
+# WI-4419 (2026-07-12): agent state dirs (.papercusp/) appear inside submodules too,
+# and git-sync auto-commits the superproject AND every submodule — so any scratch a
+# gitignore does not cover is committed automatically and then swept into every
+# release bundle by the sidecar source-tar glob. The superproject .gitignore does NOT
+# reach inside a submodule, so the guard must be repeated here. Depth-matching (**/)
+# on purpose: a slash-bearing pattern is anchored to THIS file's directory.
+.papercusp/scratch/
+.papercusp/vitest-tmp/
+.papercusp/tmp/
+.papercusp/tmp-*/
+.papercusp/logs/
+.papercusp/bench-reports/
+.papercusp/pi-sessions/
+**/.papercusp/scratch/
+**/.papercusp/vitest-tmp/
+**/.papercusp/tmp/
+**/.papercusp/tmp-*/
+**/.papercusp/logs/
+**/.papercusp/bench-reports/
+**/.papercusp/pi-sessions/
+
+# AppImage extraction/verification scratch — an ARRIVES sidecar-boot check (or a
+# manual `<app>.AppImage --appimage-extract`) unpacks the whole AppDir into a
+# `squashfs-root/` (3.6GB incl. a >100MB binary). On 2026-07-14 a verify script's
+# scratch-dir mktemp failed (perm-denied) and it extracted into THIS tree; git-sync
+# committed 8352 small files and hit the 100MB cap on the big ones. Never track it.
+# (Verify scripts must also target an out-of-tree scratch dir and hard-fail if it is
+# not writable, never fall through to cwd — see WI-4736 / the filed bug.)
+squashfs-root/
+**/squashfs-root/
+appimg-arrives*/
+**/appimg-arrives*/
+__pycache__/
+*.py[cod]
+
+# Vitest scratch TMPDIR / node-compile-cache. Agents + green-checkpoint run vitest
+# with TMPDIR=$PWD/.vitest-tmp, so results.json + the V8 compile cache are rewritten
+# on EVERY test run. git-sync auto-commits every submodule, so an untracked-but-not-
+# ignored cache is committed each tick and add/add-conflicts against origin — the
+# superproject .gitignore does NOT reach inside a submodule, so the guard is repeated
+# here (same reasoning as the .papercusp/ block, WI-4419).
+.vitest-tmp/
+**/.vitest-tmp/
+
+# EI-21266614790118256: defense-in-depth only — live-federation-gate.sh's
+# gate_selftest() no longer creates this dotfile inside bin/lib/ at all (it
+# snapshots into its own untracked $WORK scratch dir instead, injecting
+# GATE_SELFTEST_LIB_DIR so the selftest still resolves its bin/lib siblings).
+# 13 stale copies from earlier runs were found already COMMITTED here (a git-sync
+# sweep landing in the file's brief create→exec→rm window can catch it) and were
+# removed in the same change. Keep this pattern ignored so any future regression
+# to an in-place bin/lib snapshot can never be silently re-committed.
+bin/lib/.gate-selftest-snapshot-*

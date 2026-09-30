@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" aria-label="Operator logo concept — Relay Iris">
+  <defs>
+    <linearGradient id="frame" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#daf6ff"/>
+      <stop offset="48%" stop-color="#60dbff"/>
+      <stop offset="100%" stop-color="#1f90bb"/>
+    </linearGradient>
+    <radialGradient id="core" cx="50%" cy="42%" r="62%">
+      <stop offset="0%" stop-color="#1a3550"/>
+      <stop offset="58%" stop-color="#0b1725"/>
+      <stop offset="100%" stop-color="#050c15"/>
+    </radialGradient>
+    <linearGradient id="irisCup" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#f3eef9" stop-opacity="0.96"/>
+      <stop offset="100%" stop-color="#cbc4d8" stop-opacity="0.72"/>
+    </linearGradient>
+  </defs>
+  <path d="M31 16h66l15 15v66l-15 15H31L16 97V31z" fill="#07101d" stroke="url(#frame)" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M36 25h56l11 11v56l-11 11H36L25 92V36z" fill="rgba(255,255,255,0.02)" stroke="rgba(218,246,255,0.18)" stroke-width="1.5" stroke-linejoin="round"/>
+  <circle cx="64" cy="64" r="30" fill="url(#core)" stroke="rgba(218,246,255,0.22)" stroke-width="2"/>
+  <circle cx="64" cy="64" r="18" fill="none" stroke="url(#frame)" stroke-opacity="0.82" stroke-width="3"/>
+  <path d="M64 20c0 7-8 11-15 17" fill="none" stroke="#d9a977" stroke-width="3.2" stroke-linecap="round"/>
+  <path d="M64 20c0 7 8 11 15 17" fill="none" stroke="#d9a977" stroke-width="3.2" stroke-linecap="round"/>
+  <g transform="translate(0 5)">
+    <path d="M51 45h26l-3 23c0 3-4.5 6-10 6s-10-3-10-6z" fill="url(#irisCup)" fill-opacity="0.16" stroke="#dbf6ff" stroke-opacity="0.84" stroke-width="2" stroke-linejoin="round"/>
+    <ellipse cx="64" cy="45" rx="13" ry="3.2" fill="url(#irisCup)" fill-opacity="0.2" stroke="#dbf6ff" stroke-opacity="0.84" stroke-width="2"/>
+    <ellipse cx="64" cy="45" rx="9.6" ry="2.4" fill="#a97851" fill-opacity="0.86"/>
+    <rect x="61.5" y="50" width="5" height="14" rx="2.5" fill="#7ce2ff" fill-opacity="0.85"/>
+  </g>
+  <path d="M64 39v50" stroke="rgba(124,226,255,0.18)" stroke-width="1" stroke-linecap="round"/>
+  <path d="M39 64h50" stroke="rgba(124,226,255,0.12)" stroke-width="1" stroke-linecap="round"/>
+</svg>

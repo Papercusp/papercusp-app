@@ -1,0 +1,16 @@
+{
+  "_doc-motion": "Desktop motion + elevation tokens. Easings, durations, card-shadow, frost overlay. Mobile has its own animation primitives baked into Compose/SwiftUI conventions — not mirrored.",
+  "ease": {
+    "out":  { "$value": "cubic-bezier(0.16, 1, 0.3, 1)",   "$type": "cubicBezier" },
+    "in":   { "$value": "cubic-bezier(0.7, 0, 0.84, 0)",   "$type": "cubicBezier" },
+    "mid":  { "$value": "cubic-bezier(0.65, 0, 0.35, 1)",  "$type": "cubicBezier" }
+  },
+  "dur": {
+    "fast":   { "$value": "120ms", "$type": "duration" },
+    "normal": { "$value": "200ms", "$type": "duration" },
+    "panel":  { "$value": "240ms", "$type": "duration" },
+    "slow":   { "$value": "360ms", "$type": "duration" }
+  },
+  "card-shadow": { "$value": "0 24px 70px rgba(0, 0, 0, 0.32)", "$type": "shadow" },
+  "frost":       { "$value": "linear-gradient(180deg, rgba(255,255,255,0.068), rgba(255,255,255,0.024))", "$type": "other", "$description": "Glass overlay gradient — semantically a gradient, but DTCG gradient type is awkward for this single-stop case" }
+}

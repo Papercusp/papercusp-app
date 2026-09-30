@@ -1,0 +1,25 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Papercusp Server",
+  "mainBinaryName": "papercusp-server",
+  "identifier": "com.papercusp.server",
+  "app": {
+    "windows": []
+  },
+  "bundle": {
+    "shortDescription": "Papercusp backend service (operator + federation)",
+    "longDescription": "The Papercusp Server runs the operator sidecar — embedded Postgres, the harness API/IPC, and cross-instance federation — in the menubar/tray, auto-starting at login. It is the backend that psu and the Papercusp GUI attach to; keep it running and agents work whether or not the GUI is open.",
+    "resources": [
+      "sidecar/**/*",
+      "resources/*",
+      "seed/**/*"
+    ],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/lib/systemd/user/papercusp-server.service": "systemd/papercusp-server.service"
+        }
+      }
+    }
+  }
+}

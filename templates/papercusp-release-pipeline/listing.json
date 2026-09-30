@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-release-pipeline",
+  "id": "papercusp-release-pipeline",
+  "title": "Papercusp Official: Release Pipeline",
+  "description": "Aspect template: the desktop release plane — tauri-release-kit as a composable aspect: channels, tags, signing, generated updater feeds, the target matrix, Mac/Windows VM drivers; the app injects only buildSidecar(). Docs: /internal/docs on your install.",
+  "category": "release",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

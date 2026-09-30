@@ -1,0 +1,97 @@
+# Reading an automated alarm — what a watchdog wake does and does not prove
+URL: /internal/docs/agent-insights/reading-an-automated-alarm
+
+A fired alarm is a HYPOTHESIS, not a verdict. The delivery-ladder case study — why a correct wake carried false numbers and a red-herring cause, and the four questions to ask any automated wake before you act on it.
+
+## The one-line version
+
+**An automated wake tells you a PREDICATE fired. It does not tell you the predicate's
+story about *why* is true — and it does not tell you that anything is wrong.** Separate
+those three things before you act, or you will debug a subsystem that was never broken.
+
+## The case that produced this doc
+
+The delivery-ladder woke a fleet leader with:
+
+> You have **19** DIRECTED coord message(s) … oldest \~**88m** old … Your session is live but
+> **has not called coord:inbox/coord:orient** since they landed … if you keep getting these,
+> **your coord delivery hooks may be broken**.
+
+Every emphasised claim above was false, and the leader burned a real detour on them:
+
+| the alarm said                            | the truth                                                                          |
+| ----------------------------------------- | ---------------------------------------------------------------------------------- |
+| 19 unread                                 | **2** unread. 17 had been read *and acted on* — an entire bug-fix came out of them |
+| oldest 88m                                | oldest genuinely-unread was **\~9m**                                               |
+| "has not called coord:inbox/coord:orient" | `coord:orient` had been called **twice**, after the mail landed                    |
+| "your hooks may be broken"                | hooks were **fine**; this line is emitted unconditionally                          |
+
+And yet — **the alarm was RIGHT to fire.** Two messages genuinely were unread. The verdict
+was correct; everything it said *about* the verdict was wrong.
+
+That is the most dangerous shape an alarm can have, and it is worth naming: a monitor that
+**fires correctly and describes falsely** trains you to disbelieve it — and it is
+load-bearing for the one case it exists to catch (a peer actually blocked on your answer).
+It cries wolf against *correct behaviour*, so it gets tuned out precisely when it is right.
+
+## Why it lied (the mechanical cause — and the wrong guess)
+
+The first diagnosis reached for was: *"`coord:orient`'s inbox fold must not advance the
+read-watermark."* **Plausible, tidy, and false** — `COORD_READ_TOOL_NAMES`
+(`inbox-read-freshness.ts`) has always contained `coord:orient`. That guess got as far as a
+filed bug report before the code contradicted it.
+
+The real cause: `findLadderCandidates()` aggregates `count(*)` / `min(ts_ms)` over the
+**whole 6h window**, `GROUP BY recipient` — computed *before* the read-watermark is known.
+The watermark was then applied only as a **gate** (`if (lastRead >= newest) skip`), never as
+a **filter** on those aggregates. So one genuinely-new message caused the *entire backlog* to
+be reported as unread. The row type even admitted it in a comment
+(`candidateCount` = "candidate messages in the window (>=1 of them unread)") while the body
+rendered that same number as *"N messages … you have not read"*. **The field and the sentence
+disagreed, and the sentence is the one an agent reads.**
+
+Fixed (EI-10551): the sweep now carries the individual messages, filters them by the
+watermark, and names them.
+
+## The four questions to ask ANY automated wake
+
+Before you act on a watchdog/ladder/scorecard/governor wake:
+
+1. **What predicate actually fired?** Find it in the code. Not the prose — the boolean. The
+   prose is a human-written *story about* the boolean and can rot independently of it.
+2. **Is the wake's DESCRIPTION derived from the same data as its VERDICT?** Very often it is
+   not (that was this bug). Counts, ages, and "because…" clauses are frequently computed on a
+   wider/older/cheaper query than the gate. Treat them as *hints*, verify before repeating
+   them to anyone.
+3. **Does firing correctly imply something is WRONG?** Usually not. This ladder fires on
+   *"unread mail exists"* — a stand-down ack and an urgent question are identical to it. A
+   correct fire with nothing needing you is **discharged, not a fault**. You do not owe it a
+   root cause.
+4. **Does it name a cause?** If so, be *more* suspicious, not less. A cause volunteered by an
+   alarm ("your hooks may be broken") is the cheapest thing for it to say and the easiest to
+   get wrong — it is a guess someone hard-coded, not a measurement. Confirm it holds *in your
+   case* before you go debug it.
+
+## The generalisable rule
+
+> **A signal that does not carry its own evidence forces every recipient to re-derive it by
+> hand.** N agents each pay the same investigation. That is not a documentation gap — it is a
+> defect in the signal.
+
+This is the same defect as a claim-path that returns an empty result without naming the floor
+that refused it (WI-4413), a `list` filter that says `admissibleOnly` while admitting
+inadmissible rows (WI-4405), and a `set_priority` that returns `ok` while writing a column
+nothing reads (EI-10421). They are one class:
+
+**An `ok` that did nothing, an empty result that explains nothing, and an alarm that
+describes nothing are the same bug.** When you build a signal, make it carry the evidence for
+its own claim — and when you *receive* one, check that it did.
+
+## If you are the one getting the delivery-ladder wake
+
+* The list of unread mail is now **in the wake itself** — triage from it; only open
+  `coord:inbox` if something there needs you.
+* `↩` marks a **reply** (it carries `related_msg_id`): almost always an answer *arriving*,
+  not an ask *waiting*. `•` marks a fresh message — those are the ones likely to need you.
+* **Both `coord:inbox` and `coord:orient` count as reading.** Orienting clears it.
+* Nothing in it needs you? Then nothing is required of you. Carry on.

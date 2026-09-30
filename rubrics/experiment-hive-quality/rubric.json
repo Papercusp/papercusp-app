@@ -1,0 +1,33 @@
+{
+  "rubricId": "experiment-hive-quality",
+  "title": "Experiment hive quality",
+  "characteristic": "experiment-hive",
+  "description": "Grades completed whole-hive experiments against outcome, efficiency, and speed dimensions so hive-level experiments become trendable scorecards.",
+  "methodRef": null,
+  "ratingScale": ["healthy", "degraded", "broken", "unknown"],
+  "criteria": [
+    {
+      "key": "outcome",
+      "title": "Hive outcome",
+      "model": "The selected hive variant reaches the scenario's intended outcome.",
+      "method": "Read the selected arm's outcome score and baseline comparison from the experiment scorecard evidence.",
+      "driftMarkers": "Outcome score is low, unknown, or missing while the experiment declares a winner."
+    },
+    {
+      "key": "efficiency",
+      "title": "Hive efficiency",
+      "model": "The selected hive variant reaches the outcome without excessive coordination, token, cost, or retry waste.",
+      "method": "Read the selected arm's efficiency score and total cost from the experiment scorecard evidence.",
+      "driftMarkers": "Efficiency degrades while outcome stays healthy."
+    },
+    {
+      "key": "speed",
+      "title": "Hive speed",
+      "model": "The selected hive variant progresses at an acceptable pace for the scenario.",
+      "method": "Read the selected arm's speed score from the experiment scorecard evidence.",
+      "driftMarkers": "Speed is degraded or unknown across repeated hive experiments."
+    }
+  ],
+  "version": "0.1.0",
+  "source": "first-party"
+}

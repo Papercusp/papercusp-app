@@ -1,0 +1,77 @@
+-- 754: drop three DEAD partial indexes — no code consumer queries their indexed columns.
+--
+-- WI-8945 (never-scanned partial-index triage), plan db-performance-remediation-2026-07-26,
+-- decisions D-031 (a never-scanned index is not evidence of MISALIGNMENT — read the plan the
+-- consumer uses today) and D-032 (nor of DEADNESS — idx_scan=0 only means "no consumer has
+-- fired YET", so the drop criterion is "NO CONSUMER EXISTS IN CODE", established by reading
+-- call sites).
+--
+-- Every drop below is justified by CALL-SITE READING, not by idx_scan=0. The scan counts are
+-- reported only as corroboration. Each index was also confirmed NOT to be its table's only
+-- usable index.
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 1. session_ingest_state_session_idx  (1224 kB; 15,179 rows; 114,874 writes)
+--    btree (source_kind, session_id) WHERE session_id IS NOT NULL
+--
+--    NOT ONE query filters session_ingest_state by session_id. Every consumer in
+--    packages/operator-core/lib/search/session-ingest.ts filters on (source_kind, file_path)
+--    or on source_kind plus a NON-indexed column:
+--      :1175  WHERE source_kind = $1 AND file_path = $2
+--      :1355  WHERE source_kind = $1 AND counts_backfilled_at IS NULL
+--      :1399  WHERE st.source_kind = 'agent_chat' AND st.file_path <> $1 AND ...
+--      :1507  WHERE source_kind = 'agent_chat' AND file_path = $1
+--      :1620  WHERE updated_at < ... AND file_path <> $1
+--    The single `session_id` occurrence (:1130) is `turns.session_id = resolved.session_id`
+--    — a join on a DIFFERENT relation, not a filter on this table's column.
+--
+--    Its leading column (source_kind) is already covered by the UNIQUE PRIMARY KEY
+--    session_ingest_state_pkey (source_kind, file_path), which every query above matches
+--    better. That is why this index has never been scanned. Highest write amplification of
+--    the three: 114,874 writes maintaining an index nothing reads.
+--
+-- 2. bash_tool_substitution_fires_session_idx  (1024 kB; 8,991 rows; 17,974 writes)
+--    btree (session_id, fired_at) WHERE session_id IS NOT NULL
+--
+--    No query filters this table by session_id. The only SELECT
+--    (packages/operator-core/lib/bash-substitution/fires.ts:191) is
+--      WHERE workspace_id = $1 AND resolved_at IS NULL AND fired_at < $2 ORDER BY fired_at
+--    which is served EXACTLY by the already-present
+--      bash_tool_substitution_fires_unresolved_idx (workspace_id, fired_at) WHERE resolved_at IS NULL.
+--    Both UPDATEs (:228, :241) filter by primary key `id`. The one `session_id` reference in
+--    a WHERE (:217) reads a DIFFERENT table by coord_owner_id, passing fire.session_id as a
+--    VALUE — it is not an access path on this table.
+--
+-- 3. user_sessions_expires_idx  (376 kB; 0 live rows; 41,791 writes)
+--    btree (expires_at) WHERE expires_at > '2026-01-01 05:00:00+00'  [a FROZEN literal]
+--
+--    Unusable by BOTH of its table's readers, for two independent reasons:
+--      - the sweep (auth.ts:217) is
+--          DELETE ... WHERE expires_at < now() OR (created_at < ... AND (...))
+--        A top-level OR spanning different columns admits no single-index path; and
+--        `expires_at < now()` does not imply `expires_at > '2026-01-01'` anyway (a row
+--        expiring in 2025 satisfies the query and not the predicate), so the planner may
+--        never use it — the same unusable-by-construction shape as memory_canonical_current_idx.
+--      - session validation (auth.ts:126) is `WHERE s.token = $1 AND s.expires_at > now()`,
+--        a lookup on the UNIQUE pkey user_sessions_pkey (token); expires_at is a filter.
+--    The predicate is additionally a frozen date literal, so it degrades over time by
+--    construction. The table churns (41,791 writes) while holding 0 live rows, so the
+--    maintenance cost is real even though the index is empty.
+--    NOTE this is NOT the D-031 "healthy drained queue" category: a drained-queue index is
+--    one a consumer WOULD use once the queue refills. This one could not be used even then.
+--
+-- Not CONCURRENTLY: migrations run inside a transaction, and these are small. IF EXISTS keeps
+-- the migration idempotent and safe against a peer having dropped one already.
+--
+-- FORWARD-COMPAT: all three are plain non-UNIQUE btrees, so none can be an ON CONFLICT arbiter
+-- for the still-running older release (ON CONFLICT requires a UNIQUE index or constraint) —
+-- the EI-18797473716313783 failure mode is unreachable here by construction. Beyond that, each
+-- table's ON CONFLICT paths ride its UNIQUE pkey, which this migration does not touch:
+-- session_ingest_state_pkey (source_kind, file_path) and user_sessions_pkey (token) are both
+-- called out above as the access path the real queries already use. And no deployed query plan
+-- can depend on these three: idx_scan = 0 across the database's entire lifetime, corroborating
+-- the call-site reading above that NO consumer filters on their indexed columns at all.
+
+DROP INDEX IF EXISTS harness_shared.session_ingest_state_session_idx;
+DROP INDEX IF EXISTS harness_shared.bash_tool_substitution_fires_session_idx;
+DROP INDEX IF EXISTS harness_shared.user_sessions_expires_idx;

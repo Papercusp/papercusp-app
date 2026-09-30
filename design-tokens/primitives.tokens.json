@@ -1,0 +1,34 @@
+{
+  "$schema": "https://design-tokens.org/dtcg/format/draft-1.json",
+  "_meta": {
+    "description": "Workspace brand-palette primitives. Consumed by desktop + mobile (mirrored). Brand-palette only — platform-specific ink/surface scales live in each platform's semantic file."
+  },
+  "color": {
+    "sky": {
+      "100": { "$value": "#E0F2FE", "$type": "color" },
+      "200": { "$value": "#BAE6FD", "$type": "color" },
+      "300": { "$value": "#7DD3FC", "$type": "color" },
+      "400": { "$value": "#38BDF8", "$type": "color" },
+      "500": { "$value": "#0EA5E9", "$type": "color" },
+      "700": { "$value": "#0369A1", "$type": "color" }
+    },
+    "sky-cool":  { "$value": "#D7F3FF", "$type": "color", "$description": "Desktop accent-cool — between sky-100 and sky-200" },
+    "sky-hero":  { "$value": "#13F5FF", "$type": "color", "$description": "Operator hero cyan — orb chrome" },
+    "emerald": {
+      "400": { "$value": "#34D399", "$type": "color" }
+    },
+    "amber": {
+      "400": { "$value": "#FBBF24", "$type": "color", "$description": "Tailwind amber-400 — desktop --warn" }
+    },
+    "gold": {
+      "400": { "$value": "#F6C453", "$type": "color", "$description": "Papercusp custom yellow — mobile uses this instead of amber-400 for warmer feel" }
+    },
+    "rose": {
+      "400": { "$value": "#FB7185", "$type": "color" }
+    },
+    "slate": {
+      "300": { "$value": "#CBD5E1", "$type": "color" },
+      "400": { "$value": "#94A3B8", "$type": "color" }
+    }
+  }
+}

@@ -1,0 +1,177 @@
+# Can't find variable: Buffer — Vite drops the Node globals Next polyfilled
+URL: /internal/docs/agent-insights/operator-vite-node-globals
+
+The operator-vite SPA is bundled by Vite, which (unlike Next's webpack) does not polyfill Node globals (Buffer) and externalizes Node built-ins (os.homedir, fs) to empty stubs. Renderer-bundled code throws 'Can't find variable: Buffer' or 'homedir is not a function'. Fixes: a Buffer global polyfill in main.tsx, and deferring module-eval Node-builtin calls in server-only libs that leak into the SPA. Also: the desktop serves built dist, not live src — a broken build silently freezes it on stale dist.
+
+import { Aside } from '@astrojs/starlight/components';
+
+If you see **`ReferenceError: Can't find variable: Buffer`** (or
+`process is not defined`, `global is not defined`) in the desktop app,
+this is the cause.
+
+## Root cause
+
+The desktop content layer migrated from `next dev` to **`apps/operator-vite`**
+(a Vite SPA — see `operator-vite-migration-2026-05-20`). Next's webpack
+**auto-provided a browser `Buffer`** (and shimmed other Node globals) for the
+client bundle. **Vite does not** polyfill Node globals, and the operator-vite
+`vite.config.ts` has no `define`/`vite-plugin-node-polyfills`. So any code
+bundled into the renderer that references `Buffer` — most often a *dependency*
+(e.g. the OpenAI Realtime voice SDK), not app code — throws at eval/call time.
+
+The error wording is WebKit-specific: WebKitGTK (Tauri on Linux) says
+**"Can't find variable: Buffer"** where Chrome would say "Buffer is not
+defined". Both mean the same thing: a free identifier that doesn't exist.
+
+`Buffer.byteLength?.(s, 'utf8')` still throws — the `?.` only guards
+`.byteLength` being nullish, not the bare `Buffer` reference itself. In app
+code, use the Web equivalent: `new TextEncoder().encode(s).length`.
+
+## The fix
+
+App-code accidents → rewrite to a Web API (`TextEncoder`, `crypto.subtle`,
+`atob`/`btoa`). But dependencies you can't rewrite need the global restored.
+`apps/operator-vite/src/buffer-polyfill.ts` exposes the `buffer` package as the
+global, imported as the **first** line of `main.tsx` so it runs before any
+route module or dependency body evaluates:
+
+```ts
+// main.tsx — FIRST import
+import './buffer-polyfill';
+```
+
+```ts
+// buffer-polyfill.ts
+import { Buffer as BufferPolyfill } from 'buffer';
+if (typeof globalThis.Buffer === 'undefined') globalThis.Buffer = BufferPolyfill;
+```
+
+If a future dep needs `process`/`global`, add them the same way (or adopt
+`vite-plugin-node-polyfills`).
+
+## Sibling failure: `os.homedir`/`fs` called at module-eval
+
+Same root cause, different symptom:
+**`TypeError: (0,i7.homedir) is not a function`** (or `… is not a function` for
+any `node:os`/`node:fs`/`node:path` member). Vite **externalizes** Node
+built-ins to empty browser stubs — so `homedir`, `readFileSync`, etc. are
+`undefined`, not just missing globals. You can't polyfill these: the renderer
+genuinely can't read the OS home dir.
+
+The real bug is **server-only code being bundled into the SPA**. operator-vite
+is a *pure SPA* — there are no Server Components, so a `.tsx` that was a Next
+Server Component (or a lib it imports) now runs in the browser. A client
+component importing a server lib — even for one type or a `Set` like
+`db-encryption.ts`'s `ENCRYPTED_TABLES` — drags the whole module in. Real chains
+seen: `client cmpt → operator-state-pg.ts → db-encryption.ts` and
+`client cmpt → agent-tools/endpoint routes → omp-sessions.ts`.
+
+The crash is at **module-eval**, so it's almost always a top-level statement:
+
+```ts
+const KEY_FILE = join(homedir(), '.papercusp', 'db-encryption-key'); // throws on import
+```
+
+Fix = make the side effect **lazy** so importing the module is pure (and as a
+bonus, rolldown can then **tree-shake the now-side-effect-free unused server
+code out of the renderer bundle entirely**):
+
+```ts
+function keyFile() { return join(homedir(), '.papercusp', 'db-encryption-key'); }
+// …call keyFile() inside the function that actually needs it (server-side only)
+```
+
+Scan client-bundled libs for the pattern (server libs now live in
+`packages/operator-core/lib`, so scan there too):
+`grep -rnE "^(export )?const [A-Za-z0-9_]+ ?=.*(homedir|readFileSync|existsSync|hostname)\(" packages/operator-core/lib apps/operator/lib`
+then confirm which are actually in the renderer chunk by grepping the built
+`dist/assets/index-*.js` for a tell-tale string from each module. As of
+2026-05-31, latent (server-only, not yet bundled) offenders include
+`flag-distinct-id.ts`, `superuser-token.ts`, `console-launcher.ts`,
+`identity/keychain.ts`, and `flags/preset.ts` (all now under
+`packages/operator-core/lib/`) — fix them if the migration ever
+pulls them client-side. A regression guard lives in
+`packages/operator-core/lib/__tests__/no-server-imports-in-client.test.ts`.
+
+## Root cause: one value-import of a const drags the whole server subtree
+
+The lazy-fix above stops the *crash*, but the deeper bug is that server code is
+in the renderer bundle at all. The entire leak (postgres driver + db-encryption
+
+* papercusp-root + workspace-registry + agent-config) traced back to **one
+  line** — `app/settings/agent/page.tsx` value-importing the runtime const
+  `SURFACE_KEYS` from the server-only `agent-config.ts`:
+
+```ts
+import { SURFACE_KEYS, type SurfaceKey } from '@/lib/agent-config'; // ❌ drags the whole module
+```
+
+`SURFACE_KEYS` is just a string tuple, but importing *any value* from a module
+pulls that module's entire static-import subtree. `agent-config.ts` imports
+`node:fs/promises` and `operator-state-pg → db-encryption → @papercusp/db-org →
+connection.ts → postgres`. Types (`SurfaceKey`) are erased; **only the value
+import bites**.
+
+**Fix pattern — extract client-safe constants/types into a leaf module** with
+zero Node/server imports, and re-export from the server module for back-compat
+(mirrors `workspace-id-constant.ts`):
+
+```ts
+// agent-config-constants.ts  — leaf, no node/server imports
+export const SURFACE_KEYS = [...] as const;
+export type SurfaceKey = (typeof SURFACE_KEYS)[number];
+// agent-config.ts (server) — re-export so existing server callers are unaffected
+export { SURFACE_KEYS } from './agent-config-constants';
+// the client page imports from the leaf instead:
+import { SURFACE_KEYS } from '@/lib/agent-config-constants'; // ✅
+```
+
+### Diagnose it in 30 seconds
+
+The production build prints the authoritative leak surface — one line per
+server module pulled into the bundle:
+
+```bash
+npm run build:operator 2>&1 | grep "externalized for browser compatibility"
+```
+
+Each `imported by "<file>"` is a module in the renderer bundle that touches a
+Node built-in. An empty list = clean eager graph. To find the *client* root of
+a chain, BFS importers UP to a `apps/operator/app/**/*.tsx` or
+`apps/operator-vite/src/**` entry, following **only value edges** — `import
+type` and `await import()` don't eagerly bundle.
+
+### Acceptable residue: guarded dual-mode `await import()`
+
+After the fix the build still lists `connection.ts` + `postgres` — but only
+inside a **lazy** chunk (`delegates-*.js`), never the eager entry. That comes
+from commands that run in both browser and server and are correctly guarded:
+
+```ts
+if (typeof window !== 'undefined') { return fetch('/api/agent-mcp/delegates'…); }
+const { listDelegates } = await import('../../delegates'); // server-only branch
+```
+
+The browser returns before the dynamic import, so the chunk is **emitted but
+never fetched** in the renderer. This is fine — don't "fix" it by deleting the
+server branch (it's the in-process server path). The rule is **zero server
+modules in the *eager* entry chunk**, not zero in the whole `dist/`. Verify with:
+`grep -lF getOrgPg apps/operator-vite/dist/assets/index-*.js` → must be empty.
+
+## The trap that hides it: the desktop serves built `dist`, not live src
+
+`dev:operator` → `dev:nohmr` → **`vite build --watch`**, and the desktop loads
+the **`dist/` output** (HMR is off by default). Consequences:
+
+* Editing src does nothing until the watch-build emits a fresh `dist` **and**
+  you reload the Tauri window (Ctrl+R).
+* A **broken build silently freezes `dist`** at its last good output. The
+  desktop keeps running stale code and *no* source change reaches it. Check
+  `ls -lt apps/operator-vite/dist/assets/*.js` — if the newest file is old, the
+  watch build is failing. Run `npm run build:operator` to see the real error.
+
+A stray NUL byte in a `.tsx` (e.g. a literal control char used as a map-key
+delimiter) makes `rg`/`grep` treat the file as **binary and skip it** — so a
+"0 stragglers" import scan can be a lie. Force text with
+`grep -ra` / `grep --binary-files=text` when a build cites an import in a file
+your scan claims is clean.

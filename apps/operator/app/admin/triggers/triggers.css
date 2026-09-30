@@ -1,0 +1,445 @@
+.tr-shell {
+  color: var(--fg);
+  padding: 18px;
+  font-size: 13px;
+}
+
+.tr-disabled,
+.tr-state,
+.tr-empty {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-1);
+  color: var(--fg-dim);
+  padding: 18px;
+}
+
+.tr-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.tr-state-error,
+.tr-error-copy {
+  color: var(--bad);
+}
+
+.tr-intro {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.tr-intro h2,
+.tr-drawer h3 {
+  margin: 3px 0 0;
+  color: var(--fg);
+  font-size: 20px;
+  letter-spacing: 0;
+}
+
+.tr-intro p,
+.tr-drawer p {
+  max-width: 720px;
+  margin: 7px 0 0;
+  color: var(--fg-dim);
+  line-height: 1.5;
+}
+
+.tr-kicker {
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.tr-button {
+  min-height: 34px;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 35%);
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+  padding: 0 13px;
+  font: inherit;
+  font-weight: 700;
+}
+
+.tr-button-secondary {
+  background: var(--bg-1);
+  color: var(--fg);
+}
+
+.tr-button:disabled,
+.tr-switch:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.tr-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 18px 0 14px;
+}
+
+.tr-metric {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--bg-1), transparent 4%);
+  padding: 12px 14px;
+}
+
+.tr-metric span {
+  color: var(--fg-mute);
+  font-size: 11px;
+}
+
+.tr-metric strong {
+  font-size: 22px;
+}
+
+.tr-metric.good strong,
+.tr-good {
+  color: var(--good);
+}
+.tr-metric.bad strong {
+  color: var(--bad);
+}
+
+.tr-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tr-tab {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+  padding: 9px 11px;
+  font: inherit;
+  font-weight: 650;
+}
+
+.tr-tab.active {
+  border-bottom-color: var(--accent);
+  color: var(--fg);
+}
+
+.tr-list {
+  display: grid;
+  gap: 9px;
+}
+
+.tr-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--bg-1), transparent 2%);
+  padding: 13px 14px;
+}
+
+.tr-card.muted {
+  opacity: 0.72;
+}
+.tr-card-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.tr-card-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 7px;
+}
+
+.tr-card code,
+.tr-table code {
+  color: var(--accent-strong);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.tr-meta {
+  overflow-wrap: anywhere;
+  color: var(--fg-mute);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.tr-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-1);
+  color: var(--fg-dim);
+  padding: 0 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.status-connected,
+.status-ready,
+.run-succeeded {
+  color: var(--good);
+}
+.status-degraded,
+.run-skipped {
+  color: var(--warn);
+}
+.status-error,
+.run-failed {
+  color: var(--bad);
+}
+
+.tr-card-actions {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+  min-width: 100px;
+  color: var(--fg-mute);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.tr-switch {
+  display: flex;
+  align-items: center;
+  width: 38px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-3);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.tr-switch span {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--fg-mute);
+  transition:
+    transform 120ms,
+    background 120ms;
+}
+
+.tr-switch.on {
+  border-color: color-mix(in srgb, var(--good), transparent 30%);
+  background: color-mix(in srgb, var(--good), transparent 62%);
+}
+
+.tr-switch.on span {
+  transform: translateX(16px);
+  background: var(--fg);
+}
+
+.tr-link {
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 10px;
+  text-transform: none;
+}
+
+.tr-link-danger {
+  color: rgb(248, 113, 113);
+}
+
+.tr-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.tr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.tr-table th,
+.tr-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 9px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.tr-table th {
+  background: var(--bg-1);
+  color: var(--fg-mute);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.tr-table small {
+  display: block;
+  margin-top: 3px;
+  color: var(--fg-mute);
+}
+
+.tr-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(2, 6, 12, 0.7);
+}
+
+.tr-drawer {
+  width: min(430px, 100vw);
+  height: 100%;
+  box-sizing: border-box;
+  overflow: auto;
+  border-left: 1px solid var(--border-strong);
+  background: var(--bg-popover);
+  box-shadow: -24px 0 72px rgba(0, 0, 0, 0.45);
+  padding: 20px;
+}
+
+.tr-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tr-close {
+  border: 0;
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+  font-size: 24px;
+}
+
+.tr-drawer label {
+  display: grid;
+  gap: 6px;
+  margin-top: 18px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tr-drawer input {
+  min-height: 38px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: none;
+  background: var(--bg-1);
+  color: var(--fg);
+  padding: 0 10px;
+  font: inherit;
+}
+
+.tr-drawer input:focus {
+  border-color: var(--accent);
+}
+
+.tr-drawer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+@media (max-width: 780px) {
+  .tr-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tr-card {
+    flex-direction: column;
+  }
+  .tr-card-actions {
+    display: flex;
+    align-items: center;
+    justify-items: initial;
+  }
+  .tr-intro {
+    flex-direction: column;
+  }
+}
+
+/* --- P-027: social source facts on the sources view ----------------------- */
+
+.tr-filter-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.tr-filter {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-1);
+  color: var(--fg-dim);
+  padding: 3px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tr-filter.is-active {
+  border-color: var(--accent-strong);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.tr-social {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tr-social .tr-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.tr-social-tag {
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.tr-social-platform {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+/* Cursor freshness. `idle` is deliberately NOT an error colour: a source that
+   has never synced is cold, not broken. Only an unreadable cursor is a fault. */
+.tr-social-cursor.tone-ok { color: var(--good); }
+.tr-social-cursor.tone-idle { color: var(--fg-mute); }
+.tr-social-cursor.tone-warn { color: var(--bad); }
+
+.tr-social-hold {
+  color: var(--warn);
+}

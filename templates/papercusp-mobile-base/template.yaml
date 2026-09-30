@@ -1,0 +1,78 @@
+# papercusp-mobile-base — 'Papercusp Official: Mobile Base' (scope: aspect,
+# category: shell; official-mobile-app-templates-2026-08-20 P-006/P-007).
+# Machine twin: @papercusp/template-kit src/reference-templates.ts
+# PAPERCUSP_MOBILE_BASE_TEMPLATE — the kit suite pins this file to it.
+id: papercusp-mobile-base
+version: "0.1.0"
+scope: aspect
+category: shell
+summary: >-
+  The cross-platform base for official Papercusp mobile apps: a three-crate
+  Rust workspace (portable core, one UniFFI bindings crate, and an off-device
+  CLI), one generated Kotlin/Swift boundary, deterministic design tokens,
+  explicit non-secret runtime configuration, source/placeholder/secret
+  hygiene, and portable verification. Product domain behavior, endpoints,
+  copy, navigation, branding, assets, and optional native capabilities stay
+  in the consuming app.
+components:
+  - { id: rust-uniffi-mobile-base, version: 0.1.0 }
+contracts: []
+decisionPoints:
+  - id: product-domain
+    prompt: >-
+      What domain behavior belongs in the portable Rust core, and what remains
+      native presentation?
+  - id: rust-msrv
+    prompt: Which supported Rust MSRV does the app require?
+  - id: license-and-repository
+    prompt: >-
+      What SPDX license, authorship, and repository metadata replace the
+      neutral starter values?
+  - id: design-token-source
+    prompt: >-
+      Which product token values and typography replace the neutral token
+      source while preserving deterministic Kotlin/Swift generation?
+  - id: optional-capabilities
+    prompt: >-
+      Which optional native seams—credentials, deep links, push, crash
+      reporting, analytics, camera, microphone, media playback, or local
+      networking—are enabled?
+  - id: runtime-configuration
+    prompt: >-
+      Which non-secret endpoints/identifiers are build-time versus runtime
+      inputs, and which device credentials use secure storage?
+composesWith: []
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+checks:
+  - id: mobile-base-contract
+    run: checks/mobile-base-contract.test.ts
+    summary: >-
+      the three-crate Rust/UniFFI/token scaffold exists and source is free of
+      unallowlisted placeholders, secret paths, and credential signatures
+  - id: mobile-base-commands
+    run: checks/mobile-base-commands.test.ts
+    summary: >-
+      the configured Rust, binding-smoke, and token-drift commands execute
+      directly and pass
+musts:
+  - id: portable-domain-core
+    rule: "Portable domain outcomes, state transitions, validation, serialization, and error taxonomy live in Rust; native shells own presentation and platform lifecycle"
+    enforcedBy: mobile-base-contract
+  - id: single-uniffi-boundary
+    rule: "One UDL is the native contract source and generated Kotlin/Swift never becomes a hand-maintained second boundary"
+    enforcedBy: mobile-base-contract
+  - id: deterministic-mobile-tokens
+    rule: "One neutral token source deterministically generates Kotlin and Swift outputs and fails on drift"
+    enforcedBy: mobile-base-commands
+  - id: no-secrets-or-placeholders
+    rule: "Tracked source contains no usable credential, service payload, generated native artifact, unresolved identity placeholder, or foreign product identity outside an explicit allowlist"
+    enforcedBy: mobile-base-contract
+  - id: portable-verification
+    rule: "Rust format, clippy, tests, boundary smoke, and token drift execute as direct configured commands; unsupported platform legs report host-constrained in their shell checks"
+    enforcedBy: mobile-base-commands
+  - id: optional-capabilities-stay-optional
+    rule: "Credentials, links, push, analytics, crash reporting, camera, microphone, media, and local networking add no default base dependency"
+    enforcedBy: prose-only

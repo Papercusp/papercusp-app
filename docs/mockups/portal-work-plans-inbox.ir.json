@@ -1,0 +1,252 @@
+{
+  "irVersion": "0.1",
+  "surface": "portal-work-plans-inbox",
+  "ecosystem": "react-tailwind",
+  "layout": {
+    "kind": "stack",
+    "direction": "vertical",
+    "gap": { "token": "space.md" },
+    "padding": { "token": "space.lg" },
+    "children": [
+      {
+        "kind": "header",
+        "children": [
+          {
+            "kind": "heading",
+            "copy": {
+              "key": "portal.work.title",
+              "default": "Work"
+            }
+          },
+          {
+            "kind": "component",
+            "ref": "work-search"
+          },
+          {
+            "kind": "component",
+            "ref": "view-options"
+          }
+        ]
+      },
+      {
+        "kind": "tabs",
+        "children": [
+          {
+            "kind": "text",
+            "copy": {
+              "key": "portal.work.face.plans",
+              "default": "Plans"
+            }
+          },
+          {
+            "kind": "badge",
+            "copy": {
+              "key": "portal.work.face.inbox-count",
+              "default": "Inbox · 7"
+            }
+          }
+        ],
+        "interactions": ["select-work-face", "sync-query-state"],
+        "a11y": {
+          "role": "tablist",
+          "ariaLabel": {
+            "key": "portal.work.faces-label",
+            "default": "Work surfaces"
+          },
+          "focusOrder": 0
+        }
+      },
+      {
+        "kind": "grid",
+        "gap": { "token": "space.md" },
+        "children": [
+          {
+            "kind": "list",
+            "binding": {
+              "slot": "plans",
+              "repeats": true,
+              "shape": "PlanSummary"
+            },
+            "item": {
+              "kind": "card",
+              "interactions": ["select-plan", "sync-plan-query-state"],
+              "a11y": {
+                "role": "option",
+                "ariaLabel": {
+                  "key": "portal.work.plan-row-label",
+                  "default": "Open plan"
+                }
+              }
+            },
+            "emptyState": {
+              "kind": "empty-state",
+              "copy": {
+                "key": "portal.work.plans-empty",
+                "default": "No plans match these filters."
+              }
+            }
+          },
+          {
+            "kind": "stack",
+            "direction": "vertical",
+            "gap": { "token": "space.md" },
+            "children": [
+              {
+                "kind": "card",
+                "title": {
+                  "key": "portal.work.plan-now",
+                  "default": "Now and next"
+                },
+                "binding": {
+                  "slot": "selectedPlan.now",
+                  "shape": "PlanNow"
+                }
+              },
+              {
+                "kind": "list",
+                "title": {
+                  "key": "portal.work.working-now",
+                  "default": "Working now"
+                },
+                "binding": {
+                  "slot": "selectedPlan.sessions",
+                  "repeats": true,
+                  "shape": "PlanSession"
+                },
+                "item": { "kind": "card" },
+                "emptyState": {
+                  "kind": "empty-state",
+                  "copy": {
+                    "key": "portal.work.sessions-empty",
+                    "default": "No live sessions on this plan."
+                  }
+                }
+              },
+              {
+                "kind": "component",
+                "ref": "launch-agent"
+              },
+              {
+                "kind": "component",
+                "ref": "open-details"
+              }
+            ]
+          }
+        ],
+        "responsive": {
+          "viewport.laptop": {
+            "secondaryRail": "tabs-and-chips",
+            "detailSecondary": "drawer"
+          },
+          "viewport.mobile": {
+            "layout": "route-backed-list-or-detail",
+            "backAffordance": true
+          }
+        }
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "work-search",
+      "registry": "control.text",
+      "props": {
+        "placeholder": "Search plans and inbox…",
+        "leading": "search"
+      }
+    },
+    {
+      "id": "view-options",
+      "registry": "overlay.popover",
+      "props": {
+        "ariaLabel": "View and sort options",
+        "variant": "bottom-end"
+      }
+    },
+    {
+      "id": "launch-agent",
+      "registry": "action.primary",
+      "props": {
+        "label": "Launch agent"
+      }
+    },
+    {
+      "id": "open-details",
+      "registry": "action.secondary",
+      "props": {
+        "label": "Open details"
+      }
+    }
+  ],
+  "tokens": {
+    "uses": ["space.md", "space.lg"]
+  },
+  "states": {
+    "inbox-face": {
+      "kind": "grid",
+      "binding": {
+        "slot": "ownerAttention",
+        "shape": "AttentionCollection"
+      },
+      "children": [
+        {
+          "kind": "list",
+          "item": { "kind": "card" },
+          "emptyState": {
+            "kind": "empty-state",
+            "copy": {
+              "key": "portal.work.inbox-empty",
+              "default": "Nothing needs your attention."
+            }
+          }
+        },
+        {
+          "kind": "card",
+          "binding": {
+            "slot": "selectedAttentionItem",
+            "shape": "AttentionDetail"
+          }
+        }
+      ]
+    },
+    "loading": {
+      "kind": "banner",
+      "copy": {
+        "key": "portal.work.loading",
+        "default": "Loading workspace work…"
+      },
+      "a11y": {
+        "role": "status",
+        "ariaLive": "polite"
+      }
+    },
+    "error": {
+      "kind": "banner",
+      "copy": {
+        "key": "portal.work.load-error",
+        "default": "Work could not be loaded."
+      },
+      "children": [
+        {
+          "kind": "button",
+          "label": {
+            "key": "portal.work.retry",
+            "default": "Retry"
+          },
+          "interactions": ["retry"],
+          "a11y": {
+            "role": "button",
+            "ariaLabel": {
+              "key": "portal.work.retry-label",
+              "default": "Retry loading Work"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "a11y": {
+    "landmark": "main",
+    "headingLevel": 1
+  }
+}

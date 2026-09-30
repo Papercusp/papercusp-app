@@ -1,0 +1,180 @@
+# Verify what's inside a packaged installer WITHOUT extracting it — grep the raw-stored payload, but prove your detector fires first
+URL: /internal/docs/agent-insights/verifying-installer-payloads-without-extraction
+
+innoextract isn't installed and 7z has no Inno handler, so 'what's actually in this Windows installer?' looks blocked. It isn't: papercusp.iss stores the seed/resources with `nocompression` + `SolidCompression=no`, so those bytes sit RAW in the payload and are directly greppable — no extraction, no VM, no new tooling. The trap is that a grep returning 0 hits is NOT evidence of absence until you've proven (a) the region is searchable at all and (b) your pattern fires on a real instance. Two controls turn a meaningless silence into a real measurement.
+
+## The wall that isn't a wall
+
+You need to answer "does the shipped Windows installer actually contain X?" and:
+
+* `innoextract` is **not installed** on the build box;
+* `7z` has **no Inno handler** (`7z i` lists NSIS only — verify, don't assume);
+* installing tooling on a shared box, or touching a build VM, is **gated**.
+
+This reads as blocked. It usually isn't. `papercusp.iss:52` documents that the
+big payloads are stored **uncompressed**:
+
+> Per-file compression (SolidCompression=no): the seed (encrypted corestore +
+> rootfs) are ENCRYPTED/pre-compressed (stored raw in the installer)
+
+`SolidCompression=no` + `nocompression` on those `[Files]` entries means **those
+bytes appear verbatim in the payload**. You can `grep -a` the installer directly.
+This generalises: any packager that stores pre-compressed/encrypted blobs raw
+(to avoid pointless double-compression) leaks a searchable window into its payload.
+
+## The trap: absence is not evidence until you've earned it
+
+`grep -c 'BadThing' installer.bin` → `0` proves **nothing** on its own. It is
+equally consistent with:
+
+1. BadThing genuinely isn't there ✅ (what you want to conclude)
+2. the region is compressed/encrypted, so *nothing* is greppable ❌
+3. your pattern is wrong and would never match even a real BadThing ❌
+
+Readings 2 and 3 are how a verification produces a confident, wrong PASS. Two
+controls collapse them:
+
+### Control 1 — positive control: prove the region is searchable
+
+Grep for something you **know is there**. For the corestore seed, the db dir's
+`IDENTITY` file is ideal — a UUID, unique, guaranteed present:
+
+```bash
+ID=$(cat "$SEED/corestore/db/IDENTITY")        # e.g. 2cd89561-5530-4357-b5b3-3e585e9bacd6
+LC_ALL=C grep -a -c -- "$ID" "Papercusp Server_0.0.11_x64-setup-2.bin"   # → 5  ✅ searchable
+LC_ALL=C grep -a -c -- "$ID" "Papercusp GUI_0.0.11_x64-setup.exe"        # → 0  (no seed at all)
+```
+
+A **non-zero** hit in the bundle under test means the region really is raw and
+your later "0 hits" is meaningful. If the positive control is also 0, **stop** —
+you cannot conclude anything about absence.
+
+### Control 2 — negative control: prove your detector FIRES
+
+Find a real instance of the thing you're hunting and confirm your pattern
+matches it. For a RocksDB diagnostic `LOG`:
+
+```bash
+# find a real LOG anywhere on the box and prove the regex fires
+find /tmp -path '*db/LOG' -size +0 | head -3 | while read f; do
+  LC_ALL=C grep -a -c -E '20[0-9]{2}/[0-9]{2}/[0-9]{2}-[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+ .{0,20}RocksDB version:' "$f"
+done       # → 1, 1, 1  ✅ the detector works
+```
+
+Only now does `0` on the artifact mean **absence**.
+
+### Why *that* regex (the discriminator matters)
+
+Naively grepping `RocksDB version:` gives false positives: **rocksdb's own native
+binary carries that string as a format template**, and the sidecar ships in every
+bundle. The discriminator is the **timestamp prefix** — a real LOG line looks like
+
+```
+2026/07/12-14:20:41.167234 42655 RocksDB version: 10.5.1
+```
+
+whereas the binary's copy has no timestamp. Anchor on the part that only exists
+in *emitted* output, never in the code that emits it. This is the general shape:
+**find the token that distinguishes an instance of the artifact from the machinery
+that produces it.**
+
+## What this method can and cannot reach
+
+Applied to the 0.0.11 Windows artifacts (WI-5016) it produced real measurements:
+
+| question                                           | reachable?          | how                                                                                                                       |
+| -------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| does the Server bundle contain the seed?           | ✅ measured          | manifest `coreKey` → 7 + 3 hits across the two `.bin` slices                                                              |
+| does the GUI bundle contain the seed?              | ✅ measured          | same key → **0 hits** (correct — `iss:105` guards it Server-only)                                                         |
+| is a stray RocksDB `LOG` shipped?                  | ✅ measured          | detector validated, then **0 hits** in all artifacts                                                                      |
+| are `{app}\seed` and `{app}\sidecar` **siblings**? | ❌ **not reachable** | Inno's file-destination records live in the setup.exe's **compressed header** — grep can't see them. Needs `innoextract`. |
+| does the seed get **consumed** at runtime?         | ❌ not reachable     | needs a real install on the target OS                                                                                     |
+
+Be explicit about that boundary when you report. "The seed bytes are in the
+bundle" is **not** "the installer puts them where the app looks" is **not** "the
+app consumes them". Three different claims, three different proofs. Reporting the
+first as if it were the third is exactly how 0.0.9 and 0.0.10 shipped a seed that
+did nothing (see
+[verifying-seed-consumption-headless](/internal/docs/agent-insights/verifying-seed-consumption-headless)).
+
+## Windows-specific gotchas this surfaced
+
+**The build emits TWO installers, and the first one to land is the wrong one to
+verify.** `papercusp.iss:105` guards the seed behind
+`#if AppId == "com.papercusp.server"` — the **GUI** bundle ships **no seed by
+design** (WI-3234: on Windows the GUI role never restores a seed; it attaches to
+or launches the Server bundle, whose sidecar owns restore. **WINDOWS is the
+exception — NOT "Linux-only".** An earlier revision of this doc said "self-hosting
+in one bundle is Linux-only"; that is WRONG, and it contradicted this same doc's
+own note below that `main.rs:4011` enumerates macOS. MEASURED 2026-07-16 against
+the shipped 0.0.11 mac GUI: it carries the FULL seed at `Contents/Resources/seed`
+— corestore 700,901,586 bytes across 27 files, exactly its manifest's declared
+`sizeBytes`, same `coreKey`/`coreLength` as the linux+windows staged seed. So the
+GUI self-hosts on **Linux AND macOS**; only Windows splits it out). The GUI
+installer finishes first. Verifying it yields a
+release-blocking **false negative** — "Windows ships no seed!" — that is simply
+wrong. **Always target `*Server*x64-setup*.exe`.**
+
+**The Server installer is disk-SPANNED.** `iss:73` sets `DiskSpanning=yes` when
+`sidecar\source.tar.zst` is staged and `/DSingleFile` isn't passed, so the output
+is a small stub plus slices:
+
+```
+Papercusp Server_0.0.11_x64-setup.exe         3,758,036   ← stub only
+Papercusp Server_0.0.11_x64-setup-1.bin   2,096,241,920
+Papercusp Server_0.0.11_x64-setup-2.bin   1,870,534,189
+```
+
+A 3.6 MB "installer" looks broken and isn't — but **grep the `.bin` slices, not
+the stub**, or you'll measure 0 hits on an empty shell and conclude the payload
+is missing. (This layout is also why `.bin` must travel with the exe — the
+publish path getting that wrong is **EI-12913**.)
+
+**Don't reason from Linux.** Windows is the only platform whose sidecar runs in
+**WSL**: `SIDECAR_WSLENV` (`main.rs:3961`) passes `PAPERCUSP_SEED_DIR/p`, a
+Win→WSL path translation, and `main.rs:4020` notes PGDATA **cannot** live on
+DrvFs (`/mnt/c`). A Linux PASS says nothing about any of that. Note too that
+`main.rs:4011`'s sibling-layout comment enumerates Linux `.deb`, macOS, and the
+dev tree — **Windows is not named**.
+
+## Check your calibration target is real
+
+A prior `Papercusp Server_0.0.8_x64-setup.exe` sitting in a scratch dir looked
+like a perfect control to develop the method against. It is a **10-byte stub**.
+`stat` it before you build a plan on it — five seconds that saves an hour of
+debugging a "method" against a file with no payload.
+
+## Recipe
+
+```bash
+D=.../src-tauri/target/windows-vm/bundle/inno
+SEED=.../papercusp-desktop/src-tauri/seed
+
+# 0. the source of truth: is the thing even staged? (and does the manifest match the other platforms?)
+find "$SEED" -iname 'LOG*' | wc -l          # 0 = no diagnostic LOG staged
+python3 -c "import json;m=json.load(open('$SEED/manifest.json'));print(m['cutTs'],[ (s['kind'],s['meta'].get('coreLengths')) for s in m['stores']])"
+
+# 1. positive control — is the region searchable in the artifact under test?
+ID=$(cat "$SEED/corestore/db/IDENTITY")
+LC_ALL=C grep -a -c -- "$ID" "$D/Papercusp Server_0.0.11_x64-setup-2.bin"
+
+# 2. negative control — does the detector fire on a REAL instance?
+find /tmp -path '*db/LOG' -size +0 | head -1 | xargs -I{} \
+  grep -a -c -E '20[0-9]{2}/[0-9]{2}/[0-9]{2}-.* RocksDB version:' {}
+
+# 3. only now: the actual measurement
+for f in "$D"/*.bin "$D"/*setup.exe; do
+  printf '%-50s %s\n' "$(basename "$f")" \
+    "$(LC_ALL=C grep -a -c -E '20[0-9]{2}/[0-9]{2}/[0-9]{2}-.* RocksDB version:' "$f")"
+done
+```
+
+## The generalisable rule
+
+> A verification that has never been shown to fail is not a verification.
+
+Before you report PASS on the strength of something *not* being found, prove the
+search could have found it: one control that the haystack is searchable, one that
+the needle's pattern matches a real needle. Both are cheap. Skipping them is how
+you hand someone a confident PASS that means nothing — and on a release path,
+that is worse than reporting "I couldn't check."

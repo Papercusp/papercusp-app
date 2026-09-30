@@ -1,0 +1,128 @@
+{
+  "evidenceRef": "WI-6445 / pair code-search.definition-lookup (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T13:34:00Z",
+  "totalAtoms": 44,
+  "totalSessions": 29,
+  "sample": [
+    {
+      "sid": "su-effd3151-c12a-4fb3-8643-252d19652ef6",
+      "ts": "2026-07-20T05:56:47.052Z",
+      "atom": "grep -rln \"export function foldHandoffs\" packages/coordination/src/ 2>/dev/null"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-21T02:39:56.986Z",
+      "atom": "grep -rln \"function projectDirForSlug\" packages/operator-core/lib --include=\"*.ts\""
+    },
+    {
+      "sid": "su-9d726f46-c7bc-4986-8700-62340b58689d",
+      "ts": "2026-07-26T01:09:08.578Z",
+      "atom": "grep -rn \"class PgLinkStore\" -A 5 packages/operator-core/lib/**/*.ts 2>/dev/null"
+    },
+    {
+      "sid": "su-c12c22d8-2503-489d-8649-bdfcb3d68910",
+      "ts": "2026-07-26T07:30:23.414Z",
+      "atom": "grep -rn \"class PgTaggableStore\" -A 40 packages/coordination/src/capabilities/*.ts"
+    },
+    {
+      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
+      "ts": "2026-07-26T13:52:47.964Z",
+      "atom": "grep -rn \"export async function advanceHiveEpoch\" -A 25 packages/operator-core/lib/sync/hyperbee/ 2>/dev/null"
+    },
+    {
+      "sid": "su-9d726f46-c7bc-4986-8700-62340b58689d",
+      "ts": "2026-07-26T01:08:57.322Z",
+      "atom": "grep -rn \"export async function linkWorkItem\" packages/operator-core/lib/*.ts packages/operator-core/lib/**/*.ts 2>/dev/null"
+    },
+    {
+      "sid": "su-88c3bf51-e38b-47a4-b357-4c547d0e65be",
+      "ts": "2026-07-25T20:33:49.318Z",
+      "atom": "grep -rn \"export async function openConversationCore\" -A 110 packages/operator-core/lib/agent-tools/coordination/conversations-core.ts 2>/dev/null"
+    },
+    {
+      "sid": "su-1acf5890-4740-4a79-a5c0-440b62a880bb",
+      "ts": "2026-07-26T00:40:05.634Z",
+      "atom": "grep -rn \"export async function potHomeSlugForHarness\" -A 30 packages/operator-core/lib/ 2>/dev/null"
+    },
+    {
+      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
+      "ts": "2026-07-26T13:54:20.434Z",
+      "atom": "grep -rn \"export async function reconcileOwnedHiveEpochKeys\" -A 55 packages/operator-core/lib/sync/hyperbee/hive-epoch-boundary-wiring.ts"
+    },
+    {
+      "sid": "su-a8557b00-55fb-4438-a7bd-f269a7a3bf6c",
+      "ts": "2026-07-26T04:03:32.496Z",
+      "atom": "grep -rn \"export async function setIssueState\" -A 80 packages/operator-core/lib/"
+    },
+    {
+      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
+      "ts": "2026-07-26T00:24:45.955Z",
+      "atom": "grep -rn \"export function classifyAgentPane\" -A 40 packages/agent-mcp/src/*.ts 2>/dev/null"
+    },
+    {
+      "sid": "su-ea8d3491-fd1c-441b-bef7-ffb820450f53",
+      "ts": "2026-07-26T06:27:13.881Z",
+      "atom": "grep -rn \"export function defineTool\" packages/agent-mcp/src/*.ts 2>/dev/null"
+    },
+    {
+      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
+      "ts": "2026-07-26T17:34:17.668Z",
+      "atom": "grep -rn \"export function format\" packages/operator-core/lib/format/*.ts apps/operator/lib/format*.ts 2>/dev/null"
+    },
+    {
+      "sid": "su-88c3bf51-e38b-47a4-b357-4c547d0e65be",
+      "ts": "2026-07-25T22:01:31.873Z",
+      "atom": "grep -rn \"export function schemaRequiresArgs\" -A 20 packages/operator-core/lib packages/agent-mcp/src 2>/dev/null"
+    },
+    {
+      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
+      "ts": "2026-07-25T23:42:20.713Z",
+      "atom": "grep -rn \"export interface LaunchOpts\" -A 60 packages/operator-core/lib/*.ts 2>/dev/null"
+    },
+    {
+      "sid": "su-e3b21216-e294-4a92-b8f8-5a73a244ff09",
+      "ts": "2026-07-26T00:36:39.561Z",
+      "atom": "grep -rn \"function classifyClaimFailure\" -A 25 --include=*.ts packages/operator-core/lib/"
+    },
+    {
+      "sid": "su-63f9b336-5b17-461a-b12e-a8421de9a09b",
+      "ts": "2026-07-26T05:31:02.109Z",
+      "atom": "grep -rn \"function looksLikePolicyGate\" packages/operator-core/lib/"
+    },
+    {
+      "sid": "su-cd450e2a-a441-442a-afe6-f112522cbde8",
+      "ts": "2026-07-20T18:41:13.850Z",
+      "atom": "grep -rn \"function provisionGymDatabase\" packages/operator-core/lib/gym/*.ts"
+    },
+    {
+      "sid": "su-63f9b336-5b17-461a-b12e-a8421de9a09b",
+      "ts": "2026-07-26T05:37:47.146Z",
+      "atom": "grep -rn \"interface AccountEgress\" packages/operator-core/lib/"
+    },
+    {
+      "sid": "su-143b12bd-edcc-4af5-b983-3ec8f258b992",
+      "ts": "2026-07-20T05:10:04.899Z",
+      "atom": "grep -rn \"interface DevDeployState\" packages/operator-core/lib --include=\"*.ts\" -I"
+    },
+    {
+      "sid": "su-ea8d3491-fd1c-441b-bef7-ffb820450f53",
+      "ts": "2026-07-26T02:18:14.739Z",
+      "atom": "grep -rn \"interface PlanIndexRow\" packages/operator-core/lib/"
+    },
+    {
+      "sid": "su-d93ac1bf-d48f-420d-8136-dea6de467e7f",
+      "ts": "2026-07-20T18:05:34.089Z",
+      "atom": "grep -rn \"interface ProvenanceContext\" packages/operator-core/lib/sync/hyperbee/projection.ts"
+    },
+    {
+      "sid": "su-92bacd98-b714-4f44-a4fc-08e73ea7ca39",
+      "ts": "2026-07-25T21:07:34.782Z",
+      "atom": "grep -rn \"interface SystemActionCtx\" -A 15 --include=\"*.ts\" packages/operator-core/lib/harness/routines/system-actions.ts"
+    },
+    {
+      "sid": "su-e044d888-c238-4311-8eb0-aef7896b3e92",
+      "ts": "2026-07-19T21:48:17.748Z",
+      "atom": "grep -rn 'export function intFromEnv' packages/operator-core/lib --include='*.ts'"
+    }
+  ]
+}

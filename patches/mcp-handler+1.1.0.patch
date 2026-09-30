@@ -1,0 +1,44 @@
+diff --git a/node_modules/mcp-handler/dist/index.js b/node_modules/mcp-handler/dist/index.js
+index 11072f7..27d7543 100644
+--- a/node_modules/mcp-handler/dist/index.js
++++ b/node_modules/mcp-handler/dist/index.js
+@@ -363,6 +363,17 @@ function initializeMcpApiHandler(initializeServer, serverOptions = {}, config =
+               );
+             }
+             throw error;
++          } finally {
++            try {
++              if (server && server.server) {
++                yield server.server.close();
++              }
++              if (transport && transport.close) {
++                yield transport.close();
++              }
++            } catch (closeErr) {
++              logger.error("Error closing per-request POST server/transport:", closeErr);
++            }
+           }
+         }
+       } else if (url.pathname === sseEndpoint) {
+diff --git a/node_modules/mcp-handler/dist/index.mjs b/node_modules/mcp-handler/dist/index.mjs
+index c111040..2efd7d8 100644
+--- a/node_modules/mcp-handler/dist/index.mjs
++++ b/node_modules/mcp-handler/dist/index.mjs
+@@ -357,6 +357,17 @@ function initializeMcpApiHandler(initializeServer, serverOptions = {}, config =
+               );
+             }
+             throw error;
++          } finally {
++            try {
++              if (server && server.server) {
++                yield server.server.close();
++              }
++              if (transport && transport.close) {
++                yield transport.close();
++              }
++            } catch (closeErr) {
++              logger.error("Error closing per-request POST server/transport:", closeErr);
++            }
+           }
+         }
+       } else if (url.pathname === sseEndpoint) {

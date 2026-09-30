@@ -1,0 +1,23 @@
+-- 670-add-facts-confidence.sql — SUPERSEDED, intentional no-op.
+--
+-- Originally reserved for EI-18681964809855890 ("facts:assert has no
+-- confidence/provenance-strength field"). While drafting this migration, a
+-- LIVE COLLISION was discovered: EI-18685042519649106 — an independent
+-- work-item filed for the SAME owner-reported incident (a peer's unreplicated
+-- A/B rendering at full authority in a folded fact) — was claimed and being
+-- actively implemented by another agent (su-38101f27) in the same file
+-- (packages/operator-core/lib/agent-facts/store.ts) concurrently, under
+-- migration 669, with an equivalent-but-different design (`strength`:
+-- 'measured'|'single-run'|'reported'|'inferred' + `sourceOwnerId`, vs. this
+-- migration's `confidence`: 'verified'|'provisional'|'suspected').
+--
+-- Rather than land TWO overlapping columns encoding the same concept, this
+-- work was deferred to the peer's implementation (migration 669) — already
+-- further along (migration reserved first, actively mid-write holding the
+-- file lock). EI-18681964809855890 was closed as a duplicate of
+-- EI-18685042519649106. This migration NUMBER stays reserved (so 670 is never
+-- reused for something unrelated) but intentionally does nothing.
+--
+-- Idempotent no-op.
+
+SELECT 1;

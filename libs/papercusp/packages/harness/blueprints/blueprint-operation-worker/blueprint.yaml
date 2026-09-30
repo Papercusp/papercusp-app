@@ -1,0 +1,15 @@
+# Neutral execution identity for a pinned blueprint operation. This is an
+# abstract layer composed into an existing launch, not a second task runner.
+id: blueprint-operation-worker
+extends: base
+version: 0.1.0
+description: >-
+  Domain-neutral worker identity for one accepted blueprint operation.
+  Runtime grants and the operation's current authority checks remain external.
+
+slots:
+  - slot: domain
+
+# An empty declaration is an explicit deny-all until an operation supplies
+# current, host-validated tool authority. Absence would select legacy grants.
+grants: {}

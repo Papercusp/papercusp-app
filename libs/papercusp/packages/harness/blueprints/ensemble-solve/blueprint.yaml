@@ -1,0 +1,48 @@
+# ensemble-solve — ENSEMBLE coordination topology (benchmark-coordination-topologies).
+#
+# N agents solve the SAME task INDEPENDENTLY (no coordination during — team:per-task), then a JUDGE
+# role picks/merges the best solution (aggregate:judge-best). This is the key CONTROL arm: ensemble is
+# a known-strong technique with NO real-time coordination — if "real coordination" (broadcast / peer-
+# review / huddle / Queen) can't beat ensemble-vote, that's a finding. Distinct from the `vote`
+# blueprint (which votes on a DECISION); here the judge picks the best diff/solution.
+id: ensemble-solve
+extends: base
+version: 0.1.0
+description: >-
+  Ensemble: N agents solve the same task independently (no coordination during), then a judge picks the
+  best solution. The aggregation-after control arm for the coordination-topology study.
+
+workItem:
+  kind: feature
+  idPrefix: W
+
+dispatch:
+  concurrency: 4
+
+spine:
+  # The ensemble TEAM pulls a task; the runtime fans N independent solvers onto it + runs the judge.
+  claimModel: self-claim-fifo
+  maxTurns: 200
+
+dependencies:
+  tools: []
+  packs: []
+  plugins: []
+  blueprints: []
+
+coordination:
+  broadcast: none        # solvers do NOT coordinate during — independent attempts
+  review: none
+  sharedState: both
+  team: per-task         # N agents per task (not per-backlog)
+  aggregate: judge-best  # a judge picks/merges the best of the N independent solutions
+
+roles:
+  - id: solver
+    description: >-
+      One of N agents that solve the task INDEPENDENTLY (no peer coordination); produces a candidate
+      solution. Diversity across solvers is the point.
+  - id: judge
+    description: >-
+      Picks/merges the best of the N solver candidates for the task (the aggregation step). Its choice
+      is the task's result.

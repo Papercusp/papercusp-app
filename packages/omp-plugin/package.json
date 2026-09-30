@@ -1,0 +1,37 @@
+{
+  "name": "@papercusp/omp",
+  "version": "0.1.0",
+  "description": "Launch an OMP agent session pre-seeded with the Papercusp engineer-collaborator playbook, scoped to one workspace.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "papercusp-omp": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node build-native.mjs",
+    "build:native": "node build-native.mjs",
+    "typecheck": "bash ../../scripts/pc-heavy.sh tsc -p tsconfig.json --noEmit && bash ../../scripts/pc-heavy.sh tsc -p tsconfig.native.json",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "papercusp",
+    "omp",
+    "oh-my-pi",
+    "mcp",
+    "agent"
+  ],
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "esbuild": "^0.27.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
+}

@@ -1,0 +1,68 @@
+-- 798-repair-engineer-issues-terminal-error.sql — EI-20202629116790410
+--
+-- REQUIRES-DEPLOYED: packages/operator-core/lib/issues-engineer.ts#EI-20092514168581881
+-- PENDING-CODE-DEPLOY: keep parked; arm only after the release contains the base-table
+-- setIssueState writer named by the marker above.  Migration 797 is the guard;
+-- this companion makes its stale-writer failure actionable on already-migrated
+-- databases.  Keeping this file parked until the writer is deployed prevents a
+-- fresh database from installing the guard/error pair out of order.
+--
+-- No top-level BEGIN/COMMIT: the migration runner wraps each file in one
+-- transaction and records it in schema_migrations.
+
+DO $mig798$
+DECLARE
+  def              text;
+  patched          text;
+  old_raise        CONSTANT text := $$RAISE EXCEPTION 'engineer_issues terminal transition refused — use setIssueState/work_items:set_state or work_items:complete so completion integrity is enforced (issue %) ', NEW.issue_id;$$;
+  new_raise        CONSTANT text := $$RAISE EXCEPTION 'engineer_issues terminal transition refused — this release still uses the compatibility-view writer; deploy the base-table setIssueState/work_items companion before retrying (issue %) ', NEW.issue_id;$$;
+  new_marker       CONSTANT text := 'EI-20202629116790410: stale compatibility-view writer is actionable';
+BEGIN
+  SELECT pg_get_functiondef(p.oid)
+    INTO def
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'harness_shared'
+     AND p.proname = 'engineer_issues_view_dml';
+
+  IF def IS NULL THEN
+    RAISE EXCEPTION '798: harness_shared.engineer_issues_view_dml() not found — migration 797 must be applied first';
+  END IF;
+
+  IF position(new_marker IN def) > 0 THEN
+    RAISE NOTICE '798: engineer_issues_view_dml already has the actionable stale-writer error — no-op';
+    RETURN;
+  END IF;
+
+  IF position('EI-20092514168581881: refuse ungated terminal transitions' IN def) = 0 THEN
+    RAISE EXCEPTION '798: migration 797 guard marker not found in engineer_issues_view_dml — refuse to patch an unknown trigger definition';
+  END IF;
+
+  IF position(old_raise IN def) = 0 THEN
+    RAISE EXCEPTION '798: migration 797 error text not found in engineer_issues_view_dml — re-derive the patch instead of silently claiming success';
+  END IF;
+
+  patched := replace(
+    def,
+    old_raise,
+    new_raise || E'\n  -- ' || new_marker
+  );
+
+  EXECUTE patched;
+
+  SELECT pg_get_functiondef(p.oid)
+    INTO def
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'harness_shared'
+     AND p.proname = 'engineer_issues_view_dml';
+
+  IF position(new_marker IN def) = 0
+     OR position('this release still uses the compatibility-view writer' IN def) = 0
+  THEN
+    RAISE EXCEPTION '798: post-condition failed — engineer_issues_view_dml does not contain the actionable stale-writer error';
+  END IF;
+
+  RAISE NOTICE '798: engineer_issues_view_dml now explains the stale release writer';
+END
+$mig798$;

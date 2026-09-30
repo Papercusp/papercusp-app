@@ -1,0 +1,69 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "incremental": true,
+    "noEmit": true,
+    // WI-39692: this program follows `@papercusp/test-config/vitest-config` into the
+    // dependency's SOURCE (include:["**/*.ts"] + moduleResolution:"bundler"), and that file
+    // imports './lane-split.ts' with the explicit `.ts` extension — REQUIRED at runtime by
+    // Node's native TS config loader, which resolves neither the extensionless nor the `.js`
+    // form. libs/test-config's own tsconfig sets this flag, which is why the file is legal in
+    // its own program and green under lint:tsc:workspaces; without it here the two programs
+    // disagree about a file they both compile and tsc reports TS5097. Legal in this config
+    // because `noEmit` above is set (tsc requires noEmit or emitDeclarationOnly for it), and
+    // it only PERMITS the extension — it never requires one, so no existing import changes.
+    // Do NOT "fix" that import by dropping its `.ts`: that breaks the loader at runtime to
+    // satisfy a typecheck.
+    "allowImportingTsExtensions": true,
+    "allowJs": false,
+    "ignoreDeprecations": "6.0",
+    "paths": {
+      "@/*": [
+        "./*"
+      ],
+      "@papercusp/operator-core": [
+        "../../packages/operator-core/lib/index.ts"
+      ],
+      "@papercusp/operator-core/*": [
+        "../../packages/operator-core/*"
+      ]
+    }
+  },
+  // EI-19467338750785149: Next is retired for this app (it declares no `next` dependency and
+  // the standalone Next server is not a supported run mode). The `.next/types/**` includes and
+  // the `next` language-service plugin are removed because they were a LATENT TRAP, not merely
+  // dead config. `.next/` is gitignored and was never committed here, so the includes matched
+  // nothing in a clean checkout — but if a stale Next build dir ever appeared, its generated
+  // `/// <reference types="next" />` files pull next/index.d.ts -> next/types/global.d.ts,
+  // which merges a REQUIRED `readonly NODE_ENV` into NodeJS.ProcessEnv. That manufactured ~93
+  // phantom errors on one agent's box that do not exist in a clean checkout, and nearly cost
+  // ~112 pointless `env:` retypes. Do not re-add these entries.
+  "include": [
+    "**/*.ts",
+    "**/*.tsx"
+  ],
+  // EI-19467338750785149 (residual gap, MEASURED 2026-08-31): the comment above closed the
+  // `.next/types/**` route, but NOT this one. `next-env.d.ts` is gitignored and sits at the app
+  // root, so `include: ["**/*.ts"]` above swallows it the moment anything regenerates it — and
+  // it carries the same `/// <reference types="next" />`. Measured both ways at HEAD: without it
+  // 613 error blocks and ZERO ProcessEnv/NODE_ENV errors; with it restored, 872 blocks and 190
+  // ProcessEnv/NODE_ENV errors. Excluding it makes the program immune to the regenerated
+  // artifact instead of relying on nobody ever producing one.
+  "exclude": [
+    "node_modules",
+    "next-env.d.ts"
+  ]
+}

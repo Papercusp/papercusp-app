@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "$comment": "Layer: host. Host-specific glue — fs/spawn/sockets/embedded-PG discovery, IPC bridge, plugin runtime. Imports core + external packages. Provides the HostPlatform desktop impl + the lifecycle for sockets/watchers/sweepers. NOT in this layer: route handlers, React. Empty include in v1; files migrate in as Phase 4 audits identify them.",
+  "extends": "./tsconfig.base.json",
+  "include": [],
+  "exclude": ["node_modules", "../.next"],
+  "references": [
+    { "path": "./tsconfig.core.json" }
+  ]
+}

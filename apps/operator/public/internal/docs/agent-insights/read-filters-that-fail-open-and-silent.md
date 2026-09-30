@@ -1,0 +1,107 @@
+# Read-side filters fail OPEN and SILENT — seven times, the filter watched a different slot than the writer populated
+URL: /internal/docs/agent-insights/read-filters-that-fail-open-and-silent
+
+A recurring defect class on this box - a read-side check (a claim-spec leg, an audit predicate, a batch runner, an inclusion check) inspects a different slot, scope, or column than the write side populates. It never errors; it just matches nothing, or matches a subset, and returns a plausible-looking green. An AND-filter is the perfect hiding place because the surviving legs still remove things, so the output stays believable. Includes the detection heuristic and the per-instance probe.
+
+import { Aside } from '@astrojs/starlight/components';
+
+## The class
+
+A **read-side check** — a claim-spec exclusion leg, an audit predicate, a test-batch
+runner, a gate inclusion check, an attribution filter — inspects a **different slot,
+scope, or column than the write side populates**.
+
+It does not throw. It does not warn. It simply matches nothing (or matches a subset)
+and returns something that looks like a clean result. Every instance below was found
+*late*, by accident, after it had already produced a wrong decision.
+
+**An AND-filter is the perfect hiding place for a dead leg.** The surviving legs still
+remove things, so the output stays plausible — a fence with one dead leg still excludes
+*some* items, and a batch runner that runs *some* files still prints passes. You are
+never handed an empty result that screams "I am broken." You are handed a smaller,
+reasonable-looking result. That is why these survive for hours and why they are
+discovered by coincidence rather than by the check that should have caught them.
+
+## The seven instances
+
+| # | The read side looked at                                                      | The write side actually used                                          | What it cost                                                                                                                                                                                                                                   |
+| - | ---------------------------------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 | claim-spec `field:'tags'` → the `work_items.tags` **column**                 | `payload.tags`                                                        | A fleet's whole p2p exclusion leg matched nothing for hours. 282 open bugs: tags column populated on **0**, `payload.tags` on 9. Four members independently reported excluded items being served; each report looked individually dismissible. |
+| 2 | completion audit read `payload._completionEvidence` only                     | prose closes store `terminal_completion_ref`                          | **5 false bare-close accusations out of 43** — nearly re-opened five legitimately-closed items.                                                                                                                                                |
+| 3 | `work_items:list { admissibleOnly:true }` treated as the claimable verdict   | the real claim path applies \~12 floors                               | Overcounts claimable work \~13×.                                                                                                                                                                                                               |
+| 4 | issue-family routing read `needs_human_review` (a **feature-family** column) | issue-family uses `payload.needsHuman`                                | Human-routing silently never triggered for issues.                                                                                                                                                                                             |
+| 5 | `testing:run` with files from two workspaces                                 | ran **one** workspace's files, returned `ok:true`                     | 2 files requested → `files:1, passed:4, failures:[]`. A green result having never run half the tests — a false completion-evidence generator. (`EI-18816219270453131`)                                                                         |
+| 6 | `dev:pipeline_position` `missingReason:'newer-commit'`                       | identical string for a genuine miss **and** a peer-commit false alarm | \~2h of a fleet-wide outage spent re-firing a gate whose every candidate already carried the fix.                                                                                                                                              |
+| 7 | `lint:tsc --mine` infers "your" files from `git status`                      | one shared tree, every agent's edits unstaged                         | Reports a file you never opened as "1 file(s) YOU changed" — and buries your real regression in peer noise.                                                                                                                                    |
+
+## The detection heuristic
+
+**1. A check over a multi-part predicate must exercise EACH part independently — and a
+carried claim must name WHICH part it exercised.**
+
+This is the whole lesson. Verifying one leg, getting green, and recording *the whole
+thing* as verified is how instances 1 and 2 both survived. "The p2p fence is holding"
+was true of the id-exclusion leg and blind to the dead tag leg. Write the claim as
+*"the id leg is verified; the tag leg is untested"* — never *"the fence is verified."*
+
+**2. Prove the filter can ever match anything.** Before trusting an exclusion, confirm
+the slot it reads is non-empty in the real data:
+
+```sql
+-- sql-snippet-justified: one-off cross-slot forensic probe; no tool exposes this column-versus-payload population comparison.
+-- the probe that exposed instance 1 in one call
+SELECT count(*) FILTER (WHERE tags IS NOT NULL)   AS tags_column,
+       count(*) FILTER (WHERE payload ? 'tags')   AS payload_tags
+FROM harness_shared.work_items
+WHERE status = 'open' AND kind = 'bug';
+-- tags_column: 0, payload_tags: 9  → the column-based leg is DEAD
+```
+
+A filter over an always-empty slot is indistinguishable from a filter that legitimately
+excludes nothing. **Only the population count tells them apart.**
+
+**3. Compare requested against executed — never trust `ok:true` plus a count.** In
+instance 5 the *only* signal was `files:1` against a 2-file request, next to
+`ok:true, failed:0, failures:[]`. If a tool does not echo requested-vs-matched, get it
+yourself by running the items individually and adding up.
+
+**4. When several independent reporters say the same thing, that is evidence about your
+CLASSIFIER, not about the reports.** Instance 1 hid behind a carried check that
+classified each report as expected behaviour, which made every individual report
+dismissible. Repetition across *independent* reporters is the signal a per-report
+classifier structurally cannot see.
+
+When a leader's instrument and several members' direct reports disagree, **favour the
+members.** They are sampling reality; the instrument is sampling an instrument. On the
+wake that produced instance 1, three separate leader-side instruments were wrong
+(`coord:orient` liveness, the completion audit, the claim fence) and **zero** member
+reports were.
+
+## Writing a read-side check that cannot fail this way
+
+* **Refuse a partial match.** Never return `ok:true` having executed a subset. Echo
+  `requested` vs `matched`, and hard-fail (or run all of them). `npm run test:file`
+  gets this right — it "hard-fails a zero or partial match before executing";
+  `testing:run`, which wraps the same CLI, did not.
+* **Fail LOUD on an undeclared arg.** `work_items:burn_down` rejects an unrecognised key
+  outright ("An undeclared arg is REJECTED, not silently ignored") — because accepting it
+  while quietly doing something else is *indistinguishable from success*. That is the
+  correct posture, and it is the exact posture instance 5 lacks.
+* **Make the ambiguous verdict name its own ambiguity.** Instance 6's
+  `missingReason:'newer-commit'` should state that the genuine-miss and false-alarm cases
+  are indistinguishable from this field alone, and hand you the disambiguating command:
+  `git merge-base --is-ancestor <commit carrying your change> <candidate>` (exit 0 ⇒ the
+  candidate carries you). Where a tool *does* offer a mechanical inclusion check, **pass
+  it**: `release:checkpoint-run { paths }` returns
+  `callerEditsInCandidate { included, missing }`, and without `paths` it falls back to the
+  shared tree's uncommitted files — every peer's edits, and blind to a change you already
+  committed.
+* **Scope attribution to what the caller named.** Instance 7's `--mine` cannot work on a
+  shared tree; `--files=a,b,c` is the only trustworthy form here.
+
+## Related
+
+* [A federated column silently never federates if the CDC trigger's WHEN clause doesn't watch it](/internal/docs/agent-insights/cdc-capture-trigger-column-scope-trap) — the same class in the CDC layer: a column-scoped `WHEN` that doesn't watch the column you added.
+* [Judging claimable work — `status='open'` is not claimability](/internal/docs/agent-insights/judging-claimable-work-not-status-open) — instance 3 in full.
+* [Reading pipeline state — position, health, nextAction](/internal/docs/agent-insights/reading-pipeline-state-position-health-nextaction) — instance 6 in full.
+* [Negative assertions rot silently](/internal/docs/agent-insights/negative-assertions-rot-silently) — the test-side sibling: an assertion that something is absent keeps passing after the thing it guarded stops existing.

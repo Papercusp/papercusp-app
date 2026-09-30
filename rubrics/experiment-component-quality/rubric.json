@@ -1,0 +1,33 @@
+{
+  "rubricId": "experiment-component-quality",
+  "title": "Experiment component quality",
+  "characteristic": "experiment-component",
+  "description": "Grades completed component experiments against the component judge dimensions so gym experiment outcomes become trendable scorecards.",
+  "methodRef": null,
+  "ratingScale": ["healthy", "degraded", "broken", "unknown"],
+  "criteria": [
+    {
+      "key": "d1",
+      "title": "Task outcome",
+      "model": "The selected component arm solves the assigned coding/evaluation task correctly.",
+      "method": "Read the selected arm's D1 mean from the experiment scorecard evidence.",
+      "driftMarkers": "D1 is low or missing while the experiment still reports a winner."
+    },
+    {
+      "key": "d2",
+      "title": "Implementation quality",
+      "model": "The selected component arm produces clear, maintainable, minimal work without introducing avoidable risk.",
+      "method": "Read the selected arm's D2 mean from the experiment scorecard evidence.",
+      "driftMarkers": "D2 lags behind D1, implying the experiment rewards brittle or overfit implementation."
+    },
+    {
+      "key": "d3",
+      "title": "Process correctness",
+      "model": "The selected component arm follows the expected agent process: plans where needed, verifies, and avoids flailing.",
+      "method": "Read the selected arm's D3 mean from the experiment scorecard evidence.",
+      "driftMarkers": "D3 is repeatedly degraded or unknown across component experiments."
+    }
+  ],
+  "version": "0.1.0",
+  "source": "first-party"
+}

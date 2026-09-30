@@ -1,0 +1,142 @@
+# The `gym` blueprint — harness-blueprint-orchestration-2026-06-03 P-011 / D-022.
+#
+# A gym is just a harness whose work is "improve ANOTHER harness's blueprint"
+# (D-022). It is the third built-in reference blueprint (after `coding`/`research`)
+# and the self-improving layer made first-class: the same engine (deriveNext + the
+# durable pipeline), a DIFFERENT shape (a gym-task work-item, a gym vocabulary, the
+# generator/judge/proposer roles). Nothing about the gym is bespoke machinery any
+# more — it is a blueprint that operates on a *target* harness.
+#
+# The split of responsibility (D-022):
+#   - The GYM blueprint (this file) owns the optimization SPINE: generate eval tasks
+#     → run a target-blueprint variant as a sub-harness → judge the trace → propose
+#     an edit → A/B-gate → accept (commit the target's blueprint).
+#   - The TARGET blueprint owns its own gym rubric: `blueprint.gym.collectTrace`
+#     (the D-015 fifth seam), `blueprint.gym.signals`, `blueprint.gym.rubric`. The
+#     gym READS the target's gym block — so a `coding` target is judged on a git
+#     diff and a `research` target on its work-item output, with no gym-side change.
+#
+# Repo-less: the gym's OWN work (generate/judge/propose/commit) needs no repo of its
+# own — only the *target* sub-harness clones a repo (and only when the target's
+# blueprint is `requiresRepo:true`). So `requiresRepo:false` here, which also makes
+# the gym a live exercise of the work-item-output collectTrace path (P-014).
+#
+# TWO EXECUTION PATHS — by design, NOT a migration gap (deterministic-blueprints-
+# migration-2026-06-13 D-014, scoped):
+#   - SUPERVISED / agent-authored runs go through THIS spine (the durable
+#     featurePipelineWorkflow + gym-director decider + role dispatch) — proven in
+#     gym-pipeline.test.ts + the blueprint-cycle-run.ts CLI.
+#   - The LIVE UNATTENDED autoloop (the `system:gym-cycle` workspace-singleton pulse,
+#     D-010) runs the cheap DETERMINISTIC loop `lib/gym/loop.ts:runOptimizationLoop`
+#     directly (via autoloop-cycle.ts) — agent-dispatch per 30-min cycle would be
+#     wasteful. So the spine below is the gym's SHAPE/vocabulary; the imperative loop
+#     is the production executor. Do NOT "reconcile" them into one path — it would
+#     lose the loop's deterministic closure (the scoping verdict was leave-as-is).
+id: gym
+extends: base
+version: 0.1.0
+description: >-
+  A meta-harness that optimizes another harness's blueprint: a gym-director drives
+  generate-tasks → run-target-variant (sub-harness) → judge → propose → A/B-gate →
+  accept (commit the target blueprint). The target declares its own gym rubric.
+
+workItem:
+  kind: gym-task
+  idPrefix: G
+
+# The optimization spine. The gym-director emits a verb each turn; deriveNext maps
+# it to a PipelineAction. The happy path walks generate → run → judge → propose →
+# accept, but it is a flat verb→action map (D-024): the director decides the order
+# (e.g. it loops run+judge across the eval matrix before proposing).
+spine:
+  decider: gym-director
+  maxTurns: 100
+  default:
+    to: idle
+  edges:
+    # ── terminal ──
+    DONE: { to: done }
+    ESCALATE: { to: escalate, reasonFrom: arg }
+    IDLE: { to: idle }
+    # ── the optimization steps (all carry the gym-task id as FEATURE_ID, reusing the
+    #    same work-item binding mechanism coding/research use) ──
+    # generate-tasks: curate / synthesize the eval task set for the target harness.
+    GENERATE_TASKS: { to: role, role: task-generator, extras: ["FEATURE_ID={feature}"] }
+    # run-target-variant: run ONE variant of the TARGET blueprint over the eval set
+    # as a durable sub-harness. This dispatch is the recursion trigger (see below) —
+    # the variant-runner spawns the target sub-harness; the gym is layer-4 recursive.
+    RUN_VARIANT: { to: role, role: variant-runner, extras: ["FEATURE_ID={feature}"] }
+    # judge: score each run's distilled trace with the frozen Opus judge (gym:judge),
+    # using the TARGET blueprint's own rubric.
+    JUDGE: { to: role, role: judge, extras: ["FEATURE_ID={feature}"] }
+    # propose: synthesize a target-blueprint / prompt edit from the judged traces.
+    PROPOSE: { to: role, role: proposer, extras: ["FEATURE_ID={feature}"] }
+    # accept: an accepted proposal commits the target's .papercusp/blueprint.yaml /
+    # prompt and re-projects it (commit→reproject, P-016/D-007). The committer is the
+    # finalize step too (gates.finalize.onDone).
+    ACCEPT: { to: role, role: committer, extras: ["FEATURE_ID={feature}"] }
+
+# The gym-director plans the eval matrix (variants × tasks × repeats) INLINE within
+# its loop (the A/B eval-matrix DAG, P-013) — there is no plans→features import.
+planner:
+  kind: inline
+
+roles:
+  - { id: gym-director, description: "Per-gym-task optimizer orchestrator; emits the next optimization verb." }
+  - { id: task-generator, description: "Generates / curates the eval task set the target harness is scored on." }
+  - { id: variant-runner, description: "Runs one target-blueprint variant over the eval set as a durable sub-harness (recursion)." }
+  - { id: judge, description: "Frozen Opus judge (gym:judge): scores each run's distilled trace against the target's rubric." }
+  - { id: proposer, description: "Proposes a target-blueprint / prompt edit from the judged traces + signals." }
+  - { id: committer, description: "On accept, commits the target's .papercusp/blueprint.yaml / prompt and re-projects it (commit→reproject)." }
+
+# Recursion (layer 4 — OTP-style supervision): run-target-variant spawns the TARGET
+# harness as a durable sub-harness. The child is NOT the gym (self) but the *target*
+# harness's own blueprint (the gym improves another harness — D-022). That was
+# formerly an undeclared runtime override of the schema's "defaults to self";
+# `childBlueprint: $target` now DECLARES the parameterized child (autoloop-pot-
+# operator-rebuild D-008): the gym runtime binds it at spawn time via
+# `resolveChildBlueprint(gymBp, { target: <blueprint-under-optimization> })`
+# (re-exported as the gym primitive `resolveGymChildBlueprint`). one-for-one +
+# maxDepth:1 keeps it bounded (a gym runs target sub-harnesses; those targets do
+# not themselves recurse into more gyms).
+recursion:
+  enabled: true
+  childBlueprint: $target
+  spawnOn: { role: variant-runner }
+  strategy: one-for-one
+  maxDepth: 1
+
+# Gates: the A/B-gate is a human-gated approval by default — proposals land in the
+# gym control plane (gym_proposals, migration 110) for the user to accept/reject
+# (autoloop can flip this to auto-accept). The finalize recipe runs the committer on
+# DONE (commit→reproject the accepted edit).
+gates:
+  approvals:
+    - { id: ab-gate, role: proposer, blocking: true }
+  finalize:
+    onDone: [committer]
+
+# The gym is itself gym-able (D-022): it declares its OWN trace seam. A gym run has
+# no git diff of its own (its product is an accepted blueprint edit, captured in the
+# work-item output + the proposer/judge transcripts), so work-item-output — the same
+# repo-less seam `research` uses.
+gym:
+  collectTrace: work-item-output
+  signals: []
+
+knobs:
+  harnessKind: gym
+  # The gym's own work needs no repo (only the target sub-harness may). This also
+  # exercises the requiresRepo:false / work-item-output collectTrace path (P-014).
+  requiresRepo: false
+
+# Dependencies (official-blueprints-cupboard-publish D-002): derived from the
+# gym role personas (scripts/derive-blueprint-deps.mjs). gym:judge is the
+# frozen-judge scoring tool; the work-item pair is the task surface the roles
+# read/write through.
+dependencies:
+  tools:
+    - features:get
+    - gym:judge
+    - work_items:list
+  plugins: []

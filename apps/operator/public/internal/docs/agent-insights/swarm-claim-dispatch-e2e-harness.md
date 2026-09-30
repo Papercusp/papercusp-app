@@ -1,0 +1,125 @@
+# ≥3-Swarm decentralized claim-dispatch E2E — the harness, the PG-less seam, and the kill timing
+URL: /internal/docs/agent-insights/swarm-claim-dispatch-e2e-harness
+
+How the P-013 ≥3-Swarm work-item-claim E2E is built and run: each Swarm is a claim-agent.ts process exercising the REAL authority election + HTTP RPC + fail-open + reconcile, with only the claim STORE swapped for an in-memory one (the frames are PG-less) — parity-proven vs the SQL store. Plus the two gotchas that make or break a real run: the Hetzner 2-server account limit (→ 3 Swarms over 2 frames, authority isolated) and why the authority-kill must be progress-gated, not a fixed delay.
+
+import { Aside } from '@astrojs/starlight/components';
+
+P-013 of [`decentralized-dispatch-scaling-2026-06-08`](/internal/docs/plans) asks for
+the one thing the unit/integration layers can't give: **≥3 real Swarms, across
+instances, each claiming DIFFERENT items off one Pot backlog with no central
+dispatcher; kill the authority mid-run → fail-open reconcile; assert no
+double-completed work + no starvation.** This is the harness that proves it, and the
+two non-obvious things that decide whether a real run passes.
+
+## The shape — reuse su-116e7's Hetzner harness, add a claim scenario
+
+The federation harness (`p2p-perf-tier3` + `pot-cross-machine.integration.test.ts`)
+already provisions real frames and ships the runtime. The claim E2E plugs into it:
+
+* **`claim-agent.ts`** — ONE Swarm as an OS process (the claim analog of
+  `sync/hyperbee/perf/peer-child.ts`). It runs the **real** decentralized-claim
+  machinery: `routeToAuthorityForHive` (argmin-device-pubkey election over an injected
+  Pot presence roster), the real `HttpPeerRpcTransport` → `POST /api/authority/rpc` →
+  `handleAuthorityRpc` (it serves that endpoint for ops routed to it when elected
+  authority), fail-open on an unreachable authority, and a work-stealing claim loop.
+* **`claim-launcher.ts`** — `localClaimLauncher` (N child processes on loopback, the $0
+  path) and `sshClaimLauncher` (agents on real frames). A **slot** list, not a frame
+  list, so you can place ≥3 Swarms across fewer frames (see the limit gotcha).
+* **`run-claim-dispatch.ts`** — the transport-agnostic orchestrator: build the roster,
+  launch, `go`, kill the authority, collect completions, `reconcileAll`, and compute the
+  verdict (no-starvation / no-double-complete-after-reconcile / determinism / exactly-once).
+* **`swarm-claim-dispatch.integration.test.ts`** — the $0 local-parity run (always) +
+  the cred-gated real-Hetzner run.
+
+## Gotcha 1 — the bench frame is PG-less; use the in-memory store via the seam
+
+A `p2p-perf-tier3` bench frame deliberately runs only `node --import tsx` against the
+hyperbee substrate — **there is no Postgres on it** (`bench-bootstrap.ts` emits no
+embedded-pg; the runtime-pack test even asserts the script never contains `embedded-pg`).
+The SQL claim store (`work-item-claims.ts`) needs `getOrgPg()`, so it cannot run there.
+
+The claim store is reached only through the `WorkItemClaimCoordinator` **seam**
+(`work-item-claim-authority-ops.ts`, whose own header says "tests inject a fake (or a
+real-PG-backed) coordinator") plus the authority op's `local` leg. So the agent binds an
+**`InMemoryWorkItemClaimStore`** (`work-item-claim-mem-store.ts`) through that seam. Only
+the *persistence* leg is swapped; the election, RPC, fail-open, and reconcile all run for
+real cross-machine.
+
+The in-memory store's lease semantics (free-grant / steal-lapsed / extend-own /
+conflict-on-live; owner+claim\_id-checked heartbeat & release) are pinned identical to the
+SQL store by `work-item-claim-mem-store.integration.test.ts`, which runs the SAME
+sequences against BOTH and compares the decisions. The SQL store's own authority-fronted
+serialization stays proven on real PG by `work-item-claims-two-instance.integration.test.ts`
+(N=2) + `work-item-claim-reconcile.integration.test.ts`. In-mem-on-frames + that coverage
+
+* the parity test = full picture, zero per-frame PG provisioning.
+
+Importing `work-item-claims.ts` transitively imports `@papercusp/db-org`, but that import
+is side-effect-free (the org PG client is lazy) — the agent boots fine on a PG-less frame.
+The local-parity child boots the SAME import chain, so it's the canary: if it boots, the
+frame will too.
+
+## Gotcha 2 — the authority-kill must be PROGRESS-GATED, not a fixed delay
+
+The first instinct — `sleep(killAfterMs); kill()` — is **fragile and was wrong**. A fixed
+4 s delay let the authority complete its whole fair share and then die *late*; because a
+killed agent's result is discarded, those items showed up as **starved**, and the
+survivors had already quiet-broken before the kill so they **never failed open**
+(`failOpen:0`, 6 items starved — observed live on the first real run).
+
+The fix: the orchestrator waits for the **authority to report ≥2 completions** (the agent
+emits a progress line on every completion) and kills *then*. The kill reliably lands while
+the survivors are still claiming — so they fail open and, because their own stores are
+empty for the authority's items, they reclaim the WHOLE backlog (no starvation), with the
+expected tolerated double-claims that `reconcileAll` resolves to one deterministic winner.
+A `killAfterMs` cap remains only as a fallback. Lesson: **gate a mid-run kill on an
+observed progress signal, never on wall-clock — machine speed varies and you'll race the
+work loop.**
+
+## Gotcha 3 — the Hetzner account caps at 2 servers → 3 Swarms over 2 frames
+
+This account's Hetzner Cloud **server limit is 2** (`createServer` 403
+`resource_limit_exceeded` on the 3rd). "≥3 Swarms across instances" is still satisfied by
+placing the **authority alone on frame 0** and the **two survivors on frame 1** (distinct
+ports; the agent's port is an argv marker so `pkill -f 'claim-agent.ts <port>'` kills
+exactly one co-located agent). Killing frame 0's agent partitions the survivors from the
+authority across a real machine boundary — every cross-machine dynamic P-013 wants. Raise
+`CLAIM_E2E_FRAMES` (after raising the account limit) and the placement degrades to one
+Swarm per distinct VM automatically.
+
+## How to run it
+
+```bash
+# $0 local parity (always runs, no creds):
+cd packages/operator-core
+npx vitest run --config vitest.integration.config.ts \
+  lib/deployment/swarm-claim-dispatch.integration.test.ts -t "local parity"
+
+# Paid real-Hetzner run (≥3 Swarms over real frames; ~8 min, well under $0.50; DESTROYS always):
+export HCLOUD_TOKEN=$(cat ~/.papercusp/hcloud-token)
+export HETZNER_SSH_KEY_ID=114898429
+export HETZNER_SSH_IDENTITY_FILE=$HOME/.ssh/papercusp-latitude-frame
+export HETZNER_E2E_SERVER_TYPE=cpx31
+npx vitest run --config vitest.integration.config.ts \
+  lib/deployment/swarm-claim-dispatch.integration.test.ts -t "REAL Hetzner"
+# ALWAYS verify 0 leaked VMs after:
+curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" https://api.hetzner.cloud/v1/servers
+```
+
+The creds live where the federation harness's do — see
+[`hetzner-cross-machine-federation-harness`](/internal/docs/agent-insights) (the memory) /
+`p2p-performance-suite`. `provisionBenchFleet` sweeps leftover frames at start and
+`teardownAll()` runs in a `finally` (it fires on assertion failure too), so a failed run
+still cleans up — but verify anyway.
+
+## Proven
+
+* **$0 local parity** — 3 Swarms, real loopback HTTP authority RPC: no-kill ⇒ exactly-once
+  (zero double-claims, no starvation, no fail-open); kill-authority ⇒ fail-open observed,
+  deterministic reconcile, no starvation, no surviving double-completion.
+* **Real Hetzner (paid, 2026-06-09)** — 3 Swarms across 2 cpx31 frames in `ash` (authority
+  isolated on frame 0). The survivors' claims crossed the real machine boundary to the
+  authority (remote-authority RPCs), the authority was killed mid-run, the survivors failed
+  open, `reconcileAll` resolved every contested item to a single deterministic winner, and
+  the whole backlog was completed (no starvation). **0 leaked VMs** after.

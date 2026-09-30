@@ -1,0 +1,152 @@
+# Pair every schema-ensure module with a live-PG regression papercup
+URL: /internal/docs/agent-insights/live-pg-regression-papercup
+
+Unit tests can't catch CREATE TABLE typos, missing CHECK constraints, or PG-side DDL incompatibilities. A 2-second live verifier (boot embedded PG → call your ensures → assert the resulting schema) catches them all and gives you a one-line pre-commit gate.
+
+import { Aside } from '@astrojs/starlight/components';
+
+:::caution\[Update: the dogfood-ensure example is gone; the principle lives on as the fresh-migrate gate]
+The concrete subject of this page — `ensure-schema-dogfood.ts`,
+`ensureAllDogfoodTables()`, `DOGFOOD_REACTIVE_TABLES`, and
+`apps/operator/scripts/verify-dogfood-schema.ts` — has been **removed**
+(plan `self-contained-migration-baseline-2026-06-02`). Schema is now
+migrations-only (`libs/papercusp/libs/db/sql/000-baseline.sql` + `107+`
+incrementals), so there is no runtime ensure module to pair a verifier with.
+The *general principle* (boot real PG → apply the DDL → assert the resulting
+schema) is now realized by the **`empty → head` gate**:
+`apps/operator/test/fresh-migrate.integration.test.ts` +
+`packages/operator-core/lib/db-tools/verify-baseline.ts` (zero
+skip-tolerance). Read the examples below as the historical pattern; for DDL
+changes today, that integration test is the papercup.
+:::
+
+## The gap unit tests can't fill
+
+`ensure-schema-dogfood.ts` has \~600 lines of `CREATE TABLE IF NOT
+EXISTS` strings. Its unit test (`ensure-schema-dogfood-binding.test.ts`)
+asserts on the exported `DOGFOOD_REACTIVE_TABLES` array — useful, but
+the array could match the spec exactly while the SQL strings have:
+
+* A typo in a CHECK constraint name
+* A missing column in the `INSERT...ON CONFLICT DO UPDATE SET` clause
+* A `BIGINT[]` default value that PG18 parses differently than your
+  shell does
+* A primary key that mentions a column not in the CREATE TABLE body
+
+The unit test passes. The DDL fails at first runtime. The error
+surfaces somewhere downstream — usually in a user-facing flow at
+2am.
+
+## The pattern
+
+Write a `verify-<schema>.ts` script that:
+
+1. **Boots embedded PG18** on a non-default port (e.g. 16781) with a
+   fresh `tmpdir`. Does NOT touch the user's running operator or any
+   live PG.
+2. **Points the module's PG accessor** at the test instance via the
+   override env var your connection layer reads (here:
+   `HARNESS_ADMIN_DATABASE_URL`).
+3. **Dynamic-imports the module AFTER the env is set** so the
+   cached `getOrgPg()` resolves to the test PG.
+4. **Calls the module's batch ensure** (`ensureAllDogfoodTables()`).
+5. **Asserts the resulting schema** against a declarative list of
+   expected `(table, required-columns, CHECK constraints)` tuples.
+6. **Tests idempotence** — second call short-circuits via the
+   globalThis flag in `<200ms`.
+7. **Cleans up** — drops the tmp PG, removes the data dir.
+
+Example (`apps/operator/scripts/verify-dogfood-schema.ts`):
+
+```ts
+process.env.HARNESS_ADMIN_DATABASE_URL = 'postgres://...:16781/papercusp';
+const { ensureAllDogfoodTables } = await import('../lib/ensure-schema-dogfood.js');
+await ensureAllDogfoodTables();
+
+// Then query information_schema and assert.
+const tables = await checkSql<{ table_name: string }[]>`
+  SELECT table_name FROM information_schema.tables
+   WHERE table_schema = 'harness_shared'
+   ORDER BY table_name
+`;
+for (const expected of EXPECTED_TABLES) {
+  expect(tableSet.has(expected.name), 'table ' + expected.name + ' exists');
+}
+```
+
+Total: \~180 LOC. Runs in \~2s wall-clock. Catches the entire class of
+bugs unit tests can't.
+
+## What it catches that unit tests don't
+
+| Bug class                                                                  | Unit test | Live-PG papercup         |
+| -------------------------------------------------------------------------- | --------- | ------------------------ |
+| Column missing from CREATE TABLE                                           | ❌         | ✅                        |
+| CHECK constraint syntax error                                              | ❌         | ✅ (PG rejects on CREATE) |
+| Wrong column count in array default                                        | ❌         | ✅                        |
+| `BIGINT[]` vs `BIGINT` typo                                                | ❌         | ✅                        |
+| PG18 incompatibility (e.g. `IF NOT EXISTS` on a syntax that PG14 accepted) | ❌         | ✅                        |
+| Trigger function reference to nonexistent table                            | ❌         | ✅                        |
+| `ON CONFLICT` target column not in PK                                      | ❌         | ✅                        |
+| Idempotence broken by a missing flag                                       | partial   | ✅ (timing assertion)     |
+| Renamed column not propagated to a partial index                           | ❌         | ✅                        |
+
+## Wire it as a discoverable script
+
+Add a `verify:<name>` entry to `package.json` so it surfaces under
+`npm run`:
+
+```json
+{
+  "scripts": {
+    "verify:dogfood-schema": "tsx scripts/verify-dogfood-schema.ts",
+    "verify:all-dogfood": "npm run verify:dogfood-schema && npm run verify:dogfood-bootstrap && npm run verify:trigger-consolidation"
+  }
+}
+```
+
+Now `npm run verify:` tab-completes the full surface. A future agent
+who's about to touch the ensure module sees the papercup exists +
+runs it before committing.
+
+## Pre-condition setup
+
+Two things the papercup needs but the production code doesn't:
+
+1. **The schema** (`CREATE SCHEMA IF NOT EXISTS harness_shared`) —
+   the embedded PG starts empty; the ensure functions assume the
+   schema exists.
+2. **Required roles** (`CREATE ROLE IF NOT EXISTS harness_app /
+   harness_admin`) — only needed if downstream `GRANT` statements
+   reference them. Some ensure modules don't issue GRANTs; sniff
+   the module before adding the role setup.
+
+Wrap both in `DO $body$ BEGIN IF NOT EXISTS ... END $body$` so
+re-runs are clean.
+
+Use named dollar-quoting (`$body$`) not unnamed (`$$`). Bash heredocs
+collapse doubled `$` and you'll lose hours debugging "PG syntax
+error" that's actually a shell quoting bug. See the
+[`pg-migrations-dollar-quote`](/internal/docs/agent-insights/pg-migrations-dollar-quote/)
+insight.
+
+## When the unit test is enough
+
+For modules whose only PG interaction is `SELECT` or `UPDATE` (no
+DDL), the unit test surface IS the regression papercup. The live
+verifier pattern matters specifically for DDL-shipping modules:
+ensure-schema, migration files, trigger function definitions.
+
+## See also
+
+* `apps/operator/scripts/verify-dogfood-schema.ts` — **removed** (see the
+  Update banner); was the canonical example.
+* `apps/operator/test/fresh-migrate.integration.test.ts` +
+  `packages/operator-core/lib/db-tools/verify-baseline.ts` — the current
+  `empty → head` schema gate that replaces it.
+* `apps/operator/scripts/verify-trigger-consolidation.mjs` — sibling
+  pattern for trigger behavior (vs DDL shape); still present.
+* [`idempotent-pg-ensure`](/internal/docs/agent-insights/idempotent-pg-ensure/) —
+  the module-side pattern this papercup verifies.
+* [`pg-migrations-dollar-quote`](/internal/docs/agent-insights/pg-migrations-dollar-quote/) —
+  the shell-quoting hazard the papercup also catches as a side effect.

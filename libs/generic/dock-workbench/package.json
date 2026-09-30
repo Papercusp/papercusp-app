@@ -1,0 +1,41 @@
+{
+  "name": "@papercusp/dock-workbench",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Host-agnostic dockview workbench shell: panel registry, logical layout schema, adapters, pluggable persistence, and React DockWorkspace.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Papercusp/dock-workbench.git"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "peerDependencies": {
+    "dockview": "^5 || ^6",
+    "dockview-react": "^5 || ^6",
+    "react": "^18 || ^19",
+    "react-dom": "^18 || ^19"
+  },
+  "devDependencies": {
+    "@typescript/native": "npm:typescript@7.0.2",
+    "@papercusp/test-config": "*",
+    "@testing-library/react": "^16.0.0",
+    "jsdom": "^29.0.0",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "vitest": "^4.1.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "node -e \"const { spawnSync } = require('node:child_process'); const { dirname, resolve } = require('node:path'); const manifestPath = require.resolve('@typescript/native/package.json'); const compiler = resolve(dirname(manifestPath), require(manifestPath).bin.tsc); process.exit(spawnSync(process.execPath, [compiler, '--noEmit', '-p', 'tsconfig.json'], { stdio: 'inherit' }).status ?? 1)\""
+  }
+}

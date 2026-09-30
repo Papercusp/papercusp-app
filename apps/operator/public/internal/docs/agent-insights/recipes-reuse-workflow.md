@@ -1,0 +1,70 @@
+# Code recipes — the reuse loop (search → reuse → leave findable) and how popular ones graduate
+URL: /internal/docs/agent-insights/recipes-reuse-workflow
+
+Every successful code:run is saved as a reusable RECIPE. How to FIND and REUSE an existing recipe instead of re-authoring (recipes:search / recipes:run), what the code:run similarRecipes nudge means, and how hot recipes graduate into first-class tools via recipes:candidates + the Mug.
+
+# Code recipes — the reuse loop
+
+A **recipe** is a saved, reusable [`code:run`](/internal/docs/agent-insights/code-run-when-and-why)
+script. **Every successful, non-dry-run `code:run` is captured** as a recipe (you don't make a
+separate "save" call), titled by you or auto-derived. Recipes are **global** — a good recipe helps
+every pot, like a tool definition — so the one you need was very likely already written by another
+agent.
+
+`code:run` collapses many tool round-trips into one. Recipes close the other half of that win:
+**don't re-author a multi-step script that already exists.** The capture half always worked; the
+reuse half is the lever this doc is about.
+
+## The loop: SEARCH → REUSE → (author) → LEAVE FINDABLE
+
+1. **SEARCH FIRST.** Before authoring a multi-step `code:run`, call
+   **`recipes:search { query }`** (describe what you want to do, in words). It's a hybrid
+   BM25 + embedding + tool-set search, so a paraphrase still finds a match. A close hit means **reuse
+   it — do not re-author it**.
+2. **REUSE BY ID.** Run an existing recipe with **`recipes:run { id }`**. It executes under **YOUR**
+   role-scoped tool envelope — **no privilege travels with a recipe** — so running someone else's
+   recipe can never call a tool you couldn't call yourself. Use `dryRun: true` to preview its
+   `effect:'write'` mutations first. `recipes:get { id }` shows the full script before you run it;
+   `recipes:list` browses the most-run recipes.
+3. **AUTHOR only if nothing fits.** Then write the `code:run` script as usual.
+4. **LEAVE IT FINDABLE.** Pass a clear **`title` + `description`** to `code:run`. The title is what
+   the next agent's `recipes:search` matches on — a vague auto-derived title (`recipe: a + b`) is dead
+   weight in the corpus. A good title is the difference between a recipe that gets reused and one that
+   gets swept.
+
+### The `similarRecipes` nudge
+
+When a `code:run` result carries a **`similarRecipes`** array, the capture path is telling you "these
+prior recipes already do something close to what you just scripted." Next time, prefer
+`recipes:run`-ing one of them over re-authoring. It's advisory (never a block), but acting on it is
+how the corpus converges instead of sprawling.
+
+## How popular recipes graduate into tools
+
+Reuse is also the signal for **tool genesis**. The deterministic scorer
+**`recipes:candidates`** ranks recipes by *proven* reuse — run-frequency × distinct-agent breadth ×
+success-rate × tool-set cohesion — and returns **promote candidates** plus **near-duplicate merge
+clusters**. Two guards keep it honest (`code-recipes-candidates.ts`):
+
+* **Reuse floor:** a promote candidate must clear **≥2 distinct agents OR ≥3 runs**. A single
+  multi-tool run can otherwise clear the score threshold on success+cohesion alone — proven demand
+  means reuse you can *see* in the run-log, not a one-off.
+* **Redundancy damp:** a 1-tool wrapper (not batch-worthy) and a recipe whose id maps onto an
+  **existing tool name** (slug-compared) are excluded — promoting them would just regenerate a
+  primitive that already exists.
+
+The **Mug** pulls `recipes:candidates` on an idle wake, judges the worklist with pot context, and
+files a work-item to implement a strong candidate as a first-class `defineTool` (the normal coding
+pipeline's review *is* the gate) or to merge a duplicate cluster. Stale never-reused one-offs are
+retired by **`recipes:sweep`**. So the more you *reuse*, the better the system gets at turning the
+recipes you lean on into real tools.
+
+## Why this matters (the failure mode it fixes)
+
+A 2026-06-22 audit found the recipe system shipped but **dormant**: 14 recipes, all `run_count = 1`,
+**zero reuse ever**, `recipes:search` and `recipes:run` never called. The capture half ran on every
+`code:run`; the reuse half was simply **unprompted** — the `code:run` guidance taught batching and
+never pointed at `recipes:search` / `recipes:run`. The fix (plan
+`recipes-reuse-activation-2026-06-22`) wired this loop into the shared `CODE_RUN_NUDGE` and the su
+playbooks. If you only ever author and never search, the corpus can't pay back the work that went
+into it — **search before you author.**

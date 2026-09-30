@@ -1,0 +1,1929 @@
+/* Settings surface stylesheet — every rule that styles the operator's Settings
+   pages (.pc-settings-*, .kbd-settings, .settings-page). Carried BY the surface
+   (imported from settings/layout.tsx, like dev/dev.css from dev/layout.tsx) so any
+   host that mounts SettingsSurface natively — the operator itself and the cloud
+   portal through @papercusp/operator-ui/surfaces — gets the same styling without
+   importing the operator's whole globals.css. Extracted from globals.css by
+   .papercusp/scratch/settings-css/extract.mjs (portal-parity-with-papercusp-2026-09-03,
+   EI-22432328055190066); source order preserved. */
+
+
+
+/* Settings */
+.pc-settings-shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 32px;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 28px 24px 64px;
+}
+
+@media (max-width: 720px) {
+  .pc-settings-shell { grid-template-columns: 1fr; }
+}
+
+.pc-settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pc-settings-nav a {
+  padding: 10px 12px;
+  border-radius: 10px;
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+
+.pc-settings-nav a:hover,
+.pc-settings-nav a.active {
+  background: rgba(255,255,255,0.04);
+  color: var(--fg);
+  text-decoration: none;
+}
+
+/* ── Keyboard shortcut settings page ───────────────────────────── */
+.pc-settings-shell:has(.kbd-settings) {
+  max-width: 1320px;
+  gap: 24px;
+  padding-top: 18px;
+}
+.kbd-settings {
+  display: grid;
+  gap: 12px;
+  max-width: none;
+  width: 100%;
+}
+.kbd-settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 42%);
+}
+.kbd-settings-head h1 {
+  font-size: 20px;
+  line-height: 1.05;
+}
+.kbd-settings-head p {
+  max-width: 760px;
+  margin: 3px 0 0 !important;
+  font-size: 11.5px !important;
+  line-height: 1.35;
+}
+.kbd-settings-help {
+  padding: 6px 9px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: rgb(from var(--accent) r g b / 0.045);
+  border: 1px solid rgb(from var(--accent) r g b / 0.13);
+  border-radius: 7px;
+  line-height: 1.35;
+}
+.kbd-settings-help code {
+  background: rgb(from var(--accent-strong) r g b / 0.10);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10.5px;
+}
+.kbd-settings-section {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px 10px;
+}
+.kbd-settings-cat {
+  margin: 5px 0 0;
+  font-size: 10px;
+  font-weight: 760;
+  line-height: 1.2;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+.kbd-settings-grid {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.kbd-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+  grid-template-areas:
+    "title controls"
+    "default controls";
+  align-items: center;
+  gap: 1px 8px;
+  min-height: 34px;
+  padding: 5px 7px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 16%);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--bg-2), transparent 12%);
+}
+.kbd-settings-row-head {
+  grid-area: title;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.kbd-settings-row-desc {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kbd-settings-row-pill {
+  flex: 0 0 auto;
+  font-size: 8px;
+  font-weight: 760;
+  line-height: 1;
+  text-transform: uppercase;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: rgb(from var(--accent) r g b / 0.14);
+  color: var(--accent);
+}
+.kbd-settings-row-controls {
+  grid-area: controls;
+  display: grid;
+  grid-template-columns: minmax(126px, 1fr) auto auto;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
+.kbd-settings-input {
+  min-width: 0;
+  height: 26px;
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: 11.5px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--fg);
+}
+.kbd-settings-input.is-recording {
+  border-color: rgb(from var(--accent) r g b / 0.5);
+  background: rgb(from var(--accent) r g b / 0.08);
+  font-style: italic;
+}
+.kbd-settings-record,
+.kbd-settings-reset,
+.kbd-settings-reset-all {
+  min-height: 26px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.kbd-settings-record:hover,
+.kbd-settings-reset:hover,
+.kbd-settings-reset-all:hover {
+  background: var(--bg-2);
+}
+.kbd-settings-record:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.kbd-settings-reset,
+.kbd-settings-reset-all {
+  color: #fca5a5;
+  border-color: rgba(252, 165, 165, 0.3);
+}
+.kbd-settings-reset-all {
+  align-self: center;
+}
+.kbd-settings-default {
+  grid-area: default;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-mute);
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: 9.5px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 920px) {
+  .kbd-settings-section {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  .kbd-settings-cat {
+    margin-top: 2px;
+  }
+  .kbd-settings-row {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "title"
+      "controls"
+      "default";
+  }
+  .kbd-settings-row-controls {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+}
+
+/* When the persistent chat rail is open the available chrome width is much
+   smaller than the viewport, so keep the account selector compact instead of
+   letting it spill off the right edge. */
+
+
+.pc-settings-nav-link {
+  position: relative;
+  overflow: hidden;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.pc-settings-nav-link::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--accent), white 12%), transparent);
+  opacity: 0;
+  transform: scaleY(0.45);
+  transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.pc-settings-nav-link:hover,
+.pc-settings-nav-link[aria-current="page"] {
+  color: var(--fg) !important;
+  transform: translateX(2px);
+}
+.pc-settings-nav-link:hover::before,
+.pc-settings-nav-link[aria-current="page"]::before {
+  opacity: 1;
+  transform: scaleY(1);
+}
+.pc-settings-nav-link[aria-current="page"] {
+  background: color-mix(in oklab, var(--bg-3), var(--accent) 10%) !important;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent), transparent 70%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pc-header-nav-link,
+  .pc-header-nav-link::after,
+  .pc-header::after,
+  .pc-route-pending-overlay,
+  .pc-workspace-trigger,
+  .pc-workspace-menu-target,
+  .pc-workspace-menu-action,
+  .pc-workspace-menu-create,
+  .pc-workspace-menu-row,
+  .pc-user-trigger,
+  .pc-user-caret,
+  .pc-user-menu-item,
+  .pc-user-menu-item svg,
+  .pc-settings-nav-link,
+  .pc-settings-nav-link::before,
+  .operator-panel__metrics span,
+  .operator-feed-pills button,
+  .operator-entry,
+  .operator-activity-item,
+  .operator-budget-option,
+  .pc-marketplace-toolbar-copy,
+  .pc-marketplace-search,
+  .pc-marketplace-card,
+  .pc-marketplace-dialog,
+  .pc-marketplace-harness-list label,
+  .pc-marketplace-card-actions .pc-btn,
+  .pc-support-actions .pc-btn,
+  .pc-support-resources,
+  .pc-support-faq,
+  .pc-support-faq-chevron {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.pc-settings-shell {
+  position: relative;
+  isolation: isolate;
+}
+
+.pc-settings-shell::before {
+  content: "";
+  position: absolute;
+  inset: -18px -28px;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(90deg, transparent 0 118px, rgb(from var(--accent-strong) r g b / 0.050) 119px 120px, transparent 121px 238px),
+    linear-gradient(90deg, rgb(from var(--emerald-400) r g b / 0.065), transparent 36%, rgb(from var(--accent-strong) r g b / 0.07)),
+    radial-gradient(circle at 28% 0%, rgb(from var(--accent-strong) r g b / 0.12), transparent 28rem);
+  opacity: 0.62;
+  mask-image: linear-gradient(180deg, transparent 0, #000 8%, #000 92%, transparent 100%);
+  /* WI-6542: always-on loop dropped. The keyframes only shifted background-position,
+     and its `from` frame is the default, so the resting look is unchanged. */
+}
+
+.pc-settings-nav {
+  position: relative;
+  isolation: isolate;
+}
+
+.pc-settings-nav::before {
+  content: "";
+  position: absolute;
+  inset: -10px;
+  z-index: -1;
+  pointer-events: none;
+  border: 1px solid rgb(from var(--accent-strong) r g b / 0.12);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.008)),
+    color-mix(in srgb, var(--bg-deep), transparent 50%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.045), 0 18px 44px rgba(0,0,0,0.14);
+}
+
+.pc-settings-nav-link::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 6px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgb(from var(--accent-strong) r g b / 0.42), transparent);
+  opacity: 0;
+  transform: scaleX(0.35);
+  transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+
+.pc-settings-nav-link:hover::after,
+.pc-settings-nav-link[aria-current="page"]::after {
+  opacity: 0.74;
+  transform: scaleX(1);
+}
+
+.pc-settings-shell > section {
+  position: relative;
+  isolation: isolate;
+}
+
+.pc-settings-shell > section > h1:first-child {
+  position: relative;
+  text-shadow: 0 0 18px rgb(from var(--accent-strong) r g b / 0.18);
+}
+
+.pc-settings-shell > section > h1:first-child::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 54%;
+  bottom: -6px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(226, 252, 255, 0.86), rgb(from var(--accent-strong) r g b / 0.40), transparent);
+  box-shadow: 0 0 14px rgb(from var(--accent-strong) r g b / 0.42);
+}
+
+.pc-settings-shell .pc-card,
+.pc-settings-shell .pc-warn {
+  position: relative;
+  isolation: isolate;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.06),
+    0 18px 44px rgba(0, 0, 0, 0.16);
+}
+
+.pc-settings-shell .pc-card::after,
+.pc-settings-shell .pc-warn::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(120deg, transparent 0 38%, rgba(226, 252, 255, 0.12) 48%, transparent 58%) -120% 0 / 34% 100% no-repeat;
+  opacity: 0.72;
+  /* WI-6542: always-on sweep dropped — sheen parked off-canvas at `-120% 0`; the
+     static opacity above keeps the card's resting look. */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pc-setup-shell::before,
+  .pc-setup-step-orb::after,
+  .pc-setup-shell .pc-code::after,
+  .pc-settings-shell::before,
+  .pc-settings-shell .pc-card::after,
+  .pc-settings-shell .pc-warn::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* Settings pages often wrap content in an inner div; keep the control-room
+   heading light-pipe on those pages too. */
+.pc-settings-shell section h1:first-of-type {
+  position: relative;
+  text-shadow: 0 0 18px rgb(from var(--accent-strong) r g b / 0.18);
+}
+
+.pc-settings-shell section h1:first-of-type::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 54%;
+  bottom: -6px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(226, 252, 255, 0.86), rgb(from var(--accent-strong) r g b / 0.40), transparent);
+  box-shadow: 0 0 14px rgb(from var(--accent-strong) r g b / 0.42);
+}
+
+/* Settings IA and form clarity pass. */
+.pc-settings-nav {
+  gap: 14px;
+}
+
+.pc-settings-nav-search {
+  display: grid;
+  gap: 6px;
+  padding: 2px 2px 8px;
+}
+
+.pc-settings-nav-search-label,
+.pc-settings-nav-heading {
+  color: color-mix(in oklab, var(--fg-mute), white 4%);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.pc-settings-nav-search-label {
+  padding: 0 10px;
+}
+
+.pc-settings-nav-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 11px;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 12px;
+  outline: none;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.048), rgba(255,255,255,0.012)),
+    color-mix(in srgb, var(--bg-deeper), transparent 28%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.045);
+  transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.pc-settings-nav-search-input::placeholder {
+  color: color-mix(in oklab, var(--fg-mute), transparent 22%);
+}
+
+.pc-settings-nav-search-input:focus-visible {
+  border-color: color-mix(in oklab, var(--accent), white 8%);
+  box-shadow:
+    0 0 0 3px color-mix(in oklab, var(--accent), transparent 78%),
+    inset 0 1px 0 rgba(255,255,255,0.055);
+}
+
+.pc-settings-mobile-picker {
+  display: none;
+}
+
+.pc-settings-nav-groups,
+.pc-settings-nav-group {
+  display: grid;
+}
+
+.pc-settings-nav-groups {
+  gap: 18px;
+}
+
+.pc-settings-nav-group {
+  gap: 6px;
+}
+
+.pc-settings-nav-group {
+  position: relative;
+  isolation: isolate;
+  gap: 7px;
+  padding: 10px 8px 9px;
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.040), rgba(255,255,255,0.010)),
+    color-mix(in oklab, var(--bg-2), transparent 10%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.045),
+    0 10px 24px rgba(0,0,0,0.10);
+}
+
+.pc-settings-nav-group::before {
+  content: "";
+  position: absolute;
+  inset: 10px auto 10px 0;
+  width: 3px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--accent), white 12%), color-mix(in oklab, var(--accent-2, var(--accent)), transparent 12%));
+  box-shadow: 0 0 14px color-mix(in oklab, var(--accent), transparent 68%);
+  opacity: 0.72;
+}
+
+.pc-settings-nav-heading {
+  display: grid;
+  grid-template-columns: auto minmax(20px, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 22px;
+  padding: 0 12px 2px;
+  color: color-mix(in oklab, var(--fg), white 8%);
+}
+
+.pc-settings-nav-heading::after {
+  content: "";
+  height: 1px;
+  min-width: 20px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, color-mix(in oklab, var(--accent), transparent 48%), transparent);
+  opacity: 0.78;
+}
+
+.pc-settings-nav-link {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.pc-settings-nav-group .pc-settings-nav-link {
+  margin-left: 2px;
+}
+
+.pc-settings-nav-link[aria-current="page"] {
+  font-weight: 750;
+}
+
+.pc-settings-nav-link-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pc-settings-nav-chip,
+.pc-settings-status-pill {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.pc-settings-nav-chip {
+  padding: 2px 6px;
+  border: 1px solid color-mix(in oklab, var(--warn), transparent 60%);
+  color: color-mix(in oklab, var(--warn), white 8%);
+  background: color-mix(in oklab, var(--warn-bg), transparent 16%);
+}
+
+.pc-settings-nav-empty {
+  padding: 10px 12px;
+  color: var(--fg-mute);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.pc-settings-content {
+  min-width: 0;
+}
+
+.pc-settings-inline-callout {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.pc-settings-status-pill {
+  padding: 3px 7px;
+  border: 1px solid color-mix(in oklab, var(--fg-mute), transparent 68%);
+  color: color-mix(in oklab, var(--fg-mute), white 8%);
+  background: color-mix(in oklab, var(--bg-3), transparent 20%);
+}
+
+.pc-settings-status-pill.is-set {
+  border-color: color-mix(in oklab, var(--good), transparent 58%);
+  color: color-mix(in oklab, var(--good), white 8%);
+  background: color-mix(in oklab, var(--good), transparent 88%);
+}
+
+.pc-settings-status-pill.is-empty {
+  font-style: italic;
+}
+
+.pc-settings-status-pill.is-warn {
+  border-color: color-mix(in oklab, var(--warn), transparent 48%);
+  color: color-mix(in oklab, var(--warn), white 6%);
+  background: color-mix(in oklab, var(--warn), transparent 86%);
+}
+
+.pc-settings-field-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 7px;
+}
+
+.pc-settings-status-copy {
+  color: var(--fg-mute);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.pc-settings-usage-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 7px;
+}
+
+.pc-settings-usage-badges span {
+  padding: 3px 7px;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 72%);
+  border-radius: 999px;
+  color: color-mix(in oklab, var(--accent), white 8%);
+  background: color-mix(in oklab, var(--accent), transparent 92%);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.pc-settings-secret-value {
+  padding: 4px 8px;
+  border: 1px solid color-mix(in oklab, var(--border), white 4%);
+  border-radius: 6px;
+  background: var(--bg-1);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.pc-settings-diagnostics {
+  margin-bottom: 32px;
+  padding: 12px;
+  border: 1px solid color-mix(in oklab, var(--border), white 4%);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-deep), transparent 54%);
+}
+
+.pc-settings-diagnostics-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pc-settings-diagnostics-summary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pc-settings-diagnostics-toggle {
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+@media (max-width: 720px) {
+  .pc-settings-shell {
+    gap: 16px;
+    padding-inline: 16px;
+  }
+
+  .pc-settings-nav {
+    gap: 10px;
+  }
+
+  .pc-settings-nav::before {
+    inset: -8px;
+    border-radius: 16px;
+  }
+
+  .pc-settings-nav-search,
+  .pc-settings-nav-groups {
+    display: none;
+  }
+
+  .pc-settings-mobile-picker {
+    display: block;
+  }
+
+  .pc-settings-mobile-trigger {
+    display: flex;
+    width: 100%;
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    color: var(--fg);
+    font: inherit;
+    font-size: 13px;
+    border: 1px solid color-mix(in oklab, var(--accent), transparent 62%);
+    border-radius: 12px;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.055), rgba(255,255,255,0.015)),
+      color-mix(in srgb, var(--bg-deeper), transparent 18%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.055),
+      0 12px 30px rgba(0,0,0,0.16);
+  }
+
+  .pc-settings-diagnostics-head {
+    display: grid;
+  }
+
+  .pc-settings-diagnostics-summary {
+    justify-content: flex-start;
+  }
+}
+
+.pc-settings-content :not(pre) > code {
+  margin-inline: 0.12em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.pc-settings-content h1:first-of-type {
+  font-size: 32px;
+  line-height: 1.05;
+}
+
+.pc-settings-page--voice {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.pc-settings-page--voice :is(select, input, textarea) {
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.pc-settings-conv-voice-row {
+  min-width: 0;
+}
+
+.pc-settings-conv-voice-row > input {
+  min-width: 0;
+}
+
+body:has(.pc-settings-page--voice) .pc-settings-shell section section {
+  padding: 14px 16px;
+  box-sizing: border-box;
+}
+
+body:has(.pc-settings-page--voice) .pc-settings-shell section section[style*="padding"] {
+  box-sizing: border-box;
+}
+
+@media (max-width: 720px) {
+  .pc-settings-shell {
+    max-width: 100vw;
+    overflow-x: clip;
+  }
+
+  .pc-settings-shell::before {
+    inset-inline: 0;
+  }
+
+  .pc-settings-nav {
+    overflow-x: clip;
+  }
+
+  .pc-settings-nav::before {
+    inset-inline: 0;
+  }
+
+  .pc-settings-content {
+    max-width: 100%;
+    overflow-x: clip;
+  }
+
+  .pc-settings-content h1:first-of-type {
+    font-size: 28px;
+  }
+
+  body:has(.pc-settings-page--voice) .pc-settings-content {
+    overflow-x: hidden;
+  }
+
+  .pc-settings-inline-callout {
+    align-items: flex-start;
+  }
+
+  .pc-settings-inline-callout > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  body:has(.pc-settings-page--voice) .pc-settings-shell section section {
+    padding: 12px;
+  }
+
+  .pc-settings-conv-voice-row {
+    display: grid !important;
+    grid-template-columns: 1fr auto auto;
+    align-items: stretch !important;
+  }
+
+  .pc-settings-conv-voice-row > button {
+    padding-inline: 10px !important;
+  }
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell > section {
+  position: relative;
+  isolation: isolate;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell > section::before,
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell > section::after {
+  content: "";
+  position: absolute;
+  inset: -18px -24px;
+  z-index: -1;
+  pointer-events: none;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell > section::before {
+  background:
+    repeating-linear-gradient(90deg, rgb(from var(--accent-strong) r g b / 0.040) 0 1px, transparent 1px 96px),
+    repeating-linear-gradient(180deg, rgb(from var(--accent-strong) r g b / 0.025) 0 1px, transparent 1px 70px),
+    radial-gradient(circle at 42% 0%, rgb(from var(--accent-strong) r g b / 0.13), transparent 28rem);
+  opacity: 0.66;
+  mask-image: linear-gradient(180deg, transparent 0, #000 8%, #000 92%, transparent 100%);
+  /* WI-6542: always-on loop dropped — background-position-only drift, rests at `from`. */
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell > section::after {
+  border: 1px solid rgb(from var(--accent-strong) r g b / 0.12);
+  border-radius: 22px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 18px 44px rgba(0,0,0,0.12);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell section h1:first-of-type {
+  text-shadow:
+    0 0 22px rgb(from var(--accent-strong) r g b / 0.24),
+    0 0 42px rgb(from var(--emerald-400) r g b / 0.08);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell section h2 {
+  position: relative;
+  text-shadow: 0 0 14px rgb(from var(--accent-strong) r g b / 0.14);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell section h2::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 68%;
+  bottom: -6px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(226, 252, 255, 0.78), rgb(from var(--accent-strong) r g b / 0.36), transparent);
+  box-shadow: 0 0 12px rgb(from var(--accent-strong) r g b / 0.36);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell section section {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.026), rgba(255,255,255,0.006)),
+    radial-gradient(circle at 12% 0%, rgb(from var(--accent-strong) r g b / 0.07), transparent 16rem);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.045),
+    inset 0 0 0 1px rgb(from var(--accent-strong) r g b / 0.10);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell section section::before {
+  content: "";
+  position: absolute;
+  top: -24%;
+  bottom: -24%;
+  left: -34%;
+  width: 36%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(226, 252, 255, 0.22), rgb(from var(--emerald-400) r g b / 0.14), transparent);
+  filter: blur(3px);
+  /* WI-6542: always-on sweep dropped. This pseudo-element exists only to carry the
+     sweep and is opacity:0 at both ends of the old cycle, so it rests invisible. */
+  opacity: 0;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell :is(select, input[type="text"], input[type="password"], input[type="number"]) {
+  border-color: rgb(from var(--accent-strong) r g b / 0.24) !important;
+  background:
+    linear-gradient(90deg, rgb(from var(--emerald-400) r g b / 0.055), transparent),
+    color-mix(in srgb, var(--bg-deep), transparent 18%) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.055),
+    0 0 22px rgb(from var(--accent) r g b / 0.06) !important;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell button {
+  position: relative;
+  overflow: hidden;
+  border-color: rgb(from var(--accent-strong) r g b / 0.24) !important;
+  box-shadow: 0 0 20px rgb(from var(--accent) r g b / 0.08);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell button::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent 0 36%, rgba(255,255,255,0.18) 48%, transparent 60% 100%);
+  transform: translateX(-118%);
+  /* WI-6542: always-on sweep dropped — the static `translateX(-118%)` above already
+     parks this sheen off-canvas at rest. */
+}
+
+body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell section section:nth-of-type(1)::after {
+  content: "";
+  position: absolute;
+  right: 18px;
+  top: 16px;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  border: 1px solid rgb(from var(--accent-strong) r g b / 0.18);
+  border-left-color: transparent;
+  pointer-events: none;
+  opacity: 0.52;
+  filter: drop-shadow(0 0 16px rgb(from var(--accent-strong) r g b / 0.22));
+  /* WI-6542: always-on pulse dropped. The static `opacity: 0.52` above sits inside the
+     old 0.42<->0.86 cycle, so the ring keeps a mid-cycle resting look. */
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content > .space-y-8.p-6 {
+  display: grid;
+  gap: 24px;
+  padding: 8px 4px !important;
+  max-width: 880px;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content > .space-y-8.p-6 > header p {
+  margin: 8px 0 0;
+  color: var(--fg-mute) !important;
+  font-size: 14px !important;
+  line-height: 1.55;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content > .space-y-8.p-6 > section {
+  border: 1px solid color-mix(in oklab, var(--border), white 8%) !important;
+  border-radius: 18px !important;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.01)),
+    color-mix(in srgb, var(--bg), transparent 48%) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.045),
+    0 16px 38px rgba(0,0,0,0.14);
+  padding: 16px !important;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content > .space-y-8.p-6 > section h2 {
+  margin: 0 0 10px;
+  color: var(--fg);
+  font-size: 16px !important;
+  font-weight: 780;
+  line-height: 1.15;
+  text-transform: none !important;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content select,
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content button {
+  min-height: 38px;
+  border-radius: 10px !important;
+  font: inherit;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 11px !important;
+  color: var(--fg) !important;
+  border: 1px solid var(--border) !important;
+  background: color-mix(in srgb, var(--bg-deeper), transparent 28%) !important;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content button {
+  padding: 8px 12px !important;
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  box-shadow: none;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content ul {
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 10px;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in oklab, var(--border), white 6%);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-deep), transparent 52%);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content li > div {
+  min-width: 0;
+  flex: 1;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content li > div > div:first-child {
+  color: var(--fg);
+  font-size: 14px !important;
+  font-weight: 700;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content li > div > div:last-child {
+  margin-top: 4px;
+  color: var(--fg-mute) !important;
+  font-size: 12px !important;
+  line-height: 1.45;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content img[alt="Pairing QR code"] {
+  width: min(100%, 256px);
+  height: auto;
+}
+
+@media (max-width: 720px) {
+  body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content > .space-y-8.p-6 {
+    gap: 18px;
+    padding: 4px 0 0 !important;
+  }
+
+  body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content > .space-y-8.p-6 > section {
+    padding: 14px !important;
+  }
+
+  body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content > .space-y-8.p-6 > section > .mt-4.flex.items-center.gap-3 {
+    display: grid !important;
+    grid-template-columns: 1fr;
+  }
+
+  body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content li {
+    display: grid;
+  }
+
+  body:has(.pc-settings-nav-link[href="/settings/mobile"][aria-current="page"]) .pc-settings-content li button {
+    justify-self: start;
+  }
+}
+
+body:has(.pc-settings-nav-link[href="/settings/plugin-runtime"][aria-current="page"]) .pc-settings-shell > section {
+  position: relative;
+  isolation: isolate;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/plugin-runtime"][aria-current="page"]) .pc-settings-shell > section::before {
+  content: "";
+  position: absolute;
+  inset: -18px -24px;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(90deg, rgb(from var(--accent-strong) r g b / 0.040) 0 1px, transparent 1px 118px),
+    repeating-linear-gradient(180deg, rgb(from var(--accent-strong) r g b / 0.024) 0 1px, transparent 1px 76px),
+    radial-gradient(circle at 50% 0%, rgba(129, 140, 248, 0.13), transparent 30rem);
+  opacity: 0.68;
+  mask-image: linear-gradient(180deg, transparent 0, #000 8%, #000 92%, transparent 100%);
+  /* WI-6542: always-on loop dropped — background-position-only drift, rests at `from`. */
+}
+
+body:has(.pc-settings-nav-link[href="/settings/plugin-runtime"][aria-current="page"]) .pc-settings-shell .pc-card {
+  overflow: hidden;
+  border-color: rgb(from var(--accent-strong) r g b / 0.18);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.030), rgba(255,255,255,0.006)),
+    color-mix(in srgb, var(--bg-deep), transparent 30%);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/plugin-runtime"][aria-current="page"]) .pc-settings-shell .pc-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(120deg, transparent 0 38%, rgba(226, 252, 255, 0.13) 48%, transparent 58%) -120% 0 / 34% 100% no-repeat,
+    radial-gradient(circle at 12% 0%, rgb(from var(--accent-strong) r g b / 0.07), transparent 14rem);
+  opacity: 0.70;
+  /* WI-6542: always-on sweep dropped — sheen parked off-canvas at `-120% 0`; tint remains. */
+}
+
+body:has(.pc-settings-nav-link[href="/settings/plugin-runtime"][aria-current="page"]) .pc-settings-shell table {
+  position: relative;
+  overflow: hidden;
+  border-collapse: separate !important;
+  border-spacing: 0;
+  border: 1px solid rgb(from var(--accent-strong) r g b / 0.12);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-deep), transparent 66%);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/plugin-runtime"][aria-current="page"]) .pc-settings-shell th {
+  background:
+    linear-gradient(90deg, rgb(from var(--accent-strong) r g b / 0.12), transparent),
+    color-mix(in srgb, var(--bg-deep), transparent 24%);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/plugin-runtime"][aria-current="page"]) .pc-settings-shell td {
+  border-bottom-color: rgb(from var(--accent-strong) r g b / 0.12) !important;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/plugin-runtime"][aria-current="page"]) .pc-settings-shell tr:hover td {
+  background: rgb(from var(--accent-strong) r g b / 0.045);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell > section::before,
+  body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell section section::before,
+  body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell button::after,
+  body:has(.pc-settings-nav-link[href="/settings/voice"][aria-current="page"]) .pc-settings-shell section section:nth-of-type(1)::after,
+  body:has(.pc-settings-nav-link[href="/settings/plugin-runtime"][aria-current="page"]) .pc-settings-shell > section::before,
+  body:has(.pc-settings-nav-link[href="/settings/plugin-runtime"][aria-current="page"]) .pc-settings-shell .pc-card::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell > section,
+body:has(.pc-settings-nav-link[href="/settings/profile"][aria-current="page"]) .pc-settings-shell > section,
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell > section,
+body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell > section {
+  position: relative;
+  isolation: isolate;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell > section::before,
+body:has(.pc-settings-nav-link[href="/settings/profile"][aria-current="page"]) .pc-settings-shell > section::before,
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell > section::before,
+body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell > section::before {
+  content: "";
+  position: absolute;
+  inset: -18px -24px;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(90deg, rgb(from var(--accent-strong) r g b / 0.038) 0 1px, transparent 1px 104px),
+    repeating-linear-gradient(180deg, rgb(from var(--accent-strong) r g b / 0.024) 0 1px, transparent 1px 78px),
+    radial-gradient(circle at 42% 0%, rgb(from var(--accent-strong) r g b / 0.12), transparent 30rem);
+  opacity: 0.66;
+  mask-image: linear-gradient(180deg, transparent 0, #000 8%, #000 92%, transparent 100%);
+  /* WI-6542: always-on loop dropped — background-position-only drift, rests at `from`. */
+}
+
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell section h1:first-of-type,
+body:has(.pc-settings-nav-link[href="/settings/profile"][aria-current="page"]) .pc-settings-shell section h1:first-of-type,
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell section h1:first-of-type,
+body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell section h1:first-of-type {
+  text-shadow:
+    0 0 22px rgb(from var(--accent-strong) r g b / 0.22),
+    0 0 42px rgb(from var(--emerald-400) r g b / 0.08);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell section h2,
+body:has(.pc-settings-nav-link[href="/settings/profile"][aria-current="page"]) .pc-settings-shell section h3,
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell section h2,
+body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell .kbd-settings-cat {
+  position: relative;
+  text-shadow: 0 0 14px rgb(from var(--accent-strong) r g b / 0.14);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell form,
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell section,
+body:has(.pc-settings-nav-link[href="/settings/profile"][aria-current="page"]) .pc-settings-shell .pc-card,
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-callout,
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-defs,
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell [data-radix-collapsible-content],
+body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell .kbd-settings-help,
+body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell .kbd-settings-row {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border-color: rgb(from var(--accent-strong) r g b / 0.18) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.052),
+    0 18px 44px rgba(0, 0, 0, 0.12);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell form::after,
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell section::after,
+body:has(.pc-settings-nav-link[href="/settings/profile"][aria-current="page"]) .pc-settings-shell .pc-card::after,
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-callout::after,
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-defs::after,
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell [data-radix-collapsible-content]::after,
+body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell .kbd-settings-help::after,
+body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell .kbd-settings-row::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(120deg, transparent 0 38%, rgba(226, 252, 255, 0.12) 48%, transparent 58%) -120% 0 / 34% 100% no-repeat,
+    radial-gradient(circle at 12% 0%, rgb(from var(--accent-strong) r g b / 0.07), transparent 14rem);
+  opacity: 0.70;
+  /* WI-6542: always-on sweep dropped. The sheen layer is parked off-canvas by its own
+     `-120% 0` background-position, so at rest only the static radial tint shows. */
+}
+
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell form div[style*="min-height"] {
+  border-color: rgb(from var(--accent-strong) r g b / 0.24) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.055),
+    0 0 28px rgb(from var(--accent) r g b / 0.08);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell section > div[style*="grid-template-columns"] > div,
+body:has(.pc-settings-nav-link[href="/settings/profile"][aria-current="page"]) .pc-settings-shell .pc-input,
+body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell .kbd-settings-input {
+  border-color: rgb(from var(--accent-strong) r g b / 0.24) !important;
+  background:
+    linear-gradient(90deg, rgb(from var(--emerald-400) r g b / 0.050), transparent),
+    color-mix(in srgb, var(--bg-deep), transparent 30%) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.052),
+    0 0 20px rgb(from var(--accent) r g b / 0.06) !important;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell section > div[style*="grid-template-columns"] > div {
+  position: relative;
+  overflow: hidden;
+  box-shadow:
+    inset 0 0 0 1px rgb(from var(--accent-strong) r g b / 0.14),
+    inset 0 1px 0 rgba(255,255,255,0.040),
+    0 0 18px rgb(from var(--accent) r g b / 0.045) !important;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-defs code,
+body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell code,
+body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell code {
+  text-shadow: 0 0 10px rgb(from var(--accent-strong) r g b / 0.18);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-settings-section {
+  display: grid;
+  gap: 18px;
+  max-width: 880px;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-settings-section > p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-callout {
+  max-width: 760px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.010)),
+    color-mix(in srgb, var(--bg), transparent 50%);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-callout strong {
+  color: var(--fg);
+}
+
+body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-settings-section h2 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell .kbd-settings-input.is-recording {
+  animation: pcSettingsCommandPulse 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell > section::before,
+  body:has(.pc-settings-nav-link[href="/settings/profile"][aria-current="page"]) .pc-settings-shell > section::before,
+  body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell > section::before,
+  body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell > section::before,
+  body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell form::after,
+  body:has(.pc-settings-nav-link[href="/settings/operator"][aria-current="page"]) .pc-settings-shell section::after,
+  body:has(.pc-settings-nav-link[href="/settings/profile"][aria-current="page"]) .pc-settings-shell .pc-card::after,
+  body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-callout::after,
+  body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell .pc-defs::after,
+  body:has(.pc-settings-nav-link[href="/settings/publishing"][aria-current="page"]) .pc-settings-shell [data-radix-collapsible-content]::after,
+  body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell .kbd-settings-help::after,
+  body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell .kbd-settings-row::after,
+  body:has(.pc-settings-nav-link[href="/settings/shortcuts"][aria-current="page"]) .pc-settings-shell .kbd-settings-input.is-recording {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+html[data-visual-effects='minimal'] .pc-marketplace-frame::before,
+html[data-visual-effects='minimal'] .pc-marketplace-frame::after,
+html[data-visual-effects='minimal'] .pc-marketplace-tabs.pc-tabs::before,
+html[data-visual-effects='minimal'] .pc-marketplace-tabs.pc-tabs::after,
+html[data-visual-effects='minimal'] .pc-marketplace-tabs .pc-tab::after,
+html[data-visual-effects='minimal'] .pc-marketplace-list--maximal-hud::before,
+html[data-visual-effects='minimal'] .pc-marketplace-list--maximal-hud .pc-marketplace-toolbar-copy::after,
+html[data-visual-effects='minimal'] .pc-marketplace-list--maximal-hud .pc-marketplace-search::after,
+html[data-visual-effects='minimal'] .pc-marketplace-list--maximal-hud .pc-marketplace-card::before,
+html[data-visual-effects='minimal'] .pc-marketplace-list--maximal-hud .pc-marketplace-card::after,
+html[data-visual-effects='minimal'] .pc-marketplace-list--maximal-hud .pc-marketplace-dialog::before,
+html[data-visual-effects='minimal'] .pc-marketplace-list--maximal-hud .pc-marketplace-card-icon::after,
+html[data-visual-effects='minimal'] .pc-marketplace-list--maximal-hud .pc-marketplace-meta span::after,
+html[data-visual-effects='minimal'] .pc-marketplace-shell .pc-marketplace-grid::before,
+html[data-visual-effects='minimal'] .pc-marketplace-shell .pc-marketplace-toolbar-copy::after,
+html[data-visual-effects='minimal'] .pc-marketplace-shell .pc-marketplace-search::after,
+html[data-visual-effects='minimal'] .pc-marketplace-shell .pc-marketplace-card-icon::after,
+html[data-visual-effects='minimal'] .pc-marketplace-shell .pc-marketplace-meta span::after,
+html[data-visual-effects='minimal'] .pc-marketplace-detail::before,
+html[data-visual-effects='minimal'] .pc-marketplace-detail::after,
+html[data-visual-effects='minimal'] .pc-marketplace-detail-head::before,
+html[data-visual-effects='minimal'] .pc-marketplace-detail-head .pc-marketplace-card-icon::before,
+html[data-visual-effects='minimal'] .pc-marketplace-detail-head .pc-marketplace-card-icon::after,
+html[data-visual-effects='minimal'] .pc-marketplace-detail h1::after,
+html[data-visual-effects='minimal'] .pc-marketplace-detail .pc-card::after,
+html[data-visual-effects='minimal'] .pc-marketplace-detail-cmd::after,
+html[data-visual-effects='minimal'] .pc-settings-shell::before,
+html[data-visual-effects='minimal'] .pc-settings-shell > section::before,
+html[data-visual-effects='minimal'] .pc-settings-shell > section::after,
+html[data-visual-effects='minimal'] .pc-settings-shell section h1:first-of-type::after,
+html[data-visual-effects='minimal'] .pc-settings-shell section h2::after,
+html[data-visual-effects='minimal'] .pc-settings-shell form::after,
+html[data-visual-effects='minimal'] .pc-settings-shell section section::before,
+html[data-visual-effects='minimal'] .pc-settings-shell section section::after,
+html[data-visual-effects='minimal'] .pc-settings-shell button::after,
+html[data-visual-effects='minimal'] .pc-settings-shell .pc-card::after,
+html[data-visual-effects='minimal'] .pc-settings-shell .pc-warn::after,
+html[data-visual-effects='minimal'] [class*='pc-installed-']::before,
+html[data-visual-effects='minimal'] [class*='pc-installed-']::after,
+html[data-visual-effects='minimal'] [class*='pc-snapshot-']::before,
+html[data-visual-effects='minimal'] [class*='pc-snapshot-']::after,
+html[data-visual-effects='minimal'] [class*='project-docs-']::before,
+html[data-visual-effects='minimal'] [class*='project-docs-']::after,
+html[data-visual-effects='minimal'] [class*='pc-wiki-missing-']::before,
+html[data-visual-effects='minimal'] [class*='pc-wiki-missing-']::after {
+  content: none !important;
+  display: none !important;
+}
+
+/* ---- /settings/backups ---- */
+.pc-settings-page .pc-settings-subtitle {
+  color: rgba(255,255,255,0.6);
+  font-size: 13px;
+  margin-top: 4px;
+}
+.pc-settings-status {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px 16px;
+  margin: 0 0 12px;
+}
+.pc-settings-status > div { display: flex; flex-direction: column; gap: 2px; }
+.pc-settings-status dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.5);
+}
+.pc-settings-status dd { font-size: 14px; font-weight: 500; margin: 0; }
+.pc-settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.pc-settings-radio-group { display: flex; flex-wrap: wrap; gap: 12px; }
+.pc-settings-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.pc-settings-choice[aria-checked="true"] {
+  background: var(--bg-3);
+  border-color: var(--border-strong);
+}
+.pc-settings-row { display: flex; gap: 8px; align-items: center; padding: 4px 0; }
+.pc-settings-fieldset { border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 12px 14px; }
+.pc-settings-fieldset legend { padding: 0 6px; font-size: 12px; color: rgba(255,255,255,0.6); }
+.pc-settings-retention-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+.pc-settings-retention-grid label { display: flex; flex-direction: column; gap: 4px; }
+.pc-settings-note { font-size: 12px; color: rgba(255,255,255,0.55); margin: 6px 0 0; }
+.pc-settings-footer { margin-top: 24px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.08); }
+
+.pc-vault-hero .pc-settings-intro {
+  grid-column: 1 / -1;
+  max-width: 760px;
+  margin: 4px 0 0;
+  color: color-mix(in srgb, var(--fg), transparent 28%);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.pc-vault-enable-control .pc-settings-note { margin: 1px 0 0; }
+
+.pc-vault-advanced-content .pc-settings-section { margin: 0; }
+
+/* Sidebar progress chip — green when wizard is fully finished, neutral otherwise. */
+.pc-settings-nav-chip--progress {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.pc-settings-nav-chip--progress[data-finished="true"] {
+  background: rgba(34, 197, 94, 0.16);
+  color: rgb(110, 231, 165);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pc-header-nav-link,
+  .pc-header-nav-link::after,
+  .pc-header::after,
+  .pc-route-pending-overlay,
+  .pc-workspace-trigger,
+  .pc-workspace-menu-target,
+  .pc-workspace-menu-action,
+  .pc-workspace-menu-create,
+  .pc-workspace-menu-row,
+  .pc-user-trigger,
+  .pc-user-caret,
+  .pc-user-menu-item,
+  .pc-user-menu-item svg,
+  .pc-settings-nav-link,
+  .pc-settings-nav-link::before,
+  .operator-panel__metrics span,
+  .operator-feed-pills button,
+  .operator-entry,
+  .operator-activity-item,
+  .operator-budget-option,
+  .oracle-fab,
+  .oracle-fab-badge,
+  .oracle-tab,
+  .oracle-tab-add,
+  .pc-marketplace-toolbar-copy,
+  .pc-marketplace-search,
+  .pc-marketplace-card,
+  .pc-marketplace-dialog,
+  .pc-marketplace-harness-list label,
+  .pc-marketplace-card-actions .pc-button,
+  .pc-support-actions .pc-button,
+  .pc-support-resources,
+  .pc-support-faq,
+  .pc-support-faq-chevron {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+
+
+.pc-marketplace-loading {
+  padding: 28px;
+  color: var(--fg-dim);
+}
+
+.pc-marketplace-hero-v2,
+.pc-marketplace-pagehead,
+.pc-marketplace-loading {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.pc-marketplace-hero-v2::before,
+.pc-marketplace-pagehead::before,
+.pc-marketplace-loading::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(120deg, transparent 0 36%, rgba(226, 252, 255, 0.14) 46%, transparent 54%) -120% 0 / 34% 100% no-repeat,
+    radial-gradient(circle at 14% 0%, rgb(from var(--accent-strong) r g b / 0.10), transparent 14rem);
+  opacity: 0.72;
+  animation: pcMarketplaceTabSweep 5.4s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+.pc-marketplace-pagehead,
+.pc-marketplace-loading {
+  box-shadow:
+    0 22px 60px rgba(0, 0, 0, 0.15),
+    inset 0 1px 0 rgba(255,255,255,0.045);
+}
+
+.pc-marketplace-mini-stats div,
+.pc-marketplace-loading .pc-marketplace-card {
+  position: relative;
+  overflow: hidden;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.05),
+    0 16px 34px rgba(0, 0, 0, 0.12),
+    0 0 24px rgb(from var(--accent) r g b / 0.05);
+}
+
+.pc-marketplace-loading .pc-marketplace-card-head span:not(.pc-marketplace-card-icon),
+.pc-marketplace-loading p {
+  text-shadow: 0 0 10px rgb(from var(--accent-strong) r g b / 0.10);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pc-marketplace-frame::after,
+  .pc-marketplace-tabs.pc-tabs::after,
+  .pc-marketplace-hero-v2::before,
+  .pc-marketplace-pagehead::before,
+  .pc-marketplace-loading::before,
+  .pc-marketplace-mini-stats div::after,
+  .pc-marketplace-category-card::before,
+  .pc-marketplace-steps li::before,
+  .pc-marketplace-category-icon::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+.pc-marketplace-tabs.pc-tabs,
+.pc-marketplace-hero-v2,
+.pc-marketplace-pagehead,
+.pc-marketplace-toolbar-copy,
+.pc-marketplace-search,
+.pc-marketplace-card,
+.pc-marketplace-empty,
+.pc-marketplace-loading,
+.pc-marketplace-mini-stats div,
+.pc-marketplace-category-card,
+.pc-marketplace-steps,
+.pc-marketplace-steps li {
+  border-color: rgba(148, 196, 228, 0.18) !important;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.040), rgba(255,255,255,0.010)),
+    linear-gradient(135deg, rgba(255,255,255,0.020), transparent 42%, rgb(from var(--accent-strong) r g b / 0.04) 74%, transparent 100%),
+    var(--pc-market-metal) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.070),
+    inset 0 -1px 0 rgba(0,0,0,0.34),
+    0 18px 44px rgba(0, 0, 0, 0.18),
+    0 0 0 1px rgb(from var(--accent-strong) r g b / 0.05) !important;
+}
+
+.pc-marketplace-empty,
+.pc-marketplace-loading {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.032), rgba(255,255,255,0.010)),
+    color-mix(in srgb, var(--bg-deep), transparent 18%) !important;
+}
+
+/* ---- /settings/personal-vault ---- */
+.pc-personal-vault {
+  --vault-good: #63d6a0;
+  --vault-good-soft: color-mix(in srgb, var(--vault-good), transparent 88%);
+  --vault-accent-soft: color-mix(in srgb, var(--accent), transparent 88%);
+  max-width: 1120px;
+  margin-inline: auto;
+}
+
+.pc-vault-hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 20px;
+  overflow: hidden;
+  padding: 28px;
+  border: 1px solid color-mix(in srgb, var(--accent), var(--border) 72%);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 88% 15%, rgb(from var(--accent) r g b / 0.18), transparent 34%),
+    linear-gradient(145deg, color-mix(in srgb, var(--bg-1), var(--accent) 5%), var(--bg-1));
+  box-shadow: 0 20px 54px rgba(0, 0, 0, 0.18);
+}
+
+.pc-vault-hero h1,
+.pc-vault-section-heading h2,
+.pc-vault-step-section > h2,
+.pc-vault-advanced-section > h2 { margin: 3px 0 0; }
+
+.pc-vault-eyebrow,
+.pc-vault-step-kicker {
+  color: color-mix(in srgb, var(--accent-strong), white 18%);
+  font-size: 10px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.pc-vault-health {
+  align-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: color-mix(in srgb, var(--fg), transparent 18%);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.pc-vault-health.is-ready {
+  border-color: color-mix(in srgb, var(--vault-good), transparent 60%);
+  background: var(--vault-good-soft);
+  color: color-mix(in srgb, var(--vault-good), white 24%);
+}
+
+.pc-vault-health.is-paused {
+  border-color: color-mix(in srgb, var(--warn, #fbbf24), transparent 58%);
+  color: var(--warn, #fbbf24);
+}
+
+.pc-vault-overview {
+  padding: 22px;
+  border-color: color-mix(in srgb, var(--accent), var(--border) 82%);
+  background: color-mix(in srgb, var(--bg-1), var(--accent) 2.5%);
+}
+
+.pc-vault-section-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.pc-vault-enable-control {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 190px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+}
+
+.pc-vault-enable-control > span:last-child,
+.pc-vault-next-action > span:last-child {
+  display: flex;
+  flex-direction: column;
+}
+.pc-vault-pause-note { max-width: 680px; }
+
+.pc-vault-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pc-vault-steps li {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-2);
+}
+
+.pc-vault-steps li.is-complete {
+  border-color: color-mix(in srgb, var(--vault-good), transparent 68%);
+  background: var(--vault-good-soft);
+}
+
+.pc-vault-steps li > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pc-vault-steps li > span:last-child > span {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--fg), transparent 44%);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pc-vault-step-number {
+  display: inline-grid;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 55%);
+  border-radius: 999px;
+  background: var(--vault-accent-soft);
+  color: color-mix(in srgb, var(--accent-strong), white 20%);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.pc-vault-next-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 13px 15px;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 62%);
+  border-radius: 12px;
+  background: var(--vault-accent-soft);
+}
+
+.pc-vault-next-action > span:last-child > span {
+  margin-top: 2px;
+  color: color-mix(in srgb, var(--fg), transparent 30%);
+  font-size: 12px;
+}
+
+.pc-vault-next-icon { color: var(--accent-strong); font-size: 20px; }
+
+.pc-vault-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  margin: 18px 0 0;
+  padding: 1px;
+  border-radius: 12px;
+  background: var(--border);
+}
+
+.pc-vault-summary > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 13px 14px;
+  background: var(--bg-1);
+}
+
+.pc-vault-summary dt {
+  color: color-mix(in srgb, var(--fg), transparent 48%);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.pc-vault-summary dd {
+  margin: 5px 0 1px;
+  color: var(--fg);
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.pc-vault-summary span {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--fg), transparent 48%);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pc-vault-step-section { position: relative; padding: 22px; }
+.pc-vault-step-section > .pc-vault-step-kicker { display: block; margin-bottom: 2px; }
+
+.pc-vault-provider-card {
+  background: color-mix(in srgb, var(--bg-2), transparent 18%);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025);
+}
+
+.pc-vault-account-card { background: color-mix(in srgb, var(--bg-1), var(--accent) 1.5%); }
+
+.pc-vault-account-details,
+.pc-vault-disclosure {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--bg-2), transparent 18%);
+}
+
+.pc-vault-account-details > summary,
+.pc-vault-disclosure > summary {
+  padding: 10px 12px;
+  color: color-mix(in srgb, var(--fg), transparent 22%);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.pc-vault-account-details[open] > summary,
+.pc-vault-disclosure[open] > summary { border-bottom: 1px solid var(--border); }
+.pc-vault-account-details fieldset { margin: 0; padding: 13px; border: 0; }
+
+.pc-vault-disclosure > div {
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: 0 0 9px 9px !important;
+}
+
+.pc-vault-advanced-section {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--bg-1), transparent 24%);
+}
+
+.pc-vault-advanced-disclosure {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-1), transparent 20%);
+}
+
+.pc-vault-advanced-disclosure > summary {
+  padding: 14px 16px;
+  cursor: pointer;
+}
+
+.pc-vault-advanced-disclosure > summary > span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pc-vault-advanced-disclosure > summary span span {
+  color: color-mix(in srgb, var(--fg), transparent 48%);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.pc-vault-advanced-disclosure[open] > summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.pc-vault-advanced-content {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
+.pc-vault-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+}
+
+@media (max-width: 860px) {
+  .pc-vault-steps,
+  .pc-vault-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 620px) {
+  .pc-vault-hero { display: grid; grid-template-columns: 1fr; padding: 20px; }
+  .pc-vault-section-heading { display: grid; grid-template-columns: 1fr; }
+  .pc-vault-health { justify-self: start; }
+  .pc-vault-enable-control { min-width: 0; }
+  .pc-vault-steps,
+  .pc-vault-summary { grid-template-columns: 1fr; }
+  .pc-vault-steps li > span:last-child > span,
+  .pc-vault-summary span { white-space: normal; }
+}

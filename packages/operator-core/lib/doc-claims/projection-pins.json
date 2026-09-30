@@ -1,0 +1,11 @@
+{
+  "schema": "doc-claim-projection-pins/1",
+  "pins": [
+    {
+      "id": "EI-19444215495255056.pgrep-q",
+      "client": "claude",
+      "needles": ["`pgrep -q` DOES NOT EXIST"],
+      "source": "packages/operator-core/lib/claude-md-proc-guard-claim.test.ts"
+    }
+  ]
+}

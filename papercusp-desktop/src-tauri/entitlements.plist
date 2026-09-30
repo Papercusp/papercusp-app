@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the notarized macOS build
+  (mac-public-release-readiness-2026-06-25, D-002-revisit).
+
+  Notarization REQUIRES the hardened runtime. Under it, the embedded Node.js
+  sidecar (V8 JIT) and the other bundled binaries (gh, omp, pg_*, zellij, pui,
+  …) would be killed without these exceptions:
+
+  - allow-jit / allow-unsigned-executable-memory — V8/Node generates and
+    executes JIT code; without these Node aborts immediately ("can't allocate
+    executable memory" / SIGKILL).
+  - disable-library-validation — the sidecar runs a mix of binaries and loads
+    dylibs that are not all signed by THIS app's Team ID (third-party tools,
+    embedded-postgres libs); library validation would refuse to load them.
+  - allow-dyld-environment-variables — serve.ts / main.rs set PATH and (for the
+    embedded-pg / term-shim wiring) DYLD_* style env for child processes.
+
+  These are the standard set for an Electron/Node-style app and are inert for an
+  UNSIGNED build (entitlements are applied only by codesign during signing).
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
+</plist>

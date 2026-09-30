@@ -1,0 +1,1155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="A source-backed SideStage Watch mockup for one conditional current-offer module plus interactive Chat, Details, and Seller room tabs." />
+  <title>SideStage Watch — current offer and room tabs</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #fff8ef;
+      --bg-top: #fff1dc;
+      --surface: #ffffff;
+      --surface-soft: #fdf8f0;
+      --surface-sunken: #fbf1e2;
+      --border: #eadfce;
+      --border-strong: #decbb5;
+      --text: #291f1a;
+      --muted: #75665a;
+      --red: #d62b1f;
+      --red-dark: #b52218;
+      --yellow: #ffc400;
+      --yellow-dark: #8a5b00;
+      --success: #176b42;
+      --warning: #936000;
+      --danger: #a61b10;
+      --shadow: 72 47 28;
+      --radius: 1.1rem;
+      --control-radius: 0.72rem;
+      --content: 82rem;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 320px; scroll-behavior: smooth; }
+    body {
+      min-width: 320px;
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 10% -8%, color-mix(in srgb, var(--red) 9%, transparent), transparent 32rem),
+        radial-gradient(circle at 92% 6%, color-mix(in srgb, var(--yellow) 16%, transparent), transparent 34rem),
+        linear-gradient(180deg, var(--bg-top), var(--bg) 42rem);
+    }
+
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    a { color: inherit; }
+    [hidden] { display: none !important; }
+    :where(a, button, input):focus-visible {
+      outline: 3px solid color-mix(in srgb, var(--red) 38%, transparent);
+      outline-offset: 3px;
+    }
+
+    .skip-link {
+      position: fixed;
+      z-index: 100;
+      top: 0.75rem;
+      left: 0.75rem;
+      transform: translateY(-180%);
+      border-radius: 0.55rem;
+      padding: 0.65rem 0.85rem;
+      color: white;
+      background: var(--red-dark);
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .skip-link:focus { transform: translateY(0); }
+
+    .site-header {
+      position: sticky;
+      z-index: 20;
+      top: 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+      background: color-mix(in srgb, var(--bg) 88%, transparent);
+      backdrop-filter: blur(18px);
+    }
+    .site-header-inner {
+      display: flex;
+      width: min(100% - 2rem, var(--content));
+      min-height: 4.4rem;
+      margin: 0 auto;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    .wordmark {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.72rem;
+      text-decoration: none;
+    }
+    .wordmark-mark {
+      display: grid;
+      width: 2.15rem;
+      height: 2.15rem;
+      place-items: center;
+      border-radius: 0.58rem;
+      color: #fff8f3;
+      background: var(--red);
+      font-size: 0.76rem;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+      box-shadow: 0 7px 18px color-mix(in srgb, var(--red) 22%, transparent);
+    }
+    .wordmark-copy { display: grid; line-height: 1.05; }
+    .wordmark-copy strong { font-size: 0.84rem; }
+    .wordmark-copy span { margin-top: 0.23rem; color: var(--muted); font-size: 0.61rem; }
+    .validation-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      border: 1px solid color-mix(in srgb, var(--success) 25%, var(--border));
+      border-radius: 999px;
+      padding: 0.48rem 0.68rem;
+      color: var(--success);
+      background: color-mix(in srgb, var(--success) 6%, var(--surface));
+      font-size: 0.65rem;
+      font-weight: 850;
+    }
+    .validation-pill::before {
+      width: 0.48rem;
+      height: 0.48rem;
+      border-radius: 50%;
+      background: var(--success);
+      content: "";
+    }
+
+    main { width: min(100% - 2rem, var(--content)); margin: 0 auto; }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(18rem, 0.65fr);
+      gap: clamp(2rem, 6vw, 6rem);
+      align-items: end;
+      padding: clamp(4.5rem, 9vw, 8.5rem) 0 3rem;
+    }
+    .eyebrow {
+      margin: 0 0 1rem;
+      color: var(--red-dark);
+      font-size: 0.69rem;
+      font-weight: 900;
+      letter-spacing: 0.17em;
+      text-transform: uppercase;
+    }
+    h1 {
+      max-width: 12ch;
+      margin: 0;
+      font-size: clamp(3.5rem, 8vw, 7.4rem);
+      line-height: 0.88;
+      letter-spacing: -0.075em;
+    }
+    .hero p {
+      margin: 1.6rem 0 0;
+      max-width: 43rem;
+      color: var(--muted);
+      font-size: clamp(1rem, 2vw, 1.22rem);
+      line-height: 1.65;
+    }
+    .hero-aside {
+      border-left: 3px solid var(--yellow-dark);
+      padding: 0.2rem 0 0.2rem 1.15rem;
+    }
+    .hero-aside strong { display: block; font-size: 0.82rem; }
+    .hero-aside p { margin: 0.5rem 0 0; font-size: 0.78rem; line-height: 1.6; }
+
+    .study {
+      margin-bottom: 5rem;
+      border: 1px solid var(--border-strong);
+      border-radius: 1.35rem;
+      background: var(--surface);
+      box-shadow: 0 34px 90px rgb(var(--shadow) / 16%);
+      overflow: hidden;
+    }
+    .study-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1.5rem;
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.15rem;
+      background: var(--surface-soft);
+    }
+    .state-copy { min-width: 0; }
+    .state-copy strong { display: block; font-size: 0.76rem; }
+    .state-copy span { display: block; margin-top: 0.2rem; color: var(--muted); font-size: 0.62rem; }
+    .state-switch {
+      display: inline-flex;
+      flex: 0 0 auto;
+      gap: 0.28rem;
+      border: 1px solid var(--border);
+      border-radius: 0.8rem;
+      padding: 0.25rem;
+      background: var(--surface);
+    }
+    .state-switch button {
+      min-height: 2.25rem;
+      border: 0;
+      border-radius: 0.58rem;
+      padding: 0.55rem 0.72rem;
+      color: var(--muted);
+      background: transparent;
+      font-size: 0.63rem;
+      font-weight: 850;
+    }
+    .state-switch button[aria-pressed="true"] {
+      color: #fff8f4;
+      background: var(--red);
+      box-shadow: 0 6px 15px color-mix(in srgb, var(--red) 18%, transparent);
+    }
+
+    .browser-chrome {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      min-height: 3.4rem;
+      align-items: center;
+      gap: 1rem;
+      border-bottom: 1px solid #252b35;
+      padding: 0.7rem 1rem;
+      color: #dbe0e8;
+      background: #171c24;
+    }
+    .browser-dots { display: flex; gap: 0.38rem; }
+    .browser-dots i { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: #5f6876; }
+    .browser-dots i:first-child { background: #e95a4c; }
+    .browser-dots i:nth-child(2) { background: #f4bd35; }
+    .browser-dots i:nth-child(3) { background: #4fc07a; }
+    .address {
+      overflow: hidden;
+      border: 1px solid #343b48;
+      border-radius: 0.48rem;
+      padding: 0.48rem 0.72rem;
+      color: #aeb6c2;
+      background: #202630;
+      font-size: 0.64rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .browser-badge {
+      border-radius: 999px;
+      padding: 0.34rem 0.5rem;
+      color: #f8e19b;
+      background: #373018;
+      font-size: 0.55rem;
+      font-weight: 850;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .watch-shell { background: var(--bg); }
+    .watch-nav {
+      display: flex;
+      min-height: 4rem;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      border-bottom: 1px solid var(--border);
+      padding: 0.8rem 1.2rem;
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
+    }
+    .watch-brand { display: flex; align-items: center; gap: 0.65rem; font-size: 0.8rem; font-weight: 900; }
+    .watch-brand span { display: grid; width: 1.8rem; height: 1.8rem; place-items: center; border-radius: 0.48rem; color: white; background: var(--red); font-size: 0.58rem; }
+    .watch-links { display: flex; gap: 1.15rem; color: var(--muted); font-size: 0.65rem; font-weight: 750; }
+    .watch-links .active { color: var(--text); }
+    .held-items { display: inline-flex; align-items: center; gap: 0.45rem; border: 1px solid var(--border); border-radius: 999px; padding: 0.42rem 0.62rem; background: var(--surface); font-size: 0.62rem; font-weight: 800; }
+    .held-items i { display: grid; min-width: 1.2rem; height: 1.2rem; place-items: center; border-radius: 50%; color: #291f04; background: var(--yellow); font-style: normal; font-size: 0.55rem; }
+
+    .watch-content { padding: 1.1rem; }
+    .room-heading {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.2rem 0.1rem 1rem;
+    }
+    .room-heading p { margin: 0 0 0.35rem; color: var(--red-dark); font-size: 0.57rem; font-weight: 900; letter-spacing: 0.14em; text-transform: uppercase; }
+    .room-heading h2 { margin: 0; font-size: clamp(1.3rem, 3vw, 2rem); letter-spacing: -0.045em; }
+    .room-heading .meta { color: var(--muted); font-size: 0.62rem; }
+    .share {
+      min-height: 2.25rem;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--control-radius);
+      padding: 0.5rem 0.75rem;
+      color: var(--text);
+      background: var(--surface);
+      font-size: 0.64rem;
+      font-weight: 800;
+    }
+
+    .stage-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(19rem, 22rem);
+      gap: 1rem;
+      align-items: start;
+    }
+    .stream-column { min-width: 0; }
+    .stream-stage {
+      position: relative;
+      min-height: 34rem;
+      overflow: hidden;
+      border-radius: 1rem;
+      color: #f5efe8;
+      background:
+        linear-gradient(180deg, transparent 58%, rgb(9 12 17 / 92%)),
+        radial-gradient(circle at 52% 34%, #62584e 0 12%, transparent 38%),
+        linear-gradient(140deg, #363b43, #151a21 58%, #28201d);
+      box-shadow: inset 0 0 0 1px rgb(255 255 255 / 8%);
+    }
+    .stream-stage::before {
+      position: absolute;
+      inset: 0;
+      opacity: 0.32;
+      background:
+        linear-gradient(90deg, transparent 48%, rgb(255 255 255 / 7%) 49% 51%, transparent 52%),
+        linear-gradient(0deg, transparent 48%, rgb(255 255 255 / 5%) 49% 51%, transparent 52%);
+      background-size: 8rem 8rem;
+      content: "";
+    }
+    .live-chip {
+      position: absolute;
+      z-index: 2;
+      top: 1rem;
+      left: 1rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.42rem;
+      border-radius: 999px;
+      padding: 0.42rem 0.6rem;
+      color: white;
+      background: var(--red);
+      font-size: 0.6rem;
+      font-weight: 900;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+    .live-chip::before { width: 0.42rem; height: 0.42rem; border-radius: 50%; background: white; content: ""; }
+    .viewer-chip {
+      position: absolute;
+      z-index: 2;
+      top: 1rem;
+      right: 1rem;
+      border-radius: 999px;
+      padding: 0.42rem 0.6rem;
+      background: rgb(8 11 16 / 64%);
+      font-size: 0.61rem;
+      font-weight: 800;
+      backdrop-filter: blur(8px);
+    }
+    .host-card {
+      position: absolute;
+      z-index: 2;
+      right: 1rem;
+      bottom: 1rem;
+      left: 1rem;
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    .host-copy p { margin: 0 0 0.3rem; color: #ffdf79; font-size: 0.56rem; font-weight: 900; letter-spacing: 0.12em; text-transform: uppercase; }
+    .host-copy strong { display: block; font-size: clamp(1.1rem, 2.5vw, 1.65rem); }
+    .host-copy span { display: block; margin-top: 0.35rem; color: #c5c8ce; font-size: 0.65rem; }
+    .sound { border: 1px solid rgb(255 255 255 / 22%); border-radius: 0.58rem; padding: 0.5rem 0.62rem; color: #f5efe8; background: rgb(8 11 16 / 52%); font-size: 0.6rem; font-weight: 750; }
+    .stream-tabs { display: flex; gap: 0.35rem; margin-top: 0.75rem; }
+    .stream-tabs button {
+      display: inline-flex;
+      min-height: 2.2rem;
+      align-items: center;
+      gap: 0.38rem;
+      border: 1px solid var(--border);
+      border-radius: 0.6rem;
+      padding: 0.5rem 0.75rem;
+      color: var(--muted);
+      background: var(--surface);
+      font-size: 0.61rem;
+      font-weight: 800;
+    }
+    .stream-tabs button span {
+      display: grid;
+      min-width: 1.15rem;
+      height: 1.15rem;
+      place-items: center;
+      border-radius: 999px;
+      padding-inline: 0.25rem;
+      color: var(--muted);
+      background: var(--surface-soft);
+      font-size: 0.5rem;
+    }
+    .stream-tabs button[aria-selected="true"] {
+      border-color: color-mix(in srgb, var(--red) 35%, var(--border));
+      color: var(--red-dark);
+      background: color-mix(in srgb, var(--red) 5%, var(--surface));
+      box-shadow: 0 6px 16px color-mix(in srgb, var(--red) 8%, transparent);
+    }
+    .stream-tabs button[aria-selected="true"] span { color: white; background: var(--red); }
+    .stream-tabs button:focus-visible { outline: 3px solid color-mix(in srgb, var(--yellow) 58%, transparent); outline-offset: 2px; }
+
+    .room-context {
+      margin-top: 0.5rem;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 0.88rem;
+      background: var(--surface);
+      box-shadow: 0 12px 30px rgb(var(--shadow) / 8%);
+    }
+    .room-panel { min-height: 18.5rem; padding: 0.9rem; }
+    .room-panel[hidden] { display: none; }
+    .room-panel-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.72rem;
+    }
+    .room-panel-kicker {
+      display: block;
+      margin-bottom: 0.2rem;
+      color: var(--red-dark);
+      font-size: 0.51rem;
+      font-weight: 900;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+    .room-panel-header h3 { margin: 0; font-size: 0.9rem; letter-spacing: -0.025em; }
+    .room-panel-meta { color: var(--muted); font-size: 0.55rem; font-weight: 750; white-space: nowrap; }
+
+    .chat-thread { display: grid; gap: 0.62rem; margin: 0; padding: 0.78rem 0; list-style: none; }
+    .chat-message { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.58rem; align-items: start; }
+    .chat-avatar, .seller-avatar {
+      display: grid;
+      flex: 0 0 auto;
+      place-items: center;
+      border: 1px solid color-mix(in srgb, var(--red) 18%, var(--border));
+      border-radius: 50%;
+      color: var(--red-dark);
+      background: color-mix(in srgb, var(--red) 7%, var(--surface));
+      font-size: 0.52rem;
+      font-weight: 950;
+    }
+    .chat-avatar { width: 1.8rem; height: 1.8rem; }
+    .chat-message-copy { min-width: 0; }
+    .chat-author { display: flex; align-items: center; gap: 0.38rem; font-size: 0.58rem; font-weight: 900; }
+    .chat-author time { margin-left: auto; color: var(--muted); font-size: 0.49rem; font-weight: 650; }
+    .host-tag, .verified-tag {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 0.18rem 0.34rem;
+      color: #2b2104;
+      background: var(--yellow);
+      font-size: 0.43rem;
+      font-weight: 950;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+    .chat-message p { margin: 0.18rem 0 0; color: var(--muted); font-size: 0.6rem; line-height: 1.48; }
+    .chat-compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.45rem; border-top: 1px solid var(--border); padding-top: 0.72rem; }
+    .chat-field {
+      min-width: 0;
+      min-height: 2.55rem;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--control-radius);
+      outline: 0;
+      padding: 0.62rem 0.7rem;
+      color: var(--text);
+      background: var(--surface-soft);
+      font-size: 0.63rem;
+    }
+    .chat-field:focus { border-color: color-mix(in srgb, var(--red) 42%, var(--border)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 8%, transparent); }
+    .chat-compose .primary { width: auto; }
+    .chat-helper, .room-action-status { min-height: 0.85rem; margin: 0.35rem 0 0; color: var(--muted); font-size: 0.51rem; line-height: 1.4; }
+
+    .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.52rem; margin-top: 0.78rem; }
+    .detail-card { border: 1px solid var(--border); border-radius: 0.62rem; padding: 0.62rem; background: var(--surface-soft); }
+    .detail-card span, .seller-stat span { display: block; color: var(--muted); font-size: 0.48rem; font-weight: 850; letter-spacing: 0.1em; text-transform: uppercase; }
+    .detail-card strong { display: block; margin-top: 0.22rem; font-size: 0.62rem; line-height: 1.4; }
+    .detail-story { margin: 0.72rem 0 0; color: var(--muted); font-size: 0.59rem; line-height: 1.58; }
+    .info-banner {
+      margin-top: 0.7rem;
+      border-left: 3px solid var(--yellow-dark);
+      border-radius: 0.52rem;
+      padding: 0.62rem 0.68rem;
+      color: var(--text);
+      background: color-mix(in srgb, var(--yellow) 10%, var(--surface));
+      font-size: 0.56rem;
+      line-height: 1.48;
+    }
+
+    .seller-profile { display: flex; align-items: center; gap: 0.72rem; margin-top: 0.82rem; }
+    .seller-avatar { width: 3.2rem; height: 3.2rem; font-size: 0.72rem; }
+    .seller-identity { min-width: 0; }
+    .seller-name { display: flex; align-items: center; gap: 0.4rem; }
+    .seller-name strong { font-size: 0.78rem; }
+    .verified-tag { color: white; background: var(--success); }
+    .seller-identity p { margin: 0.24rem 0 0; color: var(--muted); font-size: 0.56rem; }
+    .seller-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.45rem; margin-top: 0.8rem; }
+    .seller-stat { border: 1px solid var(--border); border-radius: 0.62rem; padding: 0.58rem; background: var(--surface-soft); }
+    .seller-stat strong { display: block; margin-top: 0.25rem; font-size: 0.78rem; letter-spacing: -0.02em; }
+    .seller-bio { margin: 0.72rem 0 0; color: var(--muted); font-size: 0.59rem; line-height: 1.55; }
+    .seller-actions { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: 0.45rem; margin-top: 0.72rem; }
+
+    .offer-slot {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      background: var(--surface);
+      box-shadow: 0 16px 44px rgb(var(--shadow) / 13%);
+      overflow: hidden;
+    }
+    .slot-anchor {
+      display: flex;
+      min-height: 2.65rem;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.6rem;
+      border-bottom: 1px solid var(--border);
+      padding: 0.72rem 0.82rem;
+      background: var(--surface-soft);
+    }
+    .slot-anchor strong { font-size: 0.68rem; }
+    .slot-anchor span { color: var(--muted); font-size: 0.54rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+    .module-panel { min-height: 31.35rem; padding: 0.82rem; }
+    .module-label {
+      margin: 0 0 0.35rem;
+      color: var(--red-dark);
+      font-size: 0.55rem;
+      font-weight: 900;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+    }
+    .module-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.6rem;
+    }
+    .module-heading h3 { margin: 0; font-size: 1rem; letter-spacing: -0.025em; }
+    .stock, .status-chip {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      padding: 0.3rem 0.46rem;
+      color: var(--yellow-dark);
+      background: color-mix(in srgb, var(--yellow) 16%, transparent);
+      font-size: 0.56rem;
+      font-weight: 850;
+    }
+    .status-chip.live { color: var(--red-dark); background: color-mix(in srgb, var(--red) 9%, transparent); }
+    .status-chip.settling { color: var(--warning); background: color-mix(in srgb, var(--yellow) 15%, transparent); }
+    .status-chip.sold { color: var(--success); background: color-mix(in srgb, var(--success) 9%, transparent); }
+    .offer-image {
+      min-height: 11.25rem;
+      margin: 0.75rem 0;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 0.78rem;
+      background: url("stage-varsity-jacket.png") center / cover;
+    }
+    .offer-title { margin: 0; font-size: 0.85rem; }
+    .offer-description { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.62rem; line-height: 1.5; }
+    .offer-price { margin: 0.8rem 0 0.65rem; font-size: 1.45rem; font-weight: 900; letter-spacing: -0.045em; }
+    .trust-row { display: flex; justify-content: space-between; gap: 0.35rem; margin-top: 0.6rem; color: var(--muted); font-size: 0.52rem; }
+    .primary, .secondary {
+      width: 100%;
+      min-height: 2.55rem;
+      border-radius: var(--control-radius);
+      padding: 0.65rem 0.8rem;
+      font-size: 0.68rem;
+      font-weight: 900;
+    }
+    .primary { border: 1px solid var(--red); color: #fff8f4; background: var(--red); box-shadow: 0 8px 22px color-mix(in srgb, var(--red) 22%, transparent); }
+    .primary:hover { background: var(--red-dark); }
+    .primary:disabled { cursor: not-allowed; opacity: 0.48; box-shadow: none; }
+    .secondary { border: 1px solid var(--border-strong); color: var(--text); background: var(--surface); }
+
+    .auction-top {
+      display: grid;
+      grid-template-columns: 5.3rem minmax(0, 1fr);
+      gap: 0.8rem;
+      align-items: center;
+      margin-top: 0.8rem;
+    }
+    .ring {
+      --progress: 74%;
+      position: relative;
+      display: grid;
+      width: 5.3rem;
+      height: 5.3rem;
+      place-items: center;
+      border-radius: 50%;
+      background: conic-gradient(var(--red) 0 var(--progress), var(--border) var(--progress) 100%);
+    }
+    .ring::before { position: absolute; inset: 0.42rem; border-radius: 50%; background: var(--surface); content: ""; }
+    .ring-copy { position: relative; z-index: 1; display: grid; justify-items: center; }
+    .ring-copy strong { font-size: 1rem; font-variant-numeric: tabular-nums; letter-spacing: -0.04em; }
+    .ring-copy span { margin-top: 0.08rem; color: var(--muted); font-size: 0.46rem; font-weight: 900; letter-spacing: 0.12em; text-transform: uppercase; }
+    .ring.settling { --progress: 100%; background: conic-gradient(var(--warning) 0 var(--progress), var(--border) var(--progress) 100%); }
+    .price-stack span { display: block; color: var(--muted); font-size: 0.53rem; font-weight: 850; letter-spacing: 0.11em; text-transform: uppercase; }
+    .price-stack strong { display: block; margin-top: 0.18rem; font-size: 1.8rem; line-height: 1; letter-spacing: -0.065em; }
+    .price-stack em { display: inline-flex; margin-top: 0.4rem; border-radius: 999px; padding: 0.24rem 0.4rem; color: var(--success); background: color-mix(in srgb, var(--success) 8%, transparent); font-size: 0.52rem; font-style: normal; font-weight: 900; }
+    .leader-banner {
+      margin-top: 0.75rem;
+      border-left: 3px solid var(--yellow-dark);
+      border-radius: 0.5rem;
+      padding: 0.62rem 0.68rem;
+      background: color-mix(in srgb, var(--yellow) 10%, transparent);
+      font-size: 0.63rem;
+      font-weight: 760;
+      line-height: 1.45;
+    }
+    .leader-banner.settling { border-left-color: var(--warning); background: color-mix(in srgb, var(--yellow) 8%, transparent); }
+    .feed { margin-top: 0.72rem; }
+    .feed-label { color: var(--muted); font-size: 0.52rem; font-weight: 900; letter-spacing: 0.12em; text-transform: uppercase; }
+    .feed-list { display: grid; gap: 0.3rem; margin: 0.38rem 0 0; padding: 0; list-style: none; }
+    .feed-list li { display: flex; align-items: baseline; justify-content: space-between; gap: 0.55rem; border: 1px solid var(--border); border-radius: 0.48rem; padding: 0.38rem 0.48rem; color: var(--muted); background: var(--surface-soft); font-size: 0.58rem; }
+    .feed-list li:first-child { border-color: color-mix(in srgb, var(--yellow-dark) 38%, var(--border)); color: var(--text); }
+    .feed-list b { color: var(--yellow-dark); font-variant-numeric: tabular-nums; }
+    .bid-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.45rem; margin-top: 0.72rem; }
+    .bid-field { display: flex; min-width: 0; align-items: center; border: 1px solid color-mix(in srgb, var(--red) 28%, var(--border)); border-radius: var(--control-radius); background: var(--surface); }
+    .bid-field span { padding-left: 0.68rem; color: var(--muted); font-size: 0.7rem; }
+    .bid-field input { min-width: 0; width: 100%; min-height: 2.5rem; border: 0; outline: 0; padding: 0.55rem 0.65rem 0.55rem 0.18rem; color: var(--text); background: transparent; font-size: 0.72rem; }
+    .bid-form .primary { width: auto; }
+    .helper { min-height: 1rem; margin: 0.38rem 0 0; color: var(--muted); font-size: 0.52rem; line-height: 1.4; }
+
+    .settling-scene { display: grid; justify-items: center; margin-top: 1.35rem; text-align: center; }
+    .settling-scene .price-stack { margin-top: 0.8rem; }
+    .settling-copy { margin: 0.9rem auto 0; max-width: 18rem; color: var(--muted); font-size: 0.64rem; line-height: 1.55; }
+    .disabled-form { margin-top: 1.15rem; opacity: 0.52; }
+    .server-note { display: flex; align-items: flex-start; gap: 0.55rem; margin-top: 0.82rem; border: 1px solid var(--border); border-radius: 0.58rem; padding: 0.62rem; background: var(--surface-soft); color: var(--muted); font-size: 0.55rem; line-height: 1.48; }
+    .server-note i { width: 0.52rem; height: 0.52rem; margin-top: 0.14rem; flex: 0 0 auto; border: 2px solid color-mix(in srgb, var(--warning) 35%, var(--border)); border-top-color: var(--warning); border-radius: 50%; animation: spin 1s linear infinite; }
+
+    .sold-visual {
+      position: relative;
+      min-height: 9rem;
+      margin-top: 0.75rem;
+      overflow: hidden;
+      border-radius: 0.75rem;
+      background:
+        linear-gradient(180deg, rgb(16 21 27 / 8%), rgb(16 21 27 / 62%)),
+        url("stage-varsity-jacket.png") center / cover;
+    }
+    .sold-stamp {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) rotate(-8deg);
+      border: 4px solid #fff8f1;
+      border-radius: 0.55rem;
+      padding: 0.1rem 0.58rem 0.2rem;
+      color: #fff8f1;
+      font-size: 1.8rem;
+      font-weight: 950;
+      letter-spacing: -0.06em;
+      text-transform: uppercase;
+      box-shadow: 0 6px 24px rgb(0 0 0 / 28%);
+    }
+    .result-card { margin-top: 0.75rem; border: 1px solid color-mix(in srgb, var(--success) 25%, var(--border)); border-radius: 0.7rem; padding: 0.75rem; background: color-mix(in srgb, var(--success) 6%, var(--surface)); }
+    .result-card span { display: block; color: var(--muted); font-size: 0.52rem; font-weight: 850; letter-spacing: 0.1em; text-transform: uppercase; }
+    .result-card strong { display: block; margin-top: 0.28rem; font-size: 1.25rem; letter-spacing: -0.04em; }
+    .result-card p { margin: 0.38rem 0 0; color: var(--success); font-size: 0.62rem; font-weight: 750; }
+
+    .placement-rule {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 0.8rem;
+      align-items: start;
+      border-top: 1px solid var(--border);
+      padding: 1rem 1.15rem;
+      background: var(--surface-soft);
+    }
+    .placement-rule i { display: grid; width: 1.7rem; height: 1.7rem; place-items: center; border-radius: 50%; color: var(--success); background: color-mix(in srgb, var(--success) 10%, transparent); font-size: 0.74rem; font-style: normal; font-weight: 950; }
+    .placement-rule strong { display: block; font-size: 0.67rem; }
+    .placement-rule p { margin: 0.28rem 0 0; color: var(--muted); font-size: 0.61rem; line-height: 1.55; }
+
+    .rationale {
+      display: grid;
+      grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+      gap: clamp(2rem, 6vw, 6rem);
+      margin: 0 0 6rem;
+      align-items: start;
+    }
+    .rationale h2 { margin: 0; font-size: clamp(2.25rem, 5vw, 4.5rem); line-height: 0.95; letter-spacing: -0.065em; }
+    .rationale > div > p { color: var(--muted); line-height: 1.65; }
+    .principles { display: grid; gap: 0.75rem; }
+    .principle { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.82rem; border-top: 1px solid var(--border-strong); padding-top: 0.85rem; }
+    .principle b { display: grid; width: 1.65rem; height: 1.65rem; place-items: center; border-radius: 0.48rem; color: #2a1f04; background: var(--yellow); font-size: 0.62rem; }
+    .principle strong { display: block; font-size: 0.72rem; }
+    .principle p { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.67rem; line-height: 1.55; }
+
+    footer { display: flex; align-items: flex-start; justify-content: space-between; gap: 2rem; border-top: 1px solid var(--border-strong); padding: 2rem 0 3rem; color: var(--muted); font-size: 0.69rem; line-height: 1.6; }
+    footer p { max-width: 48rem; margin: 0; }
+    footer a { color: var(--red-dark); font-weight: 850; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width: 940px) {
+      .hero { grid-template-columns: 1fr; }
+      .hero-aside { max-width: 42rem; }
+      .stage-grid { grid-template-columns: minmax(0, 1fr) minmax(18rem, 20rem); }
+    }
+    @media (max-width: 760px) {
+      main, .site-header-inner { width: min(100% - 1.2rem, var(--content)); }
+      .hero { padding-top: 4rem; }
+      .study-toolbar { align-items: stretch; flex-direction: column; }
+      .state-switch { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); width: 100%; }
+      .state-switch button { padding-inline: 0.35rem; }
+      .browser-chrome { grid-template-columns: auto minmax(0, 1fr); }
+      .browser-badge, .watch-links { display: none; }
+      .watch-content { padding: 0.75rem; }
+      .room-heading { align-items: flex-start; flex-direction: column; }
+      .share { width: 100%; }
+      .stage-grid { grid-template-columns: 1fr; }
+      .stream-stage { min-height: 22rem; }
+      .offer-slot { width: 100%; max-width: 30rem; justify-self: center; }
+      .module-panel { min-height: auto; }
+      .rationale { grid-template-columns: 1fr; }
+      footer { flex-direction: column; }
+    }
+    @media (max-width: 480px) {
+      .site-header-inner { min-height: 3.8rem; }
+      .wordmark-copy span { display: none; }
+      .validation-pill { font-size: 0; }
+      .validation-pill::after { font-size: 0.62rem; content: "2 / 2 valid"; }
+      h1 { font-size: clamp(3.2rem, 18vw, 4.8rem); }
+      .state-switch { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .browser-chrome { padding-inline: 0.7rem; }
+      .address { font-size: 0.55rem; }
+      .watch-nav { padding-inline: 0.75rem; }
+      .held-items { font-size: 0; }
+      .held-items::before { font-size: 0.62rem; content: "Held"; }
+      .stream-stage { min-height: 18rem; }
+      .host-card { align-items: flex-start; flex-direction: column; }
+      .sound { display: none; }
+      .stream-tabs button { flex: 1 1 0; justify-content: center; padding-inline: 0.35rem; }
+      .room-panel { min-height: auto; }
+      .detail-grid { grid-template-columns: 1fr; }
+      .seller-profile { align-items: flex-start; }
+      .seller-stats { grid-template-columns: 1fr; }
+      .seller-actions, .chat-compose { grid-template-columns: 1fr; }
+      .chat-compose .primary { width: 100%; }
+      .auction-top { grid-template-columns: 4.7rem minmax(0, 1fr); }
+      .ring { width: 4.7rem; height: 4.7rem; }
+      .bid-form { grid-template-columns: 1fr; }
+      .bid-form .primary { width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to mockup</a>
+  <header class="site-header">
+    <div class="site-header-inner">
+      <a class="wordmark" href="#top" aria-label="SideStage conditional offer study home">
+        <span class="wordmark-mark">SS</span>
+        <span class="wordmark-copy"><strong>SideStage</strong><span>Watch current-offer study</span></span>
+      </a>
+      <span class="validation-pill">2 / 2 React UI IR valid · 0 lint warnings</span>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <div>
+        <p class="eyebrow">Decisions D-003 + D-004 · stable modules</p>
+        <h1>One slot. Four states.</h1>
+        <p>The familiar <strong>Now Selling</strong> card stays put until an auction starts. Then that same right-hand slot becomes the complete current-offer surface—without adding a second auction block below the stream.</p>
+      </div>
+      <aside class="hero-aside">
+        <strong>What this resolves</strong>
+        <p>Price, urgency, leader, activity, and the next action remain adjacent to the live video while the page’s spatial model stays stable.</p>
+      </aside>
+    </section>
+
+    <section class="study" aria-labelledby="study-title">
+      <div class="study-toolbar">
+        <div class="state-copy">
+          <strong id="study-title">Current-offer state preview</strong>
+          <span id="state-description">No auction active · the existing Now Selling card is preserved.</span>
+        </div>
+        <div class="state-switch" role="group" aria-label="Preview current-offer state">
+          <button type="button" data-state-target="idle" aria-pressed="true">Now selling</button>
+          <button type="button" data-state-target="live" aria-pressed="false">Live auction</button>
+          <button type="button" data-state-target="settling" aria-pressed="false">Settling</button>
+          <button type="button" data-state-target="sold" aria-pressed="false">Sold</button>
+        </div>
+      </div>
+
+      <div class="browser-chrome" aria-hidden="true">
+        <span class="browser-dots"><i></i><i></i><i></i></span>
+        <span class="address">sidestage.live/watch/studio-archive-co</span>
+        <span class="browser-badge">Source-backed</span>
+      </div>
+
+      <div class="watch-shell">
+        <nav class="watch-nav" aria-label="Mock SideStage navigation">
+          <div class="watch-brand"><span>SS</span>SideStage</div>
+          <div class="watch-links"><span>Discover</span><span class="active">Watch</span><span>Sell</span></div>
+          <span class="held-items">Held items <i>2</i></span>
+        </nav>
+
+        <div class="watch-content">
+          <div class="room-heading">
+            <div>
+              <p>Live now · Studio Archive Co.</p>
+              <h2>Varsity layers &amp; one-of-ones</h2>
+              <span class="meta">84 watching · hosted by Jules</span>
+            </div>
+            <button class="share" type="button">Share room</button>
+          </div>
+
+          <div class="stage-grid">
+            <div class="stream-column">
+              <div class="stream-stage" aria-label="Mock live video stage">
+                <span class="live-chip">Live</span>
+                <span class="viewer-chip">84 watching</span>
+                <div class="host-card">
+                  <div class="host-copy">
+                    <p>Studio Archive Co.</p>
+                    <strong>“The chenille is hand-finished.”</strong>
+                    <span>Ask about fit, condition, or styling in chat.</span>
+                  </div>
+                  <button class="sound" type="button">Sound on</button>
+                </div>
+              </div>
+              <div class="stream-tabs" role="tablist" aria-label="Room information">
+                <button id="room-tab-chat" role="tab" type="button" data-room-tab="chat" aria-selected="true" aria-controls="room-panel-chat" tabindex="0" aria-label="Chat, 126 messages">Chat <span id="chat-count">126</span></button>
+                <button id="room-tab-details" role="tab" type="button" data-room-tab="details" aria-selected="false" aria-controls="room-panel-details" tabindex="-1">Details</button>
+                <button id="room-tab-seller" role="tab" type="button" data-room-tab="seller" aria-selected="false" aria-controls="room-panel-seller" tabindex="-1">Seller</button>
+              </div>
+
+              <div class="room-context">
+                <section class="room-panel" id="room-panel-chat" role="tabpanel" data-room-panel="chat" aria-labelledby="room-tab-chat" tabindex="0">
+                  <div class="room-panel-header">
+                    <div><span class="room-panel-kicker">Room conversation</span><h3>Live chat</h3></div>
+                    <span class="room-panel-meta">84 watching</span>
+                  </div>
+                  <ol class="chat-thread" id="chat-thread" aria-label="Recent live chat messages">
+                    <li class="chat-message">
+                      <span class="chat-avatar" aria-hidden="true">MR</span>
+                      <div class="chat-message-copy"><div class="chat-author"><span>Maya R.</span><time datetime="2026-08-14T20:14:00">8:14</time></div><p>Does this run true to size, or is it more of a relaxed fit?</p></div>
+                    </li>
+                    <li class="chat-message">
+                      <span class="chat-avatar" aria-hidden="true">SA</span>
+                      <div class="chat-message-copy"><div class="chat-author"><span>Studio Archive Co.</span><span class="host-tag">Seller</span><time datetime="2026-08-14T20:14:12">8:14</time></div><p>Relaxed through the body—23 inches pit to pit. Jules will show the back next.</p></div>
+                    </li>
+                    <li class="chat-message">
+                      <span class="chat-avatar" aria-hidden="true">MO</span>
+                      <div class="chat-message-copy"><div class="chat-author"><span>Morgan</span><time datetime="2026-08-14T20:14:18">8:14</time></div><p>That hand-finished chenille is perfect. 🔥</p></div>
+                    </li>
+                  </ol>
+                  <form class="chat-compose" id="chat-form">
+                    <input class="chat-field" id="chat-message" type="text" maxlength="160" autocomplete="off" aria-label="Message the room" placeholder="Ask about fit, condition, or styling…" />
+                    <button class="primary" type="submit">Send</button>
+                  </form>
+                  <p class="chat-helper" id="chat-status" role="status" aria-live="polite">Everyone in the room can see messages you send.</p>
+                </section>
+
+                <section class="room-panel" id="room-panel-details" role="tabpanel" data-room-panel="details" aria-labelledby="room-tab-details" tabindex="0" hidden>
+                  <div class="room-panel-header">
+                    <div><span class="room-panel-kicker">Current item</span><h3>Stage Varsity Jacket</h3></div>
+                    <span class="room-panel-meta">Lot 04 · Live</span>
+                  </div>
+                  <div class="detail-grid">
+                    <div class="detail-card"><span>Condition</span><strong>Excellent vintage · light sleeve patina</strong></div>
+                    <div class="detail-card"><span>Size</span><strong>Unisex M · 23 in pit to pit</strong></div>
+                    <div class="detail-card"><span>Materials</span><strong>Wool body · leather sleeves · chenille</strong></div>
+                    <div class="detail-card"><span>Fulfillment</span><strong>$12 shipping · leaves Brooklyn in 2 days</strong></div>
+                  </div>
+                  <p class="detail-story">Late-1990s Canadian varsity with a heavyweight body and hand-finished archive lettering. The host can inspect any area live before the auction closes.</p>
+                  <div class="info-banner" role="note"><strong>Auction terms:</strong> final sale after the live inspection. Buyer protection still covers damage or details that were not disclosed on stream.</div>
+                </section>
+
+                <section class="room-panel" id="room-panel-seller" role="tabpanel" data-room-panel="seller" aria-labelledby="room-tab-seller" tabindex="0" hidden>
+                  <div class="room-panel-header">
+                    <div><span class="room-panel-kicker">Who you’re buying from</span><h3>Meet the seller</h3></div>
+                    <span class="room-panel-meta">Usually replies in 1 hr</span>
+                  </div>
+                  <div class="seller-profile">
+                    <span class="seller-avatar" aria-hidden="true">SA</span>
+                    <div class="seller-identity">
+                      <div class="seller-name"><strong>Studio Archive Co.</strong><span class="verified-tag">Verified</span></div>
+                      <p>@studioarchive · Brooklyn, New York · selling since 2019</p>
+                    </div>
+                  </div>
+                  <div class="seller-stats" aria-label="Seller reputation">
+                    <div class="seller-stat"><span>Rating</span><strong>4.9 ★</strong></div>
+                    <div class="seller-stat"><span>Completed sales</span><strong>1.8k</strong></div>
+                    <div class="seller-stat"><span>Ships in 2 days</span><strong>98%</strong></div>
+                  </div>
+                  <p class="seller-bio">Curated sportswear, collegiate graphics, and one-of-one repairs. Every live item is measured and condition-checked on camera.</p>
+                  <div class="seller-actions">
+                    <button class="secondary" id="follow-seller" type="button" aria-pressed="false">Follow seller</button>
+                    <button class="primary" id="view-shop" type="button">View 38 shop items</button>
+                  </div>
+                  <p class="room-action-status" id="seller-status" role="status" aria-live="polite"></p>
+                </section>
+              </div>
+            </div>
+
+            <aside class="offer-slot" id="current-offer-module" data-testid="current-offer-module" data-state="idle" aria-label="Current offer">
+              <div class="slot-anchor">
+                <strong>Current offer</strong>
+                <span>Same page slot</span>
+              </div>
+
+              <section class="module-panel" data-state-panel="idle" data-testid="state-idle">
+                <p class="module-label">Now selling</p>
+                <div class="module-heading">
+                  <h3>Stage Varsity Jacket</h3>
+                  <span class="stock">6 available</span>
+                </div>
+                <div class="offer-image" role="img" aria-label="Black and cream Stage Varsity Jacket"></div>
+                <p class="offer-title"><strong>Archive wool varsity</strong></p>
+                <p class="offer-description">Heavyweight wool body, cream sleeves, hand-finished chenille. Unisex medium.</p>
+                <p class="offer-price">$96.00</p>
+                <button class="primary" id="hold-item" type="button">Hold item</button>
+                <div class="trust-row"><span>No charge yet</span><span>Held for 10 min</span></div>
+                <p class="helper" id="hold-status" role="status" aria-live="polite"></p>
+              </section>
+
+              <section class="module-panel" data-state-panel="live" data-testid="state-live" hidden>
+                <p class="module-label">Live auction</p>
+                <div class="module-heading">
+                  <h3>Stage Varsity Jacket</h3>
+                  <span class="status-chip live">Bidding open</span>
+                </div>
+                <div class="auction-top">
+                  <div class="ring" role="timer" aria-label="18 seconds left">
+                    <div class="ring-copy"><strong>0:18</strong><span>left</span></div>
+                  </div>
+                  <div class="price-stack">
+                    <span>Current bid</span>
+                    <strong>$142.00</strong>
+                    <em>Going twice</em>
+                  </div>
+                </div>
+                <div class="leader-banner" role="status">Morgan leads at $142.00. Your next bid must be at least $147.</div>
+                <div class="feed">
+                  <span class="feed-label">Recent bids</span>
+                  <ol class="feed-list">
+                    <li><span>Morgan · just now</span><b>$142</b></li>
+                    <li><span>Alex R. · 4s ago</span><b>$137</b></li>
+                    <li><span>Morgan · 9s ago</span><b>$132</b></li>
+                  </ol>
+                </div>
+                <form class="bid-form" id="bid-form">
+                  <label class="bid-field">
+                    <span aria-hidden="true">$</span>
+                    <input id="bid-amount" aria-label="Bid amount in dollars" aria-describedby="current-offer-bid-help" type="number" min="147" step="1" value="147" inputmode="decimal" />
+                  </label>
+                  <button class="primary" type="submit">Place bid</button>
+                </form>
+                <p class="helper" id="current-offer-bid-help" role="status" aria-live="polite">Minimum next bid: $147 · bids are confirmed by the server.</p>
+              </section>
+
+              <section class="module-panel" data-state-panel="settling" data-testid="state-settling" hidden>
+                <p class="module-label">Auction ended</p>
+                <div class="module-heading">
+                  <h3>Stage Varsity Jacket</h3>
+                  <span class="status-chip settling">Settling</span>
+                </div>
+                <div class="settling-scene">
+                  <div class="ring settling" role="timer" aria-label="Bidding closed">
+                    <div class="ring-copy"><strong>0:00</strong><span>closed</span></div>
+                  </div>
+                  <div class="price-stack">
+                    <span>Highest accepted bid</span>
+                    <strong>$142.00</strong>
+                  </div>
+                  <p class="settling-copy">Bidding is closed. SideStage is confirming the final accepted bid and winner.</p>
+                </div>
+                <div class="server-note" role="status" aria-live="polite"><i></i><span>Waiting for the server-confirmed result. This usually takes only a moment.</span></div>
+                <div class="bid-form disabled-form" aria-hidden="true">
+                  <label class="bid-field"><span>$</span><input type="text" value="147" disabled /></label>
+                  <button class="primary" type="button" disabled>Place bid</button>
+                </div>
+              </section>
+
+              <section class="module-panel" data-state-panel="sold" data-testid="state-sold" hidden>
+                <p class="module-label">Auction complete</p>
+                <div class="module-heading">
+                  <h3>Stage Varsity Jacket</h3>
+                  <span class="status-chip sold">Sold</span>
+                </div>
+                <div class="sold-visual" role="img" aria-label="Stage Varsity Jacket sold"><span class="sold-stamp">Sold</span></div>
+                <div class="result-card" role="status">
+                  <span>Final result</span>
+                  <strong>$142.00</strong>
+                  <p>Morgan won · server confirmed</p>
+                </div>
+                <p class="offer-description">The result remains in the current-offer slot, so the room never jumps or loses its sale context.</p>
+                <button class="secondary" type="button">View auction details</button>
+              </section>
+            </aside>
+          </div>
+        </div>
+      </div>
+
+      <div class="placement-rule">
+        <i>✓</i>
+        <div>
+          <strong>Placement rule</strong>
+          <p>The auction exists only inside the current-offer slot. Nothing is inserted below the video, so the stream, chat tabs, and surrounding page keep their positions.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="rationale" aria-labelledby="rationale-title">
+      <div>
+        <p class="eyebrow">Why this direction</p>
+        <h2 id="rationale-title">Continuity beats duplication.</h2>
+        <p>The surface reads as one product moving through a sale—not two competing offers that happen to reference the same item.</p>
+      </div>
+      <div class="principles">
+        <article class="principle"><b>01</b><div><strong>Preserve the known starting point</strong><p>No active auction means the current Now Selling card remains familiar, complete, and actionable.</p></div></article>
+        <article class="principle"><b>02</b><div><strong>Transform in place</strong><p>When bidding opens, urgency, price, activity, leader, and input replace the card contents inside the same bounded slot.</p></div></article>
+        <article class="principle"><b>03</b><div><strong>Make closure explicit</strong><p>Settling distinguishes “bidding ended” from “winner confirmed,” and Sold preserves the authoritative outcome.</p></div></article>
+      </div>
+    </section>
+
+    <footer>
+      <p>Source-backed design study for the running SideStage React Watch surface. Both UI IR modules in <a href="concept-specs.json">concept-specs.json</a> passed schema validation and anti-pattern lint with no issues.</p>
+      <span>2026-08-14 · D-003 + D-004</span>
+    </footer>
+  </main>
+
+  <script>
+    (() => {
+      const descriptions = {
+        idle: "No auction active · the existing Now Selling card is preserved.",
+        live: "Auction live · countdown, current bid, activity, leader, and bid form share the same slot.",
+        settling: "Bidding closed · controls pause while SideStage confirms the authoritative result.",
+        sold: "Auction complete · final price and winner remain in the same current-offer slot."
+      };
+      const module = document.querySelector("#current-offer-module");
+      const description = document.querySelector("#state-description");
+      const controls = Array.from(document.querySelectorAll("[data-state-target]"));
+      const panels = Array.from(document.querySelectorAll("[data-state-panel]"));
+      const roomTabs = Array.from(document.querySelectorAll("[data-room-tab]"));
+      const roomPanels = Array.from(document.querySelectorAll("[data-room-panel]"));
+
+      function showState(state) {
+        module.dataset.state = state;
+        description.textContent = descriptions[state];
+        controls.forEach((control) => {
+          control.setAttribute("aria-pressed", String(control.dataset.stateTarget === state));
+        });
+        panels.forEach((panel) => {
+          panel.hidden = panel.dataset.statePanel !== state;
+        });
+      }
+
+      controls.forEach((control) => {
+        control.addEventListener("click", () => showState(control.dataset.stateTarget));
+      });
+
+      function showRoomPanel(room, focusPanel = false) {
+        roomTabs.forEach((tab) => {
+          const selected = tab.dataset.roomTab === room;
+          tab.setAttribute("aria-selected", String(selected));
+          tab.tabIndex = selected ? 0 : -1;
+        });
+        roomPanels.forEach((panel) => {
+          panel.hidden = panel.dataset.roomPanel !== room;
+          if (!panel.hidden && focusPanel) panel.focus();
+        });
+      }
+
+      roomTabs.forEach((tab, index) => {
+        tab.addEventListener("click", () => showRoomPanel(tab.dataset.roomTab));
+        tab.addEventListener("keydown", (event) => {
+          let targetIndex = index;
+          if (event.key === "ArrowRight") targetIndex = (index + 1) % roomTabs.length;
+          else if (event.key === "ArrowLeft") targetIndex = (index - 1 + roomTabs.length) % roomTabs.length;
+          else if (event.key === "Home") targetIndex = 0;
+          else if (event.key === "End") targetIndex = roomTabs.length - 1;
+          else return;
+          event.preventDefault();
+          const target = roomTabs[targetIndex];
+          showRoomPanel(target.dataset.roomTab);
+          target.focus();
+        });
+      });
+
+      document.querySelector("#chat-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const field = document.querySelector("#chat-message");
+        const message = field.value.trim();
+        const status = document.querySelector("#chat-status");
+        if (!message) {
+          status.textContent = "Type a message before sending.";
+          field.focus();
+          return;
+        }
+        const item = document.createElement("li");
+        item.className = "chat-message";
+        const avatar = document.createElement("span");
+        avatar.className = "chat-avatar";
+        avatar.setAttribute("aria-hidden", "true");
+        avatar.textContent = "YO";
+        const copy = document.createElement("div");
+        copy.className = "chat-message-copy";
+        const author = document.createElement("div");
+        author.className = "chat-author";
+        const name = document.createElement("span");
+        name.textContent = "You";
+        const time = document.createElement("time");
+        time.textContent = "now";
+        const body = document.createElement("p");
+        body.textContent = message;
+        author.append(name, time);
+        copy.append(author, body);
+        item.append(avatar, copy);
+        document.querySelector("#chat-thread").append(item);
+        const count = document.querySelector("#chat-count");
+        const nextCount = Number(count.textContent) + 1;
+        count.textContent = String(nextCount);
+        document.querySelector("#room-tab-chat").setAttribute("aria-label", `Chat, ${nextCount} messages`);
+        field.value = "";
+        status.textContent = "Preview: your message appears in the live room.";
+      });
+
+      document.querySelector("#follow-seller").addEventListener("click", (event) => {
+        const button = event.currentTarget;
+        const following = button.getAttribute("aria-pressed") !== "true";
+        button.setAttribute("aria-pressed", String(following));
+        button.textContent = following ? "Following" : "Follow seller";
+        document.querySelector("#seller-status").textContent = following
+          ? "Preview: Studio Archive Co. is now in your followed sellers."
+          : "Preview: seller removed from your followed list.";
+      });
+
+      document.querySelector("#view-shop").addEventListener("click", () => {
+        document.querySelector("#seller-status").textContent = "Preview: this opens Studio Archive Co.’s shop without leaving the live room behind.";
+      });
+
+      document.querySelector("#hold-item").addEventListener("click", () => {
+        document.querySelector("#hold-status").textContent = "Preview: item held for 10 minutes.";
+      });
+
+      document.querySelector("#bid-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const amount = Number(document.querySelector("#bid-amount").value);
+        const helper = document.querySelector("#current-offer-bid-help");
+        helper.textContent = amount >= 147
+          ? `Preview: $${amount.toFixed(2)} bid ready for server confirmation.`
+          : "Enter at least $147.00 to place the next bid.";
+      });
+    })();
+  </script>
+</body>
+</html>

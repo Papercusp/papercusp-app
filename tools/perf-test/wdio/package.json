@@ -1,0 +1,24 @@
+{
+  "name": "@papercusp/perf-test-wdio",
+  "version": "0.0.1",
+  "private": true,
+  "description": "WebdriverIO + tauri-driver runner for the packaged Papercusp desktop binary",
+  "scripts": {
+    "test": "npm run test:unit",
+    "test:all": "npm run typecheck && npm run test:unit && npm run test:wdio",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:unit": "node --import tsx --test perf-report.node-test.ts",
+    "test:wdio": "wdio run wdio.conf.ts",
+    "test:debug": "wdio run wdio.conf.ts --logLevel=debug"
+  },
+  "devDependencies": {
+    "@typescript/native": "npm:typescript@7.0.2",
+    "@wdio/cli": "^9.4.0",
+    "@wdio/local-runner": "^9.4.0",
+    "@wdio/mocha-framework": "^9.4.0",
+    "@wdio/spec-reporter": "^9.4.0",
+    "ts-node": "^10.9.2",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "web-vitals": "^5.3.0"
+  }
+}

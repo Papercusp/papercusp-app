@@ -1,0 +1,48 @@
+# The `red-queen` blueprint — deterministic-blueprints-migration-2026-06-13 (P-122).
+#
+# The vaccination cadence: per tick, expire stale drills + run ONE drill cycle for
+# the least-recently drilled class — plant a known synthetic friction in the
+# SANDBOX workspace, detect it with a real watchdog, heal it with the known remedy,
+# record MTTSH + the zero-leak assertion. The origin=drill PROVENANCE, the SANDBOX
+# isolation, and the self-learning-frontier P-001 ARMING GATE (flag + governor) all
+# live inside the shipped tick — wrapping it as a deterministic step preserves every
+# one (behavior-neutral, D-004). SQL-only, zero spend.
+id: red-queen
+extends: base
+version: 0.1.0
+description: >-
+  Red-queen vaccination: plant a known synthetic friction in the SANDBOX, detect +
+  heal it with a real watchdog, and record MTTSH + the zero-leak assertion — one
+  drill cycle per cadence tick.
+
+workItem:
+  kind: drill-run
+  idPrefix: RQ
+
+# Program-mode spine: one deterministic step, NO gate ⇒ deterministic pipeline.
+# `payload.classId` pins the rotation to one drill class (absent ⇒ least-recently
+# drilled — the op's default).
+spine:
+  steps:
+    - id: drill
+      op: red-queen:drill
+      args:
+        classId: "{{ payload.classId }}"
+      bind: drill
+
+knobs:
+  harnessKind: learning
+  requiresRepo: false
+
+# Scheduled trigger: byte-identical to the bespoke `system:red-queen-drill` routine
+# (every 6h at :05). The routine fires `system:blueprint-run { blueprintId: red-queen }`;
+# the handler detects program-mode and runs the step inline. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 5 */6 * * *"
+      action: system:blueprint-run
+      singleton: true  # P-144/D-018: workspace-singleton cadence (vaccination drill — dark until armed)
+
+dependencies:
+  tools: []
+  plugins: []

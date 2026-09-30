@@ -1,0 +1,142 @@
+# Why the MCP server 'keeps going down': it IS :3070, deploys restart it, and a bad swap crash-loops it
+URL: /internal/docs/agent-insights/mcp-host-3070-deploy-restarts-and-verify-before-cutover
+
+The papercusp-su MCP endpoint is served by :3070 (the green release checkout), so every deploy restarts it and a botched deploy (incomplete node_modules) used to MODULE_NOT_FOUND crash-loop it. Five layered defenses: atomic node_modules swap (2026-06-25) + native-addon ABI auto-rebuild + workspace-resolution gate + pre-cutover boot preflight (verify-before-restart, zero-downtime abort) + an opt-in reconnecting local MCP proxy.
+
+## What
+
+Agents report "the MCP server keeps going down" — sessions lose their `papercusp-su`
+tools, or come up toolless (`ToolSearch` empty). The instinct is "the server crashed."
+Usually the **server is healthy**; what happened is `:3070` *restarted* (and sometimes
+crash-looped), because the MCP control plane rides the deployable operator process.
+
+## Why — MCP availability is coupled to :3070's restart cycle
+
+The `papercusp-su` MCP endpoint is `http://localhost:3070/api/mcp`. **`:3070` =
+`papercup-dev-api` = the GREEN release checkout** (`papercusp-release`, pinned to `main`).
+So:
+
+* **Every deploy restarts `:3070`** (clean SIGTERM-drain). A native MCP client (Claude
+  Code) drops its connection on that restart and does **not** re-run tool discovery — so
+  a brief restart can strand a session toolless until a full *process* relaunch (not
+  `/mcp` reconnect, not `--continue`, which preserve the empty catalog).
+* **A botched deploy used to MODULE\_NOT\_FOUND crash-loop it.** The deploy swapped the
+  git checkout but synced `node_modules` via a heuristic (`--node-modules auto`); when
+  that mis-decided (documented: 2026-06-09 `@dnd-kit/core`, 2026-06-20
+  `@papercusp/plugin-loader`), `:3070` restarted into new-code + stale node\_modules →
+  `MODULE_NOT_FOUND` → `systemd Restart=always/5s` crash-loop. The only consistency check
+  (`health`) ran **after** the irreversible restart, and the rollback re-ran the same
+  heuristic, so it could leave the tree equally broken → "manual `--no-drain` recovery."
+
+Diagnostic: `journalctl --user -u papercup-dev-api.service` — `MODULE_NOT_FOUND` lines +
+SIGTERM-drain restarts, with **no** lag/RSS/watchdog signals, means deploy-coupled (not a
+runtime crash). `dev:service_health` + `dev:pipeline_position --path <file>` show whether
+`:3070` is up and where a change sits.
+
+## The layered defenses (server side)
+
+Five gates, source → cutover, all live in the deploy mechanics:
+
+1. **Atomic node\_modules swap** (`setup-release-checkout.sh` `sync_one_node_modules()`,
+   2026-06-25). The hardlink-copy of `node_modules` from the integration tree is now
+   **atomic**: the source is copied into a sibling temp dir first, then swapped into place
+   with two fast renames — so the live operator's cluster workers that respawn mid-copy
+   **never see a half-populated `node_modules`**. The previous in-place `rm -rf "$dest";
+   cp -al` opened a \~1-minute window; the 2026-06-25 all-pages connection-refused outage
+   happened exactly in that window (workers exhausted the 160-respawn budget on
+   `MODULE_NOT_FOUND` for `@modelcontextprotocol/sdk`/`@papercusp/plugin-loader`). Two
+   renames shrink the exposure to the microseconds between two `rename(2)` syscalls.
+
+2. **Native-addon ABI guard** (`setup-release-checkout.sh` step 3d,
+   `infra-fail-fast-build-integrity-2026-06-19` P-003). After the node\_modules copy,
+   each runtime-critical native addon (default: `better-sqlite3`; override via
+   `PAPERCUSP_PREFLIGHT_ADDONS`) is verified to load under the operator's own `node` ABI.
+   A mismatch triggers `npm rebuild` in the release checkout in place — turning the
+   hard crash-loop (2026-06-19: `better-sqlite3` built for Node 22 ABI 127, runtime Node
+   25 ABI 141 → "Module did not self-register" → mem0 never came up → all
+   memory-touching handlers hung behind a green health check) into **auto-recovery before
+   cutover**. Non-fatal: the deploy-gate native-addon preflight in `lib/native-addon-preflight.ts`
+   is the hard block; this step turns that block into a self-heal.
+
+3. **Workspace-resolution gate** (`setup-release-checkout.sh` step 3c, EI-2118). After the
+   node\_modules sync (and ABI guard), if any `@papercusp/@papercup` workspace package
+   resolves in the integration tree but **not** the release tree, the script **aborts
+   non-zero before any restart**. Runs for all three callers (deploy, green-checkpoint,
+   staging-sync). Pure shell; catches the recurring dangling-workspace-symlink class at
+   the source.
+
+4. **Pre-cutover boot preflight** (`deploy.ts` `executeDeploy` + `deploy-deps.ts`
+   `realDeps.preflight`, plan `mcp-host-availability-resilience-2026-06-22` P-001). After
+   the swap and **before** the live `:3070` restart, a child process imports the swapped
+   checkout's side-effect-free `host-handler` module graph (`npx tsx -e`, mirroring the
+   launch — no server/bootstrap/DB). A missing dep throws `MODULE_NOT_FOUND` *there*, so
+   the deploy **aborts before cutover** — the old process keeps serving, **zero downtime**.
+   This catches ALL deps (not just workspace pkgs), complementing gate (3). The deploy
+   tracks `migrateRan`/`liveCutover`: a pre-cutover failure reverts the tree with no
+   restart; the rollback path re-runs the preflight so it can't cut into a SECOND
+   crash-loop (prev-won't-boot → skip restart + loud manual-recovery broadcast).
+
+5. (Downstream) the green-checkpoint runs the test suite and `sync-staging-checkout` boots
+   `:3170`, so a missing **non-workspace** dep on those paths surfaces as a test red /
+   staging fault rather than silently shipping.
+
+**The rule: never restart live `:3070` into a checkout that hasn't been proven to boot.**
+
+## The client side — opt-in reconnecting proxy
+
+Even a clean restart drops the client connection. `lib/mcp-proxy/proxy.ts` +
+`bin/mcp-proxy.ts` (+ the `papercup-mcp-proxy.service` systemd unit) is an always-up local
+proxy (`:9071 → :3070`) that **retries across a `:3070` restart window**, so the
+client→proxy connection stays up and a `tools/call` issued mid-restart just waits a beat.
+Safety invariant: it retries **only a refused/pre-connect upstream** (the call provably
+never reached `:3070`) — never a post-connect error — so a non-idempotent `tools/call` is
+never double-applied. Since the P-006 cutover the proxy is the **default route**: psu
+launches export a proxy-preferring `PAPERCUSP_OPERATOR_URL` (`resolveOperatorUrl`), the
+installer mints configs against `:9071` when the unit is active, and (2026-07-02) the
+route decision is **unit-active alone** — the end-to-end health check is advisory/warn-only,
+because a transient health blip at launch/mint time used to pin the session/config to
+direct `:3070` for its whole life, the exact failure the proxy prevents.
+The per-call `scripts/su-mcp.ts` / `scripts/mcp-call.mjs` wrappers are the manual fallback
+when a session's client has already dropped.
+
+## 2026-07-02 triage — three ways sessions still went toolless (and the fixes)
+
+A live triage (`mcp-outage-triage-2026-07-02`) found three distinct classes behind the
+recurring "our MCP tools keep going down", all now fixed:
+
+1. **Workspace-unresolved hard reject on resume (the sneaky one).** With the
+   `papercusp-scoped-superuser-clamp` flag ON, a superuser MCP session whose request
+   resolved NO workspace was rejected `scoped_superuser_workspace_unresolved` → the
+   client retries `tools/list` \~4× (250ms→1s) → gives up → **permanently toolless
+   session**. Who hits it: an *untracked* resumed claude — env lost
+   `PAPERCUSP_WORKSPACE` (or never had it), and its fresh SID has no `adv_sessions`
+   row, so the SID→adv-row fallback misses (`resumeEnvFor`'s doc names this hole).
+   Fix: the clamp now falls back to `activeWorkspaceId()` (registry `current` /
+   `PAPERCUSP_WORKSPACE_ID` pin) — ONE concrete workspace, never `'*'`, so the
+   no-silent-god-mode guarantee is intact (`_mcp-handler.ts`, gating-matrix test).
+   Diagnostic: `~/.cache/claude-cli-nodejs/<proj>/mcp-logs-papercusp-su/*.jsonl`
+   shows `mcp_auth_failed: scoped_superuser_workspace_unresolved`.
+
+2. **Lifetime direct-`:3070` pins minted by a launch-time probe blip.** The old
+   proxy probe required unit-active AND a 2s `/api/health` curl through the proxy;
+   under load (or mid-deploy) the curl blipped, `resolveOperatorUrl` fell back to
+   `http://localhost:3070`, and psu exported that into the child env — so the session
+   bypassed the proxy forever and severed on every deploy. Two live sessions were
+   found pinned this way. Fix: unit-active decides the route; health failure warns.
+
+3. **Retry window shorter than a real deploy restart.** The 2026-07-01 23:12 deploy
+   restart took \~45s; proxy recoveries logged at 45.6s — AT the old 45s window edge,
+   so tail requests got 503/502 and the client could mark the server failed. Fix:
+   default window 90s (2× measured), plus the per-request `connect`-listener leak on
+   reused keep-alive sockets (MaxListenersExceededWarning) is fixed.
+
+Related but intentional: `:3170` (staging) restarts \~200×/day via staging-sync
+auto-track — never bind a long-lived session's MCP to `:3170`.
+
+## TL;DR for the next agent
+
+"MCP is down" almost always = `:3070` restarted (deploy) or crash-looped (bad swap),
+not a server crash. The crash-loop class is now multi-gated: atomic node\_modules swap →
+native-addon ABI auto-rebuild → workspace-resolution abort → verify-before-cutover. For a
+dropped *client*, fully relaunch the session (`/mcp` reconnect won't repopulate tools) or
+drive tools via `scripts/su-mcp.ts` until it reconnects.

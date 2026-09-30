@@ -1,0 +1,39 @@
+-- WI-10000549 P002 EXPAND: acceptance subject identity includes its harness.
+-- SOURCE-ONLY DRAFT: do not arm while the deployed rubric schema/readers still
+-- lack subjectHarnessSlug. Test against isolated Postgres before coordinated rollout.
+-- A rubric's storage harness is not necessarily its subject's harness. Backfill
+-- only uniquely resolvable subjects; ambiguous legacy links remain unbound and
+-- scoped readers refuse to consume them. Never resurrect migration-1004 retirees.
+
+WITH subjects AS (
+  SELECT workspace_id, plan_slug, min(harness_slug) AS harness_slug
+    FROM harness_shared.harness_plans
+   GROUP BY workspace_id, plan_slug
+  HAVING count(*) = 1
+)
+UPDATE harness_shared.harness_plans AS rubric
+   SET template_data = jsonb_set(rubric.template_data, '{subjectHarnessSlug}', to_jsonb(subjects.harness_slug))
+  FROM subjects
+ WHERE rubric.workspace_id = subjects.workspace_id
+   AND rubric.template = 'rubric'
+   AND rubric.template_data->>'kind' = 'acceptance'
+   AND rubric.template_data->>'subjectPlan' = subjects.plan_slug
+   AND rubric.template_data->>'subjectHarnessSlug' IS NULL;
+
+-- FORWARD-COMPAT: retain the broader two-column uniqueness invariant from
+-- migration 1004 while old readers/writers may still serve requests. This phase
+-- does NOT enable separate live rubrics for same-slug subjects across harnesses.
+CREATE UNIQUE INDEX IF NOT EXISTS harness_plans_one_active_acceptance_per_scoped_subject
+  ON harness_shared.harness_plans
+    (workspace_id, (template_data->>'subjectPlan'), (COALESCE(template_data->>'subjectHarnessSlug', '')))
+  WHERE template = 'rubric'
+    AND template_slug IS NULL
+    AND archived = false
+    AND status IN ('active', 'ready')
+    AND template_data->>'kind' = 'acceptance'
+    AND NULLIF(template_data->>'subjectPlan', '') IS NOT NULL;
+
+-- Keep the broader deployed-writer arbiter through this EXPAND migration. A later
+-- CONTRACT migration 1146 may retire it only after compatible readers AND
+-- writers have shipped. Both phases remain parked .DRAFT files until rollout
+-- is separately authorized; isolated tests explicitly apply each phase.

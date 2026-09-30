@@ -1,0 +1,861 @@
+/**
+ * PlanDashboard (plan-visibility-revamp-2026-08-23 P-003) — the option-C plan
+ * detail surface, rendered as an APP-PANE TAKEOVER (D-002): a full-width layer
+ * over the routed <main> content, opened from the op-chat plan sidebar.
+ *
+ * Spec artboard: docs/design/plans-mission-control-2026-08-23/OptionC.dc.html
+ * (right-hand `.detail` half — the left rail IS the existing PlansPane).
+ * Palette = the app's own vars (--bg/--fg/--accent/--good/--bad…), not the
+ * artboard's raw hex, so the surface follows the live theme.
+ */
+
+/* ── The takeover layer (PlanDashboardHost) ────────────────────────────── */
+/* Absolute inside <main data-route-transition-page> (position:relative in
+ * globals.css). Solid background: the routed page stays MOUNTED underneath
+ * (back = clear ?pdash, route state preserved) — it must not shine through. */
+.plan-dash-takeover {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+/* ── Frame ─────────────────────────────────────────────────────────────── */
+.plan-dash {
+  display: flex;
+  flex-direction: column;
+  container-type: inline-size;
+  gap: 14px;
+  padding: 16px 20px 24px;
+  min-height: 100%;
+  box-sizing: border-box;
+  font-size: 12.5px;
+  color: var(--fg);
+}
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+.plan-dash__head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plan-dash__title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.plan-dash__back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+}
+
+.plan-dash__back:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.plan-dash__back:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 2px;
+}
+
+.plan-dash__identity {
+  display: flex;
+  flex: 1 1 320px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 160px;
+}
+
+.plan-dash__title-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.plan-dash__bucket {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 650;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  border: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.plan-dash__bucket--running {
+  color: color-mix(in srgb, var(--accent) 75%, var(--fg));
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.plan-dash__bucket--ready {
+  color: color-mix(in srgb, var(--accent) 55%, var(--fg));
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.plan-dash__bucket--draft {
+  color: color-mix(in srgb, var(--warn) 55%, var(--fg));
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+}
+
+.plan-dash__title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.plan-dash__slug {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  color: var(--fg-mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.plan-dash__actions {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.plan-dash__btn {
+  gap: 5px;
+  min-height: 30px;
+  padding-inline: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+/* The Vite shell loads a late generic `.pc-btn` skin. Scope these variant
+ * rules through the dashboard so semantic primary/ghost intent wins there. */
+.plan-dash .plan-dash__btn--primary {
+  min-height: 32px;
+  padding-inline: 13px;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 5px 16px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.plan-dash .plan-dash__btn--primary:hover:not(:disabled) {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+  color: var(--accent-ink);
+}
+
+.plan-dash .plan-dash__btn--ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-mute);
+}
+
+.plan-dash .plan-dash__btn--ghost:hover {
+  color: var(--fg);
+  background: var(--bg-2);
+}
+
+/* The dashboard can be narrow inside a wide viewport while the chat/sidebar
+ * columns remain open, so responsiveness must follow this surface's own width. */
+@container (max-width: 920px) {
+  .plan-dash__title-row {
+    flex-wrap: wrap;
+  }
+
+  .plan-dash__identity {
+    flex-basis: calc(100% - 42px);
+  }
+
+  .plan-dash__actions {
+    width: 100%;
+    padding-left: 38px;
+    justify-content: flex-start;
+  }
+}
+
+@container (max-width: 560px) {
+  .plan-dash {
+    padding-inline: 14px;
+  }
+
+  .plan-dash__actions {
+    padding-left: 0;
+  }
+
+  .plan-dash .plan-dash__btn--primary {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+}
+
+/* ── Meta strip: ✎/⚒ clocks + progress + needs-you ─────────────────────── */
+.plan-dash__meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 11.5px;
+  color: var(--fg-mute);
+  flex-wrap: wrap;
+}
+
+.plan-dash__t {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ⚒ fresher than WORK_HOT_MS — same hot read as the sidebar rows. */
+.plan-dash__t--hot {
+  color: var(--fg);
+}
+
+.plan-dash__t--hot svg {
+  color: var(--good);
+}
+
+.plan-dash__t--dim {
+  opacity: 0.5;
+}
+
+.plan-dash__needs {
+  color: color-mix(in srgb, var(--bad) 65%, var(--fg));
+  font-weight: 600;
+}
+
+/* ── Progress band (direction A: the header's segmented done/wip/todo bar) ── */
+.plan-dash__band {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 6px;
+  padding: 11px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--frost, var(--bg-2));
+}
+
+.plan-dash__band-count {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+.plan-dash__band-track {
+  flex: 1 1 auto;
+  display: flex;
+  gap: 4px;
+  min-width: 120px;
+}
+
+.plan-dash__band-seg {
+  height: 7px;
+  border-radius: 999px;
+  flex-basis: 0;
+  min-width: 6px;
+}
+
+.plan-dash__band-seg--done {
+  background: color-mix(in srgb, var(--accent) 80%, transparent);
+}
+
+.plan-dash__band-seg--wip {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.plan-dash__band-seg--attention {
+  background: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+.plan-dash__band-seg--todo {
+  background: color-mix(in srgb, var(--fg-mute) 16%, transparent);
+}
+
+.plan-dash__band-legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 10.5px;
+  color: var(--fg-mute);
+  white-space: nowrap;
+}
+
+.plan-dash__band-warn {
+  color: color-mix(in srgb, var(--warn) 65%, var(--fg));
+}
+
+.plan-dash__band-live {
+  color: color-mix(in srgb, var(--good) 70%, var(--fg));
+  font-weight: 600;
+}
+
+/* ── Direction-A body: substance column + telemetry rail ───────────────── */
+.plan-dash__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
+  gap: 16px;
+  align-items: start;
+}
+
+.plan-dash__colmain,
+.plan-dash__rail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+@container (max-width: 980px) {
+  .plan-dash__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.plan-dash__card {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.plan-dash__sec-line {
+  flex: 1;
+  height: 1px;
+  background: color-mix(in srgb, var(--border) 55%, transparent);
+}
+
+.plan-dash__sec-h--accent {
+  color: color-mix(in srgb, var(--accent) 55%, var(--fg));
+}
+
+.plan-dash__sec-h--warn {
+  color: color-mix(in srgb, var(--warn) 55%, var(--fg));
+}
+
+/* ── NOW card (the plan's own next-action block) ───────────────────────── */
+.plan-dash__now {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  background: linear-gradient(
+    180deg,
+    rgb(var(--accent-rgb) / 0.08),
+    rgb(var(--accent-rgb) / 0.02)
+  );
+}
+
+.plan-dash__now-text {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--fg-dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-line;
+}
+
+.plan-dash__now-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.plan-dash__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 1px solid var(--border);
+  color: var(--fg-mute);
+}
+
+.plan-dash__chip--accent {
+  color: color-mix(in srgb, var(--accent) 55%, var(--fg));
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  background: rgb(var(--accent-rgb) / 0.06);
+}
+
+/* ── Items (grouped, the substance column's core) ──────────────────────── */
+.plan-dash__items {
+  display: flex;
+  flex-direction: column;
+  padding-top: 8px;
+}
+
+.plan-dash__igroup {
+  display: flex;
+  flex-direction: column;
+}
+
+.plan-dash__igroup .plan-dash__sec-h {
+  padding: 8px 2px 4px;
+}
+
+.plan-dash__irow {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+.plan-dash__irow-main {
+  display: grid;
+  grid-template-columns: 20px minmax(56px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 10px;
+  padding: 6px 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.plan-dash__igroup:last-child .plan-dash__irow:last-child {
+  border-bottom: 0;
+}
+
+.plan-dash__irow-main:hover .plan-dash__itext {
+  color: var(--fg);
+}
+
+.plan-dash__irow-main:focus-visible,
+.plan-dash__iwork:focus-visible,
+.plan-dash__drow:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: -2px;
+  border-radius: 7px;
+}
+
+.plan-dash__iwork {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-mute);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9.5px;
+  cursor: pointer;
+}
+
+.plan-dash__iwork:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: var(--bg-3);
+}
+
+.plan-dash__iic {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-mute);
+}
+
+.plan-dash__iic--done {
+  color: var(--good);
+}
+
+.plan-dash__iic--wip {
+  color: var(--accent);
+}
+
+.plan-dash__iic--blocked,
+.plan-dash__iic--needs-human {
+  color: var(--warn);
+}
+
+.plan-dash__iref {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--fg-mute);
+  white-space: nowrap;
+}
+
+.plan-dash__itext {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: color-mix(in srgb, var(--fg) 82%, var(--fg-mute));
+}
+
+.plan-dash__itext--dim {
+  color: var(--fg-mute);
+}
+
+.plan-dash__itext--dropped {
+  text-decoration: line-through;
+}
+
+.plan-dash__imeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plan-dash__ibadge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 650;
+  text-transform: uppercase;
+  border: 1px solid var(--warn-border);
+  color: color-mix(in srgb, var(--warn) 65%, var(--fg));
+}
+
+.plan-dash__ibadge--urgent {
+  border-color: color-mix(in srgb, var(--bad) 40%, transparent);
+  color: color-mix(in srgb, var(--bad) 65%, var(--fg));
+}
+
+/* ── Decisions (rail card) ─────────────────────────────────────────────── */
+.plan-dash__drow {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  column-gap: 10px;
+  align-items: baseline;
+  padding: 4px 0;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.plan-dash__drow:hover .plan-dash__dtext {
+  color: var(--fg);
+}
+
+.plan-dash__dref {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: color-mix(in srgb, var(--accent) 55%, var(--fg));
+}
+
+.plan-dash__dtext {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.plan-dash__dago {
+  font-size: 10px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── Sections ──────────────────────────────────────────────────────────── */
+.plan-dash__sec {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Distinction carried by case + size + weight — letter-spacing is a banned
+ * primitive (lint:design-primitives, a green-checkpoint leg). */
+.plan-dash__sec-h {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plan-dash__sec-h-note {
+  font-weight: 400;
+  text-transform: none;
+}
+
+.plan-dash__empty {
+  padding: 14px;
+  border-radius: 10px;
+  border: 1px dashed var(--border);
+  color: var(--fg-mute);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+/* ── Working-now session cards ─────────────────────────────────────────── */
+.plan-dash__sess-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 10px;
+}
+
+/* In the direction-A rail the cards stack — one narrow column. */
+.plan-dash__rail .plan-dash__sess-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.plan-dash__scard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.plan-dash__srow1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.plan-dash__sav {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: #051827;
+  flex: 0 0 auto;
+}
+
+.plan-dash__sid {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plan-dash__backend {
+  font-size: 9.5px;
+  font-weight: 650;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--fg-mute);
+  flex: 0 0 auto;
+}
+
+.plan-dash__state {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 650;
+  flex: 0 0 auto;
+}
+
+.plan-dash__state--live {
+  color: color-mix(in srgb, var(--good) 70%, var(--fg));
+}
+
+.plan-dash__state--parked {
+  color: var(--fg-mute);
+}
+
+.plan-dash__state-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.plan-dash__sintent {
+  font-size: 11px;
+  color: var(--fg-mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plan-dash__srow3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+  color: var(--fg-mute);
+}
+
+.plan-dash__srow3-spacer {
+  flex: 1;
+}
+
+/* ── Recent-activity feed ──────────────────────────────────────────────── */
+.plan-dash__feed {
+  display: flex;
+  flex-direction: column;
+}
+
+.plan-dash__fitem {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto auto;
+  align-items: center;
+  column-gap: 9px;
+  padding: 6px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  font-size: 11.5px;
+  /* Rows render as <button>s when deep-linkable — neutralise button chrome. */
+  background: transparent;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  width: 100%;
+  text-align: left;
+  color: inherit;
+}
+
+.plan-dash__fitem:last-child {
+  border-bottom: 0;
+}
+
+button.plan-dash__fitem {
+  cursor: pointer;
+}
+
+button.plan-dash__fitem:hover .plan-dash__ftext {
+  color: var(--fg);
+}
+
+.plan-dash__fic {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: var(--bg-3);
+  color: var(--fg-mute);
+}
+
+.plan-dash__fic--work {
+  color: var(--good);
+}
+
+.plan-dash__fic--edit {
+  color: var(--accent-strong);
+}
+
+.plan-dash__ftext {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: color-mix(in srgb, var(--fg) 82%, var(--fg-mute));
+}
+
+.plan-dash__fwho {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--fg-mute);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plan-dash__fago {
+  font-size: 10px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.plan-dash__fwho {
+  max-width: 76px;
+}
+
+/* Collapsed edit-run rows (direction A P-006): the "Plan edited ×N" fold. */
+.plan-dash__ftext--dim {
+  color: var(--fg-mute);
+}
+
+.plan-dash__frun-rev {
+  margin-left: 7px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9.5px;
+  color: color-mix(in srgb, var(--fg-mute), transparent 24%);
+}
+
+/* Promoted checkpoint/handoff notes — the feed's real signal, carded. */
+.plan-dash__fnote {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 14%, transparent);
+  background: rgb(var(--accent-rgb) / 0.05);
+}
+
+.plan-dash__fnote-text {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.plan-dash__fnote-meta {
+  font-size: 10px;
+  color: var(--fg-mute);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}

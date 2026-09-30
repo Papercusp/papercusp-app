@@ -1,0 +1,11 @@
+{
+  "name": "pot-eval-seed-app",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Seed sandbox for the Pot-run-evaluation battery (hive-run-evaluation-2026-06-13, P-020; renamed by WI-3466 cup-lexicon rename). A tiny real Node app the throwaway Pot extends; carries latent planted defects (baseline-green) and a parameterized acceptance check. NOT shipped — a test fixture only.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "acceptance": "node acceptance.mjs"
+  }
+}

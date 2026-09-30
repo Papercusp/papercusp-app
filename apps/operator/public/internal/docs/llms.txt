@@ -1,0 +1,13 @@
+# Papercusp
+
+> Internal engineering documentation for Papercusp - a local-first multi-agent coding harness.
+
+## Documentation Sets
+
+- [Abridged documentation](http://localhost:3070/internal/docs/llms-small.txt): a compact version of the documentation for Papercusp, with non-essential content removed
+- [Complete documentation](http://localhost:3070/internal/docs/llms-full.txt): the full documentation for Papercusp
+
+## Notes
+
+- The complete documentation includes all content from the official documentation
+- The content is automatically generated from the same source as the official documentation

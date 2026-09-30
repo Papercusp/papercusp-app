@@ -1,0 +1,69 @@
+# Spawn-ceiling jam: why a never-streamed orphan debit needs a /proc second signal
+URL: /internal/docs/agent-insights/spawn-ceiling-jam-never-streamed-reclaim
+
+The recurring \"ceiling reads full, ~nothing alive, no bee can be placed\" jam — and the two-signal reclaim rule (stream recency + /proc liveness) that clears it without an operator restart.
+
+## Symptom
+
+The spawn-admission ceiling reads full (`N/N` against `maxSimultaneousAgents`)
+while \~nothing is actually alive, so **no bee can be placed fleet-wide** — the
+"idle Queen / no bees" storm is really a hard-jammed ceiling. The watchdog fires
+`spawn-ceiling-jam`: several `spawned_agents` rows are `running`/`restarting`,
+running > 15 min, with **no stream activity**.
+
+## Why the obvious reclaimers miss it
+
+A `running` nursery row counts against the ceiling until it settles. Two periodic
+reclaimers should free a dead one, but each has a blind spot for this class:
+
+* **`reclaimOrphanedSpawns` (heartbeat-stale)** — on a long-lived (never-restarted)
+  operator, a dead child's recorded pid gets **reused by an unrelated
+  `invoke-once`-cmdline process** on a busy, high-pid-churn host. The `/proc`
+  liveness check reads that as *alive*, so the sweep bumps the row's heartbeat every
+  tick — it **never becomes a stale-heartbeat candidate**. (A prior-boot row is caught
+  by the boot-id mismatch; a **same-boot** row on a live operator is not.)
+* **`reconcileSpawnAdmissionOnBoot` (boot-id mismatch)** — only runs at operator
+  **boot**. It clears the jam, but only at the *next restart*.
+* **`reclaimCeilingJamDebits` (stream recency)** — designed to catch the reused-pid
+  false-alive via an unfakeable proxy: `last_output_at`. But **every supervised cup in
+  this deployment currently has `last_output_at IS NULL`** (a separate stdout-stream-
+  wiring gap — 0 of 149 rows populated it in a 48h sample). Per **EI-8528**, a NULL
+  `last_output_at` must **not** be read as jam evidence (that regression flipped
+  genuinely-alive, mid-task cups to `failed`). So with the stream signal absent, this
+  sweep reclaimed *nothing* — and an orphaned debit sat jamming the ceiling until the
+  next restart (**EI-8839**).
+
+## The two-signal reclaim rule (the fix)
+
+`classifyCeilingJamRow` gives one verdict per candidate, using **two** signals so a
+never-streamed row is never reclaimed on a guess:
+
+1. **Stream recency** (`'stream-silent'`) — a supervised bee that *did* stream once
+   then went silent past the window. A fresh heartbeat (reused-pid false-alive) can't
+   hide it. This is the original EI-7204 signal.
+2. **`/proc` liveness** (`'proc-dead'`, EI-8839) — for a **never-streamed** row that is
+   old enough, **same-host**, and has a recorded pid: is the child process `/proc`-
+   confirmed **dead** (`isSpawnProcessAlive`)? A dead child proves the debit is stale
+   *regardless* of the missing stream → reclaim now, no restart needed.
+3. **`'skip'`** — everything else: a still-**alive** child (**this is the EI-8528
+   protection** — a working cup's `invoke-once` process reads alive), a row we can't
+   liveness-check locally (**different host / no recorded pid** — left to the orphan
+   sweep / boot reconcile), too young, a recent stream, or an in-process loopback
+   launch (durable-spawn / `launch-*`, whose liveness proxy is process existence, not
+   stream recency).
+
+## The principle to carry forward
+
+**Absence of a signal is not evidence of death.** A never-streamed row is only
+reclaimable when a *second, independent* signal (its child process) proves the debit
+stale. Reclaiming ceiling debits is deliberately unconditional (no flag) because it
+settles only the `spawned_agents` row — it never kills a live process or a work-item
+claim. Killing a live agent (`reclaimWedgedSpawns` / `reclaimFirstOutputStalledSpawns`)
+is the flag-gated hot-path change; freeing a debit is not.
+
+Residual narrow gap: a dead child whose pid was reused by *another live invoke-once
+bee* still reads alive → not reclaimed until the boot reconcile. That is the same
+false-alive limitation `reclaimOrphanedSpawns` carries, and is strictly better than the
+prior "reclaim nothing". Closing it fully would need a pid start-time (`/proc/<pid>/stat`)
+check — deferred, since a wrong start-time computation risks a false-*dead* that kills
+live cups.

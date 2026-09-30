@@ -1,0 +1,160 @@
+# Routines that "fire" but never run — the dedup-ID + dead-executor wedge
+URL: /internal/docs/agent-insights/routines-dedup-dead-executor-wedge
+
+A routineFire PENDING on a dead DBOS executor holds its deduplicationID forever, silently collapsing every later cron fire while claimDueRoutine keeps bumping last_fired_at — the routines table looks healthy while the routine is dead. gym-cycle lost 7.5h this way.
+
+## Symptom
+
+A cron routine's `routines.last_fired_at` advances on schedule, but the
+routine's *effect* never happens. For `gym-cycle` (2026-06-12, 06:28→14:00):
+`harness_shared.autoloop_state` frozen at `gym-cycle:dispatch`,
+`gym_autoloop_config` stuck `running` for 7.5h (far past the 45-min
+stale-reclaim — which never ran, because the reclaim lives INSIDE the action
+that never executed), zero `[gym-cycle]` lines in the host journal. The Mug
+surfaced it as "P-001 autoloop discrepancy".
+
+## Mechanism
+
+`routinesTickImpl` (`packages/operator-core/lib/dbos/routines-workflow.ts`)
+enqueues each due fire with `deduplicationID: routine:<id>` and swallows
+`Duplicate…` errors as back-pressure. DBOS holds a dedup ID until the
+workflow reaches a terminal state — and **recovery is per-executor**: a fire
+PENDING on an executor that died is never recovered by the surviving hosts.
+So one dead executor holding one fire = that routine's dedup ID is occupied
+FOREVER; every later tick claims the routine (bumping `last_fired_at` — the
+misleading part) and then silently collapses the enqueue.
+
+How a foreign executor got the fire at all: any ad-hoc host (here
+`executor_id='repro-debug'`, an incident-repro session) sharing the live DB
+with the same DBOS app version joins the workflow queues and steals work; if
+it exits mid-run, everything it held is orphaned.
+
+## Diagnosis recipe
+
+```sql
+select workflow_uuid, status, executor_id, to_timestamp(created_at/1000)
+from dbos.workflow_status
+where name='routineFire' and status='PENDING';
+```
+
+A PENDING row whose `executor_id` no longer exists is the wedge. Cross-check
+`harness_shared.routines.last_fired_at` (advancing) vs the routine's actual
+effect table (frozen).
+
+## Fix (2026-06-12)
+
+* Immediate: cancel the phantom — and note the dedup is enforced by a unique
+  index with NO status predicate (`uq_workflow_status_dedup_id` on
+  `(queue_name, deduplication_id) WHERE deduplication_id IS NOT NULL`), so a
+  status flip alone does NOT free it (verified live: the next tick still
+  collapsed). DBOS's own terminal transition clears the column; a manual
+  cancel must too:
+  ```sql
+  UPDATE dbos.workflow_status
+     SET status='CANCELLED', deduplication_id=NULL
+   WHERE workflow_uuid=… AND status='PENDING';
+  -- and clear any lingering queue row:
+  DELETE FROM dbos.workflow_queue WHERE deduplication_id='routine:<id>';
+  ```
+* Structural: `startWorkflow(..., { timeoutMS: ROUTINE_FIRE_TIMEOUT_MS })`
+  (2h) — DBOS cancels a wedged fire at the deadline, so the worst case is one
+  ceiling window, not forever.
+* Prevention (open, EI-396 residual): per-host `DBOS__APPVERSION`/`DBOS__VMID`
+  discipline for ad-hoc/repro hosts so they never join the live hosts'
+  queues (the staging unit already isolates itself this way).
+
+## Update: no-first-output routineFire rows (2026-06-25)
+
+The same user-visible symptom can happen on a live executor: DBOS creates a
+`routineFire` workflow row, assigns `started_at_epoch_ms`, and pins
+`deduplication_id='routine:<id>'`, but the workflow never records its first
+`dbos.operation_outputs` checkpoint. A later recovery pass may refresh both
+`updated_at` and `started_at_epoch_ms`, so those clocks can make the dead fire
+look newly active even though the routine has not produced any durable DBOS
+operation output. Use immutable `created_at` for the no-first-output stale check.
+
+Diagnosis:
+
+```sql
+select ws.workflow_uuid, ws.status, ws.deduplication_id,
+       to_timestamp(ws.started_at_epoch_ms/1000.0) as started_at
+  from dbos.workflow_status ws
+ where ws.name='routineFire'
+   and ws.status in ('PENDING','ENQUEUED')
+   and not exists (
+     select 1 from dbos.operation_outputs op
+      where op.workflow_uuid = ws.workflow_uuid
+   );
+```
+
+Structural fix: `dbos-executor-reaper` now treats a `routineFire` whose
+`created_at` is older than a longer first-output window with zero operation rows
+as stale, NULLs its dedup, sets it `CANCELLED`, and pushes the owning
+`harness_shared.routines.next_fire_at` back to `now()`. That window is deliberately
+longer than the scheduler-tick window because `operation_outputs` is a checkpoint
+table: a legitimate long first step has no row until it completes or records its
+own timeout/error. Scout's cycle timeout is the live proof. It also cancels
+no-first-output `routinesTick` rows by `created_at`, because a stuck scheduler tick
+is the upstream version of the same failure. The requeue is intentionally limited
+to the no-first-output `routineFire` safety-valve class; routine bodies that did
+checkpoint a DBOS step still rely on their explicit workflow deadline/backoff
+rather than being retried immediately.
+
+## Update: the fix itself caused a NEW wedge — over-eager reaping of healthy fires (WI-1415 → WI-1416, 2026-06-30–07-01)
+
+**Symptom (2026-06-30, `git-sync-stall-watchdog` incident).** git-sync kept firing every
+3 min, but its DBOS fires got stuck — `metadata.last_error` repeatedly showed
+`"routineFire produced no DBOS operation output; executor reaper cancelled the stuck
+fire and requeued the routine"` — so no commit landed for \~6h while \~100 source files
+sat stranded uncommitted (and thus un-deployable). Nothing alarmed: the routine LOOKED
+active (`last_fired_at` advancing every 3 min, exactly the symptom this doc's title
+describes), but every fire was being killed and restarted from scratch before it could
+commit — roughly one commit per 40 minutes instead of one per 3 minutes.
+
+**Root cause: the 2026-06-25 fast-orphan check above was built on the WRONG queue-row
+semantics.** It read "no live `dbos.workflow_queue` row" as "orphaned" — but this DBOS
+version deletes the queue row at **dequeue** time, so every actively-EXECUTING `PENDING`
+fire *also* has no queue row. The fast path was therefore reaping ANY fire whose first
+step ran past the 90s scheduler-silence window, healthy or not — a self-inflicted
+restart loop on git-sync specifically, because git-sync's real first-step work
+(committing across the whole tree + every submodule) routinely takes longer than 90s.
+
+**Fix (`dbos-executor-reaper.ts`, verified live 2026-07-01):**
+
+* The fast-orphan path now only reaps a fire that is `ENQUEUED` (never dequeued at
+  all — a genuine anomaly, e.g. a crash between the queue delete and the status flip)
+  AND older than its own, separate, tunable window (`DEFAULT_STALE_ROUTINE_FIRE_ORPHAN_MS`,
+  default 10 min; env `PAPERCUSP_DBOS_REAPER_FIRE_ORPHAN_MS`). A `PENDING` (i.e.
+  executing) no-output fire is no longer eligible for the fast path at all — it falls
+  back to the longer no-first-output window (`DEFAULT_STALE_ROUTINE_FIRE_NO_OUTPUT_MS`),
+  which must stay above green-checkpoint's whole run. ⚠ That window is a **wall-clock cap
+  from workflow creation**, not a since-last-output silence timer — the name misleads, and
+  the value has now inverted against the suite budget twice. Do not read a number for it
+  from this page: the live value, the reasoning, and the full 4-link chain are on the
+  constant's own header comment, and the ordering is enforced by
+  `apps/operator/lib/release/release-timing-invariants.test.ts` (WI-6112).
+* `routineFireImpl` (`routines-workflow.ts`) now runs a **multi-step** system action like
+  git-sync's internal steps as individual `DBOS.runStep` sub-steps of the workflow
+  (`entry.ownSteps`, WI-1416 / `bg-host-freeze-eventloop-stall` P-006) instead of one
+  opaque long step — so the reaper sees genuine incremental progress
+  (`operation_outputs.function_id > 0`) as soon as any sub-step checkpoints, rather than
+  waiting for the whole action to finish before it can prove it isn't wedged.
+* A dedicated **`git-sync-stall-watchdog.ts`** (process-level `setInterval`, 15-min sweep,
+  same "not a DBOS routine" reasoning as `dbos-executor-reaper` — a routine-based watchdog
+  queues on the very engine that wedges) now closes the observability gap this whole doc
+  originally called out ("the routines table looks healthy while the routine is dead").
+  It reads `harness_shared.routines.metadata` for git-sync specifically and alarms
+  (owner page + escalation + fleet broadcast) on any of: HEAD staleness (tree hasn't
+  advanced while active — the PRIMARY signal, skipped on a legitimately clean/idle tree),
+  fire staleness (scheduler not running it), a persistent `last_error` across ≥2
+  consecutive 15-min sweeps, or — the WI-1416-specific signal —
+  `metadata.reaped_count` (consecutive executor-reaper cancels since the last completed
+  fire, incremented by the reaper and reset on success) reaching 3, which catches
+  exactly this reap→requeue→restart loop even while `last_error` is flipping null
+  between reaps.
+
+Net effect: the `routineFire` no-output windows are now two-tiered by TRUE anomaly
+(never-dequeued `ENQUEUED`, 10 min) vs legitimate-long-first-step `PENDING` (60 min),
+and a persistent-reap counter + dedicated watchdog give this failure class its own
+alarm instead of relying on someone noticing `last_fired_at` looking healthy while
+nothing actually happens.

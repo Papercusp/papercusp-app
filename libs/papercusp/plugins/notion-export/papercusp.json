@@ -1,0 +1,65 @@
+{
+  "name": "@papercupai/notion-export",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "Export the harness's mission summary to a Notion database. Demonstrates secrets:read + http:fetch on the Notion API.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "capabilities": [
+    "secrets:read:NOTION_API_KEY",
+    "http:fetch:api.notion.com",
+    "events:listen:mission-done"
+  ],
+  "actions": [
+    {
+      "name": "exportMission",
+      "label": "Export to Notion",
+      "surfaces": [
+        "mission-done",
+        "harness-toolbar"
+      ],
+      "capabilities": [
+        "secrets:read:NOTION_API_KEY",
+        "http:fetch:api.notion.com"
+      ],
+      "serverHandler": {
+        "timeoutSec": 30
+      },
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Page title. Defaults to the mission ID."
+          },
+          "summary": {
+            "type": "string",
+            "description": "Body content. Markdown is converted client-side."
+          }
+        }
+      }
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "required": [
+      "databaseId"
+    ],
+    "properties": {
+      "databaseId": {
+        "type": "string",
+        "minLength": 32,
+        "description": "Notion database UUID (the parent destination for new pages)."
+      },
+      "version": {
+        "type": "string",
+        "default": "2022-06-28",
+        "description": "Notion-Version header. Update if Notion bumps the API."
+      }
+    }
+  },
+  "icon": "FileText",
+  "hidden": true,
+  "hiddenReason": "Not ready yet \u2014 outbound integration is functional against a mock; live wiring against real Jira/Linear/Notion/Slack tenants is not yet verified. Hidden from marketplace until v1.0."
+}

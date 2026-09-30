@@ -1,0 +1,292 @@
+/*
+ * Command palette (⌘K / Ctrl+P) styles — APP-WIDE.
+ *
+ * Extracted from app/harness/harness.css when the palette was promoted
+ * from a harness-only widget to a root-mounted, all-pages feature
+ * (mounted in app/layout.tsx via GlobalCommandPalette). These rules used
+ * to be dead in harness.css after the HarnessDashboard removal; moving
+ * them here is the single source of truth for the palette chrome.
+ *
+ * Class prefix kept as `.h-cmd*` so the restored CommandPalette markup
+ * matches verbatim.
+ */
+
+/* ── Command palette polish ─────────────────────────────────── */
+
+/* When the dialog is force-mounted (so opening is fast), Radix sets
+   data-state="open" or "closed" on both the overlay and content. We
+   hide them visually + remove from the layout when closed.
+   `display: none` would un-mount the cmdk subtree from the rendering
+   pipeline — using `visibility: hidden` + `pointer-events: none`
+   instead keeps the children measured/painted offscreen so the first
+   open is instant. */
+.h-cmd-overlay[data-state="closed"],
+.h-cmd[data-state="closed"] {
+  visibility: hidden;
+  /* `!important` because Radix leaves an inline `style="pointer-events: auto"`
+     on Dialog.Content after the open→closed transition; without `!important`
+     that inline style wins and the closed dialog continues to intercept
+     clicks across the entire viewport. Reproducible via verdict-cli:
+     every button click on /harness was being silently absorbed by the
+     closed cmd-K dialog before this fix. */
+  pointer-events: none !important;
+  opacity: 0;
+}
+
+.h-cmd-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  background: color-mix(in srgb, var(--bg-deepest, #02060c), transparent 16%);
+  backdrop-filter: none;
+}
+
+.h-cmd {
+  /* Pin to the viewport directly — globals.css `body > *` forces every
+     body child to `position: relative; z-index: 1`, which would otherwise
+     drop a Radix-portaled dialog into normal document flow at the bottom
+     of the page (the empty-pane symptom: 840px of items overflowing
+     below a 1167px viewport). `!important` is intentional: the cascade
+     rule is too broad to fight on specificity alone. */
+  position: fixed !important;
+  top: 12vh;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 101 !important;
+  width: min(700px, 92vw);
+  max-height: 72vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-strong, color-mix(in srgb, var(--accent-strong), transparent 68%));
+  border-radius: 18px;
+  background: var(--bg-popover, #0d1829);
+  box-shadow: 0 34px 90px rgba(0,0,0,0.68);
+}
+
+.h-cmd-inputbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  background: var(--bg-raised, #112235);
+}
+
+.h-cmd-key,
+.h-cmd-esc,
+.h-cmd-clear {
+  flex-shrink: 0;
+  border: 1px solid color-mix(in oklab, var(--border), white 9%);
+  border-radius: 999px;
+  background: var(--bg-3, rgba(255, 255, 255, 0.075));
+  color: color-mix(in oklab, var(--fg-dim), white 14%);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.h-cmd-key {
+  padding: 5px 9px;
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent), transparent 62%);
+  background: color-mix(in oklab, var(--accent), transparent 88%);
+}
+
+.h-cmd-esc {
+  padding: 4px 8px;
+}
+
+.h-cmd-clear {
+  padding: 4px 9px;
+  cursor: pointer;
+  transition: border-color 140ms var(--ease-out), color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+
+.h-cmd-clear:hover {
+  color: var(--fg);
+  border-color: color-mix(in oklab, var(--accent), transparent 48%);
+  background: color-mix(in oklab, var(--accent), transparent 88%);
+}
+
+.h-cmd-input {
+  min-width: 0;
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.h-cmd-input::placeholder {
+  color: color-mix(in oklab, var(--fg-dim), transparent 10%);
+}
+
+.h-cmd-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  background: var(--bg-1, #0b1220);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.h-cmd-meta span:first-child {
+  color: color-mix(in oklab, var(--fg), var(--accent) 18%);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.h-cmd-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+  background: var(--bg-popover, #0d1829);
+}
+
+.h-cmd-section {
+  padding: 10px 10px 5px;
+  color: color-mix(in oklab, var(--fg-dim), white 8%);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.h-cmd-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--fg);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms var(--ease-out), background 140ms var(--ease-out), transform 140ms var(--ease-out);
+}
+
+.h-cmd-row:hover,
+.h-cmd-row.selected {
+  border-color: color-mix(in oklab, var(--accent), transparent 58%);
+  background: color-mix(in oklab, var(--accent), transparent 84%);
+}
+
+.h-cmd-icon {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 24%);
+  background: color-mix(in oklab, var(--bg), white 5%);
+  color: color-mix(in oklab, var(--fg), var(--accent) 22%);
+}
+
+.h-cmd-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.h-cmd-title,
+.h-cmd-subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.h-cmd-title {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.h-cmd-subtitle {
+  color: color-mix(in oklab, var(--fg-dim), white 8%);
+  font-size: 11px;
+}
+
+.h-cmd-empty {
+  min-height: 180px;
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  text-align: center;
+  color: var(--fg-dim);
+}
+
+.h-cmd-empty strong {
+  color: var(--fg);
+}
+
+.h-cmd-footer {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  background: var(--bg-1, #0b1220);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.h-cmd-footer span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Inline keycap used in the footer hints + per-row shortcut badges.
+   Replaces the former <KbdHint> inline-styled element so the palette
+   stays self-contained (no import of the harness `primitives` module). */
+.h-cmd-kbd {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.65rem;
+  line-height: 1;
+  padding: 2px 5px;
+  background: var(--bg-3);
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in oklab, var(--border), transparent 20%);
+  border-radius: 4px;
+  text-transform: none;
+}
+
+/* ── cmdk → existing .h-cmd-* mappings ──────────────────────────────────── */
+.h-cmd-row[data-selected="true"] {
+  border-color: color-mix(in oklab, var(--accent), transparent 52%);
+  background: color-mix(in oklab, var(--accent), transparent 84%);
+  color: var(--fg);
+}
+
+.h-cmd-group [cmdk-group-heading] {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  padding: 8px 14px 4px;
+}
+
+.h-cmd-group:not(:first-child) [cmdk-group-heading] {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.h-cmd-group[hidden] {
+  display: none;
+}

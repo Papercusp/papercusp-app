@@ -1,0 +1,124 @@
+# __dirname in a type:module package only breaks under tsx FILE-mode — and a swallowed DBOS boot error stalls every routine (deploy train included)
+URL: /internal/docs/agent-insights/esm-dirname-tsx-file-mode-dbos-stall
+
+A top-level __dirname in operator-core threw only under `tsx <file>` (true ESM, no shim), poisoned the register-system-actions import chain, and killed DBOS routines fleet-wide for 80+ min on the 2026-06-12 05:30 deploy — git-sync sweeps, monitors, AND release-trigger, so the deploy train could not carry its own fix. tsx -e repros are INVALID for this class (CJS context shims __dirname). Diagnosis + manual-recovery chain inside.
+
+## The failure
+
+The 2026-06-12 05:30 auto-deploy restarted `:3070` and its journal showed one
+non-fatal-looking line:
+
+```
+[dbos] boot failed (non-fatal): __dirname is not defined in ES module scope
+```
+
+Consequence: the DBOS routines engine never started. **Every** active routine
+silently stopped — git-sync sweeps (80+ min of fleet work sat uncommitted),
+coord monitors, gym-cycle, and crucially `release-trigger` + `green-checkpoint`
+themselves, so **the deploy train could not deliver its own fix**.
+
+Root cause: `change-ledger-scan-action.ts` (new that morning) had a top-level
+`const REPO_ROOT = join(__dirname, …)`. `register-system-actions.ts`
+side-effect-imports every action module; one throwing import poisons the whole
+chain (`routines-workflow` → `startDbos` → the swallowed catch).
+
+## The trap that wastes an hour: tsx -e repros LIE for this class
+
+* `npx tsx -e "import('…')"` evaluates in a **CJS context** — esbuild shims
+  `__dirname`, the import succeeds, and you conclude the code is fine.
+* `npx tsx <file>.ts` (how every host runs — hono-host, staging, sidecar)
+  compiles `type: module` packages (operator-core, harness) as **true ESM**:
+  `typeof __dirname === 'undefined'`. A top-level reference throws at import;
+  a function-body reference throws at call time (this second flavor broke
+  `ensure-omp-su` phase1 via `papercusp-files.ts` on every boot).
+
+**Repro correctly:** write a probe FILE inside the type:module package and run
+it file-mode: `npx tsx packages/operator-core/lib/__probe.ts` importing the
+suspect chain. Delete it after.
+
+**Fix pattern** (plugin-host-runtime.ts):
+`const __dirname = dirname(fileURLToPath(import.meta.url));` — never a bare
+`__dirname` in operator-core/harness.
+
+## Diagnosis runbook (routines look stalled)
+
+1. `SELECT name, active, next_fire_at FROM harness_shared.routines WHERE active` —
+   **all** `next_fire_at` in the past = the engine is dead (not one broken
+   routine). One stale row = that routine's problem.
+2. `journalctl --user -u papercup-dev-api | grep '\[dbos\] boot failed'` — the
+   swallowed boot error. `:3070` answering `/api/health` proves nothing; the
+   HTTP layer outlives the engine.
+3. Remember the second-order effect: a dead engine means **no git-sync sweeps
+   and no auto-deploys** until something manually intervenes.
+
+## Manual recovery chain (engine dead, fix only in the staging tree)
+
+Each step uses the production entry points via a `tsx -e` eval (CJS context is
+fine for *running* things — just not for reproducing the bug). Source
+`.env.local` and set `PAPERCUSP_INTEGRATION_ROOT=<canonical tree>` (without it,
+green-checkpoint resolves its tsx binary from `$HOME` and dies ENOENT):
+
+1. **Sweep staging → origin**: build a ctx from the papercup routine row and
+   call `getSystemAction('git-sync')(ctx)` (full lock/escalation path).
+2. **Green-checkpoint**: `getSystemAction('green-checkpoint')(ctx)` — runs the
+   suite in `papercup-checkpoint`, FFs `main` on green.
+3. **Deploy**: `npx tsx apps/operator/lib/release/deploy-cli.ts --execute` —
+   `:3070` restarts with the fix, DBOS launches, the train self-heals.
+
+## Related caveat: papercup-staging-api skips ALL boot hooks
+
+The staging unit runs `PAPERCUSP_BACKGROUND_WORKERS=0`, which skips
+`applyPendingMigrationsAtBoot` AND the hyperbee-substrate boot block (where
+boot-time reconciles live, e.g. the git-sync seeding reconcile). "Restart
+staging to run my boot hook" does nothing — run the hook one-shot via
+`tsx -e`, or rely on the primary/desktop operator boot.
+
+## Coda — the swallowed boot log moved, and a detector now exists (2026-06-2x)
+
+The `console.warn('[dbos] boot failed (non-fatal): …')` line from step 2 of the
+diagnosis runbook no longer lives inside `routines-workflow.ts`; it's now the
+call site in `apps/operator/bin/host-bootstrap.ts` that dynamic-imports
+`@papercusp/operator-core/lib/dbos/bootstrap` (`startDbos()`) and swallows its
+throw — `routines-workflow.ts` is still the module that chain-imports
+`register-system-actions.ts` (so a poisoned action module still poisons the
+whole registry the same way), it's just no longer where the boot catch itself
+is written. That whole block is gated behind `PAPERCUSP_DBOS_ENABLE=1`
+(default OFF, see `dbos-flags.ts`) — same env-gate shape as the other opt-in
+boot workers — so grep `host-bootstrap.ts`, not `routines-workflow.ts`, for the
+literal log line.
+
+More importantly, this incident is no longer undetectable: `host-bootstrap.ts`
+now arms a **Red Mug engine-death papercup**
+(`packages/operator-core/lib/0/engine-death.ts`,
+`armEngineDeathSentinel()`) as a **plain `setInterval`, deliberately outside
+DBOS/routines** — its own comment names this exact incident ("the swallowed
+`[dbos] boot failed` above left every routine dead for 80+ min on 2026-06-12
+with nothing detecting it") as the reason it must survive the failure it
+watches for. It's inert while the `papercusp-red-queen` flag is OFF (checked
+every pass). Step 1 of the diagnosis runbook above (`next_fire_at` all in the
+past) is still the fastest manual confirmation, but a live host should now
+self-report this class of stall via the papercup instead of silently sitting
+dead for 80+ minutes.
+
+## Coda 2 — the live sentinel's first real firing was a false alarm from an unscoped query (EI-14375, 2026-07-19)
+
+`harness_shared.routines` is multi-tenant (`workspace_id`): this one Postgres
+instance carries routines for `papercusp-workspace`, `default` (global/
+cross-hive routines like `cross-hive-outbox-drain`), and ad-hoc test
+workspaces. The live sentinel's `readRoutineLivenessRows()` originally read
+`WHERE active = true` with **no `workspace_id` filter** — so it silently
+aggregated every tenant's routines together. EI-14375 fired "the routines
+engine is dead" with papercusp's own runbook + remediation paths, while
+`papercup-bg-host-watchdog.service`'s independent ticker-freshness log showed
+continuous healthy routine fires for papercusp-workspace the entire time — the
+alarm was real for *some* tenant, but not papercusp, and papercusp's own
+runbook (this doc) is not the fix for another tenant's idle routines.
+
+Fix: `readRoutineLivenessRows(sql, workspaceId)` now takes an explicit
+workspace and `armEngineDeathSentinel()` binds it to `activeWorkspaceId()` —
+the live sentinel now only ever reports on the workspace it actually runs in.
+Diagnosing this class going forward: if `next_fire_at` looks stale, also
+check `papercup-bg-host-watchdog`'s own journal for "ticker healthy" lines
+covering the same window — if the watchdog saw healthy fires the whole time,
+distrust the sentinel's verdict and look for a scoping bug like this one
+before running the manual recovery chain.

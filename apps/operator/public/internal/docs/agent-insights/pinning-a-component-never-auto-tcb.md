@@ -1,0 +1,95 @@
+# Pin a component "never-auto" (TCB) by adding its path glob to the risk-tier protected set
+URL: /internal/docs/agent-insights/pinning-a-component-never-auto-tcb
+
+To make a code component impossible for the self-improvement loop to auto-edit (so it "cannot graduate its own permissions"), add its repo-relative path glob to DEFAULT_RISK_TIER_POLICY.protectedPathPatterns in harness/improvements/policy.ts. classifyImprovement then forces tier=human for any captured improvement touching it, and no graduation dial (autoKinds) can ever promote it. Pin it with an invariant test that asserts tier=human under FULL graduation.
+
+## The need
+
+Some components are the **trusted computing base** of the autonomous system: the
+spine executor, the agent-spawn chokepoint, the dispatch gate, the deploy
+machinery, the learning-spend budget. A bug in one = total compromise, so they
+must **never be auto-modified** by the self-improvement loop — concentrating
+authority means the component "cannot graduate its own permissions" (the
+self-graduation hazard the recursion-safety rails forbid: mug-autonomy-policy
+P-090 / self-learning-frontier P-049 / agent-capability-confinement D-007).
+
+This is **not** a new gate to build — the never-auto protected set already
+exists and is enforced. You just add your component to it.
+
+## The mechanism (one place)
+
+The enforcement is **risk-tier classification by file path**, in
+`packages/operator-core/lib/harness/improvements/policy.ts`:
+
+* `DEFAULT_RISK_TIER_POLICY.protectedPathPatterns` is a list of repo-relative
+  globs (`**` across segments, `*` within — `matchGlob`).
+* `classifyImprovement(candidate, policy)` returns `tier: 'human'` +
+  `protectedHit` for any candidate whose `paths` match a protected glob —
+  **before** the auto lane is reachable.
+* Graduation (Phase 4 trust-widening) is the **only** dial, and it edits
+  `autoKinds` (which work-item *kinds* may auto-implement). It **cannot** touch
+  `protectedPathPatterns`, so a protected path stays human under *any*
+  graduation. That orthogonality is the whole safety property.
+
+Already covered by broad globs (don't re-add): `dbos/**` (the durable executor +
+`spawnInvokeOnce`), `harness/routines/**` (the cadence layer), `release/**` (the
+deploy machinery), `git-sync/**` + `libs/papercusp/packages/locks/**` (the
+commit/push routine + the lock authority), `learning-governor/**`,
+`change-ledger/**`, `**/auth/**`, `**/credentials/**`,
+`libs/papercusp/libs/db/sql/**`, `libs/flags/**`, and the loop's **own** code —
+`harness/improvements/**` + `agent-tools/improvements/**` (so a pin can't be
+un-made by auto-editing the policy that enforces it). Two co-located TCB
+constant modules are also spread in wholesale — `DETERMINISTIC_EXECUTOR_TCB_PATTERNS`
+(the spine executor) and `CAPABILITY_DISPATCH_TCB_PATTERNS` (the capability
+dispatch gate); see the worked examples below.
+
+## How to pin a component
+
+1. Add the component's path glob(s) to `protectedPathPatterns`. Keep the canonical
+   list of *your* component's globs in a small co-located constant and spread it
+   in — e.g. `blueprint-steps/tcb.ts` exports
+   `DETERMINISTIC_EXECUTOR_TCB_PATTERNS`, and `policy.ts` does
+   `...DETERMINISTIC_EXECUTOR_TCB_PATTERNS`. (A pure constant module — no imports,
+   no side effects — so the safety policy can import it without pulling in the
+   component's runtime.)
+2. Write an **invariant test** (sibling of
+   `harness/improvements/recursion-safety-invariants.test.ts`) that, for a real
+   representative file under each glob:
+   * classifies `tier: 'human'` under `FULLY_GRADUATED` (`autoKinds` = every
+     kind) — the cannot-graduate property;
+   * has the **same** `protectedHit` under default and full graduation;
+   * `protectedHit ∈ your-glob-set` (proves *your* pin is doing the gating, not
+     an incidental pre-existing pattern);
+   * and a clean off-component path still graduates to `auto` (the pin isn't
+     vacuously blocking everything).
+
+Worked examples — two components now use this exact co-located-constant pattern:
+
+* `deterministic-blueprints-migration-2026-06-13` P-141 pinned the program-mode
+  spine executor + deterministic-step runner
+  (`packages/operator-core/lib/coord-ops/**`, `.../blueprint-steps/**`,
+  `libs/generic/step-program/**`, the blueprint validator) — see
+  `blueprint-steps/tcb.ts` + `tcb-invariants.test.ts`.
+* `agent-capability-confinement-2026-06-13` (P-030 / D-007) pinned the capability
+  dispatch gate — the PDP (`capability-envelope/**`), the decision-ledger
+  (`decision-ledger/**`), the host wiring (`projected-tool-deps.ts`), the generic
+  dispatch stack (`libs/generic/tooldef/src/dispatch-stack.ts`), and the gated
+  capability tool surface (`agent-tools/capability/**`) — declared in
+  `capability-envelope/tcb.ts` (`CAPABILITY_DISPATCH_TCB_PATTERNS`) and pinned by
+  `capability-envelope/tcb-invariants.test.ts`.
+
+## Gotcha: verify new `.ts` test files with direct `tsc`, not just vitest
+
+Vitest runs through esbuild, which **does not type-check** — a green vitest run
+can still carry `tsc` errors that breach `operator-core`'s `.tsc-baseline.json`
+(CI gates on it). Run `npx tsc --noEmit -p packages/operator-core/tsconfig.json`
+and grep for your files. Two that bit P-141/P-140:
+
+* Importing an untyped `.mjs` guard script into a `.ts` test: `// @ts-ignore`
+  only suppresses the **next line**, so a *multi-line* `import { … } from
+  '…/guard.mjs'` leaves `TS7016` on the `from` line unsuppressed. Use
+  `import * as guard from '…/guard.mjs'` (single line) and cast the surface to
+  typed locals (keeps `noImplicitAny` happy when you `.map` over an exported
+  array).
+* A hand-written program-gate branch literal needs `else` (it's a defaulted —
+  therefore required-in-output — field): `{ when, else: false, op, args }`.

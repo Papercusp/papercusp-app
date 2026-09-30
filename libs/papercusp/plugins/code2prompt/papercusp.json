@@ -1,0 +1,194 @@
+{
+  "name": "@papercupai/code2prompt",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "Diff-aware prompt context for the reviewer role. Wraps the code2prompt CLI to produce structured prompts showing what changed since a base ref. Bundled templates: code-review, security-audit, refactor-prep. Plus a generic `pack` tool for non-diff use cases.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "icon": "GitBranch",
+  "capabilities": [
+    "tools:code2prompt:diff",
+    "tools:code2prompt:pack",
+    "compute:exec:code2prompt"
+  ],
+  "tools": [
+    {
+      "name": "diff",
+      "description": "Build a diff-aware prompt showing what changed in the working tree (or vs a base ref). Reviewer's primary tool — combines code2prompt's git-diff support with a templated prompt for code review / security audit / refactor planning.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "base": {
+            "type": "string",
+            "description": "Git ref to diff against. Default: 'main'. Reviewer typically passes the harness's last_accepted_feature_sha (set when validator passes a feature)."
+          },
+          "include": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Glob patterns to include in the diff. Default: all changed files."
+          },
+          "ignore": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Glob patterns to ignore."
+          },
+          "template": {
+            "enum": [
+              "code-review",
+              "security-audit",
+              "refactor-prep",
+              "none"
+            ],
+            "default": "code-review",
+            "description": "Bundled prompt template applied to the diff. 'none' returns raw diff context."
+          },
+          "format": {
+            "enum": [
+              "markdown",
+              "xml"
+            ],
+            "default": "markdown",
+            "description": "Output format."
+          }
+        }
+      },
+      "capabilities": [
+        "tools:code2prompt:diff",
+        "compute:exec:code2prompt"
+      ],
+      "roles": [
+        "reviewer",
+        "architect",
+        "debugger"
+      ],
+      "rolesQuota": {
+        "reviewer": {
+          "perRun": 5
+        },
+        "architect": {
+          "perRun": 3
+        },
+        "debugger": {
+          "perRun": 5
+        }
+      },
+      "timeoutSec": 60,
+      "expose": {
+        "http": {
+          "path": "/api/plugins/code2prompt/diff",
+          "methods": [
+            "POST"
+          ]
+        },
+        "mcp": {
+          "name": "code2prompt.diff",
+          "largeOutput": true
+        }
+      },
+      "guidance": {
+        "when": "Reviewer's primary tool — build a diff-aware prompt showing what changed (working tree or vs a base ref).",
+        "notWhen": "For non-diff project packing, use `code2prompt.pack` or `repomix.pack`. diff is review-specific."
+      }
+    },
+    {
+      "name": "pack",
+      "description": "Build a non-diff prompt over a project (or subset) — same shape as repomix.pack but uses code2prompt's templating. Useful when a reviewer wants a structured prompt, not a raw repo dump.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "ignore": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "template": {
+            "enum": [
+              "code-review",
+              "security-audit",
+              "refactor-prep",
+              "none"
+            ],
+            "default": "none"
+          },
+          "format": {
+            "enum": [
+              "markdown",
+              "xml"
+            ],
+            "default": "markdown"
+          },
+          "tokens": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include code2prompt's token count in the output header."
+          }
+        }
+      },
+      "capabilities": [
+        "tools:code2prompt:pack",
+        "compute:exec:code2prompt"
+      ],
+      "roles": [
+        "reviewer",
+        "architect"
+      ],
+      "rolesQuota": {
+        "reviewer": {
+          "perRun": 3
+        },
+        "architect": {
+          "perRun": 5
+        }
+      },
+      "timeoutSec": 60,
+      "expose": {
+        "http": {
+          "path": "/api/plugins/code2prompt/pack",
+          "methods": [
+            "POST"
+          ]
+        },
+        "mcp": {
+          "name": "code2prompt.pack",
+          "largeOutput": true
+        }
+      },
+      "guidance": {
+        "when": "Pack a project (or subset) using code2prompt's templating — same shape as repomix.pack but different template engine.",
+        "notWhen": "For a diff specifically, use `code2prompt.diff`. For most cases, either pack tool works; pick by template preference."
+      }
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "binary": {
+        "type": "string",
+        "default": "code2prompt",
+        "description": "Binary name on PATH. Override if you installed under a non-default name."
+      },
+      "defaultBase": {
+        "type": "string",
+        "default": "main",
+        "description": "Default base ref for `diff` when input.base is unset."
+      },
+      "inlineThresholdChars": {
+        "type": "number",
+        "default": 50000,
+        "description": "Outputs smaller than this returned inline; larger ones written to .papercusp/scratch/ and returned as a path reference."
+      }
+    }
+  }
+}

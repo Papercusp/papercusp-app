@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-ops-pots",
+  "id": "papercusp-ops-pots",
+  "title": "Papercusp Official: Agentic Work Plane",
+  "description": "Aspect template: app-owned plan templates promote through the canonical work-item DAG, assign only actionable work to a stable app agent, and durably wake its live adopter. Joined to the deterministic app through exactly ONE typed seam. Docs: /internal/docs on your install.",
+  "category": "agentic",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

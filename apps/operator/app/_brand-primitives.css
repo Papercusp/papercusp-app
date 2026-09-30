@@ -1,0 +1,20 @@
+/**
+ * Do not edit directly, this file was auto-generated.
+ */
+
+:root {
+  --sky-100: #e0f2fe;
+  --sky-200: #bae6fd;
+  --sky-300: #7dd3fc;
+  --sky-400: #38bdf8;
+  --sky-500: #0ea5e9;
+  --sky-700: #0369a1;
+  --sky-cool: #d7f3ff; /** Desktop accent-cool — between sky-100 and sky-200 */
+  --sky-hero: #13f5ff; /** Operator hero cyan — orb chrome */
+  --emerald-400: #34d399;
+  --amber-400: #fbbf24; /** Tailwind amber-400 — desktop --warn */
+  --gold-400: #f6c453; /** Papercusp custom yellow — mobile uses this instead of amber-400 for warmer feel */
+  --rose-400: #fb7185;
+  --slate-300: #cbd5e1;
+  --slate-400: #94a3b8;
+}

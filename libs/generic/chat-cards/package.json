@@ -1,0 +1,35 @@
+{
+  "name": "@papercusp/chat-cards",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Host-free React renderers for @papercusp/chat-protocol interactive cards. Cards and transport callbacks enter through props; no operator or portal path is imported.",
+  "main": "src/index.tsx",
+  "types": "src/index.tsx",
+  "exports": {
+    ".": {
+      "types": "./src/index.tsx",
+      "import": "./src/index.tsx",
+      "default": "./src/index.tsx"
+    }
+  },
+  "peerDependencies": {
+    "@papercusp/chat-protocol": "*",
+    "lucide-react": "^0.544.0",
+    "react": "^18 || ^19"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@papercusp/chat-protocol": "*",
+    "@papercusp/test-config": "*",
+    "@testing-library/react": "^16.3.2",
+    "jsdom": "^29.1.1",
+    "lucide-react": "^0.544.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "vitest": "^4.1.4"
+  }
+}

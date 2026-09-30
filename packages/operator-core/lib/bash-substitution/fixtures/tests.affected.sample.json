@@ -1,0 +1,128 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 / pair tests.affected (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T13:34:00Z",
+  "totalAtoms": 204,
+  "totalSessions": 48,
+  "sample": [
+    {
+      "sid": "su-1c841b25-410f-45ef-b0ed-c0e22034a0c9",
+      "ts": "2026-07-20T22:40:32.536Z",
+      "atom": "npm run test:affected"
+    },
+    {
+      "sid": "su-c12c22d8-2503-489d-8649-bdfcb3d68910",
+      "ts": "2026-07-26T03:34:07.268Z",
+      "atom": "npm run test:affected -- 2>&1"
+    },
+    {
+      "sid": "su-7905fadc-2ba3-4492-897d-99d351a64a68",
+      "ts": "2026-07-26T05:27:02.097Z",
+      "atom": "npm run test:affected 2>&1"
+    },
+    {
+      "sid": "su-707029ce-300a-469b-8fca-4cd393f5a0d2",
+      "ts": "2026-07-25T23:28:26.853Z",
+      "atom": "npm run test:affected > /tmp/affected.log 2>&1"
+    },
+    {
+      "sid": "su-a8557b00-55fb-4438-a7bd-f269a7a3bf6c",
+      "ts": "2026-07-26T02:54:51.753Z",
+      "atom": "npm run test:affected > /tmp/ei-18673501896258575-test-affected.log 2>&1"
+    },
+    {
+      "sid": "su-7845f434-583f-4801-86ba-d06f350d1071",
+      "ts": "2026-07-26T08:40:07.478Z",
+      "atom": "npm run test:affected > /tmp/ei186944-test-affected.log 2>&1 &"
+    },
+    {
+      "sid": "su-e044d888-c238-4311-8eb0-aef7896b3e92",
+      "ts": "2026-07-20T04:36:01.949Z",
+      "atom": "npm run test:affected > /tmp/kps3-test-affected.log 2>&1"
+    },
+    {
+      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
+      "ts": "2026-07-26T14:47:08.565Z",
+      "atom": "npm run test:affected > /tmp/p007-affected.log 2>&1"
+    },
+    {
+      "sid": "su-1c841b25-410f-45ef-b0ed-c0e22034a0c9",
+      "ts": "2026-07-20T22:40:16.975Z",
+      "atom": "npm run test:affected > /tmp/papercusp-affected-tests-ei153.log 2>&1 &"
+    },
+    {
+      "sid": "su-a8ea9aff-9469-4a8f-90bf-f09c6a383ca3",
+      "ts": "2026-07-25T21:49:45.059Z",
+      "atom": "npm run test:affected > /tmp/su-a8ea9-affected2.log 2>&1 &"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T01:19:07.622Z",
+      "atom": "npm run test:affected > /tmp/test-affected-20260721-0119.log 2>&1"
+    },
+    {
+      "sid": "su-73565638-a17a-4be4-adfd-86a6750ac1c1",
+      "ts": "2026-07-26T01:46:39.865Z",
+      "atom": "npm run test:affected > /tmp/test-affected-EI18661727856396907.log 2>&1"
+    },
+    {
+      "sid": "su-7a80832c-ade5-4ed2-9a08-43f72fbbdae4",
+      "ts": "2026-07-26T01:06:44.407Z",
+      "atom": "npm run test:affected > /tmp/test-affected-ei18663-retry.log 2>&1"
+    },
+    {
+      "sid": "su-ea8d3491-fd1c-441b-bef7-ffb820450f53",
+      "ts": "2026-07-26T08:16:11.622Z",
+      "atom": "npm run test:affected > /tmp/test-affected-ei18693907749585513.log 2>&1 &"
+    },
+    {
+      "sid": "su-ccb43bf4-89a3-4222-88e8-0c345cea2749",
+      "ts": "2026-07-20T08:05:47.196Z",
+      "atom": "npm run test:affected > /tmp/test-affected-wi5626.log 2>&1"
+    },
+    {
+      "sid": "su-ccb43bf4-89a3-4222-88e8-0c345cea2749",
+      "ts": "2026-07-20T09:50:32.290Z",
+      "atom": "npm run test:affected > /tmp/test-affected.log 2>&1"
+    },
+    {
+      "sid": "su-effd3151-c12a-4fb3-8643-252d19652ef6",
+      "ts": "2026-07-20T05:16:33.054Z",
+      "atom": "npm run test:affected > /tmp/wi4518-test-affected.log 2>&1 &"
+    },
+    {
+      "sid": "su-88c3bf51-e38b-47a4-b357-4c547d0e65be",
+      "ts": "2026-07-25T20:58:26.778Z",
+      "atom": "npm run test:affected > /tmp/wi5754-affected.log 2>&1"
+    },
+    {
+      "sid": "su-88c3bf51-e38b-47a4-b357-4c547d0e65be",
+      "ts": "2026-07-25T21:17:39.112Z",
+      "atom": "npm run test:affected > /tmp/wi5754-affected3.log 2>&1"
+    },
+    {
+      "sid": "su-00cb5bbb-979b-4d78-81d8-a1debf876551",
+      "ts": "2026-07-25T21:30:16.954Z",
+      "atom": "npm run test:affected > /tmp/wi5778-affected-v2.log 2>&1 &"
+    },
+    {
+      "sid": "su-7a80832c-ade5-4ed2-9a08-43f72fbbdae4",
+      "ts": "2026-07-26T04:32:53.855Z",
+      "atom": "npm run test:affected > /tmp/wi5895-test-affected.log 2>&1"
+    },
+    {
+      "sid": "su-e15fb42f-6686-41e7-8368-37f5ec26ef3c",
+      "ts": "2026-07-26T06:55:10.879Z",
+      "atom": "npm run test:affected > /tmp/wi5988-affected.log 2>&1"
+    },
+    {
+      "sid": "su-ae6cbc84-7787-44f8-af6e-348ea9d14dc8",
+      "ts": "2026-07-26T07:38:25.246Z",
+      "atom": "npm run test:affected > /tmp/wi5993-test-affected.log 2>&1 &"
+    },
+    {
+      "sid": "su-73565638-a17a-4be4-adfd-86a6750ac1c1",
+      "ts": "2026-07-26T09:49:24.967Z",
+      "atom": "npm run test:affected > /tmp/wi6026-test-affected.log 2>&1 &"
+    }
+  ]
+}

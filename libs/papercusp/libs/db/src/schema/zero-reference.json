@@ -1,0 +1,5937 @@
+{
+  "adaptive_telemetryInHarness_shared": {
+    "serverName": "harness_shared.adaptive_telemetry",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "requested_n": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "actual_n": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "tier_label": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "available_at_decision": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "max_slots": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "outcome": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "outcome_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "duration_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "agent_actionsInHarness_shared": {
+    "serverName": "harness_shared.agent_actions",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "agent": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "command_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "args": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "error_code": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "duration_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "session_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "request_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "agent_chats_consolidatedInHarness_shared": {
+    "serverName": "harness_shared.agent_chats_consolidated",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "title": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "transcript": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "total_input_tokens": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "total_output_tokens": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "total_cost_usd_cents": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "archived_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "agent_queriesInHarness_shared": {
+    "serverName": "harness_shared.agent_queries",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "agent": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "query_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "args_compact": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "request_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "agent_runs_consolidatedInHarness_shared": {
+    "serverName": "harness_shared.agent_runs_consolidated",
+    "primaryKey": [
+      "harness_slug",
+      "run_id"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "run_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "size_bytes": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "duration_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "cost_usd": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "input_tokens": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "output_tokens": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "cache_read_tokens": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "cache_creation_tokens": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "running": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "last_event_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "created_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "audit_logInHarness_shared": {
+    "serverName": "harness_shared.audit_log",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "actor": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "action": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "subject": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "details": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "_search": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "autoloop_stateInHarness_shared": {
+    "serverName": "harness_shared.autoloop_state",
+    "primaryKey": [
+      "harness_slug",
+      "role"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "last_fired_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "last_status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "consecutive_errors": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "briefingsInPapercup_shared": {
+    "serverName": "papercup_shared.briefings",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "title": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "quarter": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "script_path": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "duration_seconds": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "youtube_url": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "youtube_video_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "thumbnail_url": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "render_log": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "error": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "summary": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "cooldown_marksInHarness_shared": {
+    "serverName": "harness_shared.cooldown_marks",
+    "primaryKey": [
+      "key"
+    ],
+    "columns": {
+      "key": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "marked_at_ms": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "delegate_inboxInHarness_shared": {
+    "serverName": "harness_shared.delegate_inbox",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "delivered_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "headline": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "claude_session_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "delegatesInHarness_shared": {
+    "serverName": "harness_shared.delegates",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "claude_session_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "title": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "summary": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "last_active_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "turn_count": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "origin": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "initiator_msg": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "transcript": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "directive_summariesInPapercup_shared": {
+    "serverName": "papercup_shared.directive_summaries",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "directive_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "author": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "body": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "directivesInPapercup_shared": {
+    "serverName": "papercup_shared.directives",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "title": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "body": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "created_by": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "created_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "deadline_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "budget_cents": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "priority": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "assigned_departments": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "linked_project_ids": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "el_conv_callsInHarness_shared": {
+    "serverName": "harness_shared.el_conv_calls",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "conversation_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "agent_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "duration_secs": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "ym": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "feature_audit_consolidatedInHarness_shared": {
+    "serverName": "harness_shared.feature_audit_consolidated",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "field": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "old_value": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "new_value": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "actor": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "goalsInHarness_shared": {
+    "serverName": "harness_shared.goals",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "install_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "title": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "body": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "parent_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "budget_cents": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "metadata": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "_search": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_archivesInHarness_shared": {
+    "serverName": "harness_shared.harness_archives",
+    "primaryKey": [
+      "harness_slug",
+      "phase",
+      "id"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "size_bytes": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_brainstormInHarness_shared": {
+    "serverName": "harness_shared.harness_brainstorm",
+    "primaryKey": [
+      "harness_slug",
+      "phase"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "canvas": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "mindmap": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_branch_actionsInHarness_shared": {
+    "serverName": "harness_shared.harness_branch_actions",
+    "primaryKey": [
+      "harness_slug",
+      "branch"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "branch": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "last_check_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_checkpointsInHarness_shared": {
+    "serverName": "harness_shared.harness_checkpoints",
+    "primaryKey": [
+      "harness_slug",
+      "name"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "name": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "waiting_since_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "granted": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "consumed": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_chunk_plansInHarness_shared": {
+    "serverName": "harness_shared.harness_chunk_plans",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "feature_id",
+      "chunk_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "chunk_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "chunk_index": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "files": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "description": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "strikes": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "last_error": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "commit_sha": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "created_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "spawned_by_spawn_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_decisionsInHarness_shared": {
+    "serverName": "harness_shared.harness_decisions",
+    "primaryKey": [
+      "harness_slug",
+      "line_hash"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "line_hash": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "iso": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "verb": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "args": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "iteration": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "is_ghost": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_design_artifactsInHarness_shared": {
+    "serverName": "harness_shared.harness_design_artifacts",
+    "primaryKey": [
+      "id",
+      "harness_slug"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "metadata": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "created_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "harness_dispatchesInHarness_shared": {
+    "serverName": "harness_shared.harness_dispatches",
+    "primaryKey": [
+      "workspace_id",
+      "parent_slug",
+      "child_slug",
+      "dispatch_at"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "parent_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "child_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "child_role": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "dispatch_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "result_body": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_escalationsInHarness_shared": {
+    "serverName": "harness_shared.harness_escalations",
+    "primaryKey": [
+      "harness_slug",
+      "phase"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "escalation": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "supervisor_notes": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_expert_feedbackInHarness_shared": {
+    "serverName": "harness_shared.harness_expert_feedback",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "expert_id",
+      "feedback_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "expert_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feedback_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "persona": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "verdict": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "ended_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_expert_turnsInHarness_shared": {
+    "serverName": "harness_shared.harness_expert_turns",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "expert_id",
+      "feedback_id",
+      "turn_idx"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "expert_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feedback_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "turn_idx": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "speaker": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "body": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "harness_expertsInHarness_shared": {
+    "serverName": "harness_shared.harness_experts",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "expert_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "expert_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "title": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "budget_cents": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "feature_size": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "high_level_spec": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "agent_count": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "round_count": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "personas_used": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "user_engaged": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "termination_reason": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "spec_content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_feature_debug_notesInHarness_shared": {
+    "serverName": "harness_shared.harness_feature_debug_notes",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "feature_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_feature_notesInHarness_shared": {
+    "serverName": "harness_shared.harness_feature_notes",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "feature_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_feature_prsInHarness_shared": {
+    "serverName": "harness_shared.harness_feature_prs",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "feature_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "pr_url": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "pr_state": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "opened_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_features_consolidatedInHarness_shared": {
+    "serverName": "harness_shared.harness_features_consolidated",
+    "primaryKey": [
+      "harness_slug",
+      "feature_id"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "title": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "summary": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "attempts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "claims": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "notes": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "metadata": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "project_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "expected_cost_cents": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "tags": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "needs_human_review": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "created_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "parent_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "goal_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "taken_by": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "taken_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "expires_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "_search": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "deprecation_reason": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "see_also": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "needs_design": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "design_status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "design_spec_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "discarded_design_work": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_git_logInHarness_shared": {
+    "serverName": "harness_shared.harness_git_log",
+    "primaryKey": [
+      "harness_slug",
+      "sha"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "sha": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "parents": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "subject": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "author": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "refs": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_healthInHarness_shared": {
+    "serverName": "harness_shared.harness_health",
+    "primaryKey": [
+      "harness_slug"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "spec_present": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "contract_present": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "last_check_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_hook_logsInHarness_shared": {
+    "serverName": "harness_shared.harness_hook_logs",
+    "primaryKey": [
+      "harness_slug",
+      "log_id"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "log_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "name": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "size_bytes": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_issues_consolidatedInHarness_shared": {
+    "serverName": "harness_shared.harness_issues_consolidated",
+    "primaryKey": [
+      "harness_slug",
+      "issue_id"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "issue_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "title": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "severity": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "source": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "found_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "found_during": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "repro": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "evidence": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "suggested_fix": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "code_pointer": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "linked_feature_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "attempts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "notes": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "created_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "harness_lanesInHarness_shared": {
+    "serverName": "harness_shared.harness_lanes",
+    "primaryKey": [
+      "harness_slug",
+      "phase",
+      "role"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "pid": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "started_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_mission_stateInHarness_shared": {
+    "serverName": "harness_shared.harness_mission_state",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "cost_warn_fired": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "ready_for_prod_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "lanes": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "harness_pending_issuesInHarness_shared": {
+    "serverName": "harness_shared.harness_pending_issues",
+    "primaryKey": [
+      "harness_slug",
+      "phase",
+      "issue_id"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "issue_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "title": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "severity": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "source": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_phasesInHarness_shared": {
+    "serverName": "harness_shared.harness_phases",
+    "primaryKey": [
+      "harness_slug",
+      "phase"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "phase_path": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "branch": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "port": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "public_url": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "exists_on_disk": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "alive": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "passed_count": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "total_count": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "cost_usd": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "iteration": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "promotion_in_flight": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_plan_reviewInHarness_shared": {
+    "serverName": "harness_shared.harness_plan_review",
+    "primaryKey": [
+      "harness_slug"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_project_filesInHarness_shared": {
+    "serverName": "harness_shared.harness_project_files",
+    "primaryKey": [
+      "harness_slug"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "spec": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "agents": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "contract": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "config": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_promotionsInHarness_shared": {
+    "serverName": "harness_shared.harness_promotions",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "promotion_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "promotion_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "from_phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "to_phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "sha": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "harness_proposals_sharedInHarness_shared": {
+    "serverName": "harness_shared.harness_proposals_shared",
+    "primaryKey": [
+      "harness_slug",
+      "proposal_id",
+      "phase"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "proposal_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "review_verdict": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "review_summary": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "reviewed_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "applied_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "rejected_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "size_bytes": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_registryInHarness_shared": {
+    "serverName": "harness_shared.harness_registry",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_run_chunksInHarness_shared": {
+    "serverName": "harness_shared.harness_run_chunks",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "run_id",
+      "seq"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "run_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "seq": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "chunk_data": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "harness_run_outputInHarness_shared": {
+    "serverName": "harness_shared.harness_run_output",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "run_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "run_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "role": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "prompt_body": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "jsonl_body": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "out_body": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "err_body": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "exit_code": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "duration_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "started_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "ended_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "harness_screenshotsInHarness_shared": {
+    "serverName": "harness_shared.harness_screenshots",
+    "primaryKey": [
+      "harness_slug",
+      "phase",
+      "id"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "size_bytes": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_skillsInHarness_shared": {
+    "serverName": "harness_shared.harness_skills",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "name"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "name": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_smoke_testInHarness_shared": {
+    "serverName": "harness_shared.harness_smoke_test",
+    "primaryKey": [
+      "harness_slug"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "pass_content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "failure_content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "results": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "startup_log": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_snapshotsInHarness_shared": {
+    "serverName": "harness_shared.harness_snapshots",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "snapshot_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "snapshot_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "iteration": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "features_json": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "validation_md": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "notes_md": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "config_json": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "taken_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "harness_snapshots_consolidatedInHarness_shared": {
+    "serverName": "harness_shared.harness_snapshots_consolidated",
+    "primaryKey": [
+      "harness_slug",
+      "snapshot_id"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "snapshot_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "iter_num": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "files": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "feature_counts": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "created_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "harness_statusInHarness_shared": {
+    "serverName": "harness_shared.harness_status",
+    "primaryKey": [
+      "harness_slug",
+      "phase"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "iteration": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "total_features": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "passed_count": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "todo_count": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "blocked_count": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "last_active_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "cost_usd": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "expires_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_summariesInHarness_shared": {
+    "serverName": "harness_shared.harness_summaries",
+    "primaryKey": [
+      "harness_slug",
+      "phase"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "harness_testsInHarness_shared": {
+    "serverName": "harness_shared.harness_tests",
+    "primaryKey": [
+      "harness_slug",
+      "phase",
+      "test_id"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "test_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "name": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "duration_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "last_run_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "harness_text_artifactsInHarness_shared": {
+    "serverName": "harness_shared.harness_text_artifacts",
+    "primaryKey": [
+      "harness_slug",
+      "rel_path"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "rel_path": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "hidden_pluginsInHarness_shared": {
+    "serverName": "harness_shared.hidden_plugins",
+    "primaryKey": [
+      "basename",
+      "workspace_id"
+    ],
+    "columns": {
+      "basename": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "reason": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "hidden_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "hidden_by": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "identity_filesInHarness_shared": {
+    "serverName": "harness_shared.identity_files",
+    "primaryKey": [
+      "role"
+    ],
+    "columns": {
+      "role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "bytes": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "message_commentsInPapercup_shared": {
+    "serverName": "papercup_shared.message_comments",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "message_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "author": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "body": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "message_recipientsInPapercup_shared": {
+    "serverName": "papercup_shared.message_recipients",
+    "primaryKey": [
+      "message_id",
+      "dept_slug"
+    ],
+    "columns": {
+      "message_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "dept_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "messagesInPapercup_shared": {
+    "serverName": "papercup_shared.messages",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "from_dept": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "subject": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "body": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ref_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "project_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "directive_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "metadata": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "mobile_devicesInHarness_shared": {
+    "serverName": "harness_shared.mobile_devices",
+    "primaryKey": [
+      "device_id"
+    ],
+    "columns": {
+      "device_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "user_email": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "device_kind": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "device_label": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "paired_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "last_seen": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "revoked_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "mobile_pair_tokensInHarness_shared": {
+    "serverName": "harness_shared.mobile_pair_tokens",
+    "primaryKey": [
+      "pair_token"
+    ],
+    "columns": {
+      "pair_token": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "user_email": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "desktop_host": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "expires_at_ms": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "consumed": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "mobile_push_tokensInHarness_shared": {
+    "serverName": "harness_shared.mobile_push_tokens",
+    "primaryKey": [
+      "device_id",
+      "platform"
+    ],
+    "columns": {
+      "device_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "platform": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "token": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "registered_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "oauth_noncesInHarness_shared": {
+    "serverName": "harness_shared.oauth_nonces",
+    "primaryKey": [
+      "nonce"
+    ],
+    "columns": {
+      "nonce": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "exp_ms": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "consumed": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_agent_configInHarness_shared": {
+    "serverName": "harness_shared.operator_agent_config",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_budgetInHarness_shared": {
+    "serverName": "harness_shared.operator_budget",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_budget_tiersInHarness_shared": {
+    "serverName": "harness_shared.operator_budget_tiers",
+    "primaryKey": [
+      "ord"
+    ],
+    "columns": {
+      "ord": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "label": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "cap_usd": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "blurb": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "operator_claimsInHarness_shared": {
+    "serverName": "harness_shared.operator_claims",
+    "primaryKey": [
+      "harness_slug",
+      "plugin_slug"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "plugin_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "machine_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "pid": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "run_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "script_hash": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "claimed_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "expires_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_conversationsInHarness_shared": {
+    "serverName": "harness_shared.operator_conversations",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "title": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "started_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "ended_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "el_conversation_ids": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "has_audio": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_credentialsInHarness_shared": {
+    "serverName": "harness_shared.operator_credentials",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "payload_ct": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_dismissed_cardsInHarness_shared": {
+    "serverName": "harness_shared.operator_dismissed_cards",
+    "primaryKey": [
+      "workspace_id",
+      "card_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "card_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "dismissed_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_first_runInHarness_shared": {
+    "serverName": "harness_shared.operator_first_run",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_idle_snapshotInHarness_shared": {
+    "serverName": "harness_shared.operator_idle_snapshot",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_last_scanInHarness_shared": {
+    "serverName": "harness_shared.operator_last_scan",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_marketplace_tokenInHarness_shared": {
+    "serverName": "harness_shared.operator_marketplace_token",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "payload_ct": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_oracle_memoryInHarness_shared": {
+    "serverName": "harness_shared.operator_oracle_memory",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_oracle_promptInHarness_shared": {
+    "serverName": "harness_shared.operator_oracle_prompt",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_pausedInHarness_shared": {
+    "serverName": "harness_shared.operator_paused",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_preferencesInHarness_shared": {
+    "serverName": "harness_shared.operator_preferences",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_prompt_userInHarness_shared": {
+    "serverName": "harness_shared.operator_prompt_user",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_publish_credentialsInHarness_shared": {
+    "serverName": "harness_shared.operator_publish_credentials",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "payload_ct": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_rate_limitInHarness_shared": {
+    "serverName": "harness_shared.operator_rate_limit",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_scan_locksInHarness_shared": {
+    "serverName": "harness_shared.operator_scan_locks",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "started_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "holder_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "expires_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "operator_scanner_sessionInHarness_shared": {
+    "serverName": "harness_shared.operator_scanner_session",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_scansInHarness_shared": {
+    "serverName": "harness_shared.operator_scans",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "started_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "ended_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "claude_session_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "request_text": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "summary": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "suggestions": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "suggestion_count": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "cost_usd": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "cached": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "error": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_search_provider_credentialsInHarness_shared": {
+    "serverName": "harness_shared.operator_search_provider_credentials",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "payload_ct": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_settingsInHarness_shared": {
+    "serverName": "harness_shared.operator_settings",
+    "primaryKey": [
+      "key"
+    ],
+    "columns": {
+      "key": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "value": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "description": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_standing_candidatesInHarness_shared": {
+    "serverName": "harness_shared.operator_standing_candidates",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_stt_spendInHarness_shared": {
+    "serverName": "harness_shared.operator_stt_spend",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_trust_storeInHarness_shared": {
+    "serverName": "harness_shared.operator_trust_store",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "payload_ct": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_tts_spendInHarness_shared": {
+    "serverName": "harness_shared.operator_tts_spend",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_turnsInHarness_shared": {
+    "serverName": "harness_shared.operator_turns",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "conversation_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "seq": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "text": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "source": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "el_conv_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "audio_url": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "operator_user_profileInHarness_shared": {
+    "serverName": "harness_shared.operator_user_profile",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_voice_credentialsInHarness_shared": {
+    "serverName": "harness_shared.operator_voice_credentials",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "payload_ct": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "operator_voice_prefsInHarness_shared": {
+    "serverName": "harness_shared.operator_voice_prefs",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "orchestrator_settingsInHarness_shared": {
+    "serverName": "harness_shared.orchestrator_settings",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "tiers": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "labels": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "rubric": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "org_charterInHarness_shared": {
+    "serverName": "harness_shared.org_charter",
+    "primaryKey": [
+      "org_id"
+    ],
+    "columns": {
+      "org_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "org_decisionsInHarness_shared": {
+    "serverName": "harness_shared.org_decisions",
+    "primaryKey": [
+      "org_id",
+      "dept_slug"
+    ],
+    "columns": {
+      "org_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "dept_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "org_departmentsInHarness_shared": {
+    "serverName": "harness_shared.org_departments",
+    "primaryKey": [
+      "org_id",
+      "dept_slug"
+    ],
+    "columns": {
+      "org_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "dept_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "name": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "mandate": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "inbox_kinds": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "outbox_kinds": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "org_inboxInHarness_shared": {
+    "serverName": "harness_shared.org_inbox",
+    "primaryKey": [
+      "org_id",
+      "dept_slug",
+      "message_id"
+    ],
+    "columns": {
+      "org_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "dept_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "message_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "msg_from": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "msg_to": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "subject": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "body": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "ref_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "project_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "directive_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "org_notesInHarness_shared": {
+    "serverName": "harness_shared.org_notes",
+    "primaryKey": [
+      "org_id",
+      "dept_slug"
+    ],
+    "columns": {
+      "org_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "dept_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "content": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "org_outboxInHarness_shared": {
+    "serverName": "harness_shared.org_outbox",
+    "primaryKey": [
+      "org_id",
+      "dept_slug",
+      "message_id"
+    ],
+    "columns": {
+      "org_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "dept_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "message_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "msg_from": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "msg_to": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "subject": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "body": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "ref_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "project_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "directive_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "org_projectsInHarness_shared": {
+    "serverName": "harness_shared.org_projects",
+    "primaryKey": [
+      "org_id",
+      "project_id"
+    ],
+    "columns": {
+      "org_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "project_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "slug": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "name": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "vertical": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "pending_eventsInHarness_shared": {
+    "serverName": "harness_shared.pending_events",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "install_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "target_role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "due_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "consumed_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "consumed_by": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "source_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "pending_reviewsInHarness_shared": {
+    "serverName": "harness_shared.pending_reviews",
+    "primaryKey": [
+      "harness_slug",
+      "review_id",
+      "phase"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "review_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "resolved": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "mtime_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "phase": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "pi_sessionsInHarness_shared": {
+    "serverName": "harness_shared.pi_sessions",
+    "primaryKey": [
+      "workspace_id",
+      "session_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "session_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "bearer_hash": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "capabilities": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "started_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "ended_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "plugin_capability_grantsInHarness_shared": {
+    "serverName": "harness_shared.plugin_capability_grants",
+    "primaryKey": [
+      "plugin_name",
+      "plugin_version",
+      "harness_slug",
+      "capability"
+    ],
+    "columns": {
+      "plugin_name": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "plugin_version": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "capability": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "granted_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "granted_by": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "reason": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "plugin_configsInHarness_shared": {
+    "serverName": "harness_shared.plugin_configs",
+    "primaryKey": [
+      "harness_slug",
+      "plugin_slug"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "plugin_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "config": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "config_ct": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "plugin_enablesInHarness_shared": {
+    "serverName": "harness_shared.plugin_enables",
+    "primaryKey": [
+      "harness_slug",
+      "plugin_slug"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "plugin_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "version": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "config_hash": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "enabled_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "project_spec_revisionsInHarness_shared": {
+    "serverName": "harness_shared.project_spec_revisions",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "project_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "spec": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "summary": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "author_role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "author": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "include_decisions": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "tokens_in": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "tokens_out": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "cost_usd_cents": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "projectsInHarness_shared": {
+    "serverName": "harness_shared.projects",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "name": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "budget_cents": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "spent_cents": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "owning_dept": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "vertical": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "created_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "metadata": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "spec": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "spec_updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "spec_manually_edited_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "slug": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "cost_cap_cents": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "earned_cents": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "parent_slug": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "_search": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "prompt_compositionsInHarness_shared": {
+    "serverName": "harness_shared.prompt_compositions",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "run_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts_ms": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "total_chars": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "substrate_chars": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "history_chars": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "role_prompt_chars": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "memory_chars": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "identity_chars": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "runtime_chars": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "provision_audit_logInHarness_shared": {
+    "serverName": "harness_shared.provision_audit_log",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "plugin_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "run_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "data": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "provision_stateInHarness_shared": {
+    "serverName": "harness_shared.provision_state",
+    "primaryKey": [
+      "workspace_id",
+      "harness_slug",
+      "plugin_slug"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "plugin_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "routinesInHarness_shared": {
+    "serverName": "harness_shared.routines",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "install_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "name": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "trigger_kind": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "trigger_config": {
+        "type": "json",
+        "optional": false,
+        "serverName": null
+      },
+      "target_role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "payload_template": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "concurrency": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "catchup": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "active": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "last_fired_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "next_fire_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "updated_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "metadata": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "snapshot_featuresInHarness_shared": {
+    "serverName": "harness_shared.snapshot_features",
+    "primaryKey": [
+      "harness_slug",
+      "snapshot_id",
+      "feature_id"
+    ],
+    "columns": {
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "snapshot_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "title": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "summary": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "attempts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "claims": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "notes": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "metadata": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "project_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "expected_cost_cents": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "tags": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "needs_human_review": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "deprecation_reason": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "parent_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "goal_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "created_ts": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "spawned_agentsInHarness_shared": {
+    "serverName": "harness_shared.spawned_agents",
+    "primaryKey": [
+      "spawn_id"
+    ],
+    "columns": {
+      "spawn_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "parent_spawn_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "parent_role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "child_role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "chunk_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "run_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "started_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "finished_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "duration_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "exit_code": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "output_tail": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "error_message": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "cancel_requested": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "system_principalsInHarness_shared": {
+    "serverName": "harness_shared.system_principals",
+    "primaryKey": [
+      "workspace_id",
+      "name"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "name": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "bearer_hash": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "capabilities": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "toast_logInHarness_shared": {
+    "serverName": "harness_shared.toast_log",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "level": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "message": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "description": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "action_label": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "action_href": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "token_indexInHarness_shared": {
+    "serverName": "harness_shared.token_index",
+    "primaryKey": [
+      "token"
+    ],
+    "columns": {
+      "token": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "created_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "tool_invocationsInHarness_shared": {
+    "serverName": "harness_shared.tool_invocations",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "plugin_name": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "tool_name": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "role": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "feature_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "chunk_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "run_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "spawn_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "parent_spawn_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "window_key": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "invoked_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "duration_ms": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "output_ref": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "output_size": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "error_message": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "user_actionsInHarness_shared": {
+    "serverName": "harness_shared.user_actions",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "harness_slug": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "kind": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "status": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "summary": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "detail_url": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "error_text": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "invocation_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "started_at": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "finished_at": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "actor": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace_id": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  },
+  "voice_leaseInHarness_shared": {
+    "serverName": "harness_shared.voice_lease",
+    "primaryKey": [
+      "workspace_id"
+    ],
+    "columns": {
+      "workspace_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "owner_id": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "owner_kind": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "expires_at_ms": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      }
+    }
+  },
+  "voice_utterancesInHarness_shared": {
+    "serverName": "harness_shared.voice_utterances",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": {
+      "id": {
+        "type": "number",
+        "optional": false,
+        "serverName": null
+      },
+      "ts": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "workspace": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "source": {
+        "type": "string",
+        "optional": false,
+        "serverName": null
+      },
+      "mode": {
+        "type": "string",
+        "optional": true,
+        "serverName": null
+      },
+      "length_chars": {
+        "type": "number",
+        "optional": true,
+        "serverName": null
+      },
+      "name_used": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "had_backstory": {
+        "type": "boolean",
+        "optional": true,
+        "serverName": null
+      },
+      "modifications": {
+        "type": "json",
+        "optional": true,
+        "serverName": null
+      }
+    }
+  }
+}

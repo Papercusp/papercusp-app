@@ -1,0 +1,792 @@
+{
+  "schema": 1,
+  "capturedAt": "2026-08-17T03:02:51.421Z",
+  "profile": "ci",
+  "host": {
+    "hostname": "host-42d2ff27",
+    "platform": "linux",
+    "cpus": 128
+  },
+  "entries": [
+    {
+      "scenario": "merge.decode-throughput",
+      "params": {
+        "historySize": 1000,
+        "seed": 1234
+      },
+      "metrics": {
+        "decodeMs": {
+          "unit": "ms",
+          "count": 1000,
+          "p50": 0.06,
+          "p95": 0.12,
+          "p99": 0.303,
+          "max": 1.026,
+          "mean": 0.071
+        },
+        "decodeRate": {
+          "unit": "ops/sec",
+          "count": 1,
+          "p50": 13888.431,
+          "p95": 13888.431,
+          "p99": 13888.431,
+          "max": 13888.431,
+          "mean": 13888.431
+        }
+      },
+      "loopLagP95Ms": 20.1,
+      "convergence": null
+    },
+    {
+      "scenario": "merge.decode-throughput",
+      "params": {
+        "historySize": 10000,
+        "seed": 1234
+      },
+      "metrics": {
+        "decodeMs": {
+          "unit": "ms",
+          "count": 10000,
+          "p50": 0.053,
+          "p95": 0.095,
+          "p99": 0.194,
+          "max": 3.663,
+          "mean": 0.06
+        },
+        "decodeRate": {
+          "unit": "ops/sec",
+          "count": 1,
+          "p50": 16470.753,
+          "p95": 16470.753,
+          "p99": 16470.753,
+          "max": 16470.753,
+          "mean": 16470.753
+        }
+      },
+      "loopLagP95Ms": 20.2,
+      "convergence": null
+    },
+    {
+      "scenario": "merge.full-merge",
+      "params": {
+        "historySize": 1000,
+        "logs": 3,
+        "repeats": 5,
+        "seed": 1234
+      },
+      "metrics": {
+        "fullMergeMs": {
+          "unit": "ms",
+          "count": 5,
+          "p50": 69.212,
+          "p95": 73.651,
+          "p99": 73.651,
+          "max": 73.651,
+          "mean": 68.655
+        }
+      },
+      "loopLagP95Ms": 20.1,
+      "convergence": null
+    },
+    {
+      "scenario": "merge.full-merge",
+      "params": {
+        "historySize": 10000,
+        "logs": 3,
+        "repeats": 5,
+        "seed": 1234
+      },
+      "metrics": {
+        "fullMergeMs": {
+          "unit": "ms",
+          "count": 5,
+          "p50": 626.998,
+          "p95": 753.779,
+          "p99": 753.779,
+          "max": 753.779,
+          "mean": 642.036
+        }
+      },
+      "loopLagP95Ms": 20.4,
+      "convergence": null
+    },
+    {
+      "scenario": "merge.idle-tick",
+      "params": {
+        "historySize": 1000,
+        "ticks": 100,
+        "seed": 1234
+      },
+      "metrics": {
+        "backfillMergeMs": {
+          "unit": "ms",
+          "count": 1,
+          "p50": 147.203,
+          "p95": 147.203,
+          "p99": 147.203,
+          "max": 147.203,
+          "mean": 147.203
+        },
+        "idleTickMs": {
+          "unit": "ms",
+          "count": 100,
+          "p50": 0.009,
+          "p95": 0.038,
+          "p99": 0.093,
+          "max": 0.094,
+          "mean": 0.013
+        }
+      },
+      "loopLagP95Ms": 20.3,
+      "convergence": null
+    },
+    {
+      "scenario": "merge.idle-tick",
+      "params": {
+        "historySize": 10000,
+        "ticks": 100,
+        "seed": 1234
+      },
+      "metrics": {
+        "backfillMergeMs": {
+          "unit": "ms",
+          "count": 1,
+          "p50": 894.103,
+          "p95": 894.103,
+          "p99": 894.103,
+          "max": 894.103,
+          "mean": 894.103
+        },
+        "idleTickMs": {
+          "unit": "ms",
+          "count": 100,
+          "p50": 0.008,
+          "p95": 0.01,
+          "p99": 0.019,
+          "max": 0.035,
+          "mean": 0.008
+        }
+      },
+      "loopLagP95Ms": 20.1,
+      "convergence": null
+    },
+    {
+      "scenario": "merge.delta-tick",
+      "params": {
+        "historySize": 1000,
+        "seed": 1234
+      },
+      "metrics": {
+        "backfillMergeMs": {
+          "unit": "ms",
+          "count": 1,
+          "p50": 153.196,
+          "p95": 153.196,
+          "p99": 153.196,
+          "max": 153.196,
+          "mean": 153.196
+        },
+        "deltaTick1Ms": {
+          "unit": "ms",
+          "count": 20,
+          "p50": 0.115,
+          "p95": 0.239,
+          "p99": 0.472,
+          "max": 0.472,
+          "mean": 0.144
+        },
+        "deltaTick100Ms": {
+          "unit": "ms",
+          "count": 20,
+          "p50": 6.017,
+          "p95": 7.242,
+          "p99": 10.555,
+          "max": 10.555,
+          "mean": 6.161
+        },
+        "deltaTick1000Ms": {
+          "unit": "ms",
+          "count": 20,
+          "p50": 56.413,
+          "p95": 69.716,
+          "p99": 75.288,
+          "max": 75.288,
+          "mean": 58.691
+        }
+      },
+      "loopLagP95Ms": 20.8,
+      "convergence": null
+    },
+    {
+      "scenario": "merge.delta-tick",
+      "params": {
+        "historySize": 10000,
+        "seed": 1234
+      },
+      "metrics": {
+        "backfillMergeMs": {
+          "unit": "ms",
+          "count": 1,
+          "p50": 1106.965,
+          "p95": 1106.965,
+          "p99": 1106.965,
+          "max": 1106.965,
+          "mean": 1106.965
+        },
+        "deltaTick1Ms": {
+          "unit": "ms",
+          "count": 20,
+          "p50": 0.136,
+          "p95": 0.254,
+          "p99": 0.267,
+          "max": 0.267,
+          "mean": 0.15
+        },
+        "deltaTick100Ms": {
+          "unit": "ms",
+          "count": 20,
+          "p50": 10.381,
+          "p95": 16.751,
+          "p99": 17.495,
+          "max": 17.495,
+          "mean": 11.093
+        },
+        "deltaTick1000Ms": {
+          "unit": "ms",
+          "count": 20,
+          "p50": 77.649,
+          "p95": 185.483,
+          "p99": 225.058,
+          "max": 225.058,
+          "mean": 100.127
+        }
+      },
+      "loopLagP95Ms": 22.3,
+      "convergence": null
+    },
+    {
+      "scenario": "replication.sustained",
+      "params": {
+        "peers": 2,
+        "rate": 10,
+        "count": 200
+      },
+      "metrics": {
+        "childLoopLagP95Ms": {
+          "unit": "ms",
+          "count": 2,
+          "p50": 20.5,
+          "p95": 20.6,
+          "p99": 20.6,
+          "max": 20.6,
+          "mean": 20.55
+        },
+        "childRssPeak": {
+          "unit": "bytes",
+          "count": 2,
+          "p50": 300019712,
+          "p95": 312852480,
+          "p99": 312852480,
+          "max": 312852480,
+          "mean": 306436096
+        },
+        "appendToVisibleMs": {
+          "unit": "ms",
+          "count": 200,
+          "p50": 473,
+          "p95": 945,
+          "p99": 958,
+          "max": 978,
+          "mean": 498.285
+        },
+        "appendCallMs": {
+          "unit": "ms",
+          "count": 200,
+          "p50": 1,
+          "p95": 2,
+          "p99": 2,
+          "max": 7,
+          "mean": 0.98
+        }
+      },
+      "loopLagP95Ms": 20.6,
+      "convergence": {
+        "expectedReaders": 1,
+        "convergedReaders": 1,
+        "laggingReaders": [],
+        "p95LimitMs": null,
+        "observedP95Ms": 945,
+        "budgetMs": 120000,
+        "convergedMs": {
+          "unit": "ms",
+          "count": 1,
+          "p50": 948,
+          "p95": 948,
+          "p99": 948,
+          "max": 948,
+          "mean": 948
+        }
+      }
+    },
+    {
+      "scenario": "replication.sustained",
+      "params": {
+        "peers": 2,
+        "rate": 100,
+        "count": 400
+      },
+      "metrics": {
+        "childLoopLagP95Ms": {
+          "unit": "ms",
+          "count": 2,
+          "p50": 20.8,
+          "p95": 20.8,
+          "p99": 20.8,
+          "max": 20.8,
+          "mean": 20.8
+        },
+        "childRssPeak": {
+          "unit": "bytes",
+          "count": 2,
+          "p50": 295067648,
+          "p95": 302489600,
+          "p99": 302489600,
+          "max": 302489600,
+          "mean": 298778624
+        },
+        "appendToVisibleMs": {
+          "unit": "ms",
+          "count": 400,
+          "p50": 521,
+          "p95": 946,
+          "p99": 997,
+          "max": 1008,
+          "mean": 515.675
+        },
+        "appendCallMs": {
+          "unit": "ms",
+          "count": 400,
+          "p50": 1,
+          "p95": 1,
+          "p99": 2,
+          "max": 5,
+          "mean": 0.858
+        }
+      },
+      "loopLagP95Ms": 20.8,
+      "convergence": {
+        "expectedReaders": 1,
+        "convergedReaders": 1,
+        "laggingReaders": [],
+        "p95LimitMs": null,
+        "observedP95Ms": 946,
+        "budgetMs": 120000,
+        "convergedMs": {
+          "unit": "ms",
+          "count": 1,
+          "p50": 608,
+          "p95": 608,
+          "p99": 608,
+          "max": 608,
+          "mean": 608
+        }
+      }
+    },
+    {
+      "scenario": "replication.sustained",
+      "params": {
+        "peers": 5,
+        "rate": 10,
+        "count": 200
+      },
+      "metrics": {
+        "childLoopLagP95Ms": {
+          "unit": "ms",
+          "count": 5,
+          "p50": 20.6,
+          "p95": 20.7,
+          "p99": 20.7,
+          "max": 20.7,
+          "mean": 20.64
+        },
+        "childRssPeak": {
+          "unit": "bytes",
+          "count": 5,
+          "p50": 308576256,
+          "p95": 314155008,
+          "p99": 314155008,
+          "max": 314155008,
+          "mean": 308124057.6
+        },
+        "appendToVisibleMs": {
+          "unit": "ms",
+          "count": 800,
+          "p50": 506,
+          "p95": 962,
+          "p99": 985,
+          "max": 1009,
+          "mean": 504.483
+        },
+        "appendCallMs": {
+          "unit": "ms",
+          "count": 200,
+          "p50": 1,
+          "p95": 2,
+          "p99": 5,
+          "max": 27,
+          "mean": 1.4
+        }
+      },
+      "loopLagP95Ms": 20.7,
+      "convergence": {
+        "expectedReaders": 4,
+        "convergedReaders": 4,
+        "laggingReaders": [],
+        "p95LimitMs": null,
+        "observedP95Ms": 962,
+        "budgetMs": 120000,
+        "convergedMs": {
+          "unit": "ms",
+          "count": 4,
+          "p50": 335,
+          "p95": 385,
+          "p99": 385,
+          "max": 385,
+          "mean": 350.5
+        }
+      }
+    },
+    {
+      "scenario": "replication.sustained",
+      "params": {
+        "peers": 5,
+        "rate": 100,
+        "count": 400
+      },
+      "metrics": {
+        "childLoopLagP95Ms": {
+          "unit": "ms",
+          "count": 5,
+          "p50": 21.2,
+          "p95": 21.6,
+          "p99": 21.6,
+          "max": 21.6,
+          "mean": 21.16
+        },
+        "childRssPeak": {
+          "unit": "bytes",
+          "count": 5,
+          "p50": 316420096,
+          "p95": 318279680,
+          "p99": 318279680,
+          "max": 318279680,
+          "mean": 314711244.8
+        },
+        "appendToVisibleMs": {
+          "unit": "ms",
+          "count": 1600,
+          "p50": 413,
+          "p95": 961,
+          "p99": 1001,
+          "max": 1025,
+          "mean": 454.659
+        },
+        "appendCallMs": {
+          "unit": "ms",
+          "count": 400,
+          "p50": 1,
+          "p95": 5,
+          "p99": 11,
+          "max": 40,
+          "mean": 1.635
+        }
+      },
+      "loopLagP95Ms": 21.6,
+      "convergence": {
+        "expectedReaders": 4,
+        "convergedReaders": 4,
+        "laggingReaders": [],
+        "p95LimitMs": null,
+        "observedP95Ms": 961,
+        "budgetMs": 120000,
+        "convergedMs": {
+          "unit": "ms",
+          "count": 4,
+          "p50": 932,
+          "p95": 941,
+          "p99": 941,
+          "max": 941,
+          "mean": 929.5
+        }
+      }
+    },
+    {
+      "scenario": "replication.ceiling",
+      "params": {
+        "peers": 2,
+        "count": 1500
+      },
+      "metrics": {
+        "ceilingOpsPerSec": {
+          "unit": "ops/sec",
+          "count": 1,
+          "p50": 1237.624,
+          "p95": 1237.624,
+          "p99": 1237.624,
+          "max": 1237.624,
+          "mean": 1237.624
+        },
+        "floodCatchUpMs": {
+          "unit": "ms",
+          "count": 1,
+          "p50": 1212,
+          "p95": 1212,
+          "p99": 1212,
+          "max": 1212,
+          "mean": 1212
+        },
+        "childLoopLagP95Ms": {
+          "unit": "ms",
+          "count": 2,
+          "p50": 20.4,
+          "p95": 26.1,
+          "p99": 26.1,
+          "max": 26.1,
+          "mean": 23.25
+        },
+        "childRssPeak": {
+          "unit": "bytes",
+          "count": 2,
+          "p50": 294236160,
+          "p95": 305676288,
+          "p99": 305676288,
+          "max": 305676288,
+          "mean": 299956224
+        }
+      },
+      "loopLagP95Ms": 26.1,
+      "convergence": {
+        "expectedReaders": 1,
+        "convergedReaders": 1,
+        "laggingReaders": [],
+        "p95LimitMs": null,
+        "observedP95Ms": null,
+        "budgetMs": 300000,
+        "convergedMs": {
+          "unit": "ms",
+          "count": 1,
+          "p50": 1212,
+          "p95": 1212,
+          "p99": 1212,
+          "max": 1212,
+          "mean": 1212
+        }
+      }
+    },
+    {
+      "scenario": "replication.ceiling",
+      "params": {
+        "peers": 5,
+        "count": 1500
+      },
+      "metrics": {
+        "ceilingOpsPerSec": {
+          "unit": "ops/sec",
+          "count": 4,
+          "p50": 773.994,
+          "p95": 824.629,
+          "p99": 824.629,
+          "max": 824.629,
+          "mean": 787.088
+        },
+        "floodCatchUpMs": {
+          "unit": "ms",
+          "count": 4,
+          "p50": 1873,
+          "p95": 2003,
+          "p99": 2003,
+          "max": 2003,
+          "mean": 1908.25
+        },
+        "childLoopLagP95Ms": {
+          "unit": "ms",
+          "count": 5,
+          "p50": 27.5,
+          "p95": 29.3,
+          "p99": 29.3,
+          "max": 29.3,
+          "mean": 26.46
+        },
+        "childRssPeak": {
+          "unit": "bytes",
+          "count": 5,
+          "p50": 345939968,
+          "p95": 355889152,
+          "p99": 355889152,
+          "max": 355889152,
+          "mean": 339279872
+        }
+      },
+      "loopLagP95Ms": 29.3,
+      "convergence": {
+        "expectedReaders": 4,
+        "convergedReaders": 4,
+        "laggingReaders": [],
+        "p95LimitMs": null,
+        "observedP95Ms": null,
+        "budgetMs": 300000,
+        "convergedMs": {
+          "unit": "ms",
+          "count": 4,
+          "p50": 1873,
+          "p95": 2003,
+          "p99": 2003,
+          "max": 2003,
+          "mean": 1908.25
+        }
+      }
+    },
+    {
+      "scenario": "churn.cold-join",
+      "params": {
+        "historySize": 1000,
+        "winners": 582,
+        "seed": 1234
+      },
+      "metrics": {
+        "childLoopLagP95Ms": {
+          "unit": "ms",
+          "count": 2,
+          "p50": 20.7,
+          "p95": 21.4,
+          "p99": 21.4,
+          "max": 21.4,
+          "mean": 21.05
+        },
+        "childRssPeak": {
+          "unit": "bytes",
+          "count": 2,
+          "p50": 292499456,
+          "p95": 293318656,
+          "p99": 293318656,
+          "max": 293318656,
+          "mean": 292909056
+        },
+        "coldJoinMs": {
+          "unit": "ms",
+          "count": 1,
+          "p50": 3338,
+          "p95": 3338,
+          "p99": 3338,
+          "max": 3338,
+          "mean": 3338
+        }
+      },
+      "loopLagP95Ms": 21.4,
+      "convergence": {
+        "expectedReaders": 1,
+        "convergedReaders": 1,
+        "laggingReaders": [],
+        "p95LimitMs": null,
+        "observedP95Ms": null,
+        "budgetMs": null,
+        "convergedMs": null
+      }
+    },
+    {
+      "scenario": "churn.cold-join",
+      "params": {
+        "historySize": 10000,
+        "winners": 3710,
+        "seed": 1234
+      },
+      "metrics": {
+        "childLoopLagP95Ms": {
+          "unit": "ms",
+          "count": 2,
+          "p50": 20.7,
+          "p95": 21,
+          "p99": 21,
+          "max": 21,
+          "mean": 20.85
+        },
+        "childRssPeak": {
+          "unit": "bytes",
+          "count": 2,
+          "p50": 332058624,
+          "p95": 384516096,
+          "p99": 384516096,
+          "max": 384516096,
+          "mean": 358287360
+        },
+        "coldJoinMs": {
+          "unit": "ms",
+          "count": 1,
+          "p50": 6630,
+          "p95": 6630,
+          "p99": 6630,
+          "max": 6630,
+          "mean": 6630
+        }
+      },
+      "loopLagP95Ms": 21,
+      "convergence": {
+        "expectedReaders": 1,
+        "convergedReaders": 1,
+        "laggingReaders": [],
+        "p95LimitMs": null,
+        "observedP95Ms": null,
+        "budgetMs": null,
+        "convergedMs": null
+      }
+    },
+    {
+      "scenario": "churn.reconnect-storm",
+      "params": {
+        "readers": 4,
+        "historySize": 10000,
+        "winners": 3710,
+        "seed": 1234
+      },
+      "metrics": {
+        "rejoinCatchUpMs": {
+          "unit": "ms",
+          "count": 4,
+          "p50": 2588,
+          "p95": 4377,
+          "p99": 4377,
+          "max": 4377,
+          "mean": 3105.5
+        },
+        "childLoopLagP95Ms": {
+          "unit": "ms",
+          "count": 5,
+          "p50": 20.6,
+          "p95": 20.7,
+          "p99": 20.7,
+          "max": 20.7,
+          "mean": 20.6
+        },
+        "childRssPeak": {
+          "unit": "bytes",
+          "count": 5,
+          "p50": 383856640,
+          "p95": 394993664,
+          "p99": 394993664,
+          "max": 394993664,
+          "mean": 381072998.4
+        }
+      },
+      "loopLagP95Ms": 20.7,
+      "convergence": {
+        "expectedReaders": 8,
+        "convergedReaders": 8,
+        "laggingReaders": [],
+        "p95LimitMs": null,
+        "observedP95Ms": null,
+        "budgetMs": null,
+        "convergedMs": null
+      }
+    }
+  ]
+}

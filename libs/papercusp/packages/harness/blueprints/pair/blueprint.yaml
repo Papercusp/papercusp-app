@@ -1,0 +1,43 @@
+# pair — DRIVER/NAVIGATOR pair-programming topology (benchmark-coordination-topologies).
+#
+# Two agents collaborate on ONE task (team:per-task): a driver writes the solution while a navigator
+# continuously reviews/critiques + catches errors (review:peer). The TIGHTEST "correct each other"
+# loop — tests whether real-time pairing beats async peer-review (dist-peer-review) and ensemble.
+id: pair
+extends: base
+version: 0.1.0
+description: >-
+  Driver/navigator pair: two agents on one task — a driver writes, a navigator continuously reviews +
+  corrects. The tightest real-time peer-correction loop in the topology study.
+
+workItem:
+  kind: feature
+  idPrefix: W
+
+dispatch:
+  concurrency: 4
+
+spine:
+  claimModel: self-claim-fifo
+  maxTurns: 200
+
+dependencies:
+  tools: []
+  packs: []
+  plugins: []
+  blueprints: []
+
+coordination:
+  broadcast: none
+  review: peer        # the navigator reviews/corrects the driver continuously
+  sharedState: both
+  team: per-task      # the pair collaborates on the SAME task
+
+roles:
+  - id: driver
+    description: >-
+      Writes the solution for the task; incorporates the navigator's real-time feedback as it works.
+  - id: navigator
+    description: >-
+      Continuously reviews the driver's work-in-progress, catches errors/edge-cases, and proposes
+      corrections before they're committed.

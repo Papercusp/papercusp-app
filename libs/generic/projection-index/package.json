@@ -1,0 +1,19 @@
+{
+  "name": "@papercusp/projection-index",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A generic, event-maintained structured→index projection. Feed it source records as they change; it keeps an inverted index (key → entries) incrementally — computing the minimal delta against each source's prior contributions so a record that drops or retags an entry removes the stale one. Query a key to get the aggregated entries: no full scan, no re-summarisation, no drift. The domain mapping (record → contributions) and the persistence store are injected; the lib owns only the incremental-maintenance algorithm. Zero I/O, zero domain coupling, zero runtime deps.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

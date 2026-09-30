@@ -1,0 +1,88 @@
+# Reading failed-tool-call history (forensics)
+URL: /internal/docs/agent-insights/failed-tool-call-history
+
+Where the history of failed tool calls lives (dev:telemetry + harness_shared.tool_invocations), how to classify the failures, and why the restart-window connection-refused mode is invisible in that table.
+
+When someone says "tool calls were failing," don't assume — the history is
+recorded and cheap to read. There are **two failure surfaces** and they do
+**not** overlap; check both.
+
+## Surface 1 — recorded tool errors (`tool_invocations`)
+
+Every dispatched tool call (including `?superuser=1`) writes a row to
+`harness_shared.tool_invocations` in the **`papercusp`** DB. Which PG
+instance/port that is is **not** a fixed `:5432` — the operator resolves it
+at runtime via `getHarnessAdminUrl()` (discovery-file-first, port shifts
+across boots/machines; see
+[embedded-pg-discovery](/internal/docs/agent-insights/embedded-pg-discovery)).
+`:5432` is only the *native-PG dev-box fallback* value baked into
+`NATIVE_FALLBACK`/`connection.ts`'s hardcoded fallback string, used when no
+discovery file and no explicit env var are present — don't assume it's the
+live port; resolve it (`getHarnessAdminUrl()` in code, or read
+`~/.papercusp/embedded-pg.json` from a shell) rather than hardcoding.
+
+Quick triage without SQL: the **`dev:telemetry`** MCP tool returns a per-tool
+rollup (`call_count`, `error_count`, p50/p95) over the last N hours. Narrow
+the window (e.g. 3h vs 168h) to localize *when* a burst happened.
+
+Row-level columns that matter: `tool_name, status, error_message, invoked_at,
+duration_ms, role, transport, principal_kind, workspace_id, args_json`.
+`status` is one of `ok | error | role-not-allowed | timeout`.
+
+### Classify before you fix
+
+In a 2026-05-31 audit, \~234 errors / 7 days bucketed as (most → least):
+
+| Bucket                            | Signature                                                                                                               | What it is                                                                                                                                                                                                         |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Bad arg shape**                 | `invalid_args: …` (surfaces as `handler_error`/HTTP 500, *not* 400 — the Zod throw is inside the projected fn)          | Caller sent the wrong arg shape. Not a backend fault.                                                                                                                                                              |
+| **Missing harness scope**         | `No harness in scope` / `resolveHarnessPlansDir: no harness in ctx`                                                     | A harness-scoped tool called without the `harness` arg.                                                                                                                                                            |
+| **Missing bearer/workspace auth** | `built-in tool "X" requires authenticated request (bearer + workspace tx)`; `Principal "loopback" lacks capability "…"` | A principal-gated built-in invoked without a principal/tx, or a principal whose caps don't include the one required. See [tooldef-authorization-model](/internal/docs/agent-insights/tooldef-authorization-model). |
+| **Timeout**                       | `status='timeout'`, `duration_ms ≈ 60000`                                                                               | Usually `chat:ask_choice` — the user never answered the card. Not a bug.                                                                                                                                           |
+| **Real bug**                      | `permission denied for table …`, `column "…" does not exist`, `spawn npx ENOENT`, `features_import_failed:404`          | The small genuine set.                                                                                                                                                                                             |
+
+The lesson: most "failures" are caller-side (bad args, missing scope) or a
+specific auth-wiring gap — **not** a backend that fell over. `p50≈0–1ms` with
+100% error rate ⇒ an instant throw (validation/auth gate), not a crash.
+
+## Surface 2 — the restart window (NOT in `tool_invocations`)
+
+The `:3070` Hono host has **no hot-reload** for `lib/**`, so picking up a
+server-side edit means restarting it (`systemctl --user restart
+papercup-dev-api.service`, or the Tauri reload). During each boot window the
+port **refuses connections**, and every in-flight tool call + lock-hook call
+across the fleet fails with `ECONNREFUSED` — which never reaches the host, so
+**it is never logged in `tool_invocations`.**
+
+Where to see it instead:
+
+* `~/.papercusp/locks-cache/last-error.json` — the lock hook's last failure
+  (`phase:"connect"`, `detail:"<urlopen error [Errno 111] Connection refused>"`).
+* `journalctl --user -u papercup-dev-api.service` — `Stopping/Started` lines;
+  match their timestamps against the lock-cache error to the second.
+
+If agents report a *burst* of failures that don't appear in `tool_invocations`,
+it was almost certainly a restart window, not a tool bug. (This is the
+self-referential cost of agents editing the backend they run on.)
+
+## postgres-js gotchas when writing regression tests against PG
+
+Two that bit while adding the regression tests for these bugs:
+
+* **`int8`/`BIGINT` comes back as a string.** `payload->>…` and bigint columns
+  (e.g. `harness_registry.updated_at`) deserialize to `string`, not `number`.
+  Coerce with `Number(...)` if the tool's contract is numeric.
+* **`${JSON.stringify(obj)}::jsonb` double-encodes.** postgres-js re-serializes
+  the string, storing a quoted JSON *string scalar* (so `payload->'projects'`
+  is `null`). Insert JSON with **`sql.json(obj)`** instead.
+
+## Live-DB checks are fair game
+
+You can `psql` the embedded PG (`harness_admin`; resolve the live host:port via
+`jq -r .url ~/.papercusp/embedded-pg.json` — see
+[embedded-pg-discovery](/internal/docs/agent-insights/embedded-pg-discovery),
+don't assume `:5432`) read-only to reproduce a query or confirm a
+`has_table_privilege(...)`. For a faithful migration test,
+execute the **real** `NNN-*.sql` files against a testcontainer DB (see
+`apps/operator/test/harness-plan-status-grants.integration.test.ts`) rather than
+re-stating the DDL.

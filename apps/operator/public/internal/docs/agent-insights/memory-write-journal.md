@@ -1,0 +1,72 @@
+# Memory write journal — no write is lost to an embedder outage
+URL: /internal/docs/agent-insights/memory-write-journal
+
+The write-ahead journal under memory:remember/update: journaled failure envelopes, the auto-drain, provenance, and the transcript miner.
+
+
+Memory writes are embed-synchronous: `memory:remember` / `memory:update` only
+land if the embedder answers. Before the write-ahead journal
+(`memory-write-journal-auto-recovery-2026-07-11`), an embedder outage — sidecar
+down, provider quota, a 300s timeout under load — returned `{ok:false}` and the
+content was **lost**, surviving only in the calling agent's session transcript.
+This happened live on 2026-07-10: a `memory:remember` timed out while a bulk
+re-embed saturated the embed sidecar, and the fact vanished until a manual
+transcript-forensics pass dug it back out.
+
+## How it works now
+
+1. **INSERT-first.** The tool INSERTs the write into
+   `harness_shared.memory_write_journal` *before* the embed+store attempt. A
+   plain relational INSERT has no embedder dependency, so loss is structurally
+   impossible while Postgres is up.
+2. **Honest envelope.** On failure the tool returns
+   `{ok:false, reason, journaled:true, will_retry:true, journal_id}`.
+   **Do NOT re-fire the write** — the fact is parked, not lost. (A blind
+   retry is also unnecessary after a timeout whose write actually landed:
+   the drain's near-dup guard closes the journal row against the existing
+   memory.)
+3. **Auto-drain.** The 5-minute embed-backfill tick replays pending rows
+   oldest-first once the backend probe passes: bounded batch (25/tick),
+   linear backoff per row, 30-attempt cap. Rows past the cap park as
+   `failed_permanent` and are surfaced in the UI — never silently dropped.
+4. **Provenance.** Recovered memories carry `metadata.recovered_from`
+   (`journal` or `transcript-miner`) plus the journal id — visible in
+   `memory:list`/`memory:search` results, so an agent can tell a fact arrived
+   late.
+5. **User surfacing.** The Settings → Memory page shows a live
+   "N memories pending embedding" badge, a "Memory recovered: N facts from
+   HH:MM–HH:MM now searchable" banner after a drain, and a retries-exhausted
+   notice (`userMemory.journalStatus` sync resolver; the drain fires the
+   invalidate).
+
+## Agent guidance
+
+- A `journaled:true` failure needs **no action** — continue your work; the
+  fact becomes searchable within ~5 minutes of the embedder recovering.
+- `journaled` **absent** on a failure means the journal itself was
+  unavailable (pre-migration DB, PG hiccup) — the old lossy behavior. Park
+  the fact somewhere durable yourself (e.g. `facts:assert`, which is
+  DB-backed and needs no embedder) and retry later.
+- Deliberate refusals (`similar_exists` dedup, `conflict`) are **not**
+  journaled-for-retry: the tool closes the journal row so the drain can never
+  land a write it refused.
+
+## Losses that predate the journal
+
+`memory:recover-from-transcripts` mines session transcripts for failed
+memory-write tool calls (escape-tolerant `"ok":false` detection; excludes
+writes the same session retried successfully). Dry-run by default; with
+`confirm:true` it parks candidates in the journal (`source:
+'transcript-miner'`), and the standard drain re-stores them behind the same
+near-dup guard.
+
+## Ops notes
+
+- Table: `harness_shared.memory_write_journal` (migration 567).
+- Tunables: `PAPERCUSP_MEMORY_JOURNAL_MAX_ATTEMPTS` (30),
+  `PAPERCUSP_MEMORY_JOURNAL_DRAIN_BATCH` (25).
+- The drain logs `[memory-journal] drain: recovered=… deduped=… exhausted=…`
+  on any non-empty pass.
+- Text updates journal too (`metadata.__journal_update_of`); the drain replays
+  them as `backend.update`, never as a new add. Metadata-only patches are
+  vec-safe and aren't journaled.

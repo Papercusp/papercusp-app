@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Launch the desktop app pointed at the PRODUCTION Vite bundle.
+#
+# vs sibling launchers:
+#   bin/desktop-dev          → Vite dev server :3055   (HMR, dev-mode React, unminified)
+#   bin/desktop-dev-nohmr    → Hono host :3070         (dev-mode build, no HMR, served via Hono)
+#   bin/desktop-preview-prod → Vite preview :4173      (prod-mode build, minified, real React.production)
+#
+# Use this when you need to know how the bundle will behave for a real user:
+#   - Production React (no dev warnings, no Fast Refresh wrapper, faster)
+#   - Terser-minified JS (~5-10× smaller, real-world parse cost)
+#   - `import.meta.env.PROD === true`, `NODE_ENV === 'production'`
+#   - Dead-code-eliminated `if (NODE_ENV === 'development')` blocks
+#
+# This still runs inside `tauri dev`, so:
+#   - Hot-restart on Rust changes works (Tauri's own rebuild watcher)
+#   - Webview DevTools still attach (debug build of the Rust binary)
+#   - DOES NOT package a .deb / AppImage — use bin/release-local.sh for that
+#
+# Workflow:
+#   1. In papercup repo: `cd apps/operator-vite && npm run build` (one-shot)
+#      or run `npm run preview -- --watch=false` continuously
+#   2. Here: `bin/desktop-preview-prod`
+#   3. After editing app code, re-run step 1, then Cmd-R/Ctrl-R in the
+#      webview to reload (Vite preview is NOT a watcher; it just serves)
+#
+# Note: /api/* calls go to the prod-bundle's expected backend. Make sure
+# the operator backend on :3070 (papercup-dev systemd unit) is running.
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PREVIEW_PORT="${PREVIEW_PORT:-4173}"
+OPERATOR_VITE_DIR="${OPERATOR_VITE_DIR:-../apps/operator-vite}"
+
+# Confirm the prod bundle exists; if not, build it once (no watcher).
+if [[ ! -f "$OPERATOR_VITE_DIR/dist/index.html" ]]; then
+  echo "==> No prod bundle at $OPERATOR_VITE_DIR/dist/ — building once…" >&2
+  (cd "$OPERATOR_VITE_DIR" && npm run build)
+fi
+
+# Start `vite preview` in the background; kill it when Tauri exits.
+PREVIEW_LOG="$(mktemp /tmp/desktop-preview-prod.XXXXXX.log)"
+echo "==> Starting vite preview on :$PREVIEW_PORT (log: $PREVIEW_LOG)" >&2
+(cd "$OPERATOR_VITE_DIR" && npm run preview -- --port "$PREVIEW_PORT" --strictPort) \
+  >"$PREVIEW_LOG" 2>&1 &
+PREVIEW_PID=$!
+
+cleanup() {
+  if kill -0 "$PREVIEW_PID" 2>/dev/null; then
+    kill "$PREVIEW_PID" 2>/dev/null || true
+    wait "$PREVIEW_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+# Wait for preview to be reachable (max 20s).
+for _ in $(seq 1 40); do
+  if curl -sf -o /dev/null "http://127.0.0.1:$PREVIEW_PORT/"; then
+    break
+  fi
+  sleep 0.5
+done
+
+if ! curl -sf -o /dev/null "http://127.0.0.1:$PREVIEW_PORT/"; then
+  echo "ERROR: vite preview never came up on :$PREVIEW_PORT — see $PREVIEW_LOG" >&2
+  exit 1
+fi
+
+echo "==> Launching Tauri (webview → http://localhost:$PREVIEW_PORT)" >&2
+exec npm run tauri -- dev --config "{\"build\":{\"devUrl\":\"http://localhost:$PREVIEW_PORT\"}}"

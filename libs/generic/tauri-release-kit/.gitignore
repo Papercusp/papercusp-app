@@ -1,0 +1,51 @@
+
+# WI-4419 (2026-07-12): agent state dirs (.papercusp/) appear inside submodules too,
+# and git-sync auto-commits the superproject AND every submodule — so any scratch a
+# gitignore does not cover is committed automatically and then swept into every
+# release bundle by the sidecar source-tar glob. The superproject .gitignore does NOT
+# reach inside a submodule, so the guard must be repeated here. Depth-matching (**/)
+# on purpose: a slash-bearing pattern is anchored to THIS file's directory.
+.papercusp/scratch/
+.papercusp/vitest-tmp/
+.papercusp/tmp/
+.papercusp/tmp-*/
+.papercusp/logs/
+.papercusp/bench-reports/
+.papercusp/pi-sessions/
+**/.papercusp/scratch/
+**/.papercusp/vitest-tmp/
+**/.papercusp/tmp/
+**/.papercusp/tmp-*/
+**/.papercusp/logs/
+**/.papercusp/bench-reports/
+**/.papercusp/pi-sessions/
+
+# WI-761481 (2026-08-29): same submodule-reach gap, for the Vite/Vitest cache dir.
+# `defineVitestConfig` sets `cacheDir: '.vitest-tmp'`, so it lands at THIS root — the
+# superproject ignore does not reach here and the WI-4419 block only covers .papercusp/*.
+# Result: .vitest-tmp/vitest/<hash>/results.json was committed in 7 generic submodules.
+# It records a per-run `duration`, so it changes every run; being tracked, it entered the
+# affected-tests dependency closure and flipped the passing-task verdict fingerprint every
+# run, so the cross-run reuse cache could NEVER hit (measured hits=0).
+.vitest-tmp/
+**/.vitest-tmp/
+
+# Build/test artifacts: git-sync auto-commits every submodule, so an ungitignored
+# node_modules cache (e.g. .vite/vitest results.json) gets committed on every deploy,
+# bumping the submodule pointer for no reason and riding into release bundles (cf WI-4419).
+node_modules/
+
+# Coverage reports — any Vitest/cargo-llvm-cov --coverage run.
+#
+# The SUPERPROJECT .gitignore already carries this exact rule set, but a
+# superproject ignore does NOT govern inside a submodule: `git check-ignore`
+# run from the repo root answers "is in submodule <p>" and declines, so the
+# rule silently stops at this boundary. Without a copy HERE, git-sync (which
+# commits the superproject AND every submodule) sweeps the generated report
+# into this repo. Same class as EI-22195215129102176 (74 files / +54,104
+# lines swept) and EI-22201289307647151 (this rule was missing from 22 of 38
+# coverage-capable submodules until then).
+coverage/
+coverage-*/
+**/coverage/
+**/coverage-*/

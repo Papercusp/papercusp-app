@@ -1,0 +1,28 @@
+{
+  "name": "@papercusp/linkable-edges",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A generic typed-entity graph: polymorphic edges (src →rel→ dst) between {kind,ref} object references, with idempotent link/unlink + directional listOut/listIn queries over an injected store. Ships an in-memory store, a Taggable-rides-Linkable helper (a tag IS an object→topic edge), and one conformance suite any backend can run. Zero domain coupling — the host injects the store (PG, etc.).",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./conformance": {
+      "types": "./src/conformance.ts",
+      "import": "./src/conformance.ts",
+      "default": "./src/conformance.ts"
+    }
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

@@ -1,0 +1,221 @@
+# Distribution trust posture
+URL: /internal/docs/security/distribution-trust
+
+The v1 trust model for distributing harnesses, blueprints, plugins, tool-packs, and knowledge-packs through the Cupboard — why forking/installing pulls a supply-chain surface, how capability-gating + install-consent contain it, why instruction-carrying kinds are review-gated, what we defer, and what's out of scope.
+
+import { Aside } from '@astrojs/starlight/components';
+
+The **Cupboard** is one storefront with ten listing kinds, each with a
+different consumer action and a different trust surface:
+
+| Kind             | Action               | Pulls code?                                                                     | Trust surface                                                                        |
+| ---------------- | -------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `harness`        | **join**             | No — joins a Hypercore swarm by topic                                           | Peer/membership trust ([shared harnesses](/internal/docs/security/shared-harnesses)) |
+| `blueprint`      | **fork**             | **Yes** — clones the project remote + any bundled plugin code                   | Supply chain + review gate (this page)                                               |
+| `plugin`         | **install**          | **Yes** — installs a distributable plugin (a pack *with* a runtime)             | Supply chain (this page)                                                             |
+| `pack`           | **install**          | **Yes** — installs a runtime-less code-tool pack, registering MCP tools         | Supply chain (this page)                                                             |
+| `knowledge-pack` | **install**          | No code — seeds curated learnings into a pot's shared memory                    | Injected agent context + review gate (this page)                                     |
+| `template`       | **install**          | **Yes** — clones a first-party app-template repo + materializes an app scaffold | Supply chain (first-party author)                                                    |
+| `app`            | **download/install** | **Yes** — downloads a standalone release or installs a native bundle            | Release provenance + capability/install consent for bundles                          |
+| `rubric`         | **install**          | No executable code — installs a grading contract + optional method              | Judgment integrity + review gate                                                     |
+| `plan`           | **install**          | No direct code — installs an executable plan template                           | Instruction integrity + rubric-dependency gate + review gate                         |
+| `recipe`         | **install**          | No new code — installs runnable tool orchestration                              | Authority review + review gate                                                       |
+
+> The runtime-less code-tool pack is the `pack` kind (briefly named `tool-pack`
+> by migration 008, then renamed back by `cupboard-public-release-2026-07-12`);
+> `knowledge-pack` was `learning-pack` before migration 011. Both superseded
+> values still parse as normalized wire aliases (`normalizeListingKind`), so
+> older clients keep publishing/browsing.
+
+> The `snapshot` kind was **retired**
+> (`retire-snapshots-instance-spec-2026-06-09`, D-005). It is no longer in
+> `LISTING_KINDS`, `normalizeListingKind` returns `null` for it, and
+> Cupboard migration 008 deletes every snapshot row and drops `snapshot`
+> from the `listing_kind` CHECK constraint — no current worker code can serve
+> a snapshot listing. References below are to its successors (blueprint for the
+> fork path).
+
+This page is the trust posture for kinds that **pull code or artifacts** —
+forking a blueprint, installing a plugin/pack/template/app — or **change future
+agent judgment and action** — knowledge-packs, rubrics, plan templates, and recipes. It records the v1 decision
+(`harness-blueprint-distribution-2026-06-03`, **P-009 / D-007 / D-009**) and,
+importantly, what is **deferred** and what is **out of scope**.
+
+## The supply-chain surface
+
+Forking a blueprint pulls the project remote *and any plugin code it bundles*;
+installing a plugin or pack pulls code directly. A `pack` is a
+runtime-less code-tool pack that registers MCP tools (`provides_tools`), so it
+sits on the same supply-chain surface as a plugin. Plugin code runs in the
+operator's plugin host with access to host services (tasks, secrets, fetch,
+compute). **Unconstrained, that is a classic supply-chain risk** — a published
+listing could ship a plugin that reads secrets or exfiltrates over the network.
+
+A `knowledge-pack` pulls *no executable code*, but it injects curated learnings
+into a pot's shared memory — i.e. content that lands in agent context. That is
+a different risk (prompt injection), addressed by the review gate below rather
+than by capability-gating.
+
+## v1 posture: capability-gate + install-consent
+
+The v1 containment for the **code-pulling** kinds is the **existing two-tier
+plugin capability model** — we reuse it rather than inventing a
+distribution-specific mechanism (D-009). A plugin capability is usable **iff it
+is in BOTH tiers**:
+
+1. **Tier 1 — manifest.** The plugin's `capabilities[]` (manifest) declares what
+   it *could* use. Format `namespace:action[:resource]`
+   (`tasks:read`, `http:fetch:*.youtube.com`, `secrets:read:YT_API_KEY`).
+2. **Tier 2 — install-consent.** At install/enable the operator presents those
+   caps to the user, who grants a subset. The grant set is stored in
+   `harness_shared.plugin_capability_grants` (originally Migration 051, now in
+   `000-baseline.sql`) and loaded at plugin init.
+
+The gate is `hasCapability(ctx, cap)` in
+[`packages/plugin-loader/src/capabilities.ts`](https://github.com/Papercusp/plugin-loader) —
+it ANDs the manifest set with the granted set (both wildcard-aware). The grants
+store + loader live in the operator core (`lib/plugin-grants.ts` ·
+`getGrantsForPluginInHarness`, and `lib/plugin-host-runtime.ts` ·
+`loadGrantedCapsSafe`; post-carve these are `@papercusp/operator-core`).
+
+`loadGrantedCapsSafe` returns `undefined` — not an empty array — when there
+are **zero** grants for a `(plugin@version, harness)` pair (no consent flow has
+run yet, or Postgres is unreachable with no legacy file present) and on any read
+error. That `undefined` is stored verbatim into the runtime's grant state, and
+`hasCapability` treats `granted === undefined` as the **legacy single-tier
+(manifest-only)** path. So the operator runtime is *not* unconditionally on the
+two-tier path: until grants exist for a plugin, or if the grants read fails, it
+falls back to manifest-only for that plugin. The deliberate revoke path deletes
+specific caps (leaving a non-empty set), so an explicit user-revoke is *not*
+confused with "no grants yet".
+
+The invariant a forked blueprint relies on (when grants are present): **a forked
+plugin can use a capability only if it is both declared in the manifest AND
+consented to at install — it can never escalate beyond either.** A
+tampered/forged grant set cannot widen the manifest (tier 1 is still required),
+and declining consent leaves the plugin inert. This is pinned by
+`packages/plugin-loader/src/fork-install-consent.test.ts`.
+
+The dangerous egress surfaces are gated at the boundary a forked plugin actually
+hits: `makeFetchProxy` rejects any host not covered by an `http:fetch:<host>`
+capability, and `makeSecretsProxy` rejects any `secrets:read:<NAME>` not granted.
+
+### Fork inherits the parent's grants
+
+Forking does **not** silently re-prompt or degrade a plugin to manifest-only on
+first invocation. `copyGrantsToNewHarness` (`lib/plugin-grants.ts`) copies every
+`(plugin, version, capability)` grant from the source harness to the new one
+under the target slug, `granted_by='system'`, `reason='fork from <sourceSlug>'`
+(`ON CONFLICT DO NOTHING`, so a re-fork doesn't duplicate). The fork inherits
+its parent's capability decisions rather than starting from no grants.
+
+### Backfill for already-enabled plugins
+
+At operator boot, `backfillGrantsFromEnabledPluginsAndLegacyFile` **silently
+grants** each currently-enabled plugin its full manifest-declared cap set
+(`granted_by='system'`, `reason='enabled-plugins.json backfill'`) so existing
+harnesses don't break on first reload after the two-tier rollout. A legacy
+`~/.papercusp/granted-capabilities.json` file is a **read-only fallback** that is
+also replayed verbatim. The practical consequence: the consent prompt is for
+*new* installs — already-enabled plugins are backfilled with their declared caps
+rather than re-prompted retroactively. Users can revoke any backfilled cap from
+the consent UI afterward.
+
+### Server-capability invocation (palette)
+
+The desktop palette's server-capability path
+(`lib/capabilities/invoke.ts` · `paletteInvokeGuard` →
+`invokeServerCapability`; post-carve `@papercusp/operator-core`) runs **with no
+gate bypass for trust/role**: it is a plain loopback `operator` principal, a
+server-side §3 admission re-check refuses non-eligible tools, and
+destructive/high-risk tools require an explicit `confirmed:true`. Every call is
+audited. (See D-007 in the source.)
+
+## Review gate for instruction-carrying kinds
+
+Capability-gate + install-consent covers **code-egress** risk (fetch/secrets) —
+it does **not** cover **prompt-injection** risk from content that lands in agent
+context. So the five **instruction/judgment-carrying** kinds carry a **pre-publication
+review gate**:
+
+* A **knowledge-pack** injects curated learnings into a pot's shared memory.
+* A **blueprint** runs agent roles.
+* A **rubric** changes how future work is graded.
+* A **plan** directs agents through a reusable goal and item DAG.
+* A **recipe** is runnable multi-step tool orchestration.
+
+`REVIEW_POLICY_KINDS = ['knowledge-pack', 'blueprint', 'rubric', 'plan', 'recipe']`. At publish, a listing of
+one of these kinds lands `review_status='pending'` (every other kind, and every
+pre-008 row, is `'approved'`). Pending/rejected listings are **excluded from
+public list and read** — only the publisher can read their own pending listing
+(via `GET /:id` with auth), and operators triage them through `/admin`. A
+non-owner request for a non-approved listing returns 404. An operator approval
+(or rejection, with a surfaced reason) flips the status.
+
+Pure code kinds — `plugin` and `pack` — are **not** review-gated; they keep
+install-consent + reactive moderation (reports → unlist). `app` also remains outside
+the prose-review set: standalone delivery is release-link handoff, while native
+bundles retain their manifest/capability install checks. The split is by risk
+type: code kinds are contained by the capability gate at runtime; instruction
+kinds have no analogous runtime gate, so they're held for human review before
+they're publicly visible.
+
+## Publisher trust signals (Cupboard worker)
+
+The Cupboard worker (`apps/operator-public`) surfaces *advisory* publisher
+signals on each listing — they inform, they do not hard-gate (a provisional
+listing is **not** an ownership claim):
+
+* **Publisher-collaborator signal** — the publisher's GitHub permission on the
+  bound repo at publish time (`publisher_permission`, Migration 002;
+  `derivePublisherPermission`). The browse card shows "collaborator" vs "not a
+  collaborator". A non-collaborator who can merely read a public repo reads as
+  `read`.
+* **Channel-2 device attestation** — an optional device-key to GitHub-login gist
+  binding (Migration 003), verified/revoked by the hourly indexer.
+* **Operator ban-list** — `banned_publisher_pubkeys`; a banned publisher
+  device pubkey's listings are filtered from browse and 404 on detail.
+* **Private repos are rejected** at publish; all listings are public.
+
+These are the same signals harness listings already carried — the
+storefront merge applies them uniformly across all listing kinds (every kind is
+project-remote-backed in v1).
+
+## Deferred (D-009) — acceptable because there are no users yet
+
+* **Plugin signing.** No cryptographic signature on plugin code.
+
+Note that a **review gate is no longer fully deferred**: the instruction-carrying
+kinds (blueprint, knowledge-pack, rubric, plan, recipe) are pre-publication review-gated (above).
+What remains deferred is review/curation for the **pure code kinds** (plugin,
+pack), which keep install-consent + reactive moderation as their floor, and
+cryptographic signing for all kinds.
+
+Capability-gate + install-consent (code kinds) and the review gate
+(instruction kinds) are the floor; signing raises it later. Revisit before there
+are real users installing third-party listings.
+
+## Out of scope here (D-012)
+
+* **Producer-side trust** — collaborator push-access to the papercupai project
+  remote (who may *publish/contribute to* a project), as opposed to
+  consumer-side trust (what a *forked/installed* plugin may *do*, this page).
+  That surface is owned by the
+  [project-centric rethink](/internal/docs/spec) and the
+  distributed-coordination plans (`distributed-coordination-shared-harness-2026-06-04`).
+
+## Summary
+
+| Concern                             | v1                                                                                                                                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Live listing kinds                  | `harness`, `blueprint`, `plugin`, `pack`, `knowledge-pack`, `template`, `app`, `rubric`, `plan`, `recipe` (snapshot retired; `tool-pack`/`learning-pack` parse as normalized aliases) |
+| Forked/installed plugin capability  | manifest ∩ user-consented grant (`hasCapability`) when grants present; manifest-only fallback when grants absent/unreadable                                                           |
+| Consent record                      | `plugin_capability_grants` (baseline.sql; was Migration 051)                                                                                                                          |
+| Fork capability inheritance         | parent grants copied `granted_by='system'` (`copyGrantsToNewHarness`)                                                                                                                 |
+| Already-enabled plugins             | manifest caps backfilled at boot (`granted_by='system'`); legacy JSON read-only fallback                                                                                              |
+| Network / secret egress             | per-host / per-name capability via fetch+secrets proxies                                                                                                                              |
+| Instruction/judgment-carrying kinds | pre-publication review gate (`blueprint`, `knowledge-pack`, `rubric`, `plan`, `recipe` land `pending`, hidden until operator-approved)                                                |
+| Palette server-capability           | §3 re-check, confirm-for-destructive, no trust bypass, audited                                                                                                                        |
+| Publisher trust                     | advisory signals (collaborator perm, device attestation, ban-list); private repos rejected                                                                                            |
+| Signing                             | deferred (D-009); review deferred only for pure code kinds                                                                                                                            |
+| Producer-side push trust            | out of scope (D-012)                                                                                                                                                                  |

@@ -1,0 +1,82 @@
+# If you emit a derived or negative claim, check the state that would falsify it — or say you didn't
+URL: /internal/docs/agent-insights/derived-claims-carry-their-own-caveat
+
+The single defect behind most agent-DX friction here — a surface states a derived or NEGATIVE result as ground truth when the falsifying state was one cheap check away. Agents correctly trust it, and then silently do the wrong thing.
+
+## The pattern
+
+An audit of one long su session (EI-10951, 2026-07-13) found that nearly every friction
+worth filing was **the same defect wearing different clothes**:
+
+> A surface states a **derived** or **negative** result as if it were ground truth, when
+> the state that would falsify it was one cheap check away.
+
+The instances, all real, all from a single session:
+
+| The surface said                                                     | The truth                                                          | What it cost                                                                                                                      |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| tool-search: *"not found"*                                           | The tool exists; the session's surface is a **subset**             | Agent concluded the verb didn't exist, abused `work_items:checkpoint` as an erratum channel, left a wrong claim in an item's body |
+| a standing fact, folded verbatim: *"NEXT: implement EI-10539"*       | EI-10539 was **resolved** — the fact's own `sourceRef` said so     | Every future orient instructed an agent to redo finished work                                                                     |
+| `code:run`: *"1 write-effect call already executed — do NOT re-run"* | The call was **rejected on its args**; nothing was written         | A wasted verification round-trip; and it trains agents to skim the warning in the rare case it's right                            |
+| `facts:assert`: `ok: true`                                           | The body was silently **truncated to 500 chars**, cut mid-sentence | A standing fact shipped as a truncated instruction to every future agent                                                          |
+| the SPA 503: *"run `npm run build`"*                                 | The build had **just failed** — the system knew                    | A dead app telling you to run the thing that killed it                                                                            |
+| `work_items:complete`: *"you mentioned a duplicate"*                 | The prose was about a duplicated **type interface**                | Noise that erodes trust in the same channel's real warnings                                                                       |
+
+## Why it is worse than an error
+
+In every case the system was **confident**, and the agent — correctly — trusted it. Two of
+these caused the agent to **silently do the wrong thing**, which is strictly worse than a
+failure: a failure stops you; a false certainty routes you.
+
+Note what these are *not*: they aren't crashes, and they aren't lies about things the system
+didn't know. In each case **the falsifying state was already in hand** — the tool catalogue,
+the source item's status, the dispatch result, the stored length, the build-failure marker.
+It was simply never consulted before the claim went out.
+
+## Why "add a warning" is not the fix
+
+The tempting repair for each row is to add a caveat to the docs or the persona. **That has
+already been tried and has already failed.**
+
+EI-9011 filed the tool-search false-negative and was resolved by adding a warning to the
+capability map: *"a zero-hit search there does not mean the tool doesn't exist."* That
+warning was **live and in-context** when the identical failure recurred (EI-10946, n=2).
+The persona said it too. So did the MCP instructions. Three warnings, all read at session
+start, all forgotten at the moment of failure — because the failure is **silent** and the
+negative result is **indistinguishable from ground truth** exactly when you are looking at it.
+
+Session-start prose does not survive to the point of use. Put the caveat **where the claim
+is emitted**.
+
+## The rule
+
+**Before a surface emits a derived or negative claim — a "not found", a "nothing here", a
+remediation instruction, a heuristic verdict, a success — it must first check the state that
+would make it false. If it cannot, it must say so.**
+
+Concretely, in ascending order of preference:
+
+1. **Check the falsifying state.** It is usually already loaded. The SPA 503 now reads the
+   build-failure marker before telling you to run the build, and says the build will fail the
+   same way (EI-10539). `code:run` now distinguishes a write that *landed* from one the
+   dispatcher *rejected* (EI-10951). `facts:list` now flags a fact whose source work-item has
+   closed (EI-10947).
+2. **Report the uncertainty you actually have.** `facts:assert` still truncates over-cap
+   bodies (never lose a write) but now returns `truncated: { storedChars, droppedChars }` —
+   `ok: true` is no longer a claim that nothing was lost (EI-10952).
+3. **Never advertise the create and hide the undo.** If an agent can write durable state from
+   its seeded surface, it must be able to *correct* it from that surface — otherwise the
+   workaround **is** the corruption (EI-10946; guarded by `core-spine-inverses.test.ts`).
+4. **Prefer point-of-use response text over session-start prose.** The file-lock block error
+   is the in-repo example that works: it arrives exactly when you're blocked and names the
+   tool to call. The capability-map warning is the one that demonstrably didn't.
+
+## For reviewers
+
+When reviewing a change that emits advice, a warning, or a negative result, ask:
+
+* *What state would make this claim false, and did we look at it?*
+* *If a heuristic fired, does the evidence actually support the confidence of the wording?*
+* *If this is a safety warning, is it right on the COMMON case?* A warning that cries wolf on
+  the common case is ignored in the rare case it exists for — which is a net loss of safety,
+  not a conservative gain.

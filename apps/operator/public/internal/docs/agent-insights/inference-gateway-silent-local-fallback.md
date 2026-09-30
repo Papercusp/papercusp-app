@@ -1,0 +1,99 @@
+# Account pins silently route to `local`: the stale gateway pool
+URL: /internal/docs/agent-insights/inference-gateway-silent-local-fallback
+
+Why `psu --account X` (or any cup account pin) can land all usage on the wrong account. The pin routes via the localhost inference gateway (:8788) + the x-papercusp-account header; the gateway resolves its account pool ONCE at startup and caches it for its whole lifetime. A swallowed pool-load error used to collapse that pool to a one-account `local` fallback (the box's ~/.claude login), so every pin was silently ignored for hours. How to spot it (/healthz accountId:local), the fix (fail-closed resolve + restart), and the x-papercusp-routed-account header that makes a pin's real destination visible.
+
+## Symptom
+
+You pin a session or cup to a specific pool account — `psu --account ownerhandle`, or a
+Mug/spawn account binding — and the usage **does not show up on that account**. It
+lands somewhere else (often the box's own login) and the pin appears to do nothing.
+
+## How the pin is *supposed* to work
+
+`--account X` threads through five links (plan `psu-account-chooser`):
+
+1. `psu-launcher.mjs` POSTs `{account:'X'}` to `/api/agent-mcp/console/bootstrap-su`.
+2. `bootstrap-su` → `gatewaySpawnEnv(true,{accountId:'X'})` → returns env +
+   an `accountNotice`.
+3. That env is `ANTHROPIC_BASE_URL=http://127.0.0.1:8788` +
+   `ANTHROPIC_CUSTOM_HEADERS=x-papercusp-account: X` + `PAPERCUSP_ACCOUNT_ID=X`,
+   folded into the `exec`'d agent.
+4. The agent sends every model call to the localhost gateway, forwarding the
+   `x-papercusp-account` header (its own `~/.claude` bearer rides along and is
+   **stripped** by the gateway).
+5. The gateway (`gateway.ts`) reads the header → `pool.select('X')` → injects X's
+   OAuth bearer → forwards upstream. **Usage lands on X.**
+
+The whole chain is observable from inside a pinned session: its env has
+`ANTHROPIC_BASE_URL=http://127.0.0.1:8788` and `ANTHROPIC_CUSTOM_HEADERS=x-papercusp-account: …`.
+
+## The fault: a stale, `local`-only pool
+
+The gateway resolves its account pool **once at startup and holds it for its whole
+lifetime** (`account-resolver.ts` — "a rebind is a gateway restart"). The resolver
+used to swallow a transient pool-load error:
+
+```ts
+const pool = await loadAccountPool(ws).catch(() => ({ accounts: [] }));
+```
+
+`loadAccountPool` **throws** on a DB read blip but **resolves `{accounts:[]}`** for a
+genuinely empty pool. The `.catch` collapsed *both* into empty → the `local-fallback`
+branch → a one-account pool `[local]` (the box's `~/.claude/.credentials.json`). With
+that pool, `createFailoverPool([local]).select('X')` returns `null`, so the
+`x-papercusp-account` header is **silently ignored** and every request egresses on
+`local`. One \~1-second blip at a restart poisoned routing for \~10 hours, with zero
+signal — the launcher still printed "pinned to account X".
+
+## Diagnose it
+
+```bash
+curl -s http://127.0.0.1:8788/healthz        # accountId:"local"  ← the fault
+journalctl --user -u papercup-inference-gateway.service | grep "account pool"
+#   account pool [local]; primary 'local' via local-fallback   ← bad
+#   account pool [ownerhandle10, …, ownerhandle]; primary 'ownerhandle10' via pool   ← healthy
+```
+
+A healthy pool lists every registered account. `loadAccountPool(undefined)` from a
+quick tsx probe will show the accounts *exist* even while the live gateway is stuck on
+`local` — the gateway's copy is just stale.
+
+## Fix
+
+* **Immediate:** `systemctl --user restart papercup-inference-gateway.service` — it
+  re-resolves the pool (the service runs `tsx` from the staging tree, so code edits
+  take effect on restart too). Confirm `/healthz` no longer says `local`.
+* **Durable (shipped 2026-06-18):** the resolver now **fails closed** — a pool-load
+  error is retried briefly then **thrown** (the supervised gateway exits → systemd
+  `Restart=always` retries against a healthy DB) instead of caching a wrong `local`
+  pool. A genuinely empty pool still → `local`.
+
+## Detectability: `x-papercusp-routed-account`
+
+Every gateway response now carries `x-papercusp-routed-account: <id>` naming the
+account the request **actually** egressed on. Use it to confirm a pin took, or to see
+a silent redirect:
+
+```bash
+curl -sD - -o /dev/null -H "x-papercusp-account: ownerhandle" \
+  -H "anthropic-version: 2023-06-01" --data '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
+  http://127.0.0.1:8788/v1/messages | grep -i routed-account
+```
+
+## A pin is a PREFERENCE, not a hard pin
+
+Even with a healthy pool, the gateway **yields a pin to liveness**
+(`gateway.ts` — "cache-affinity yields to liveness"): if the pinned account's live
+governor is rate-limit-paused, the request fails over to the pool's `active()` account
+rather than 429-looping. So a pin to a *paced* account legitimately routes elsewhere —
+and `x-papercusp-routed-account` will show it. For reliable attribution, pin to an
+account with headroom (`accounts:status` → `available:true`, low utilization). There is
+no "hard pin / wait-don't-failover" option today; if you need one, that's a feature ask.
+
+## See also
+
+* [rate-limit-is-usually-account-routing-not-capacity](/internal/docs/agent-insights/rate-limit-is-usually-account-routing-not-capacity)
+* [llm-429-check-the-transport-not-the-account](/internal/docs/agent-insights/llm-429-check-the-transport-not-the-account)
+* [fleet-inference-auth](/internal/docs/agent-insights/fleet-inference-auth)
+* [gym-cycle-inprocess-llm-bypasses-gateway](/internal/docs/agent-insights/gym-cycle-inprocess-llm-bypasses-gateway)

@@ -1,0 +1,43 @@
+-- 755: drop memory_canonical_current_idx — unusable by CONSTRUCTION, and not worth "fixing".
+--
+-- WI-8945, plan db-performance-remediation-2026-07-26, decisions D-029/D-031/D-032.
+--   btree (created_at DESC) WHERE (invalid_at IS NULL)
+--   1600 kB · 33,804 rows · 157,877 writes · idx_scan 0
+--
+-- 1. THE "PARTIAL" PREDICATE IS NOT PARTIAL. It matches 33,706 of 33,804 rows (99.7%):
+--    invalid_at IS NULL 33,706 · invalidated 98 · invalid_at > now() 0.
+--    A partial index covering 99.7% of its table is a full index in a costume — no
+--    selectivity benefit, full write amplification.
+--
+-- 2. ITS ONLY CONSUMER MAY NEVER USE IT. The sole `ORDER BY created_at DESC` reader is
+--    libs/generic/memory/src/canonical-store.ts:813-819, whose bitemporal validity predicate
+--    (:241 / :244) is
+--        (invalid_at IS NULL OR invalid_at > now())
+--    which does NOT imply `invalid_at IS NULL`, so the planner cannot prove index coverage.
+--    PROVEN rather than inferred: with `SET enable_seqscan=off` the planner STILL selected the
+--    (now `Disabled: true`) Seq Scan — i.e. no index can serve that query at all.
+--
+-- 3. "JUST ALIGN THE QUERY" IS SEMANTICALLY FORBIDDEN HERE — this is the D-031 trap.
+--    Adding `invalid_at IS NULL` would make the index usable (Index Scan, LIMIT cost 147.71 vs
+--    2841.45 for Seq Scan+Sort, ~19x) and would be WRONG: the OR branch is required for the
+--    as-of read, and `invalid_at > now()` matches 0 rows TODAY, which is precisely what makes
+--    the trap look safe — exactly how migration 751's candidate would have silently dropped
+--    36,965 rows. `now()` is also non-IMMUTABLE, so it can never appear in an index predicate.
+--
+-- 4. AND IT WOULD NOT BE WORTH IT. pg_stat_statements over 24.5 days: that list query runs
+--    13,781 calls @ 0.98ms = 13.5s cumulative (~25s including its 3 slower variants) — against
+--    157,877 writes of index maintenance. A 19x win on 25 seconds of lifetime DB time.
+--
+-- Per D-032 the drop criterion is "no consumer exists in CODE" (established above by reading
+-- the call site), never idx_scan=0. memory_canonical retains 12 other indexes, including the
+-- pkey and the trigram/vector paths its hot queries actually use.
+--
+-- FORWARD-COMPAT: this is a plain non-UNIQUE btree, so the still-running older release cannot
+-- be using it as an ON CONFLICT arbiter (ON CONFLICT requires a UNIQUE index or constraint) —
+-- the EI-18797473716313783 failure mode is unreachable here by construction, and the UNIQUE
+-- pkey that memory_canonical's upserts do arbitrate on is untouched by this migration. It also
+-- cannot be serving any deployed query plan: idx_scan = 0 across the database's entire
+-- lifetime, and point 2 above PROVES the stronger claim that its only candidate consumer could
+-- never use it — with enable_seqscan = off the planner still selected the Seq Scan.
+
+DROP INDEX IF EXISTS harness_shared.memory_canonical_current_idx;

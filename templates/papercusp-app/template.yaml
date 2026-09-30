@@ -1,0 +1,157 @@
+# papercusp-app — 'Papercusp Official: App' (scope: app, category: app).
+# The ONE whole-app root (plan unified-app-template-2026-08-23, D-001).
+#
+# WHY ONE ROOT. Measured against the previous four roots at staging HEAD:
+# papercusp-webapp and papercusp-desktop-app shared 15 of 15 paths, 11 of them
+# BYTE-IDENTICAL, and the four that differed were all documentation/metadata.
+# There was no code divergence — the only axis separating web from desktop was
+# the chassis aspect, and the only axis separating agentic from not was whether
+# papercusp-ops-pots joined the composition. Two booleans, four roots, one
+# template. This collapses them back into the parameters they always were.
+#
+# HOW THE CHASSIS IS CHOSEN. `requires` cannot express "web OR desktop": it is
+# a static hard pin walked unconditionally by resolveRequiresClosure, and
+# validated with no answers in hand. So the invariant half (data + UI) stays in
+# `requires`, and the variable half moves onto the decision point that asks the
+# question — `target.selects` names, per answer, the chassis that joins the
+# composition. composeTemplates then enforces the choice STRUCTURALLY, so a
+# chassis-less app fails to compose exactly as a missing `requires` would.
+#
+# Machine twin: @papercusp/template-kit src/reference-templates.ts
+# PAPERCUSP_APP_TEMPLATE — the kit's suite pins this file to it.
+id: papercusp-app
+version: "0.1.0"
+scope: app
+category: app
+summary: >-
+  The one whole-app root — a THIN pure composition of papercusp-data-layer
+  (app-owned Postgres, connection discovery, typed-contract write gates) and
+  papercusp-ui (headless primitives, data grids, dock workbench, brand
+  lexicon) as hard requires, plus a `target` decision point that selects the
+  chassis: papercusp-tauri-desktop-shell for desktop, papercusp-web-host for
+  the browser, or BOTH from one codebase. The data and UI closure is identical
+  either way — that is why one root serves both. No own components; an app
+  built from it must pass the UNION of its closure's checks, so a dual-target
+  build inherits both chassis suites and is opt-in, never the default.
+components: []
+contracts: []
+decisionPoints:
+  # ANSWERED FIRST — it selects the chassis, and every chassis-level decision
+  # point (tenancy, hosting-target, auth-strategy on web; the sidecar and
+  # release-pipeline forks on desktop) arrives with whichever one is chosen.
+  - id: target
+    prompt: >-
+      Which runtime target does this app ship — desktop (the Tauri chassis:
+      thin Tauri host, Node/Hono sidecar, release pipeline), web (the Next.js
+      standalone host, auth seam, deploy skeleton), or BOTH from one codebase?
+      Answer this FIRST: it selects the chassis aspect, and the chassis brings
+      its own decision points with it. Choosing both is deliberate, never the
+      default — the composed app must pass the UNION of both chassis check
+      suites on every build. MEASURED (P-005): that union is 5 check
+      declarations against a single target's 4 — the chassis contributes
+      exactly ONE check (its boot-e2e), and the other three
+      (composition-integrity, data-layer, ui) are shared and paid once either
+      way. So the tax is +1 declaration, NOT a doubling — but it is the most
+      expensive KIND of check (build the app, boot the host, probe health), so
+      a declaration count understates the wall clock. Choose both because the
+      app genuinely ships two artifacts.
+    selects:
+      arity: one-or-more
+      options:
+        - value: desktop
+          summary: >-
+            The Tauri chassis — thin Tauri host to a Node/Hono sidecar, with
+            the release pipeline and an embedded per-install Postgres.
+          templates:
+            - { id: papercusp-tauri-desktop-shell, version: 0.1.0 }
+        - value: web
+          summary: >-
+            The Next.js standalone host — auth seam, discovery on boot, the
+            Dockerfile builder layer, and the tenancy fork it declares.
+          templates:
+            - { id: papercusp-web-host, version: 0.1.0 }
+  # The second axis the four old roots encoded as separate templates. It is
+  # OPTIONAL — the explicit `none` answer is what makes it so — because an app
+  # without an agent plane is the ordinary case, and an implicit agent plane
+  # would be a seam nobody chose.
+  - id: agents
+    prompt: >-
+      Does this app embed an agent plane? `none` is the ordinary answer and
+      the default shape: a deterministic app with no agent work plane or seam.
+      Answer `pots` and papercusp-ops-pots joins the composition, bringing the
+      canonical plan-to-work-item execution plane (app-owned plan runs,
+      blocked-by DAG, stable-agent assignment + required wake) and the ONE
+      typed seam the app crosses to reach it — which is a real architectural
+      commitment, not a feature flag. It is answered here rather than by
+      picking a different template, because the agent plane was always a
+      layer on the same app, never a different app.
+    selects:
+      options:
+        - value: none
+          summary: >-
+            No agent plane or seam — the deterministic app only.
+          templates: []
+        - value: pots
+          summary: >-
+            The canonical plan/work-item/stable-agent execution plane, layered
+            on via papercusp-ops-pots and reached across exactly one typed seam.
+          templates:
+            - { id: papercusp-ops-pots, version: 0.1.0 }
+  - id: domain
+    prompt: >-
+      What is the app's domain — the noun its data layer ledgers and its UI
+      surfaces? Drives every aspect-level decision point (schema, searchable
+      surfaces, panels, lexicon terms).
+  - id: optional-planes
+    prompt: >-
+      Beyond the required closure, does the app need live UI state sync
+      (compose papercusp-data-sync) or search over its data (compose
+      papercusp-search)? Add them to the composition now if so — both are
+      designed to drop onto either chassis.
+composesWith:
+  - papercusp-tauri-desktop-shell
+  - papercusp-web-host
+  - papercusp-data-layer
+  - papercusp-ui
+  - papercusp-ops-pots
+  - papercusp-data-sync
+  - papercusp-search
+# The INVARIANT half of the closure. The chassis is deliberately NOT here — it
+# is selected by `target` above, and composeTemplates enforces that selection
+# with the same force a hard pin would.
+requires:
+  - { id: papercusp-data-layer, version: 0.1.0 }
+  - { id: papercusp-ui, version: 0.1.0 }
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/restart-webapp-audit-papercusp-webapp-template
+checks:
+  - id: composition-integrity
+    run: checks/composition-integrity.test.ts
+    summary: >-
+      the composed set resolves (composeTemplates ok: pins consistent, one
+      root app scope, every selecting decision point satisfied) and the union
+      of checks is what CI runs
+musts:
+  - id: thin-app-template
+    rule: "The app template adds glue guidance and decision points, never its own components — capability belongs in aspects"
+    enforcedBy: composition-integrity
+  - id: answer-target-first
+    rule: "`target` is answered BEFORE any other decision point — it selects the chassis, and the chassis's own decision points (tenancy, hosting-target, auth-strategy) only appear once it is chosen"
+    enforcedBy: composition-integrity
+  - id: full-union-green
+    rule: "The composed app passes the FULL union of the closure checks — the chassis's boot/contract checks, components-integrated, composition-integrity"
+    enforcedBy: prose-only
+  - id: dual-target-is-opt-in
+    rule: "target: both is chosen deliberately and never by default — it adds the second chassis's boot-e2e check to the union the app must pass on every build (MEASURED P-005: 6 declarations vs 5; the non-chassis four are shared), and that cost is stated in the ship disclosure"
+    enforcedBy: prose-only
+  - id: agents-are-explicit
+    rule: "No agent work plane and no seam unless `agents` was answered `pots` — the plane joins only by an explicit answer that puts papercusp-ops-pots in the composition, and is never implicit"
+    enforcedBy: composition-integrity
+  - id: agentic-plan-work-plane
+    rule: "When `agents` is `pots`, every external or scheduled agentic run uses an app-owned plan template, canonical plan-item promotion, the blocked-by DAG, and execution { appHarnessSlug, agentName } for actionable-only assignment plus required wake — never an app-local orchestration loop"
+    enforcedBy: prose-only
+  - id: one-seam
+    rule: "When `agents` is `pots`, the deterministic app and agentic work plane meet at exactly ONE typed seam — the seam discipline is papercusp-ops-pots' Tier B MUST and is honored in full, not re-invented in app code"
+    enforcedBy: prose-only

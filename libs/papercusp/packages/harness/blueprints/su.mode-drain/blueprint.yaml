@@ -1,0 +1,50 @@
+# The `su.mode-drain` IDENTITY — identities-v1-2026-08-30 P-021 (D-008 as amended
+# 2026-09-03; D-022 §1/§6).
+#
+# ABSTRACT, like `base`: no workItem/spine, never loaded standalone — a layer in an
+# `extends` stack. The `slots:` key is the identity discriminator (D-013): this document
+# fills the EXCLUSIVE `objective` mode axis — the DEFINITION of DRAIN mode (the owner's
+# "drain the work queue to terminal" mission) in the coding su's vocabulary.
+#
+# THE IMPLICATION IS KERNEL, NOT THIS DOCUMENT'S: DRAIN ⇒ AUTO is a row in
+# `modes/registry.ts` (`implies: ['auto']`) that the registry WRITE applies — entering
+# drain writes the auto row, so `mode:set drain` binds THIS document on `objective` AND
+# `su.mode-auto` on `autonomy`. An identity cannot author an implication.
+#
+# Attached by `mode:set { mode:'drain' }` / a `--mode=drain` launch through the ⟦stack⟧
+# channel; `enabled:false` detaches and VOIDS it. Text: `prompts/objective.md`, resolved
+# THROUGH THE PROMPT CHAIN.
+id: su.mode-drain
+extends: base
+version: 0.1.0
+description: >-
+  IDENTITY (abstract — a layer, never runnable alone): the DRAIN mode definition — drive
+  the agreed backlog to terminal as a fleet leader, completion integrity over burn-down
+  speed. Fills the exclusive `objective` mode axis; DRAIN ⇒ AUTO stays a kernel
+  implication (P-021 / D-008).
+
+slots:
+  - slot: objective
+contributions:
+  - id: drain-definition
+    purpose: prompt
+    source: fixed
+    refresh: source-change
+    inputKind: prompt-file
+    ref: "mode:su.mode-drain:objective"
+  - id: current-mode-state
+    purpose: operational
+    source: provider
+    refresh: turn
+    inputKind: setting
+    ref: mode
+    producerRef: modes/store:agent_modes
+mode:
+  id: drain
+  policyRef: drain
+  title: "DRAIN — drive the queue to terminal"
+  oneLiner: "take a work-item backlog and drive every item to a terminal state; completion integrity over speed"
+  definitionContributionId: drain-definition
+  implies: [auto]
+  requiresSubject: false
+  launchable: true

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Launch the desktop app in its production-equivalent mode: bundled
+# embedded-postgres, isolated workspace, no external DB. This is the
+# code path that ships to end users; use it when you want to test the
+# real first-launch experience.
+#
+# For dev (point at the system PG that the webapp at :3055/:3070 also
+# uses), see `bin/desktop-dev` instead.
+#
+# Usage: bin/desktop                  (foreground; logs to stdout)
+#        LOG=/tmp/x.log bin/desktop   (override log path)
+#        BG=1 bin/desktop             (background; logs to $LOG)
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+BIN="$ROOT/src-tauri/target/release/papercusp-desktop"
+LOG="${LOG:-/tmp/papercusp-desktop-embedded.log}"
+
+if [[ ! -x "$BIN" ]]; then
+  echo "ERROR: binary missing at $BIN"
+  echo "Build it first: (cd $ROOT/src-tauri && cargo build --release)"
+  exit 1
+fi
+
+echo "==> killing any running papercusp-desktop + orphan sidecars"
+pgrep -af "papercusp-desktop|embedded-postgres-server|sidecar/.*next-server|sidecar/.*code-server" \
+  | grep -v "$$" | grep -v "pgrep\|grep " | awk '{print $1}' \
+  | xargs -r kill 2>/dev/null || true
+sleep 2
+
+echo "==> launching $BIN (mode=embedded, log=$LOG)"
+if [[ "${BG:-0}" == "1" ]]; then
+  nohup "$BIN" > "$LOG" 2>&1 &
+  echo "==> backgrounded as pid $!"
+else
+  exec "$BIN"
+fi

@@ -1,0 +1,22 @@
+-- 331-harness-plans-promote-policy-column.sql
+-- v2 plan-templates-and-rubric-v2-2026-06-20 P-001 — structure the promote-policy.
+--
+-- The `## Promote` policy was the ONE plan section still REGEX-parsed at READ time
+-- (extractPromoteSection → parseYaml → PromotePolicySchema) by every consumer —
+-- lint.ts, expand-generators.ts, coordination/tools/promote.ts each re-call
+-- parsePromotePolicy(planRaw). The plan-interface audit (D-001) flagged it as the
+-- single markdown-parse offender. Fix: parse ONCE at write-time into this column;
+-- consumers read the structured policy instead of re-parsing.
+--
+-- Stores the operator-side ParsePromoteResult `{ policy, warnings }` (app-maintained,
+-- exactly like the items/decisions/now_state derived index — the pure
+-- @papercusp/plan-parser deliberately carries no YAML dep, so the parse stays
+-- operator-side). NULLABLE:
+--   NULL                       = not yet repopulated (existing rows pre-backfill) —
+--                                consumers fall back to parsePromotePolicy(content).
+--   {"policy":null,...}        = populated, no `## Promote` section.
+--   {"policy":{...},...}       = populated with a parsed policy.
+-- Lazy-populated: any subsequent plan write repopulates the row via
+-- deriveIndexFromContent, so the column converges without a backfill pass.
+ALTER TABLE harness_shared.harness_plans
+  ADD COLUMN IF NOT EXISTS promote_policy jsonb;

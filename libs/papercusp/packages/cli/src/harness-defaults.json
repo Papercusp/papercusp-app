@@ -1,0 +1,18 @@
+{
+  "phase": "staging",
+  "models": {
+    "scoper": "claude-opus-4-7",
+    "worker": "claude-sonnet-4-6",
+    "validator": "claude-opus-4-7",
+    "orchestrator": "claude-haiku-4-5",
+    "reviewer": "claude-opus-4-7"
+  },
+  "timeouts": {
+    "scoper": 600,
+    "worker": 900,
+    "validator": 600,
+    "reviewer": 300,
+    "orchestrator": 120
+  },
+  "maxCostUsd": 10
+}

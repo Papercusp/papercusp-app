@@ -1,0 +1,145 @@
+# A declared vocabulary value with no writer is an invisible outage — and the grep that should catch it lies
+URL: /internal/docs/agent-insights/a-declared-vocabulary-value-with-no-writer
+
+injection-delivery-coverage declared two ports and only ever wrote one, so a turn-start injection outage was undetectable by the detector built to detect it. The port literal was already in the file, feeding a DIFFERENT sink, so a grep read as covered while the counter had never been written once. Covers the two-layer masking (no writer, then aggregating the dimension away), why the never-alarm-without-a-baseline rule must be per-dimension, and how to build a census whose negative you have actually demonstrated.
+
+## The one-line version
+
+If a type declares a vocabulary of things a system measures, **every value in it needs a
+producer** — otherwise the system reports confidently on a dimension it has never once
+observed, and the absence looks exactly like health.
+
+## What happened
+
+`packages/operator-core/lib/memory/injection-delivery-coverage.ts` exists to answer *"is
+client X actually being served per-turn context?"* Its own header lists the failure it was
+built to make visible: **"no rows at all ⇒ the hook never fired (install/trust bug)"**.
+
+It declared two ports:
+
+```ts
+export type InjectionPort = 'turn-start' | 'mid-turn';
+```
+
+`recordInjectionCoverage` was called from `mid-turn-context.ts` — and nowhere else. Measured
+2026-08-10, `harness_shared.context_injection_coverage` held **9 (client, port, outcome)
+groups, 100% of them `mid-turn`, and had never held a single `turn-start` row for any
+client in its entire history.**
+
+So the detector built to catch an injection outage was structurally incapable of catching a
+turn-start one. That is not hypothetical: **EI-20001110634702380 was a real turn-start
+injection failure, and it closed cause-undetermined** — the evidence that would have named
+it was the row nothing wrote.
+
+## Why a grep said it was fine
+
+This is the part worth carrying, because it is the part that fooled two readings.
+
+`turn-start-memory.ts` **already contained the literal `port: 'turn-start'`** — on the
+`session` object feeding `memory_recall_stats`, a completely different sink:
+
+```ts
+session: {
+  sessionId: owner,
+  port: 'turn-start',   // ← memory_recall_stats. NOT the coverage counter.
+},
+```
+
+A grep for the port literal returns a hit. The file "mentions turn-start". Everything looks
+instrumented. The coverage counter had never been written once.
+
+**Anchor the check to the CALL, not to a string several sinks share:**
+
+```bash
+# right — what actually writes the counter
+grep -rn "recordInjectionCoverage(" --include=*.ts packages apps libs | grep -v "\.test\."
+
+# wrong — matches a different sink and reads as covered
+grep -rn "port: 'turn-start'" --include=*.ts packages
+```
+
+This is the same family as the form-blind detectors documented under
+[shared-lib singletons](/internal/docs/system/repo-conventions): a guard anchored to how a
+thing is *spelled* rather than to the property that defines membership.
+
+## The second layer: aggregating the dimension away
+
+Fixing the writer is only half of it. The reader did:
+
+```sql
+SELECT client, outcome, tool, sum(n) ... GROUP BY 1, 2, 3   -- no port
+```
+
+A **per-client total cannot express "turn-start is dead but mid-turn is fine."** The working
+port's traffic keeps `events` healthy and the dead port never surfaces. So even once rows
+existed, a turn-start outage would still have been masked — by the very traffic that proves
+the *other* port is fine.
+
+Generalised: **if you aggregate away the dimension an outage lives in, you have built a
+detector that cannot see that outage.** The numerator must group by the dimension, and the
+`everObserved` baseline must be keyed on `(client, port)` — keying on either alone
+reintroduces the blend.
+
+## Keep never-alarm-without-a-baseline PER DIMENSION
+
+`classifyInjectionClient` already refuses to page a client that has never been observed
+working: absence of a baseline is absence of evidence the recording path is even deployed,
+not evidence it broke. That rule has to survive the new dimension.
+
+It matters most at exactly one moment — **the rollout of this fix**. The instant the reader
+learns to look per-port, every client has a turn-start port with zero baseline. If a
+missing baseline meant `regressed`, the fix would have paged for every client on its own
+first tick, with a confidently wrong cause.
+
+| port state            | verdict          | pageable                               |
+| --------------------- | ---------------- | -------------------------------------- |
+| baseline, then silent | `regressed`      | **yes** — a real outage                |
+| no baseline, silent   | `never-observed` | no — a known gap, visible in the panel |
+
+The client-level verdict then rolls up as the **worst** of its ports, which is what lets one
+dead port move the panel at all. And the summary must **name the port** — a bare
+`claude stopped delivering context` while claude's mid-turn is healthy points the reader at
+the wrong layer entirely.
+
+## Build a census whose negative you have demonstrated
+
+The recurrence guard is "every declared port has a writer". Write it so its corpus is an
+**argument**, not something it discovers internally — then you can run it against a
+synthetic pre-fix corpus and prove it reports the gap:
+
+```ts
+export function portsWithWriters(sources: readonly { path: string; text: string }[]): Set<string>
+```
+
+```ts
+it('CONTROL: reports the gap when a port has no writer', () => {
+  const written = portsWithWriters([
+    { path: 'mid-turn-context.ts', text: `recordInjectionCoverage([{ port: 'mid-turn' }])` },
+    // mentions the port but never records — the shape that makes a naive grep say "covered"
+    { path: 'turn-start-memory.ts', text: `session: { port: 'turn-start' }` },
+  ]);
+  expect(written.has('turn-start')).toBe(false);
+});
+```
+
+A guard whose negative has never been demonstrated is not a guard. This is the tier-1 form
+from the falsifiability rules in `CLAUDE.md` — a deliberately-wrong control kept permanently
+in the test file — and it needs **no tree mutation at all**, so it cannot be swept into a
+commit by git-sync the way a mutate-and-restore probe can.
+
+The same technique applies to the reader: extracting the fold as a pure exported function
+(`foldInjectionCoverage`) is what made the anti-masking property testable, because the
+property was previously unreachable — the folding lived inside a function whose first
+statement opens a Postgres connection.
+
+## The checklist
+
+When you add or review a measured vocabulary:
+
+1. **Every declared value has a producer.** Census it, and prove the census can fail.
+2. **The reader groups by the dimension** the vocabulary describes — never sums it away.
+3. **Baselines are keyed per dimension**, so a new dimension's rollout cannot page.
+4. **The summary names the failing dimension**, not just the entity.
+5. **Verify against the real sink.** Unit tests here mock the recorder, so they prove the
+   call happens, not that a row lands. The closing evidence was a live POST to `:3170`
+   followed by a `dev:pg_query` showing the first `turn-start` rows in the table's history.

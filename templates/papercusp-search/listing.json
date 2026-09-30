@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-search",
+  "id": "papercusp-search",
+  "title": "Papercusp Official: Search (Hybrid Retrieval)",
+  "description": "Aspect template: search over your app data — pluggable sources, hybrid lexical+semantic retrieval, reranking and RRF fusion behind one typed seam. Compose into any papercusp app that needs findability. Docs: /internal/docs on your install.",
+  "category": "search",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

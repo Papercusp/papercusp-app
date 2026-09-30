@@ -1,0 +1,183 @@
+# Voice modality
+URL: /internal/docs/endpoint-system/voice-modality
+
+How tools declare text vs voice relevance, and how the current hosted-voice session maps those prompt-level tool surfaces onto the operator/Papercup voice stack.
+
+# Voice modality
+
+Tools can declare a `modality` field stating which surfaces they're meaningful
+from — `'text'`, `'voice'`, or both. This is **prompt-assembly metadata**: it
+decides what a voice-facing brain sees in its tool catalog, not which transport
+is currently carrying the audio.
+
+Today the main voice transport is the hosted operator voice session
+(`OperatorVoiceSession`), but the same modality rules also apply to text chat,
+mobile voice routes, and any other caller that renders a voice catalog.
+
+## Default behaviour
+
+```ts
+defineTool({
+  name: 'tasks:list',
+  // modality omitted → defaults to ['text', 'voice']
+  args: TaskListArgs,
+  handler: async (input, ctx) => { … },
+});
+```
+
+A tool without a declared modality is available from **both** surfaces — it appears in the catalog rendered for text *and* for voice. (An earlier text-only default silently emptied the voice catalog for every tool that didn't opt in, so the default was flipped to `['text', 'voice']`.)
+
+## Declaring a voice-capable tool
+
+```ts
+defineTool({
+  name: 'operator:converse',
+  modality: ['text', 'voice'],
+  args: ConverseArgs,
+  handler: async (input, ctx) => { … },
+});
+```
+
+The catalog renderer will include this tool in both text and voice surfaces.
+
+## Declaring a text-only tool explicitly
+
+```ts
+defineTool({
+  name: 'some:button_only_tool',
+  modality: ['text'],  // REQUIRED to keep it out of voice — the default is both
+  // This drops the tool from voice catalogs.
+  args: SomeArgs,
+  handler: async (input, ctx) => { … },
+});
+```
+
+This is a **real** carve-out, not just documentation: because the default is `['text', 'voice']`, a tool that should never reach a voice surface must declare `modality: ['text']` — otherwise it shows up in voice catalogs too.
+
+## What the framework does NOT do
+
+The framework's modality concept is **prompt-assembly metadata only**. The framework:
+
+* ✅ Filters the rendered tool catalog by the caller's modality (via `renderToolsCatalog(role, names, modality)`)
+* ✅ Surfaces `modality` on the `tools/list` MCP response so MCP clients can filter independently
+* ❌ Does NOT auto-narrate `progress` / `done` events for voice surfaces
+* ❌ Does NOT enforce modality at call-time — a voice surface can still invoke a text-only tool if it forces the call
+
+The "narration" model from the original Phase 4 plan was a poor fit for the EL Conv AI integration. See the spike memo (in-repo plan `voice-modality-spike-2026-05-13`, at `apps/operator/docs/plans/voice-modality-spike-2026-05-13.md`) for the analysis — it isn't published as a standalone docs page.
+
+## How the current hosted voice path actually works
+
+The live hosted voice path is not "the provider brain talks directly to the
+user." It is:
+
+1. a hosted voice provider session
+2. the provider calls our tool for each user turn
+3. the operator host relays the final transcript into the Papercup or operator
+   brain
+4. the answer comes back through the shared voice pipeline
+
+In the current one-brain architecture, the provider-facing session is owned by
+`packages/operator-core/lib/voice-node/operator-voice-session.ts`, and its
+production wiring comes from `operator-voice-session-deps.ts`.
+
+The provider is therefore a **voice front-end**, not the cognition source. The
+tool result is a short acknowledgment; the real answer arrives later through the
+same voice session via `voice:say` and the papercup-says pump.
+
+The earlier browser-only `askOperatorViaSse` story is historical context, not
+the full current architecture.
+
+### Which persona brain answers — the Papercup-as-Herald repoint
+
+The `operator-converse` route (`endpoint-route/routes/agent-mcp/operator-converse.ts`)
+doesn't always dispatch to `operator:converse`. It resolves a `role` (default
+`'operator'`) and looks up `${role}:converse`, falling back to `operator:converse` if
+that name isn't registered. `role` comes from an explicit `body.role` when set;
+otherwise it falls back to the `humanFacingRole` voice pref (`'operator'` |
+`'papercup'`, default `'operator'`) so voice, text, and mobile all converge on
+the same human-facing persona choice.
+
+When `role === 'papercup'`, the turn is answered by the always-on Papercup persona
+instead of the legacy operator persona — same tag contract (`<say>`, `<set_mode>`,
+`<sleep>`), but with its own read-context and two Papercup-only control tags (below).
+See [the Papercup](/internal/docs/agent-insights/papercup) for the full architecture
+(how it's enabled, its read-context sources, and the handoff-to-Mug flow).
+
+### Hosted voice is transport — the brain is still ours
+
+The hosted session is deliberately relay-shaped. Its prompt override tells it to
+call the tool on every user turn and never answer from its own knowledge. That
+keeps the cognition in the local operator/Papercup stack and avoids a voice-only
+split brain.
+
+The exact transport may change over time, but the modality contract stays the
+same: **voice-surfaced tools are chosen by prompt assembly, then invoked inside
+our own role/policy system.**
+
+## The `<say>` tag protocol
+
+The operator brain (running our prompt) wraps voice-mode replies in `<say>...</say>` tags. The shipped default model is `anthropic/claude-opus-4-7` (the pinned `OPERATOR_BRAIN_MODEL_DEFAULT`); the resolution chain is `OPERATOR_BRAIN_MODEL` env → per-workspace agent-config `models['operator']` → pinned default (`resolveBrainModel` in `converse.ts`). The brain may also emit other tags that the system parses:
+
+| Tag                                                                         | Purpose                                                                                                                                                                     | Where the side-effect fires                                                                                                                      |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `<say>spoken text</say>`                                                    | TTS body. Required for voice turns.                                                                                                                                         | Client (`askOperatorViaSse`) extracts the body and returns to EL.                                                                                |
+| `<set_mode>active\|passive</set_mode>`                                      | Lifecycle hint.                                                                                                                                                             | Client only — the mode flip runs in `OperatorConversationProvider`.                                                                              |
+| `<sleep duration_minutes="N" reason="…">`                                   | "Stay silent for N minutes" (capped at 1 day).                                                                                                                              | Client only — the sleep timer is written by `OperatorConversationProvider`.                                                                      |
+| `<continue/>`                                                               | "I have more user-visible progress to make; no user input needed."                                                                                                          | Client only — the runtime auto-fires another turn with `trigger: 'continue'`.                                                                    |
+| `<report>{json}</report>`                                                   | Structured per-plan/per-item status, paired with `<say>`.                                                                                                                   | Client only — persisted alongside `parsed.say` and rendered as a card/list.                                                                      |
+| `<spawn role="..." harness="..." feature="..." chunk="..." extras="K=V" />` | Server-side orchestrator dispatch. **Operator role only** — a Papercup turn never dispatches `<spawn>` even if one is present (its capability envelope denies `cup:spawn`). | Server (`parseOperatorTurn` → `fleet/operator-spawn`); never returned to EL.                                                                     |
+| `<handoff_to_mug summary="…" harness="…" feature="…" tier="…" urgent="…">`  | The **Papercup's** file-and-nudge placement seam — never spawns, files a `work_item` and nudges the Mug. **Papercup role only.**                                            | Server (`parseOperatorTurn` → `operator-papercup-handoff.ts`); never returned to EL. See [the Papercup](/internal/docs/agent-insights/papercup). |
+| `<delegate_deep summary="…" brief="…" harness="…">`                         | The **Papercup's** hard-thinking delegation seam — offloads sustained analysis to the deep-analysis lane. **Papercup role only.**                                           | Server (`parseOperatorTurn` → `papercup-deep-delegate.ts`); never returned to EL.                                                                |
+
+The shared parser (`parseOperatorTurn` in `operator-converse-tags.ts`) runs on
+both the server and the client, but they consume different slots, and which
+server-side tags are honored depends on the turn's `role`. `operator:converse`
+reads `parsed.say` / `parsed.report` and, for an **operator** turn, dispatches
+`parsed.spawns`; for a **papercup** turn it instead dispatches
+`parsed.handoffs` and `parsed.deepDelegations` and ignores `parsed.spawns`.
+Those control-tag sets cannot cross.
+
+### `<say>` body clamping
+
+The parser doesn't pass `<say>` bodies through verbatim — `clampSay` (in `operator-converse-tags.ts`) sanitizes them as part of the active-mode voice-persona contract:
+
+* **Truncated to ≤220 chars** (`SAY_MAX_CHARS`). The cut prefers the last complete sentence boundary (when that keeps at least 60 chars); otherwise it falls back to a word-boundary cut with an ellipsis hint so the next-turn context shows the truncation.
+* **Inline markdown is stripped** — `**bold**`, `_italic_`, `` `code` ``, and `[text](url)` are reduced to their plain text, since TTS would otherwise speak the markup.
+
+Author voice-mode prompts with this in mind: a long, markdown-heavy `<say>` body will be silently shortened and de-formatted before it reaches TTS.
+
+## Sanitizer
+
+The client-side `askOperatorViaSse` warn-logs when a voice turn arrives without a `<say>` tag — that's the silent-regression class where TTS would speak raw markup including `<set_mode>` / `<spawn>` tags verbatim. Console message:
+
+```
+[el-conv:ask_operator] voice turn returned without <say> tag; the raw body will be spoken via TTS: <text>
+```
+
+If you see this in production, the brain's voice-mode prompt regressed.
+
+## Cards on voice — `fallbackText`
+
+The bespoke-card-improvements arc (`ctx.askUser`) added a state channel that delivers card payloads to chat surfaces. Voice doesn't render cards — there are no buttons to click — but a tool that emits a card during a voice turn still wants the user to hear *something*.
+
+The `CardSpec.fallbackText` field bridges this gap. When set, the operator-converse SSE forwarder picks up `state-snapshot` events and appends each card's `fallbackText` (or `prompt` as a fallback) to the spoken response:
+
+```ts
+ctx.askUser({
+  prompt: 'Did you mean X or Y?',
+  dataSchema: z.object({ choice: z.enum(['x', 'y']) }),
+  presentation: { kind: 'radio', options: [...] },
+  fallbackText: 'Did you mean X or Y?',   // voice surfaces speak this
+});
+```
+
+Gating (audit5+): the `operator-converse` SSE only forwards `state-snapshot` events when `body.modality === 'voice'`, and only forwards snapshots with at least one openCard carrying `fallbackText`. This avoids cross-conversation leak (a text turn's card would otherwise be spoken in a concurrent voice turn) and keeps state-shaped tools (`ctx.publishState` without cards) off the voice path.
+
+`chat:ask_choice` is available from **both** surfaces — it declares no `modality`, so it defaults to `['text', 'voice']`. On a voice turn its `fallbackText` (the question + options) is spoken, and by default the user still clicks the card on the chat surface to answer. A single-select card that sets `voiceAnswerable: true` (e.g. the silence-nudge "Ready" card) goes further: the client-side `voice-card-router` matches the user's spoken pick against the option labels/ids and submits it via `/card-response` — so voice **can** now answer those cards hands-free (gated by the `cardAnsweringEnabled` voice preference). Multi-select and non-`voiceAnswerable` cards still require a click.
+
+## See also
+
+* [Transports](./transports.mdx) — how typed events project across HTTP / MCP / IPC
+* Spike memo `voice-modality-spike-2026-05-13` (`apps/operator/docs/plans/voice-modality-spike-2026-05-13.md`) — why the original "ctx.narrate" design didn't fit; not a published docs page
+* `packages/operator-core/lib/voice-node/operator-voice-session.ts` — the hosted voice-session source
+* `packages/operator-core/lib/operator-converse-tags.ts` — the tag parser

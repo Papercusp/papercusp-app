@@ -1,0 +1,116 @@
+# Linker speed-up (WI-5086, plan desktop-build-speed-2026-07-16#P-007).
+#
+# Every desktop build leg (bin/build-linux-local.sh + the Linux subshell in
+# bin/release-local.sh, bin/mac-vm-build.sh, bin/build-windows-on-vm.sh)
+# invokes `cargo`/`tauri build` from this directory (papercusp-desktop) or a
+# descendant of it, so cargo's upward config-file walk picks this file up on
+# all three legs without any extra plumbing.
+#
+# Uses LLD (the LLVM linker) on all three platforms via the linker binaries
+# ALREADY bundled with every rustup toolchain since ~Rust 1.71
+# (<sysroot>/lib/rustlib/<target>/bin/{gcc-ld/ld.lld, gcc-ld/ld64.lld,
+# gcc-ld/lld-link, rust-lld}) — confirmed present in this repo's toolchain
+# (`rustc 1.94.1`) for all of x86_64-unknown-linux-gnu, the apple-darwin
+# targets, AND x86_64-pc-windows-msvc. LLD links measurably faster than each
+# platform's older default (GNU bfd/gold on Linux, pre-Xcode-15 ld64 on
+# macOS, link.exe on Windows) with ZERO extra provisioning on any of the
+# three build hosts — no package install, no PATH setup, nothing beyond the
+# rustup toolchain every leg already has.
+#
+# ── Why lld everywhere, not "mold (linux) / lld (mac+windows)" as first
+# scoped (WI-5086's own title) ──────────────────────────────────────────────
+# mold was evaluated and built successfully from source (v2.41.0, on this
+# dev box: `cmake` + `cmake --build`, ~1min on a 128-core box) but could NOT
+# be durably provisioned as part of this change:
+#   - No root/sudo on this box's agent identity (`mold` has an apt candidate,
+#     0.7.7-2ubuntu0.1, but `apt install` needs root — confirmed absent).
+#   - The user-writable install targets that DON'T need root (~/.local/bin,
+#     linuxbrew's Cellar) were observed FLIPPING between read-only and
+#     writable ACROSS SEPARATE SHELL INVOCATIONS in the same investigation —
+#     i.e. not just "no root", but no STABLE place to park a self-installed
+#     binary at all in that execution context.
+# lld needs no such install (it ships inside the toolchain every leg already
+# has), so it is the ROBUST choice for every leg — including Linux, where
+# the WI's title asked for mold specifically. If a future box gets a stable
+# install path for mold (or ships it baked into the box image), swapping
+# `ld.lld` for `mold`/`ld.mold` below on the Linux block is a one-line
+# follow-up, not a redesign — noted here rather than left as an unowned TODO.
+#
+# ── Measured delta (Linux leg; mac/windows need validation on a real VM
+# cross-platform cut — flagged for whoever runs the next one, see WI-5089) ──
+# Rust 1.90.0+ (this toolchain: 1.94.1) already defaults x86_64-unknown-
+# linux-gnu to try lld automatically (rust-lang blog, 2025-09-01,
+# "Faster linking times with 1.90.0 stable on Linux using the LLD linker") —
+# so on THIS specific toolchain version the block below mostly makes the
+# already-active default explicit/pinned (protects against a future rustc
+# regression or an older/downgraded toolchain that predates the 1.90 default
+# — this repo's release scripts don't pin an exact rustc version). A clean
+# isolated link-only A/B on this shared, noisy dev box did not produce a
+# trustworthy number (box-load swamped a link-time delta on the order of a
+# few seconds for a binary this size — see WI-5086/WI-5084 threads for the
+# investigation); the externally-published 1.90.0 lld benchmarks plus the
+# broad, well-established lld-vs-bfd literature (larger wins on bigger
+# binaries with more debug info, which the full desktop Tauri binaries with
+# hundreds of dependencies are) support keeping it. Real per-platform numbers
+# should come from `time`-wrapping the actual `tauri build` step on a real
+# cross-platform release cut, same disposition as WI-5084's sccache
+# hit-rate — a natural, zero-extra-cost checkpoint, not a dedicated
+# benchmark run.
+
+[target.'cfg(target_os = "linux")']
+# Bare `cargo build` fallback only. Release scripts set RUSTFLAGS for path
+# remapping, which suppresses target.*.rustflags; they source
+# bin/lib/rust-path-remap.sh and carry this same flag in the build environment.
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.'cfg(target_os = "macos")']
+# Bare `cargo build` fallback; release producers carry the flag in RUSTFLAGS.
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# MSVC doesn't route through a cc-style driver, so `-fuse-ld=` doesn't apply —
+# select the toolchain-bundled MSVC-flavored LLD binary directly instead.
+#
+# ── crt-static (WI-39375, fixes WI-39372) ──────────────────────────────────
+# STATICALLY LINK THE MSVC C RUNTIME. Without this the msvc target links the
+# DYNAMIC CRT (the toolchain default), so the shipped papercusp-desktop.exe
+# hard-depends on VCRUNTIME140.dll / VCRUNTIME140_1.dll / MSVCP140.dll — and
+# NOTHING in this repo ships or installs the VC++ redistributable (0 tree-wide
+# references; bundle.windows.webviewInstallMode is null). The result reached
+# users: 0.0.17 installs fine on a clean Windows and then dies at first launch
+# with "The code execution cannot proceed because VCRUNTIME140.dll was not
+# found" (WI-39372, reproduced on a clean Win11 Ent LTSC 26100 guest).
+#
+# The defect is invisible from the build side BY CONSTRUCTION: every build
+# machine has Visual Studio, so the DLL is always present where the artifact is
+# produced and only ever missing where it is consumed. That is why it survived
+# into a release artifact, and why no amount of build-host testing would catch
+# the next one — see the import-table guard tracked on WI-39375.
+#
+# Why static CRT rather than shipping vc_redist.x64.exe from the NSIS hook:
+#   - This crate is a single [[bin]] with NO [lib]/crate-type, so there is no
+#     cdylib and no DLL boundary of ours across which CRT heap objects could be
+#     allocated on one side and freed on the other — the one condition that
+#     makes crt-static genuinely hazardous. WebView2 is reached over COM, a
+#     stable ABI boundary that does not pass CRT objects.
+#   - bundle.targets builds BOTH `nsis` and `msi`. An NSIS installer hook fixes
+#     only the NSIS leg and would leave the MSI still shipping broken; this
+#     removes the dependency outright, so every Windows artifact is fixed at
+#     once.
+# ACCEPTANCE is a property of the ARTIFACT, not of the build: the produced .exe
+# must carry no VCRUNTIME140/MSVCP140 entry in its PE import table. A green
+# build proves nothing here — builds already succeeded while shipping this bug.
+#
+# ⚠ THIS COPY DOES NOT GOVERN THE SHIPPED ARTIFACT — DO NOT DELETE THE OTHER ONE.
+# cargo's rustflag sources are MUTUALLY EXCLUSIVE, not additive: if the RUSTFLAGS
+# ENV VAR is set, `target.*.rustflags` here is IGNORED ENTIRELY. bin/build-
+# windows-cross.sh sets RUSTFLAGS (for its path remap), so on the REAL release
+# path this block is dead and $_WIN_CRT_STATIC in that script is what applies.
+# Verified empirically: a probe crate with target.<host>.rustflags = ["--cfg",
+# "from_config_toml"] emits that cfg with no env RUSTFLAGS, and emits ONLY
+# `--cfg from_env` once RUSTFLAGS is set — the config value vanishes rather than
+# merging. This block exists for plain `cargo xwin build` / IDE invocations that
+# set no env RUSTFLAGS. Keep BOTH; the build script's import-table guard is what
+# actually proves the property held.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+rustflags = ["-C", "target-feature=+crt-static"]

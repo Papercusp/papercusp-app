@@ -1,0 +1,73 @@
+{
+  "name": "@papercusp/coordination",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Papercusp Postgres tie-in adapter over the generic pub/sub substrate (@papercusp/pubsub-substrate) + typed-entity graph (@papercusp/linkable-edges). The host-agnostic algorithm cores moved to those borrowable libs; this package keeps only the papercusp-bound PG backends (PgCoordLog → harness_shared.coord_event_log, PgPresenceStore, PgWatermarkStore, and the Pg capability stores → coord_topics/entity_subscriptions/threads/links) and re-exports the generic seams + conformance suites so the @papercusp/coordination public surface is unchanged. Identity resolution stays host-side by design.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./core": {
+      "types": "./src/core/index.ts",
+      "import": "./src/core/index.ts",
+      "default": "./src/core/index.ts"
+    },
+    "./event-log": {
+      "types": "./src/event-log/index.ts",
+      "import": "./src/event-log/index.ts",
+      "default": "./src/event-log/index.ts"
+    },
+    "./event-log/conformance": {
+      "types": "./src/event-log/conformance.ts",
+      "import": "./src/event-log/conformance.ts",
+      "default": "./src/event-log/conformance.ts"
+    },
+    "./presence": {
+      "types": "./src/presence/index.ts",
+      "import": "./src/presence/index.ts",
+      "default": "./src/presence/index.ts"
+    },
+    "./presence/conformance": {
+      "types": "./src/presence/conformance.ts",
+      "import": "./src/presence/conformance.ts",
+      "default": "./src/presence/conformance.ts"
+    },
+    "./watermark-store": {
+      "types": "./src/watermark-store/index.ts",
+      "import": "./src/watermark-store/index.ts",
+      "default": "./src/watermark-store/index.ts"
+    },
+    "./watermark-store/conformance": {
+      "types": "./src/watermark-store/conformance.ts",
+      "import": "./src/watermark-store/conformance.ts",
+      "default": "./src/watermark-store/conformance.ts"
+    },
+    "./capabilities": {
+      "types": "./src/capabilities/index.ts",
+      "import": "./src/capabilities/index.ts",
+      "default": "./src/capabilities/index.ts"
+    },
+    "./capabilities/conformance": {
+      "types": "./src/capabilities/conformance.ts",
+      "import": "./src/capabilities/conformance.ts",
+      "default": "./src/capabilities/conformance.ts"
+    }
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@papercusp/linkable-edges": "file:../../libs/generic/linkable-edges",
+    "@papercusp/pubsub-substrate": "file:../../libs/generic/pubsub-substrate"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "file:../../libs/test-config",
+    "postgres": "^3.4.5",
+    "vitest": "^4.1.4"
+  }
+}

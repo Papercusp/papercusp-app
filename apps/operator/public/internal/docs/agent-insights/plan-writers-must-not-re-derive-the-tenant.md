@@ -1,0 +1,164 @@
+# A writer that re-derives its own (workspace, harness) key is the bug — three shipped generations of it
+URL: /internal/docs/agent-insights/plan-writers-must-not-re-derive-the-tenant
+
+harness_plans is keyed on (workspace_id, harness_slug, plan_slug). Every plan READER resolves that key through resolvePlanScope; four WRITERS resolved it themselves. Each fix replaced one wrong derivation with another wrong derivation — DEFAULT_WORKSPACE_ID, then activeWorkspaceId(), then the un-collapsed ctx slug — because the bug was never the value, it was having a second resolution path at all. Includes the live repro and the one-line rule.
+
+## The rule
+
+**A write must be keyed by the SAME resolver that read the row. Never re-derive
+the tenant at the write site.**
+
+For `harness_shared.harness_plans` that resolver is
+`plans/source.ts`'s `resolvePlanScope` — reached via
+`plans/_write-scope.ts`'s `resolvePlanWriteScope(ctx)`:
+
+```ts
+// ✅ the only correct shape
+const { workspaceId, harnessSlug } = await resolvePlanWriteScope(sctx);
+await withWorkspace(workspaceId, (tx) => tx`
+  UPDATE harness_shared.harness_plans
+     SET ...
+   WHERE workspace_id = ${workspaceId}
+     AND harness_slug = ${harnessSlug}
+     AND plan_slug    = ${slug}
+  RETURNING plan_slug`);   // ← and CHECK the returned rows
+```
+
+If you already hold a resolved scope — notably `withPlanLock`'s returned
+`result.scope` — thread **that** through instead of resolving again.
+
+## Why this keeps happening
+
+`harness_plans` is keyed on `(workspace_id, harness_slug, plan_slug)`. Both
+halves of that key are non-obvious:
+
+* **workspace\_id is a property of the HARNESS**, resolved from
+  `harness_shared.projects` then the authoritative harness registry — *not* of
+  whatever workspace is "current" in the calling process.
+* **harness\_slug is Hive-collapsed**: plans are Hive-scoped, so a MEMBER harness
+  keys its plans under its Hive HOME (`potHomeSlugForHarness`).
+
+Every plan READER goes through `resolvePlanScope`, which does both. Four writers
+did neither, and derived the key themselves. The result was always the same
+shape — an `UPDATE` matching **zero rows** while the handler returned `ok: true`.
+
+## The three generations
+
+Each fix replaced one wrong derivation with a *different* wrong derivation,
+because the diagnosis stopped at the value instead of at the second path.
+
+| gen                    | the writer used                    | why it was wrong                                                                                                                                                                                                                                                             |
+| ---------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 — WI-5125 / EI-16183 | a hardcoded `DEFAULT_WORKSPACE_ID` | there are **zero** plans in the `'default'` workspace; every real plan lives in `papercusp-workspace`. Every `UPDATE` matched 0 rows.                                                                                                                                        |
+| 2 — the EI-16183 *fix* | `activeWorkspaceId()`              | the AMBIENT workspace (request-ALS → env → registry default). Correct only inside a browser request whose workspace happens to match the harness's registered one — so **any agent-side tool call outside that ALS scope keys a different row than the read just returned**. |
+| 3 — WI-5825            | the raw ctx harness slug           | skips the Hive-home collapse, so a member harness's write targets a row no reader ever looks at.                                                                                                                                                                             |
+
+Generation 2 is the instructive one: it was *the fix for generation 1*, it
+passed review, and it shipped. `plan-start-state.ts` caught it — and was
+repaired by taking the resolved scope as a **parameter** instead of resolving it
+— but the other four writers were never given the same treatment.
+
+## Why nobody noticed for weeks
+
+The failure is **silent by construction**. A mis-keyed `UPDATE` is not an error:
+it matches nothing and commits successfully. The handlers then reported success
+anyway, and two of them had failure modes that read as *normal behavior*:
+
+* `plans:pause` returned the friendly `{ notStarted: true }` — "you never
+  started this plan" — which is exactly what a user with a genuinely unstarted
+  plan sees.
+* `plans:start` returned `{ ok: true, status: 'started' }` regardless of rows
+  affected, and then **emitted the `plan started` demand event** for a start
+  that never happened.
+
+The observable symptom was only ever an absence: drag-to-reorder did nothing,
+start and pause did nothing. The data said so plainly if you looked — 14 of 1047
+plans had an `op_status`, 2 had an `op_priority`, and those predated the
+workspace move — but nothing ever *reported* a failure.
+
+## The repro (and how to run it live)
+
+The definitive check is to write through the tool and then read Postgres —
+never trust the tool's own `ok`:
+
+```
+POST /api/admin/plans/set-priority  { slug: <plan>, priority: 777 }
+  → { ok: true, priority: 777 }
+
+-- sql-snippet-justified: one-off post-write probe of the tenant key; no plans tool exposes this exact write/read zero-row diagnostic.
+SELECT op_priority FROM harness_shared.harness_plans WHERE plan_slug = <plan>
+  → 777        ✅ fixed
+  → NULL       ❌ the classic: ok:true over a 0-row write
+```
+
+Two practical notes for running this against a real operator:
+
+* **Your MCP session's `tools:invoke` will NOT exercise your edit.** The tool
+  catalog is served by the release checkout (`:3070`), so a staging-tree change
+  is invisible to it. Restart the staging operator
+  (`dev:restart { target: 'staging', confirm: true, authorize: true, reason: 'reload the staging operator with updated code' }`, which rebuilds
+  `dist-host`) and drive **`:3170`** instead. Confirm your code is really in the
+  bundle before believing a result — `grep -c <your new symbol> apps/operator/dist-host/hono-host.mjs`.
+* **`/api/admin/plans/:verb` needs the superuser bearer.** A bare loopback curl
+  resolves `trust: 'unverified-loopback'` and is refused
+  (`{"error":{"code":"forbidden"}}`). Send
+  `Authorization: Bearer $(cat ~/.papercusp/superuser-token)`. That path also
+  synthesizes the `?superuser=1` ctx — i.e. the `'*'`/no-harness scope — which
+  makes it the *best* live test of the resolver, not merely a convenient one.
+
+## ⚠ Your before/after control is probably tainted
+
+Proving "this red is pre-existing, not mine" is exactly the discipline this bug
+class demands — and in this repo the obvious way to do it **silently doesn't
+work**:
+
+```bash
+git show HEAD:path/to/file.ts > path/to/file.ts   # ❌ NOT a pristine baseline
+```
+
+git-sync commits the whole working tree on a schedule, so within a few minutes
+of your edit **HEAD already contains it**. I hit this exactly: git-sync
+committed my change at 20:54:35, my "pristine" control ran at 20:57:05, and the
+`git show HEAD:` restore handed me back my own code. The test failed, I read
+that as "pre-existing", and the control had proven nothing.
+
+Get a real baseline instead:
+
+```bash
+git log --oneline -3 -- path/to/file.ts        # find the commit carrying your change
+git show <that-commit>~1:path/to/file.ts       # the parent = genuinely pre-edit
+grep -c '<your new symbol>' path/to/file.ts    # VERIFY it's absent before trusting the run
+```
+
+Better still, when you can: **construct the old code directly** (save your
+version aside, patch the live file back to the old shape, run, restore). That
+never depends on what git thinks HEAD is.
+
+## Make the next generation impossible
+
+Fixing the four call sites is not the fix; removing the second path is.
+
+1. **One seam.** `resolvePlanWriteScope` is the single entry point, and its doc
+   comment carries all three generations so the next reader sees the pattern,
+   not just the current value.
+2. **Required, not defaulted.** `armPlanSchedule` / `disarmPlanSchedule` took
+   `workspaceId?: string` with an `?? activeWorkspaceId()` fallback. Every caller
+   passed it, so the fallback was unreached — an armed trap for the next caller.
+   It is now `workspaceId: string`, so the **compiler** catches an omission that
+   would otherwise have been a silent 0-row no-op.
+3. **Never let a 0-row write report success.** Every one of these handlers now
+   `RETURNING`s and treats an empty result as `plan_not_found`, with the resolved
+   scope in the message (`no plan 'x' in papercusp-workspace/papercusp`) — which
+   is also what makes the next mis-scope diagnosable in one line instead of a
+   week.
+4. **Test against the resolver, not the ambient.** The regression tests mock
+   `resolvePlanScope` (not `activeWorkspaceId`), pin a deliberately
+   non-`'default'` workspace, and seed a decoy row in an
+   `'ambient-WRONG-workspace'` tenant — so a regression *hits the decoy* and
+   reds, instead of silently no-opping into a passing test.
+
+## Related
+
+* [`raw-sql-plan-slug-needs-workspace-harness-scope`](/internal/docs/agent-insights/raw-sql-plan-slug-needs-workspace-harness-scope)
+  — the READ-side sibling: a hand-written `WHERE plan_slug = …` without the
+  workspace/harness predicate silently reads another tenant's row.

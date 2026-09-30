@@ -1,0 +1,100 @@
+# The `coding-solo` blueprint — impartial-benchmark-suite-2026-06-15 (BRIEF 4 / P-006).
+#
+# BASELINE A (internal ablation): the `coding` harness with the MULTI-AGENT SPINE
+# COLLAPSED TO A SINGLE WORKER. The clean causal isolation for the impartial benchmark
+# suite — identical model / base tool capabilities / infra / iso-budget to the full
+# Papercusp arm; the ONLY difference is orchestration OFF: no director, no
+# scoper→architect→worker→validator→reviewer hand-offs, no multi-role review, no
+# features-import decomposition. A delta between this arm and the full `external-bench`
+# (full coding spine) arm is therefore attributable to COORDINATION ITSELF, not to
+# compute / tools / plumbing (D-004 fairness; D-002 causal-isolation headline).
+#
+# Both arms are instantiated by the SAME `external-bench:run` op (BRIEF 2 / P-019) over
+# the SAME cloned repo @ base_commit, capped at the SAME iso-budget (BRIEF 7 / P-011),
+# and graded by the SAME official grader (BRIEF 3 / P-005). They differ ONLY in
+# `blueprintId`: the Papercusp arm instantiates `external-bench`'s full coding spine,
+# this arm instantiates `coding-solo`. This blueprint is also the per-sample generation
+# unit Baseline C (best-of-N, P-008) samples N times — "C = A sampled N times + verifier".
+#
+# WHY `extends: single-agent` (not `coding`): the blueprint loader DEEP-MERGES
+# `spine.edges` (loader.mergeRaw), so `extends: coding` would LEAK the coding decision
+# verbs (NEXT_WORKER / NEXT_VALIDATOR / NEXT_ARCHITECT / …) into a single-role spine.
+# `single-agent` gives the clean DONE/ESCALATE/IDLE spine + `planner: inline` (no
+# decomposition) + the governed/durable launch contract. NOTE the planner difference is
+# itself part of "orchestration ON": the full arm's `planner: features-import`
+# (plan→features, waves, blocked_by parallelism) is decomposition machinery; collapsing
+# to `inline` (one work_item, one agent) is the correct ablation.
+#
+# The worker persona below is a DELIBERATE END-TO-END single-agent SWE solver, elicited
+# to its best (METR anti-strawman discipline — never hand a baseline a worse setup than
+# we'd give ourselves). It is NOT the pipeline chunk-worker (`prompts/worker.md`), which
+# hands off to a validator that does not exist in this arm and would under-elicit it.
+id: coding-solo
+extends: single-agent
+version: 0.1.0
+description: >-
+  Baseline A internal ablation: the coding harness with the multi-agent spine collapsed
+  to a single end-to-end worker — identical model / base tools / infra / budget to the
+  full coding spine, only orchestration OFF. The single-agent generation unit for the
+  impartial benchmark suite (also the per-sample unit Baseline C best-of-N samples).
+
+workItem:
+  kind: feature
+  idPrefix: F
+
+# Single-role spine: the worker IS the decider and runs the task end-to-end, emitting
+# DONE when it believes the task is solved (the adapter then extracts the diff and grades
+# externally), ESCALATE if genuinely blocked. The DONE/ESCALATE/IDLE edges and the
+# `planner: inline` are inherited from `single-agent`; we only name the decider (worker)
+# and lift maxTurns so a real SWE-bench-Pro task isn't strangled before it reaches the
+# iso-budget cap (the iso-budget — tokens/$ — is the TRUE fairness bound, BRIEF 7; turns
+# are only a runaway safety bound). 200 mirrors the full coding spine's maxTurns.
+spine:
+  decider: worker
+  maxTurns: 200
+
+roles:
+  - id: worker
+    description: >-
+      The single benchmark solver: read the task (the problem_statement carried on the
+      work_item) and the repo, implement a complete and correct fix, write and run tests
+      to verify it, and emit DONE with a working tree whose `git diff base..HEAD` is the
+      submission. No hand-off, no decomposition, no peer review — you are the entire
+      pipeline. Persona: blueprints/coding-solo/prompts/worker.md (blueprint-owned,
+      resolved via BLUEPRINT_ID=coding-solo).
+
+# Diff extraction reuses the coding gym seam (`git-diff`): BRIEF 3's `extractDiff` reads
+# the substrate git diff of the worktree against base_commit (grader test files excluded).
+gym:
+  collectTrace: git-diff
+
+knobs:
+  # Same infra class as the full arm's coding sub-harness (the "identical infra" control).
+  harnessKind: coding
+  requiresRepo: true
+
+# Tool surface = the BASE coding capabilities a single solver uses: its own scratch
+# artifacts, repo/project docs, locating its worktree, recall, and reading its assigned
+# task. The native read / edit / bash / test-exec / search capabilities ride the spawned
+# agent's runtime, identical to the full arm's worker. This list DELIBERATELY EXCLUDES
+# the coordination / hand-off / decomposition surface that the full `coding` blueprint
+# grants its worker (coord:* / plans:add-*/new/promote/set-* / topics:* /
+# issues:* / features:history|list_related / harness:escalation|pending_reviews) — that
+# surface IS the multi-agent treatment being ablated (D-004), and a lone worker has no
+# peer to coordinate with. Holding the BASE capabilities identical while removing ONLY
+# the orchestration surface is the fairness invariant. (Reconcile the exact base set
+# with BRIEF 2's `external-bench` coding worker so the two arms' base tools match byte
+# for byte; "blocked" in this arm is the spine's ESCALATE verb, not a work_items:create.)
+dependencies:
+  tools:
+    - agent_tools:list
+    - artifacts:load
+    - artifacts:save
+    - docs:get
+    - docs:outline
+    - docs:search
+    - harness:phase_path
+    - memory:search
+    - work_items:get
+    - work_items:list
+  plugins: []

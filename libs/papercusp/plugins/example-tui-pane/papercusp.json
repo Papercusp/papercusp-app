@@ -1,0 +1,22 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "example-tui-pane",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Reference plugin for the TUI pane surface (revive-plugin-system D-002). Contributes a `tui-pane` the pui opens in a zellij pane, rendering a small live view via a shipped render.sh.",
+  "capabilities": [
+    "ui:tui-pane",
+    "compute:exec:sh"
+  ],
+  "ui": [
+    {
+      "type": "tui-pane",
+      "slug": "demo",
+      "label": "Example TUI Pane",
+      "icon": "terminal",
+      "command": ["sh", "render.sh"]
+    }
+  ],
+  "tools": []
+}

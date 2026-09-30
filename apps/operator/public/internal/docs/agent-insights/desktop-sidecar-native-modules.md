@@ -1,0 +1,146 @@
+# The desktop sidecar's native modules — the Windows sidecar is a LINUX process, and platform binaries arrive as optionalDependencies
+URL: /internal/docs/agent-insights/desktop-sidecar-native-modules
+
+Two independent ship-blockers in one cut (0.0.9 shipped DOA on all three platforms). (1) napi/node-gyp packages ship their platform binaries as optionalDependencies, so a dependency-closure copier that walks only `dependencies` silently drops every native binary. (2) The Windows sidecar runs INSIDE WSL, so it needs LINUX natives — cross-installing @img/sharp-win32-x64 to 'fix Windows' packs a binary nothing ever loads. Plus the false-green family that hid both.
+
+## What shipped, and how
+
+0.0.9 installed cleanly on all three platforms and died at boot on all three:
+
+```
+Could not load the "sharp" module using the linux-x64 runtime
+    at .../sidecar/node_modules/sharp/lib/sharp.js:120
+```
+
+On a dev box nobody noticed: when its own sidecar dies, the app **falls back to a
+`:3070` operator** — which every dev box has and no beta tester does. Only a real
+install on a machine with no dev operator can see this class.
+
+## Trap 1 — platform binaries are `optionalDependencies`, and every hop is optional
+
+`copy_pkg_closure()` in `build-desktop-sidecar.sh` walked only `dependencies`.
+But napi/node-gyp packages ship their platform binaries as **`optionalDependencies`** —
+that is the convention, not an edge case. sharp is the worst case, because *every*
+hop is optional:
+
+```
+sharp --(optional)--> @img/sharp-linux-x64 --(optional)--> @img/sharp-libvips-linux-x64
+```
+
+So the bundle packaged sharp's JavaScript and **none** of its native code. A
+one-level fix is not enough either: it would ship the binding without the 16MB
+`libvips-cpp.so.8.17.3` it links against.
+
+The copier now follows both dep sets, and an absent optional dep for *another*
+platform is correctly skipped rather than warned about (it is supposed to be absent).
+
+> The clue nobody followed: the musl-strip step had *always* claimed these arrive
+> "as optional deps (e.g. `@img/sharp-linuxmusl-*`)" — it had been stripping packages
+> the copier never copied. A standing contradiction in the code is a bug report.
+
+## Trap 2 — the WINDOWS sidecar is a LINUX process
+
+This is the one that will fool you, and it fooled two agents in opposite directions.
+
+`build-windows-cross.sh` (WI-5651 retired the VM-based `build-windows-on-vm.sh` that
+used to do this) packs `sidecar/` **as-is** and never rebuilds it — it fails early if
+`src-tauri/sidecar/apps` isn't already populated by `build-desktop-sidecar.sh` — keeping
+`sidecar/**/node_modules`. That looks exactly like a bug: the Windows
+app appears to get *linux* natives and a linux ELF `bin/node`.
+
+It is not a bug. **On Windows the sidecar runs inside WSL** — `main.rs`
+`make_sidecar_command`:
+
+```rust
+let mut cmd = Command::new("wsl.exe");
+cmd.args(["--distribution", wsl_setup::DISTRO_NAME_PUB,  // papercup-runtime
+          "--cd", &cwd_wsl,                              // the sidecar dir, /mnt/c/...
+          "--exec", "node", "--require", &preload_wsl, &server_js_wsl]);
+```
+
+It does **not** execute the bundled `sidecar/bin/node`. It runs `node` inside the
+distro — `scripts/build-rootfs.sh` installs **node 22 linux-x64 into `/usr/local`**
+precisely so a profile-less `wsl.exe --exec node` finds it. cwd is the packed sidecar
+dir, so `require("sharp")` resolves out of the packed **linux** `node_modules`.
+
+**Consequences:**
+
+* Windows wants the linux-built sidecar. Packing it as-is is correct.
+* Cross-installing `@img/sharp-win32-x64` to "fix Windows" packs a binary **nothing
+  ever loads**. It fixes nothing and bloats the installer.
+* The linux ELF `sidecar/bin/node` inside the Windows bundle is never executed —
+  dead weight, safe to trim.
+
+**Each leg is already correct by construction**, because `build-desktop-sidecar.sh`
+has *no cross-target mode* — `target_os` / `_bare_node_platform` come from `uname -s`
+of the **build host**:
+
+| leg     | sidecar built where                   | natives it needs           |
+| ------- | ------------------------------------- | -------------------------- |
+| linux   | this box                              | linux-x64                  |
+| windows | *reuses linux's bundle*               | linux-x64 (runs under WSL) |
+| mac     | on the mac VM (`mac-vm-build.sh:194`) | darwin (its own host arch) |
+
+> The mac build VM is **Darwin x86\_64**, not arm64. A `@img/sharp-darwin-arm64`
+> cross-install is the wrong arch for it.
+
+## Trap 3 — the false-green family that hid all of it
+
+Every one of these was hit for real, and each one manufactures confidence:
+
+* **Node resolves UPWARD.** The sidecar lives inside the repo, so a native *missing
+  from the bundle* is happily resolved from an ancestor `node_modules` and the broken
+  bundle greens. Any in-place `require()` check is vacuous unless it forbids escape.
+  A user's machine has no ancestor `node_modules`; it dies there instead.
+* **Never test a failure sentinel by inequality.** A boot probe did
+  `code=$(curl -o /dev/null -w '%{http_code}' … || echo 000)`; curl prints `000` *and*
+  exits non-zero on connection-refused, so `|| echo 000` **concatenated** to `"000000"`,
+  which `!= "000"` — a refused connection read as UP. There is no HTTP 000000. Match a
+  real status **positively** (`^[1-5][0-9][0-9]$`).
+* **A gate whose expectations come from the artifact it checks cannot fail on a
+  missing file.** A "scan node\_modules for `*.node` and load what you find" check finds
+  *nothing* to test when the native is absent — i.e. it passes on exactly the bug.
+  Keep the contract a **static list**.
+* **`serve.mjs --ensure` reuses a healthy running operator and exits 0**, so a "boot
+  gate" built on it passes without ever booting the bundle. (It also SIGKILLs the
+  operator it adopts — never point it at your real `HOME`.)
+* **A binary grep proves PACKAGED, never LOADED or DELIVERED.**
+* **`cmd | head` returns head's exit status, not cmd's.**
+
+## The guard that closes the class
+
+`verify-sidecar-bundle.sh` phase **\[6] native modules load** — called from
+`build-desktop-sidecar.sh` on **every build, on every host**, so one check covers all
+three legs. It `require()`s each contract native with the **bundled node, resolving out
+of the bundle**, and patches `Module._resolveFilename` to reject any resolution that
+**escapes the bundle** — enforcing the real contract: *the bundle is self-contained*.
+A packaged-but-unloadable native now fails the **build**, not the beta tester.
+
+Two rules for editing it:
+
+1. **`REQUIRED_NATIVE_MODULES` is a static list on purpose.** Do not turn it into a
+   scan (see Trap 3). When you add a dependency that dlopens a `*.node`, add it here.
+2. **`onnxruntime-node` is advisory, never fatal.** Upstream ships
+   `bin/napi-v6/darwin/`**`arm64` only** — there is *no* darwin-x64 binding, so on the
+   Intel mac VM it can never load; it is also deliberately kept off the boot path
+   (`voice-node/kokoro-local.ts`: "Dynamic import keeps onnxruntime-node's native load
+   OFF the operator boot path"). Requiring it would red every mac cut forever.
+
+**Falsify it in both directions after any change** — delete the bundle's `@img/` and
+confirm it *fails*, then confirm the real bundle *passes*. A gate you have never
+watched fail is not a gate.
+
+## If you are debugging this again
+
+```bash
+# does the packed sidecar's sharp actually load, under the node that will run it?
+cd papercusp-desktop/src-tauri/sidecar
+./bin/node -e 'const s=require("sharp"); if(!/^\d+\.\d+\.\d+/.test(s.versions.vips)) process.exit(1); console.log("ok", s.versions.vips)'
+
+# the whole contract, both call styles
+bash bin/verify-sidecar-bundle.sh src-tauri/sidecar   # relative (how mac-vm-build.sh calls it)
+```
+
+Note the verifier normalizes its `SIDECAR` argument to an absolute path: phase \[6]
+`cd`s into the bundle, and a relative `$BIN/node` would resolve nowhere afterwards —
+making every native "fail to load". Phases \[1]–\[5] never `cd`, so they never noticed.

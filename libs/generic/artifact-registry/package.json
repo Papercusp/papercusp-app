@@ -1,0 +1,22 @@
+{
+  "name": "@papercusp/artifact-registry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A generic artifact registry: publish/install distributable artifacts (plugins, snapshots, blueprints, packages…) over a pluggable storage backend. Content-addressed blob store (hash-verified put/get, idempotent dedupe, visibility-gated download, refcounted GC) behind a BlobStore port, plus an ArtifactRegistry over a ListingStore port (publish-with-dedup, list, get, unlist+GC, claim) with the domain — kinds, identity/trust, validation — injected. Zero coupling: no Cloudflare, no SQL, no HTTP framework. Web-Crypto only.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "@typescript/native": "npm:typescript@7.0.2",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "vitest": "^4.1.4"
+  }
+}

@@ -1,0 +1,68 @@
+# The `scout` blueprint — deterministic-blueprints-migration-2026-06-13 (P-121).
+#
+# Scout's autonomous-ideation cadence (hive-creative-ideation P-008 / D-010): per
+# tick, gate on idle-capacity OR friction → the autoloop fire-gate → single-flight
+# claim → budget, then run ONE budgeted ideation cycle (ideator → critic → route to
+# plans/gym/improvements). Most ticks no-op cheaply; a real cycle fires only when the
+# cadence gate says so — the cron is the heartbeat, NOT the cadence.
+#
+# Scout is NOT a flag+governor-preflight loop: its gate is STRUCTURAL and lives inside
+# the tick (the op runs the SAME `runScoutTick` the routine did, with the SAME
+# production cycle runner + signals + governor sub-budget mirror). So as a blueprint
+# it is a DETERMINISTIC pipeline — one step whose op runs the self-gated tick —
+# behavior-neutral with the bespoke `system:scout-cycle` routine (D-004). The cycle's
+# ideator/critic legs are operator `llmCall`s, NOT fleet spawns via spawnInvokeOnce
+# (D-009), so this is NOT a `spawn-roles` hybrid and NOT a re-route onto the launch
+# chokepoint. SEEDED INACTIVE; bring-up is human-gated.
+id: scout
+extends: base
+version: 0.1.0
+description: >-
+  Scout autonomous-ideation cadence: idle/friction-gated, budgeted ideation cycles
+  (ideator → critic → route to draft plans / the gym / improvements) on a frequent
+  heartbeat. The op runs the same self-gated tick as the bespoke routine.
+
+# A descriptive work-item kind (the deterministic pipeline routes ideas directly —
+# draft plans / gym entries / improvements — rather than creating rows); the schema
+# requires the field.
+workItem:
+  kind: ideation-cycle
+  idPrefix: SCT
+
+# Program-mode spine (P-010): one deterministic step, NO gate ⇒ deterministic
+# pipeline. `payload.cadence` / `payload.budget` / `payload.cycleTimeoutMs` /
+# `payload.scout` are the cadence, budget, wall-clock timeout, and Scout config
+# overrides the routine's payload_template carries (absent ⇒ the op's / gate's
+# defaults). A whole-string `{{ payload.x }}` that is unset interpolates to
+# undefined → the op's optional arg is omitted → its default applies.
+spine:
+  steps:
+    - id: cycle
+      op: blender:cycle
+      args:
+        cadence: "{{ payload.cadence }}"
+        budget: "{{ payload.budget }}"
+        cycleTimeoutMs: "{{ payload.cycleTimeoutMs }}"
+        scout: "{{ payload.scout }}"
+      bind: cycle
+
+knobs:
+  harnessKind: learning
+  requiresRepo: false
+
+# Scheduled trigger (D-004): the Scout heartbeat, byte-identical to the bespoke
+# `system:scout-cycle` routine (every 30 min). The routine fires `system:blueprint-run`
+# with `{ blueprintId: scout }`; the handler detects program-mode and runs the step
+# inline. The cadence gate inside the tick decides whether to actually run. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 */30 * * * *"
+      action: system:blueprint-run
+      singleton: true        # P-144/D-018: workspace-singleton cadence
+      singletonActive: true  # D-024: structural-gated ideation loop — seeds ACTIVE on a fresh workspace
+
+# No agent roles (the cycle's LLM legs are internal llmCalls) and no agent-tool deps —
+# the step calls a registered function, not an agent.
+dependencies:
+  tools: []
+  plugins: []

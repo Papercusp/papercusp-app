@@ -1,0 +1,4 @@
+{
+  "id": "orient-no-bundle",
+  "configDelta": { "excludeTools": ["coord:orient"] }
+}

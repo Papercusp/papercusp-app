@@ -1,0 +1,128 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 / pair postgres.psql-describe (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T01:23:00Z",
+  "totalAtoms": 35,
+  "totalSessions": 10,
+  "sample": [
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-20T15:54:27.346Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -X -A -F' | ' -c \"\\d harness_shared.coord_event_log\" 2>&1"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-20T16:39:58.691Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -X -A -F' | ' -c \"\\d harness_shared.coord_presence\" 2>&1"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-20T16:05:18.353Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -X -A -F' | ' -c \"\\d harness_shared.engineer_issues\" 2>&1"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-20T16:14:56.387Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -X -A -F' | ' -c \"\\d harness_shared.pots\" 2>&1"
+    },
+    {
+      "sid": "su-7905fadc-2ba3-4492-897d-99d351a64a68",
+      "ts": "2026-07-26T05:04:40.305Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -c \"\\d harness_shared.agent_facts\" 2>&1"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-20T15:12:35.849Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -c \"\\d harness_shared.coord_thread_posts\" 2>&1"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T22:17:03.776Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -c \"\\d harness_shared.engineer_issues\" 2>&1"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T11:36:22.141Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -c \"\\d harness_shared.routines\" 2>&1"
+    },
+    {
+      "sid": "su-63f9b336-5b17-461a-b12e-a8421de9a09b",
+      "ts": "2026-07-26T01:45:53.694Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -c \"\\d harness_shared.schema_migrations\""
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T22:11:34.341Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -c \"\\dt harness_shared.*\" 2>&1"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-20T15:12:00.127Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -c \"\\dt\" 2>&1"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-20T16:45:48.296Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -t -A -c \"\\d harness_shared.work_items\""
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T09:17:16.034Z",
+      "atom": "psql \"postgresql://harness_admin:harness_admin_pwd@localhost:5432/papercusp\" -tA -c \"\\dt harness_shared.*\" 2>&1"
+    },
+    {
+      "sid": "su-73565638-a17a-4be4-adfd-86a6750ac1c1",
+      "ts": "2026-07-26T07:30:52.016Z",
+      "atom": "psql \"postgresql://postgres:postgres@localhost:5432/papercusp\" -c \"\\dt harness_shared.schema_migrations\" 2>&1"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-20T18:08:18.378Z",
+      "atom": "psql \"postgresql://postgres@127.0.0.1:18632/papercusp\" -tA -c \"\\d harness_shared.harness_registry\" 2>&1"
+    },
+    {
+      "sid": "su-d93ac1bf-d48f-420d-8136-dea6de467e7f",
+      "ts": "2026-07-20T20:59:38.296Z",
+      "atom": "psql -h 127.0.0.1 -p 18632 -U postgres -d papercusp -c \"\\d harness_shared.harness_features_consolidated\" 2>&1"
+    },
+    {
+      "sid": "su-d93ac1bf-d48f-420d-8136-dea6de467e7f",
+      "ts": "2026-07-20T20:56:56.668Z",
+      "atom": "psql -h 127.0.0.1 -p 18632 -U postgres -d papercusp -c \"\\d harness_shared.substrate_outbox\" 2>&1"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-20T20:57:02.870Z",
+      "atom": "psql -h 127.0.0.1 -p 18632 -U postgres -d papercusp -c \"\\d substrate_outbox\" 2>&1"
+    },
+    {
+      "sid": "su-5f583f64-915f-4596-b5ec-0c6af8620dec",
+      "ts": "2026-07-17T05:02:33.595Z",
+      "atom": "psql -h localhost -U harness_admin -d papercusp -c \"\\d harness_shared.adv_sessions\" 2>&1"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-21T02:07:15.391Z",
+      "atom": "psql -h localhost -U harness_admin -d papercusp -c \"\\d harness_shared.harness_registry\" 2>&1"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-21T02:06:35.583Z",
+      "atom": "psql -h localhost -U harness_admin -d papercusp -c \"\\d harness_shared.messages_consolidated\" 2>&1"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-21T02:06:24.527Z",
+      "atom": "psql -h localhost -U harness_admin -d papercusp -c \"\\dt harness_shared.*message*\" 2>&1"
+    },
+    {
+      "sid": "su-a8557b00-55fb-4438-a7bd-f269a7a3bf6c",
+      "ts": "2026-07-26T14:34:46.378Z",
+      "atom": "psql -h localhost -p 5432 -U harness_admin -d papercusp -c \"\\d harness_shared.schema_migrations\" 2>&1"
+    },
+    {
+      "sid": "su-4d787d0b-f22e-4a31-8f04-cd977981f7e2",
+      "ts": "2026-07-17T09:33:00.629Z",
+      "atom": "psql -h localhost -p 5432 -U harness_admin -d papercusp -c \"\\d harness_shared.session_pending_gates\" 2>&1"
+    }
+  ]
+}

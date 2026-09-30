@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Fast launcher: always builds the debug binary from the COMMITTED config
+# before launching it, then opens it against the frozen :3070 bundle
+# (EI-160 point 1 — the durable, in-repo fix).
+#
+# WHY :3070 (not :3055 / :3170): this repo is edited concurrently by a FLEET
+# of agents. A window pointed at the :3055 Vite dev server or the :3170
+# staging operator reloads on every fleet edit / dep re-optimization / proxy
+# 502 — it "constantly refreshes on load". :3070 is the GREEN release
+# operator: a static, deploy-gated bundle that does not change under you.
+# Want HMR for a local UI tweak instead? Use `bin/desktop-dev-nohmr` (or
+# `npm run tauri -- dev` for the full :3055 HMR path).
+#
+# WHY "ALWAYS REBUILD" (the durable, in-repo fix for EI-160 point 1): the
+# window's content URL is baked into the Rust binary at compile time (Tauri's
+# generate_context! embeds tauri.conf.json's devUrl/frontendDist). The
+# recurring "the refresh bug keeps coming back" symptom is: someone rebuilds
+# this debug binary pointed at :3055/:3170 to live-test branch code and never
+# rebuilds it back, so the artifact they later double-click DRIFTS off the
+# frozen :3070 bundle — the committed config being correct does nothing until
+# the binary is recompiled.
+#
+# An earlier version of this script tried to detect that drift by grepping
+# the compiled binary's strings for its baked content URL and skipping the
+# rebuild when it already matched. That heuristic turned out to be UNSOUND:
+# Tauri serializes the WHOLE build config (both `devUrl` and `frontendDist`)
+# into the binary's rodata regardless of which one actually governs runtime
+# navigation (that choice is instead made by the `custom-protocol` Cargo
+# feature — off by default in this crate's `[features] default = []`, so a
+# plain `cargo build` here always uses `devUrl`, not `frontendDist`, making a
+# frontendDist-vs-baked-strings comparison backwards). Rather than depend on
+# that fragile, easy-to-get-wrong inference, this launcher takes the OTHER
+# fix the tracking item proposed: make dev launches always rebuild. `cargo
+# build` is INCREMENTAL — a no-op build after `touch tauri.conf.json` costs
+# tens of seconds, not a from-scratch compile — so this stays fast in
+# practice while never risking a stale artifact.
+#
+# It also relies on build.rs's own EI-160 point-2 fix (a placeholder written
+# for a missing gitignored sidecar/, so a fresh/cleaned checkout still
+# compiles) — no separate sidecar bootstrap needed here.
+#
+# Each invocation launches one new window (foreground).
+#
+# Usage: bin/desktop-fast-launch
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+DESKTOP="$(cd "$HERE/.." && pwd)"
+SRCTAURI="$DESKTOP/src-tauri"
+BIN="$SRCTAURI/target/debug/papercusp-desktop"
+CONF="$SRCTAURI/tauri.conf.json"
+LOG="${LOG:-/tmp/papercusp-desktop-fast-launch.log}"
+log(){ echo "[desktop-fast-launch $(date +%H:%M:%S)] $*" | tee -a "$LOG" >&2 ; }
+
+# ── 1. Ensure the frozen :3070 backend (papercup-dev-api / green release
+#      operator) this bundle points at is actually up. Best-effort: if the
+#      systemd unit doesn't exist on this box (e.g. CI, a non-dev-box
+#      checkout) we just skip and let the app report the real error.
+if ! curl -fsS --max-time 2 http://127.0.0.1:3070/ >/dev/null 2>&1; then
+  log ":3070 unreachable — attempting to start papercup-dev-api.service"
+  systemctl --user start papercup-dev-api.service >>"$LOG" 2>&1 || true
+  for _ in $(seq 1 30); do
+    sleep 1
+    curl -fsS --max-time 2 http://127.0.0.1:3070/ >/dev/null 2>&1 && break
+  done
+fi
+
+# ── 2. Always rebuild from the committed config (incremental — see header).
+#      `touch` forces cargo to re-run build.rs / re-embed the config even
+#      when no source changed, so a prior drifted bake is always corrected.
+#      A single flock serializes concurrent launches onto one build instead
+#      of racing two `cargo build`s against the same target/ dir.
+exec 9>/tmp/papercusp-desktop-fast-launch-build.lock
+flock -w 600 9 || { log "could not acquire build lock within 600s — another build is stuck"; exit 1; }
+log "building desktop binary from committed config (devUrl/frontendDist per $CONF)"
+if ! ( cd "$SRCTAURI" && touch tauri.conf.json && cargo build ) >>"$LOG" 2>&1; then
+  log "cargo build failed — see $LOG"
+  flock -u 9
+  exit 1
+fi
+flock -u 9
+
+if [ ! -x "$BIN" ]; then
+  log "ERROR: build succeeded but $BIN is not present/executable"
+  exit 1
+fi
+
+cd "$DESKTOP"
+exec "$BIN"

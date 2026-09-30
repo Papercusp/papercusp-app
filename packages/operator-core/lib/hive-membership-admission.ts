@@ -1,0 +1,552 @@
+/**
+ * hive-membership-admission — the P-MEMBER orchestration: compose the owner-signed
+ * policy (EN-1 getHivePolicy) with the pending-join queue + the trust set to GATE a
+ * joiner, and let the owner DECIDE pending requests (Brief EN-3 / P-MEMBER).
+ *
+ * Three entry points:
+ *   - evaluateJoinAdmission  — the JOIN-PATH gate. Reads the policy, runs the pure
+ *     decision (hive-membership-policy.evaluateMembershipAdmission), and for an
+ *     `approval`-mode joiner records a PENDING request (federates to the owner). The
+ *     join flow calls this BEFORE trust-admitting (upsertHiveMember) a joiner.
+ *   - approvePendingJoin     — the OWNER approves: trust-admit (upsertHiveMember with
+ *     the request's captured devices) + mark the pending row 'approved' (federates the
+ *     decision back). This is what flips a pending joiner into the trust set.
+ *   - denyPendingJoin        — the OWNER denies: mark 'denied'. The joiner is never
+ *     trust-admitted.
+ *
+ * The owner-decision functions are gated on claimed-owner authority by their CALLERS
+ * (the agent-tools / API routes that own the binding-service check), NOT here — this
+ * module is the mechanism, the route is the gate (same split as hive-policy-author /
+ * the policy-set route).
+ *
+ * `null`/absent policy ⇒ `open` ⇒ admit, so a Hive with no policy is completely
+ * unaffected (today's behavior; EN-1 guarantee #2). All collaborators are injectable
+ * seams for hermetic tests; `sql` threads a per-file test schema into the stores.
+ */
+import type { Sql } from 'postgres';
+import { pinModuleState } from '@papercusp/module-singleton';
+import { getHivePolicy } from './hive-policy-store';
+import type { HivePolicy } from './hive-policy-schema';
+import {
+  evaluateMembershipAdmission,
+  type JoinerIdentity,
+} from './hive-membership-policy';
+import { resolveFederatedPotScope, type FederatedPotScope } from './federated-pot-scope';
+import {
+  recordPendingJoin as realRecordPendingJoin,
+  getPendingJoin as realGetPendingJoin,
+  setPendingJoinDecision as realSetPendingJoinDecision,
+  type PendingJoinRecord,
+} from './hive-pending-joins-store';
+import {
+  upsertHiveMember as realUpsertHiveMember,
+  getHiveMember as realGetHiveMember,
+  type HiveMemberRecord,
+} from './hive-membership-store';
+import type { DeviceAttestationEntry } from './harness/contributor-row-types';
+
+/** The joiner's identity + the devices to bind on (admission material). */
+export interface JoinerInfo extends JoinerIdentity {
+  displayName?: string | null;
+  avatarUrl?: string | null;
+  deviceAttestations?: DeviceAttestationEntry[];
+}
+
+export type JoinAdmissionOutcome =
+  | { outcome: 'admit' }
+  | { outcome: 'pending'; reason: string; pending: PendingJoinRecord }
+  | { outcome: 'refuse'; reason: 'banned' | 'not_allowlisted' };
+
+export interface MembershipAdmissionDeps {
+  /** Read the current owner-VERIFIED policy. Default: getHivePolicy → .policy. */
+  getPolicy?: (workspaceId: string, potHomeSlug: string) => Promise<HivePolicy | null>;
+  recordPendingJoin?: typeof realRecordPendingJoin;
+  getPendingJoin?: typeof realGetPendingJoin;
+  setPendingJoinDecision?: typeof realSetPendingJoinDecision;
+  upsertHiveMember?: typeof realUpsertHiveMember;
+  /** Read an existing member row — the ownerAdmitOrPend already-member fast path.
+   *  Default: getHiveMember. */
+  getHiveMember?: typeof realGetHiveMember;
+  /**
+   * BUG B self-heal (shared-hive-member-content-federation D-028, layer 3): RE-grant +
+   * re-FEDERATE the reconnecting member's epoch keys [0..current]. Called from
+   * ownerAdmitOrPend's already_member branch so a member that MISSED the original
+   * federated grant (joined-after-grant / forward-only cursor / re-session) gets it
+   * re-sent on reconnect. Default: re-grant via reconcileEpochKeysForCurrentMembers
+   * with refederate=true + onlyDevices=the member's devices (C-001: revoked excluded).
+   * Injectable so the unit tests can assert it fires on reconnect (and only then).
+   */
+  refederateMemberEpochKeys?: (args: {
+    workspaceId: string;
+    potHomeSlug: string;
+    memberDevicePubkeys: readonly string[];
+  }) => Promise<void>;
+  /** Per-file test schema threaded into the stores. */
+  sql?: Sql;
+}
+
+/**
+ * WI-2141185 mechanism 1 — the reconnect re-grant must be idempotent in EFFECT, not
+ * merely in content.
+ *
+ * `admitAnnouncedPeerAsOwner` runs for EVERY drained announce by design (boot.ts: a
+ * second device of an already-member user would otherwise never be attested), and the
+ * already_member branch below used to fire the BUG-B re-grant on every one of them.
+ * refederate=true re-stamps the wrapped_key row (origin='local', fed_ts/fed_hlc cleared)
+ * so the mig-411 AFTER INSERT OR UPDATE capture re-federates it — so each announce
+ * enqueued a fresh substrate_outbox put for a row whose CONTENT never changed. Measured
+ * on the two-machine rig: 1,924 pot_epoch_keys puts/min generated by TWO underlying rows
+ * (~1000x amplification), with 7,076 undrained.
+ *
+ * The heal itself is still required (the owner cannot observe whether the member ever
+ * APPLIED the key — pot_epoch_keys records only that the owner wrapped it), so this
+ * bounds it instead of removing it: re-grant ONCE per (hive, member device) per process.
+ * A genuine reconnect in a fresh process still heals; repeat announces within one process
+ * add nothing, because the member is by definition connected at the moment we re-send.
+ * A NEW device is a new key ⇒ still healed. An epoch ADVANCE needs no entry here: a new
+ * epoch inserts a new row, and the capture trigger federates on INSERT.
+ */
+const __reconnectRegrantState = pinModuleState<{ healed: Set<string> }>(
+  '@papercusp/operator-core.hive-membership-admission.reconnectRegrant',
+  () => ({ healed: new Set<string>() }),
+);
+
+/** Unambiguous composite key — JSON tuple so no separator can collide with a slug/pubkey. */
+const regrantKey = (workspaceId: string, potHomeSlug: string, devicePubkey: string): string =>
+  JSON.stringify([workspaceId, potHomeSlug, devicePubkey]);
+
+/** Test-only: clear the process-lifetime re-grant memo between hermetic cases. */
+export function __resetReconnectRegrantMemoForTests(): void {
+  __reconnectRegrantState.healed.clear();
+}
+
+/** Key-order-stable JSON so an attestation compare cannot false-positive on key order. */
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_k, val) =>
+    val && typeof val === 'object' && !Array.isArray(val)
+      ? Object.fromEntries(
+          Object.entries(val as Record<string, unknown>).sort(([a], [b]) =>
+            a < b ? -1 : a > b ? 1 : 0,
+          ),
+        )
+      : val,
+  );
+}
+
+/**
+ * WI-2141185 mechanism 1 (second half): would this announce CHANGE the stored member row?
+ *
+ * upsertHiveMember's ON CONFLICT ... DO UPDATE SET carries no content guard, so a repeat
+ * announce rewrote pot_members unconditionally and the capture trigger federated the
+ * no-op write (measured: 2,408 pot_members puts/min, 5,146 undrained). The already_member
+ * branch already reads the stored row, so the comparison is free — skip the write when it
+ * would be a no-op.
+ *
+ * Mirrors the merge the upsert performs: scalars compared directly, attestations UNIONed
+ * by device_pubkey with the announced entry winning. A pubkey already on this row's
+ * revoked blocklist is SCRUBBED by that merge, so it can never change the row — ignoring
+ * it here also denies a banned device a re-federation lever by re-announcing.
+ */
+function announceWouldChangeMember(
+  existing: HiveMemberRecord,
+  joiner: {
+    githubUsername: string;
+    displayName?: string | null;
+    avatarUrl?: string | null;
+    deviceAttestations?: readonly { device_pubkey?: string }[] | null;
+  },
+): boolean {
+  // The already_member branch always upserts bindingStatus:'verified'.
+  if (existing.bindingStatus !== 'verified') return true;
+  if (existing.githubUsername !== joiner.githubUsername) return true;
+  if (existing.displayName !== (joiner.displayName ?? null)) return true;
+  if (existing.avatarUrl !== (joiner.avatarUrl ?? null)) return true;
+
+  const revoked = new Set(existing.revokedPubkeys ?? []);
+  const stored = new Map<string, string>();
+  for (const att of existing.deviceAttestations ?? []) {
+    const pk = att?.device_pubkey;
+    if (typeof pk === 'string' && pk.length > 0) stored.set(pk, stableJson(att));
+  }
+  for (const att of joiner.deviceAttestations ?? []) {
+    const pk = att?.device_pubkey;
+    if (typeof pk !== 'string' || pk.length === 0) continue;
+    if (revoked.has(pk)) continue; // scrubbed by the merge — cannot change the row
+    const prior = stored.get(pk);
+    if (prior === undefined || prior !== stableJson(att)) return true;
+  }
+  return false;
+}
+
+/**
+ * Default BUG-B reconnect re-grant: re-send the reconnecting member's epoch keys
+ * [0..current] with refederate=true so the mig-411 AFTER INSERT OR UPDATE capture
+ * re-federates them. Owner-only + flag-gated (the delegate self-gates: loadHivePubkey
+ * is null / the flag is off ⇒ no-op), C-001-safe (reconcileEpochKeysForCurrentMembers
+ * excludes the revoked union, intersected with onlyDevices). DYNAMIC import avoids the
+ * admission ↔ boundary-wiring module cycle (same pattern as upsertHiveMember's grant).
+ */
+async function defaultRefederateMemberEpochKeys(
+  args: { workspaceId: string; potHomeSlug: string; memberDevicePubkeys: readonly string[] },
+  sql?: Sql,
+): Promise<void> {
+  const devices = args.memberDevicePubkeys.filter(
+    (pk): pk is string => typeof pk === 'string' && pk.length > 0,
+  );
+  if (devices.length === 0) return;
+  const { reconcileEpochKeysForCurrentMembers, isHiveRekeyEnabled } = await import(
+    './sync/hyperbee/hive-epoch-boundary-wiring'
+  );
+  await reconcileEpochKeysForCurrentMembers({
+    workspaceId: args.workspaceId,
+    potHomeSlug: args.potHomeSlug,
+    enabled: await isHiveRekeyEnabled(),
+    refederate: true,
+    onlyDevices: devices,
+    sql,
+  });
+}
+
+async function defaultGetPolicy(
+  workspaceId: string,
+  potHomeSlug: string,
+  sql?: Sql,
+): Promise<HivePolicy | null> {
+  const resolved = await getHivePolicy(workspaceId, potHomeSlug, sql);
+  return resolved?.policy ?? null;
+}
+
+/**
+ * The JOIN-PATH gate. Evaluate the owner-signed policy against a prospective joiner:
+ *   - admit   → the caller proceeds to trust-admit (upsertHiveMember).
+ *   - pending → a pending-join request is RECORDED (federates to the owner); the
+ *               caller does NOT trust-admit. The joiner waits for owner approval.
+ *   - refuse  → banned or not-allowlisted; the caller aborts the join.
+ *
+ * Pure-decision delegated to hive-membership-policy; this adds the pending-request
+ * side effect. `null` policy ⇒ admit (existing hives unaffected).
+ */
+export async function evaluateJoinAdmission(
+  input: { workspaceId: string; potHomeSlug: string; joiner: JoinerInfo },
+  deps: MembershipAdmissionDeps = {},
+): Promise<JoinAdmissionOutcome> {
+  const { workspaceId, potHomeSlug, joiner } = input;
+  const getPolicy = deps.getPolicy ?? ((ws, home) => defaultGetPolicy(ws, home, deps.sql));
+  const recordPending = deps.recordPendingJoin ?? realRecordPendingJoin;
+
+  const policy = await getPolicy(workspaceId, potHomeSlug);
+  const decision = evaluateMembershipAdmission(policy, {
+    githubUserId: joiner.githubUserId,
+    githubUsername: joiner.githubUsername,
+  });
+
+  if (decision.decision === 'admit') return { outcome: 'admit' };
+  if (decision.decision === 'refuse') return { outcome: 'refuse', reason: decision.reason };
+
+  // pending — record the federated request so it reaches the owner queue.
+  const pending = await recordPending(
+    {
+      workspaceId,
+      potHomeSlug,
+      githubUserId: joiner.githubUserId,
+      githubUsername: joiner.githubUsername,
+      displayName: joiner.displayName ?? null,
+      avatarUrl: joiner.avatarUrl ?? null,
+      deviceAttestations: joiner.deviceAttestations ?? [],
+    },
+    deps.sql,
+  );
+  return { outcome: 'pending', reason: decision.reason, pending };
+}
+
+export type DecidePendingResult =
+  | { ok: true; status: 'approved'; member: HiveMemberRecord; pending: PendingJoinRecord }
+  | { ok: true; status: 'denied'; pending: PendingJoinRecord }
+  | { ok: false; code: 'no_pending'; detail?: string };
+
+/**
+ * OWNER approves a pending joiner: trust-admit them (upsertHiveMember with the devices
+ * captured in the request) THEN mark the request 'approved' (federates the decision
+ * back). The owner is the writer, so the new hive_members row + the approved status
+ * federate to every peer incl. the joiner — robust even if the joiner is offline.
+ *
+ * Authority (claimed-owner) is the CALLER's responsibility.
+ */
+export async function approvePendingJoin(
+  // ⚠ SCOPE (WI-6312): the FEDERATED scope. Branded on the INPUT deliberately — this module
+  // has no local handle to resolve from, so the obligation belongs to the JOIN FLOW that
+  // already knows which of the two names it is holding.
+  input: {
+    workspaceId: string;
+    potHomeSlug: FederatedPotScope;
+    githubUserId: number;
+    decidedByGithubUserId: number;
+  },
+  deps: MembershipAdmissionDeps = {},
+): Promise<DecidePendingResult> {
+  const getPending = deps.getPendingJoin ?? realGetPendingJoin;
+  const upsertMember = deps.upsertHiveMember ?? realUpsertHiveMember;
+  const setDecision = deps.setPendingJoinDecision ?? realSetPendingJoinDecision;
+
+  const pending = await getPending(input.workspaceId, input.potHomeSlug, input.githubUserId, deps.sql);
+  if (!pending) return { ok: false, code: 'no_pending' };
+
+  const member = await upsertMember(
+    {
+      workspaceId: input.workspaceId,
+      potHomeSlug: input.potHomeSlug,
+      githubUserId: pending.githubUserId,
+      githubUsername: pending.githubUsername,
+      displayName: pending.displayName,
+      avatarUrl: pending.avatarUrl,
+      deviceAttestations: pending.deviceAttestations,
+      bindingStatus: 'verified',
+    },
+    deps.sql,
+  );
+
+  const decided = await setDecision(
+    input.workspaceId,
+    input.potHomeSlug,
+    input.githubUserId,
+    'approved',
+    input.decidedByGithubUserId,
+    null,
+    deps.sql,
+  );
+  return { ok: true, status: 'approved', member, pending: decided ?? pending };
+}
+
+/** OWNER denies a pending joiner: mark 'denied' (federates back). Never trust-admitted. */
+export async function denyPendingJoin(
+  input: {
+    workspaceId: string;
+    potHomeSlug: string;
+    githubUserId: number;
+    decidedByGithubUserId: number;
+    reason?: string | null;
+  },
+  deps: MembershipAdmissionDeps = {},
+): Promise<DecidePendingResult> {
+  const setDecision = deps.setPendingJoinDecision ?? realSetPendingJoinDecision;
+  const decided = await setDecision(
+    input.workspaceId,
+    input.potHomeSlug,
+    input.githubUserId,
+    'denied',
+    input.decidedByGithubUserId,
+    input.reason ?? null,
+    deps.sql,
+  );
+  if (!decided) return { ok: false, code: 'no_pending' };
+  return { ok: true, status: 'denied', pending: decided };
+}
+
+/**
+ * The OWNER-SIDE admit-or-pend decision, applied at the substrate admission seam
+ * (boot.ts `drainAdmissionQueue`) when the owner admits a binding-verified peer's
+ * announce. This is what WIRES the previously-dead `evaluateJoinAdmission` gate into
+ * the live join path (WI-639): before this, the owner UNCONDITIONALLY trust-admitted
+ * (`upsertHiveMember`) every verified peer — so `membership:'approval'` did nothing.
+ *
+ * Precedence:
+ *   1. ALREADY a member → refresh the row (re-upsert). This preserves the prior
+ *      open-mode reconnect behavior: the upsert idempotently re-grants the member's
+ *      epoch keys (shared-hive-rekey). An established member is NEVER re-routed
+ *      through the policy gate (approval mode must not "un-admit" an approved member
+ *      on reconnect, and must not re-open a pending/decided request for them).
+ *   2. NOT yet a member → consult the owner-signed policy via `evaluateJoinAdmission`:
+ *        - admit   (open / allowlisted)  → trust-admit (upsertHiveMember).
+ *        - pending (approval mode)       → a federated pending-join request is
+ *          recorded (by the OWNER here, origin='local' → it reaches the joiner and
+ *          shows in the owner's pot:membership_pending queue); the peer is NOT
+ *          trust-admitted. The owner later decides via pot:membership_decide.
+ *        - refuse  (banned / not-allowlisted) → neither admit nor pending.
+ *
+ * SECURITY/INVARIANTS: this gates ONLY the membership UPSERT decision. It does NOT
+ * touch core admission, the revoked set, the read-cut/epoch decrypt gate, or per-op
+ * policy enforcement — those run unchanged at their own seams. With no policy (or
+ * `open` mode) the outcome is `admit`, so existing hives are byte-for-byte unaffected.
+ * The joiner's CORE is admitted by boot.ts independent of this decision; a pending /
+ * refused peer's CONTENT is still gated by the P-002 membership guard + per-op
+ * enforcement, so nothing leaks before approval.
+ *
+ * Authority (this is the owner box, holding the Hive key) is the CALLER's check
+ * (boot.ts self-gates on loadHivePubkey), same split as the rest of this module.
+ */
+export type OwnerAdmitOutcome =
+  | { action: 'admitted'; member: HiveMemberRecord; reason: 'already_member' | 'policy_admit' }
+  | { action: 'pending'; pending: PendingJoinRecord }
+  | { action: 'refuse'; reason: 'banned' | 'not_allowlisted' };
+
+export async function ownerAdmitOrPend(
+  // ⚠ SCOPE (WI-6312): FEDERATED, resolved by the caller — see approvePendingJoin above.
+  input: { workspaceId: string; potHomeSlug: FederatedPotScope; joiner: JoinerInfo },
+  deps: MembershipAdmissionDeps = {},
+): Promise<OwnerAdmitOutcome> {
+  const { workspaceId, potHomeSlug, joiner } = input;
+  const getMember = deps.getHiveMember ?? realGetHiveMember;
+  const upsertMember = deps.upsertHiveMember ?? realUpsertHiveMember;
+
+  const upsert = (): Promise<HiveMemberRecord> =>
+    upsertMember(
+      {
+        workspaceId,
+        potHomeSlug,
+        githubUserId: joiner.githubUserId,
+        githubUsername: joiner.githubUsername,
+        displayName: joiner.displayName ?? null,
+        avatarUrl: joiner.avatarUrl ?? null,
+        deviceAttestations: joiner.deviceAttestations ?? [],
+        bindingStatus: 'verified',
+      },
+      deps.sql,
+    );
+
+  // 1 — already a member: refresh (idempotent epoch re-grant on reconnect). Never
+  //     re-route an established member through the policy gate.
+  const existing = await getMember(workspaceId, potHomeSlug, joiner.githubUserId, deps.sql);
+  if (existing) {
+    // WI-2141185 M1: this runs for EVERY drained announce (boot.ts), so an unconditional
+    // upsert re-stamped pot_members on every one and the capture trigger federated the
+    // no-op write. Skip the write when the announce carries nothing new; the stored row
+    // IS the result the upsert would have produced.
+    const member = announceWouldChangeMember(existing, joiner) ? await upsert() : existing;
+    // BUG B self-heal (D-028, layer 3): upsert's own grant is ON CONFLICT DO NOTHING, so a
+    // member that MISSED the original federated epoch-key grant (joined-after-grant /
+    // forward-only cursor / re-session) is never re-sent it — the owner's gap-check reads its
+    // OWN hive_epoch_keys (sees "no gap") and the capture trigger was AFTER INSERT only. On
+    // RECONNECT, re-grant [0..current] to THIS member's devices with refederate=true: the row
+    // is re-stamped (origin='local', fed_ts/fed_hlc cleared) → the mig-411 AFTER INSERT OR
+    // UPDATE capture re-federates → the member's LWW accepts the re-sent key. C-001 preserved
+    // (revoked devices excluded). Best-effort: a re-grant hiccup must NOT fail admission.
+    try {
+      // WI-2141185 M1: bound the heal to ONCE per (hive, device) per process — see
+      // __reconnectRegrantState. Repeat announces re-stamped the wrapped_key row and
+      // re-federated identical content ~1000x/min per row; a re-send only ever needed to
+      // happen once per reconnect, which is what this branch's own comment already claimed.
+      const healed = __reconnectRegrantState.healed;
+      const announcedDevices = (joiner.deviceAttestations ?? [])
+        .map((d) => d.device_pubkey)
+        .filter((pk): pk is string => typeof pk === 'string' && pk.length > 0);
+      const unhealed = announcedDevices.filter(
+        (pk) => !healed.has(regrantKey(workspaceId, potHomeSlug, pk)),
+      );
+      if (unhealed.length > 0) {
+        const refederate =
+          deps.refederateMemberEpochKeys ?? ((a) => defaultRefederateMemberEpochKeys(a, deps.sql));
+        await refederate({
+          workspaceId,
+          potHomeSlug,
+          memberDevicePubkeys: unhealed,
+        });
+        // Only after a SUCCESSFUL re-grant — a throw leaves the device unhealed so the
+        // next announce retries it, preserving the pre-fix best-effort retry semantics.
+        for (const pk of unhealed) healed.add(regrantKey(workspaceId, potHomeSlug, pk));
+      }
+    } catch {
+      /* best-effort — never fail a reconnect admission on an epoch-key re-grant */
+    }
+    return { action: 'admitted', member, reason: 'already_member' };
+  }
+
+  // 2 — not yet a member: the owner-signed policy decides. evaluateJoinAdmission
+  //     RECORDS the pending request under approval mode (federates to the joiner).
+  const outcome = await evaluateJoinAdmission({ workspaceId, potHomeSlug, joiner }, deps);
+  if (outcome.outcome === 'admit') {
+    return { action: 'admitted', member: await upsert(), reason: 'policy_admit' };
+  }
+  if (outcome.outcome === 'pending') {
+    return { action: 'pending', pending: outcome.pending };
+  }
+  return { action: 'refuse', reason: outcome.reason };
+}
+
+/** The result of the owner's substrate-seam admission of an announced peer (the
+ *  testable extraction of boot.ts drainAdmissionQueue's membership step, WI-639). */
+export type OwnerAnnounceAdmitResult =
+  | { action: 'skip'; reason: 'no_hive_home' | 'not_owner' }
+  | { action: 'admitted'; potHomeSlug: string; reason: 'already_member' | 'policy_admit' }
+  | { action: 'pending'; potHomeSlug: string }
+  | { action: 'refuse'; potHomeSlug: string; reason: 'banned' | 'not_allowlisted' };
+
+export interface AdmitAnnouncedPeerDeps extends MembershipAdmissionDeps {
+  /** Resolve a harness slug → its Hive home slug. Default: hive-federation
+   *  potHomeSlugForHarness (a fresh registry read). */
+  potHomeSlugForHarness?: (workspaceId: string, harnessSlug: string) => Promise<string | null>;
+  /** Truthy iff THIS Swarm holds the Hive private key (the owner box). Default:
+   *  identity/hive-keypair loadHivePubkey. */
+  loadHivePubkey?: (workspaceId: string, potHomeSlug: string) => Promise<unknown>;
+  /** The admit-or-pend decision. Default: ownerAdmitOrPend. */
+  admit?: typeof ownerAdmitOrPend;
+}
+
+/**
+ * The OWNER substrate-seam admission of a binding-verified announced peer — the
+ * testable extraction of what boot.ts `drainAdmissionQueue` runs when it admits a
+ * new peer's core (WI-639). Resolves the Hive home, self-gates to the OWNER box,
+ * then routes the membership decision through `ownerAdmitOrPend`.
+ *
+ * WI-280: hive_members is keyed by the HIVE-HOME slug, but a peer joins via the
+ * MEMBER topic, so the booted `harnessSlug` is the MEMBER slug. We resolve the home
+ * via `potHomeSlugForHarness` (a fresh registry read: member → its hive_slug;
+ * hive-home → itself) — NOT a boot-time projection slug, which is undefined on the
+ * owner's MEMBER boot and silently skipped registration before. `skip` outcomes:
+ * `no_hive_home` (not part of a hive) / `not_owner` (no Hive key on this box — the
+ * local upsert is the owner's; federation projects it to the others).
+ *
+ * Returns the outcome (+ the resolved potHomeSlug) so the caller can record the
+ * matching boot-event; it performs no boot-history I/O itself.
+ */
+export async function admitAnnouncedPeerAsOwner(
+  input: {
+    workspaceId: string;
+    harnessSlug: string;
+    peer: { githubUserId: number; githubLogin: string; devicePubkey: string; attestationGistId: string };
+  },
+  deps: AdmitAnnouncedPeerDeps = {},
+): Promise<OwnerAnnounceAdmitResult> {
+  const resolveHome =
+    deps.potHomeSlugForHarness ??
+    (async (ws: string, slug: string) => (await import('./hive-federation')).potHomeSlugForHarness(ws, slug));
+  const loadPubkey =
+    deps.loadHivePubkey ??
+    (async (ws: string, home: string) => (await import('./identity/hive-keypair')).loadHivePubkey(ws, home));
+  const admit = deps.admit ?? ownerAdmitOrPend;
+
+  const localPotHomeSlug = await resolveHome(input.workspaceId, input.harnessSlug);
+  if (!localPotHomeSlug) return { action: 'skip', reason: 'no_hive_home' };
+  if (!(await loadPubkey(input.workspaceId, localPotHomeSlug))) return { action: 'skip', reason: 'not_owner' };
+
+  // ⚠ SCOPE (WI-6312): `potHomeSlugForHarness` is a fresh REGISTRY read, i.e. the LOCAL
+  // handle — which a joiner's `freeSlug` may have suffixed. This is THE resolution point
+  // for the whole owner-announce admit path: everything downstream is branded, so it can
+  // only be reached with the federated scope. Fails open to the local handle, leaving the
+  // owner path (where canonical == local) byte-identical.
+  const potHomeSlug = await resolveFederatedPotScope(input.workspaceId, localPotHomeSlug);
+
+  const outcome = await admit(
+    {
+      workspaceId: input.workspaceId,
+      potHomeSlug,
+      joiner: {
+        githubUserId: input.peer.githubUserId,
+        githubUsername: input.peer.githubLogin,
+        deviceAttestations: [
+          {
+            device_pubkey: input.peer.devicePubkey,
+            gist_id: input.peer.attestationGistId,
+            gist_url: '',
+            device_label: input.peer.githubLogin,
+            created_at: Date.now(),
+            signature_by_device: '',
+          },
+        ],
+      },
+    },
+    deps,
+  );
+  if (outcome.action === 'admitted') return { action: 'admitted', potHomeSlug, reason: outcome.reason };
+  if (outcome.action === 'pending') return { action: 'pending', potHomeSlug };
+  return { action: 'refuse', potHomeSlug, reason: outcome.reason };
+}

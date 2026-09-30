@@ -1,0 +1,232 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/social-mastodon",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Mastodon platform trigger pack: Watches an account's home timeline and mention notifications on its own instance. Records each event and publishes nothing.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": {
+    "mode": "exact"
+  },
+  "capabilities": [],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "accessToken"
+    ],
+    "properties": {
+      "instanceHost": {
+        "type": "string",
+        "title": "Mastodon instance",
+        "shareable": true,
+        "description": "The instance host this account lives on, e.g. `mastodon.social`. Public, and required to build a reply target, so it travels with a share."
+      },
+      "accessToken": {
+        "type": "string",
+        "title": "Mastodon access token",
+        "secret": true,
+        "shareable": false,
+        "snapshotPolicy": "strip",
+        "description": "A token issued by THIS instance. Mastodon registers an OAuth client per instance, so no platform-wide provider can mint it."
+      }
+    }
+  },
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "escalationGuidance": {
+          "type": "string",
+          "title": "What needs a human",
+          "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said.",
+          "maxLength": 1000
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 12,
+      "windowSeconds": 300
+    },
+    "targets": [
+      {
+        "id": "record-mastodon-event",
+        "kind": "plan",
+        "path": "plan.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "trigger"
+          ],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": [
+                "key",
+                "source",
+                "event",
+                "sourceId",
+                "externalId",
+                "dedupeKey",
+                "payload"
+              ],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "pattern": "^ext:mastodon:(post|reply|mention)$"
+                },
+                "source": {
+                  "type": "string",
+                  "const": "mastodon"
+                },
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "post",
+                    "reply",
+                    "mention"
+                  ]
+                },
+                "sourceId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "externalId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dedupeKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "payload": {
+                  "type": "object",
+                  "datatype": "social-post",
+                  "additionalProperties": true,
+                  "required": [
+                    "id",
+                    "text"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "replyToId": {
+                      "type": "string"
+                    },
+                    "occurredAt": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "escalationGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said."
+            }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "mastodon-post",
+        "source": {
+          "kind": "external",
+          "sourceKind": "mastodon"
+        },
+        "target": "record-mastodon-event",
+        "eventPattern": "ext:mastodon:post",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      },
+      {
+        "id": "mastodon-reply",
+        "source": {
+          "kind": "external",
+          "sourceKind": "mastodon"
+        },
+        "target": "record-mastodon-event",
+        "eventPattern": "ext:mastodon:reply",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      },
+      {
+        "id": "mastodon-mention",
+        "source": {
+          "kind": "external",
+          "sourceKind": "mastodon"
+        },
+        "target": "record-mastodon-event",
+        "eventPattern": "ext:mastodon:mention",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      }
+    ],
+    "edges": []
+  },
+  "icon": "Globe"
+}

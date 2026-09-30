@@ -1,0 +1,18 @@
+{
+  "name": "@papercusp/control-mutation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The D-005 control-mutation harness: dryRun preview · apply · post-apply verify (auto-revert) · audit · one-call revert, over an injected audit-write port. Pure, zero domain/DB coupling.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  }
+}

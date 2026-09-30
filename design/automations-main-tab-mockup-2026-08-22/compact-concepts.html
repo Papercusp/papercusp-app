@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Automations — compact concepts</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111d;
+      --surface: #0b1725;
+      --surface-2: #0f1d2d;
+      --surface-3: #122235;
+      --line: #263b50;
+      --line-soft: #1a2c3f;
+      --fg: #eef7ff;
+      --dim: #a9bfd1;
+      --muted: #7890a6;
+      --accent: #38bdf8;
+      --accent-soft: rgba(56, 189, 248, .11);
+      --good: #34d399;
+      --good-soft: rgba(52, 211, 153, .10);
+      --warn: #fbbf24;
+      --warn-soft: rgba(251, 191, 36, .10);
+      --purple: #a78bfa;
+      --purple-soft: rgba(167, 139, 250, .10);
+      --shadow: 0 24px 70px rgba(0, 0, 0, .42);
+    }
+
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { background: var(--bg); }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    button, input, select { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .page { width: min(1540px, 100%); margin: 0 auto; padding: 28px clamp(14px, 3vw, 42px) 60px; }
+    .study-head { display: flex; justify-content: space-between; gap: 28px; align-items: flex-end; margin-bottom: 18px; }
+    .eyebrow { color: var(--accent); font-size: 11px; font-weight: 850; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { margin: 8px 0 7px; font-size: clamp(28px, 3vw, 42px); line-height: 1.04; letter-spacing: -.035em; }
+    .lede { max-width: 860px; margin: 0; color: var(--dim); font-size: 14px; }
+    .snapshot {
+      flex: 0 0 330px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--dim);
+      font-size: 12px;
+    }
+    .snapshot strong { display: block; margin-bottom: 3px; color: var(--good); font-size: 12px; }
+
+    .concept-picker {
+      position: sticky;
+      z-index: 10;
+      top: 10px;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      margin-bottom: 12px;
+      padding: 7px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: rgba(11, 23, 37, .96);
+      box-shadow: 0 14px 36px rgba(0, 0, 0, .28);
+      backdrop-filter: blur(16px);
+    }
+    .concept-picker > span { margin: 0 5px; color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; }
+    .concept-picker button {
+      min-height: 36px;
+      padding: 0 12px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--dim);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 750;
+    }
+    .concept-picker button[data-active="true"] { border-color: rgba(56, 189, 248, .34); background: var(--accent-soft); color: var(--fg); }
+    .concept-picker em { margin-left: auto; padding-right: 8px; color: var(--muted); font-size: 11px; font-style: normal; }
+
+    .concept { display: none; }
+    .concept[data-active="true"] { display: block; }
+    .concept-note { display: flex; justify-content: space-between; gap: 16px; margin: 14px 2px 9px; }
+    .concept-note strong { font-size: 14px; }
+    .concept-note span { max-width: 650px; color: var(--muted); font-size: 12px; text-align: right; }
+
+    .app {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--bg);
+      box-shadow: var(--shadow);
+    }
+    .window-bar { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 0 12px; border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 11px; }
+    .window-bar strong { color: var(--dim); font-size: 11px; }
+    .dots { display: flex; gap: 5px; }
+    .dots i { width: 7px; height: 7px; border-radius: 50%; background: #34506a; }
+    .automations { padding: 18px; background: var(--bg); }
+    .mast { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; }
+    .mast h2 { margin: 0; font-size: 24px; letter-spacing: -.025em; }
+    .mast p { margin: 3px 0 0; color: var(--dim); font-size: 12px; }
+    .mast-actions { display: flex; gap: 7px; }
+    .btn {
+      min-height: 36px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+      color: var(--dim);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .btn.primary { border-color: var(--accent); background: var(--accent); color: #04121c; }
+    .btn.subtle { background: transparent; }
+
+    .tabs-summary {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 14px;
+      min-height: 44px;
+      padding: 4px 6px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+    }
+    .tab { padding: 7px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 750; }
+    .tab.active { background: var(--accent-soft); color: var(--accent); }
+    .tab small { margin-left: 4px; padding: 1px 5px; border-radius: 999px; background: rgba(255, 255, 255, .07); color: var(--dim); font-size: 10px; }
+    .summary-inline { display: flex; gap: 15px; align-items: center; margin-left: auto; padding: 0 7px; }
+    .summary-inline span { color: var(--muted); font-size: 11px; }
+    .summary-inline strong { color: var(--fg); font-size: 12px; }
+    .summary-inline .attention strong { color: var(--warn); }
+
+    .toolbar {
+      display: flex;
+      gap: 7px;
+      align-items: center;
+      margin-top: 10px;
+      padding: 7px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+    }
+    .search {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      width: min(330px, 42%);
+      min-width: 230px;
+      min-height: 36px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--bg);
+      color: var(--muted);
+    }
+    .search input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--fg); font-size: 12px; }
+    .filters { display: flex; gap: 3px; }
+    .filter { min-height: 34px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; }
+    .filter.active { background: var(--accent-soft); color: var(--fg); }
+    .toolbar-meta { margin-left: auto; color: var(--muted); font-size: 11px; }
+
+    .panel { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; min-height: 42px; padding: 0 12px; border-bottom: 1px solid var(--line-soft); }
+    .panel-head strong { font-size: 12px; }
+    .panel-head span { color: var(--muted); font-size: 11px; }
+
+    /* Concept A — lean rows */
+    .lean-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 350px; gap: 10px; margin-top: 10px; }
+    .lean-row {
+      display: grid;
+      grid-template-columns: minmax(250px, 1.35fr) 118px minmax(170px, .8fr) 104px 18px;
+      gap: 12px;
+      align-items: center;
+      min-height: 72px;
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--line-soft);
+      background: transparent;
+    }
+    .lean-row:last-child { border-bottom: 0; }
+    .lean-row.selected { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
+    .row-title { min-width: 0; }
+    .row-title > div { display: flex; gap: 7px; align-items: center; }
+    .dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--good); }
+    .dot.paused { background: var(--muted); }
+    .row-title strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+    .row-title p { overflow: hidden; margin: 4px 0 0 14px; color: var(--dim); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+    .cell span { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+    .cell strong { display: block; overflow: hidden; margin-top: 4px; color: var(--dim); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+    .source-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid rgba(56, 189, 248, .32); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 800; }
+    .chev { color: var(--muted); }
+
+    .inspector { padding: 14px; }
+    .inspector .kicker { color: var(--accent); font-size: 11px; font-weight: 850; text-transform: uppercase; }
+    .inspector h3 { margin: 7px 0 5px; font-size: 17px; line-height: 1.25; }
+    .inspector > p { margin: 0; color: var(--dim); font-size: 12px; }
+    .state-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+    .state-chips span { padding: 3px 7px; border: 1px solid rgba(52, 211, 153, .34); border-radius: 999px; background: var(--good-soft); color: var(--good); font-size: 11px; font-weight: 750; }
+    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 11px; }
+    .detail-grid div { padding: 8px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--bg); }
+    .detail-grid span { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+    .detail-grid strong { display: block; margin-top: 4px; font-size: 12px; }
+    .mini-path { display: grid; gap: 5px; margin-top: 11px; }
+    .mini-path div { display: grid; grid-template-columns: 62px 1fr auto; gap: 7px; align-items: center; padding: 7px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--bg); }
+    .mini-path b { color: var(--accent); font-size: 10px; text-transform: uppercase; }
+    .mini-path span { overflow: hidden; color: var(--dim); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    .mini-path em { color: var(--good); font-size: 10px; font-style: normal; }
+    .inspector-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 11px; }
+    .inspector-actions button { min-height: 34px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); color: var(--dim); font-size: 11px; }
+    .inspector-actions .manual { border-color: rgba(56, 189, 248, .34); color: var(--accent); }
+
+    /* Concept B — compact causal lanes */
+    .lane-panel { margin-top: 10px; }
+    .lane-labels { display: grid; grid-template-columns: 150px minmax(200px, 1fr) minmax(190px, .9fr) 88px; gap: 24px; padding: 9px 13px; color: var(--muted); font-size: 11px; font-weight: 850; text-transform: uppercase; }
+    .lane-flow { display: grid; grid-template-columns: 150px minmax(200px, 1fr) minmax(190px, .9fr) 88px; gap: 24px; align-items: stretch; min-height: 94px; padding: 8px 12px; border-top: 1px solid var(--line-soft); }
+    .lane-node { position: relative; z-index: 1; min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
+    .lane-node::after { position: absolute; top: 50%; left: 100%; width: 25px; height: 1px; background: #456176; content: ""; }
+    .lane-node.outcome::after { display: none; }
+    .lane-node strong { display: block; overflow: hidden; font-size: 12px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+    .lane-node span { display: -webkit-box; overflow: hidden; margin-top: 5px; color: var(--dim); font-size: 11px; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+    .lane-node small { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
+    .lane-node.source { border-color: rgba(56, 189, 248, .32); }
+    .lane-node.plan { border-color: rgba(167, 139, 250, .32); }
+    .lane-node.outcome { border-color: rgba(52, 211, 153, .30); }
+    .lane-state { display: grid; align-content: center; gap: 5px; }
+    .lane-state b { color: var(--good); font-size: 11px; }
+    .lane-state span { color: var(--muted); font-size: 10px; }
+
+    /* Concept C — focus split */
+    .focus-workspace { display: grid; grid-template-columns: 310px minmax(0, 1fr); gap: 10px; margin-top: 10px; }
+    .focus-list { padding: 8px; }
+    .focus-list .search { width: 100%; min-width: 0; margin-bottom: 7px; }
+    .focus-item { width: 100%; padding: 10px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: inherit; text-align: left; }
+    .focus-item + .focus-item { margin-top: 3px; }
+    .focus-item.selected { border-color: rgba(56, 189, 248, .28); background: var(--accent-soft); }
+    .focus-item strong { display: block; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+    .focus-item span { display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; color: var(--muted); font-size: 11px; }
+    .focus-main { padding: 14px; }
+    .focus-main-head { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; }
+    .focus-main h3 { max-width: 780px; margin: 0; font-size: 20px; line-height: 1.2; }
+    .focus-main-head p { margin: 5px 0 0; color: var(--dim); font-size: 12px; }
+    .focus-path { display: grid; grid-template-columns: 1fr 34px 1.25fr 34px 1fr; gap: 8px; align-items: center; margin-top: 16px; }
+    .focus-node { min-height: 110px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+    .focus-node b { display: block; color: var(--accent); font-size: 10px; text-transform: uppercase; }
+    .focus-node strong { display: block; margin-top: 8px; font-size: 13px; }
+    .focus-node span { display: block; margin-top: 5px; color: var(--dim); font-size: 11px; }
+    .arrow { color: #557189; font-size: 20px; text-align: center; }
+    .focus-lower { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+    .focus-card { padding: 11px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--bg); }
+    .focus-card header { display: flex; justify-content: space-between; color: var(--dim); font-size: 11px; font-weight: 800; }
+    .focus-card p { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+
+    /* Modal mockup — shared by every concept */
+    .modal-root[hidden] { display: none; }
+    .modal-root { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 24px; }
+    .scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .76); backdrop-filter: blur(3px); }
+    .modal {
+      position: relative;
+      width: min(760px, 100%);
+      max-height: calc(100vh - 48px);
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+      box-shadow: 0 30px 110px rgba(0, 0, 0, .68);
+    }
+    .modal-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; padding: 16px 18px 14px; border-bottom: 1px solid var(--line-soft); }
+    .modal-head h2 { margin: 0; font-size: 20px; }
+    .modal-head p { margin: 4px 0 0; color: var(--dim); font-size: 12px; }
+    .icon-btn { width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); color: var(--dim); cursor: pointer; }
+    .modal-body { padding: 16px 18px; }
+    .step-label { color: var(--accent); font-size: 10px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
+    .field-title { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; }
+    .field-title strong { font-size: 13px; }
+    .field-title span { color: var(--muted); font-size: 11px; }
+    .trigger-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 9px; }
+    .trigger-option { padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); cursor: pointer; text-align: left; }
+    .trigger-option[data-selected="true"] { border-color: var(--accent); background: var(--accent-soft); }
+    .trigger-option strong { display: block; font-size: 13px; }
+    .trigger-option span { display: block; margin-top: 4px; color: var(--dim); font-size: 11px; }
+    .trigger-option em { display: block; margin-top: 8px; color: var(--muted); font-size: 10px; font-style: normal; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 12px; }
+    .field { display: grid; gap: 5px; }
+    .field.full { grid-column: 1 / -1; }
+    .field label { color: var(--dim); font-size: 11px; font-weight: 750; }
+    .field input, .field select { width: 100%; min-height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--fg); font-size: 12px; }
+    .plan-mode { display: flex; gap: 3px; margin-top: 14px; padding: 4px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--bg); }
+    .plan-mode button { flex: 1; min-height: 33px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 11px; }
+    .plan-mode button[data-selected="true"] { background: var(--surface-3); color: var(--fg); }
+    .truth-note { margin-top: 12px; padding: 9px 10px; border: 1px solid rgba(52, 211, 153, .25); border-radius: 7px; background: var(--good-soft); color: var(--dim); font-size: 11px; }
+    .truth-note strong { color: var(--good); }
+    .modal-foot { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--line-soft); }
+    .modal-foot span { color: var(--muted); font-size: 11px; }
+    .modal-foot div { display: flex; gap: 7px; }
+    .mock-status { color: var(--good) !important; }
+
+    @media (max-width: 1050px) {
+      .study-head { align-items: stretch; flex-direction: column; }
+      .snapshot { flex-basis: auto; }
+      .summary-inline { display: none; }
+      .lean-workspace, .focus-workspace { grid-template-columns: 1fr; }
+      .lane-labels, .lane-flow { grid-template-columns: 130px minmax(180px, 1fr) minmax(170px, 1fr) 70px; gap: 16px; }
+      .lean-row { grid-template-columns: minmax(250px, 1fr) 110px 150px 18px; }
+      .lean-row .cost-cell { display: none; }
+    }
+    @media (max-width: 760px) {
+      .page { padding-inline: 10px; }
+      .concept-picker { overflow-x: auto; }
+      .concept-picker > span, .concept-picker em { display: none; }
+      .study-head { margin-bottom: 12px; }
+      .concept-note { flex-direction: column; }
+      .concept-note span { text-align: left; }
+      .automations { padding: 12px; }
+      .mast { flex-direction: column; }
+      .mast-actions { width: 100%; }
+      .mast-actions .btn { flex: 1; }
+      .tabs-summary { overflow-x: auto; }
+      .toolbar { align-items: stretch; flex-direction: column; }
+      .search { width: 100%; min-width: 0; }
+      .filters { overflow-x: auto; }
+      .toolbar-meta { display: none; }
+      .lean-row { grid-template-columns: minmax(0, 1fr) 88px 18px; }
+      .lean-row .outcome-cell, .lean-row .cost-cell { display: none; }
+      .lane-labels { display: none; }
+      .lane-flow { grid-template-columns: 1fr; gap: 6px; }
+      .lane-node::after { display: none; }
+      .lane-state { grid-template-columns: auto auto; justify-content: space-between; }
+      .focus-path { grid-template-columns: 1fr; }
+      .focus-path .arrow { transform: rotate(90deg); }
+      .focus-lower, .trigger-options, .form-grid { grid-template-columns: 1fr; }
+      .field.full { grid-column: auto; }
+      .modal-root { padding: 8px; }
+      .modal { max-height: calc(100vh - 16px); }
+      .modal-foot { align-items: stretch; flex-direction: column; }
+      .modal-foot div, .modal-foot button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="study-head">
+      <div>
+        <div class="eyebrow">Automations simplification study</div>
+        <h1>Compact, quiet, and anchored on the work.</h1>
+        <p class="lede">Three alternatives for reducing chrome while keeping trigger → plan → outcome legible. Every concept removes the square background, moves trigger-flow search to the left, and opens “New automation” in place.</p>
+      </div>
+      <aside class="snapshot">
+        <strong>Static design preview</strong>
+        Flow labels below are copied from three real Papercusp schedule rows on 2026-08-23. This file performs no live reads or writes; production remains the source of truth.
+      </aside>
+    </header>
+
+    <nav class="concept-picker" aria-label="Mockup concepts">
+      <span>View</span>
+      <button type="button" data-concept-button="a" data-active="true">A · Lean rows</button>
+      <button type="button" data-concept-button="b" data-active="false">B · Compact lanes</button>
+      <button type="button" data-concept-button="c" data-active="false">C · Focus split</button>
+      <em>Click “New automation” in any concept to preview the popup</em>
+    </nav>
+
+    <section class="concept" data-concept="a" data-active="true">
+      <div class="concept-note"><strong>Concept A · Lean rows — recommended</strong><span>Fastest scan, least vertical waste. Causal detail moves into the inspector while the list keeps source, state, and plan identity visible.</span></div>
+      <div class="app">
+        <div class="window-bar"><div class="dots"><i></i><i></i><i></i></div><strong>Papercusp · Automations</strong><span>compact concept A</span></div>
+        <div class="automations">
+          <header class="mast">
+            <div><h2>Automations</h2><p>Automatic triggers, the plans they run, and observed outcomes.</p></div>
+            <div class="mast-actions"><button class="btn subtle" type="button">↻ Refresh</button><button class="btn primary js-open-modal" type="button">＋ New automation</button></div>
+          </header>
+          <div class="tabs-summary">
+            <button class="tab active">Flows <small>3</small></button><button class="tab">Catalog</button><button class="tab">Activity</button><button class="tab">Sources</button>
+            <div class="summary-inline"><span class="attention">Attention <strong>1</strong></span><span>Armed <strong>2</strong></span><span>Paused <strong>1</strong></span></div>
+          </div>
+          <div class="toolbar">
+            <label class="search">⌕ <input aria-label="Search trigger flows" placeholder="Search trigger flows"></label>
+            <div class="filters"><button class="filter active">All · 3</button><button class="filter">Attention · 1</button><button class="filter">Paused · 1</button></div>
+            <span class="toolbar-meta">automatic sources only</span>
+          </div>
+          <div class="lean-workspace">
+            <section class="panel">
+              <div class="panel-head"><strong>Trigger flows</strong><span>attention first, then cadence</span></div>
+              <div class="lean-row selected">
+                <div class="row-title"><div><i class="dot"></i><strong>Alert on new critical-severity work items in papercusp</strong></div><p>Automatic alert plan</p></div>
+                <div><span class="source-chip">◷ Schedule</span></div>
+                <div class="cell outcome-cell"><span>Cadence</span><strong>Every 15 minutes</strong></div>
+                <div class="cell cost-cell"><span>State</span><strong>Armed</strong></div><span class="chev">›</span>
+              </div>
+              <div class="lean-row">
+                <div class="row-title"><div><i class="dot"></i><strong>Recurring auto-coupling-health grade — standing check</strong></div><p>Derived-relation health grade</p></div>
+                <div><span class="source-chip">◷ Schedule</span></div>
+                <div class="cell outcome-cell"><span>Cadence</span><strong>Weekly</strong></div>
+                <div class="cell cost-cell"><span>State</span><strong>Armed</strong></div><span class="chev">›</span>
+              </div>
+              <div class="lean-row">
+                <div class="row-title"><div><i class="dot paused"></i><strong>Daily digest — open papercusp-improvement work items</strong></div><p>Improvement queue digest</p></div>
+                <div><span class="source-chip">◷ Schedule</span></div>
+                <div class="cell outcome-cell"><span>Cadence</span><strong>Daily at 09:00</strong></div>
+                <div class="cell cost-cell"><span>State</span><strong>Paused</strong></div><span class="chev">›</span>
+              </div>
+            </section>
+            <aside class="panel inspector">
+              <div class="kicker">Scheduled plan · armed</div>
+              <h3>Alert on new critical-severity work items in papercusp</h3>
+              <p>One automatic trigger. Manual launch remains an optional action.</p>
+              <div class="state-chips"><span>Enabled</span><span>Not running</span></div>
+              <div class="detail-grid"><div><span>Cadence</span><strong>Every 15m</strong></div><div><span>Trigger count</span><strong>1 automatic</strong></div></div>
+              <div class="mini-path"><div><b>Source</b><span>Schedule · every 15m</span><em>Armed</em></div><div><b>Plan</b><span>Critical severity alert</span><em>Ready</em></div><div><b>Outcome</b><span>Observed run history</span><em>Open</em></div></div>
+              <div class="inspector-actions"><button class="manual">Run manually</button><button>Edit schedule</button></div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="concept" data-concept="b" data-active="false">
+      <div class="concept-note"><strong>Concept B · Compact causal lanes</strong><span>Preserves the source → plan → outcome story, but removes the square canvas and cuts each flow to a single 94px lane.</span></div>
+      <div class="app">
+        <div class="window-bar"><div class="dots"><i></i><i></i><i></i></div><strong>Papercusp · Automations</strong><span>compact concept B</span></div>
+        <div class="automations">
+          <header class="mast"><div><h2>Automations</h2><p>See what starts each plan and what happened next.</p></div><div class="mast-actions"><button class="btn subtle" type="button">↻ Refresh</button><button class="btn primary js-open-modal" type="button">＋ New automation</button></div></header>
+          <div class="tabs-summary"><button class="tab active">Flows <small>3</small></button><button class="tab">Catalog</button><button class="tab">Activity</button><button class="tab">Sources</button><div class="summary-inline"><span class="attention">Attention <strong>1</strong></span><span>Armed <strong>2</strong></span></div></div>
+          <div class="toolbar"><label class="search">⌕ <input aria-label="Search trigger flows" placeholder="Search trigger flows"></label><div class="filters"><button class="filter active">All</button><button class="filter">Attention</button><button class="filter">Paused</button></div><span class="toolbar-meta">3 automatic flows</span></div>
+          <section class="panel lane-panel">
+            <div class="panel-head"><strong>Trigger flows</strong><span>plain surface · no decorative grid</span></div>
+            <div class="lane-labels"><span>Trigger</span><span>Plan</span><span>Outcome / next</span><span>State</span></div>
+            <div class="lane-flow">
+              <div class="lane-node source"><strong>Schedule</strong><span>Every 15 minutes</span><small>1 automatic trigger</small></div>
+              <div class="lane-node plan"><strong>Alert on new critical-severity work items</strong><span>Papercusp · ready</span></div>
+              <div class="lane-node outcome"><strong>Run-linked outcome</strong><span>Only observed history appears here</span></div>
+              <div class="lane-state"><b>Armed</b><span>Inspect ›</span></div>
+            </div>
+            <div class="lane-flow">
+              <div class="lane-node source"><strong>Schedule</strong><span>Weekly</span><small>1 automatic trigger</small></div>
+              <div class="lane-node plan"><strong>Recurring auto-coupling-health grade</strong><span>Papercusp · ready</span></div>
+              <div class="lane-node outcome"><strong>Derived relation health</strong><span>Observed state stays separate</span></div>
+              <div class="lane-state"><b>Armed</b><span>Inspect ›</span></div>
+            </div>
+            <div class="lane-flow">
+              <div class="lane-node source"><strong>Schedule</strong><span>Daily at 09:00</span><small>1 automatic trigger</small></div>
+              <div class="lane-node plan"><strong>Daily improvement digest</strong><span>Papercusp · ready</span></div>
+              <div class="lane-node outcome"><strong>Open work-item digest</strong><span>No run inferred from schedule</span></div>
+              <div class="lane-state"><b style="color:var(--muted)">Paused</b><span>Inspect ›</span></div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section class="concept" data-concept="c" data-active="false">
+      <div class="concept-note"><strong>Concept C · Focus split</strong><span>Lowest simultaneous density: search and flow selection stay left; the selected automation gets the full right pane.</span></div>
+      <div class="app">
+        <div class="window-bar"><div class="dots"><i></i><i></i><i></i></div><strong>Papercusp · Automations</strong><span>compact concept C</span></div>
+        <div class="automations">
+          <header class="mast"><div><h2>Automations</h2><p>Choose a flow, then inspect its causal path and controls.</p></div><div class="mast-actions"><button class="btn subtle" type="button">↻ Refresh</button><button class="btn primary js-open-modal" type="button">＋ New automation</button></div></header>
+          <div class="tabs-summary"><button class="tab active">Flows <small>3</small></button><button class="tab">Catalog</button><button class="tab">Activity</button><button class="tab">Sources</button><div class="summary-inline"><span>Automatic flows <strong>3</strong></span></div></div>
+          <div class="focus-workspace">
+            <aside class="panel focus-list">
+              <label class="search">⌕ <input aria-label="Search trigger flows" placeholder="Search trigger flows"></label>
+              <button class="focus-item selected"><strong>Critical-severity work-item alert</strong><span><b>Every 15m</b><em>Armed</em></span></button>
+              <button class="focus-item"><strong>Recurring auto-coupling-health grade</strong><span><b>Weekly</b><em>Armed</em></span></button>
+              <button class="focus-item"><strong>Daily improvement digest</strong><span><b>Daily · 09:00</b><em>Paused</em></span></button>
+            </aside>
+            <section class="panel focus-main">
+              <div class="focus-main-head"><div><h3>Alert on new critical-severity work items in papercusp</h3><p>Automatic trigger and observed execution are presented separately.</p></div><span class="source-chip">◷ Armed schedule</span></div>
+              <div class="focus-path"><div class="focus-node"><b>Source</b><strong>Every 15 minutes</strong><span>1 automatic trigger</span></div><div class="arrow">→</div><div class="focus-node"><b>Plan</b><strong>Critical-severity work-item alert</strong><span>Papercusp · ready</span></div><div class="arrow">→</div><div class="focus-node"><b>Outcome</b><strong>Run-linked history only</strong><span>No execution inferred from the schedule</span></div></div>
+              <div class="focus-lower"><div class="focus-card"><header><span>Controls</span><span>automatic vs manual</span></header><p>Pause the schedule, edit cadence, or run the plan manually without counting manual as a trigger.</p><div class="inspector-actions"><button class="manual">Run manually</button><button>Edit schedule</button></div></div><div class="focus-card"><header><span>Health</span><span>truthful absence</span></header><p>Run state, cost, and outcomes stay blank until the system has linked evidence.</p></div></div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="modal-root" id="create-modal" hidden>
+    <div class="scrim js-close-modal" aria-hidden="true"></div>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="create-title" aria-describedby="create-description">
+      <header class="modal-head">
+        <div><div class="eyebrow">New automation</div><h2 id="create-title">Create an automation</h2><p id="create-description">Choose a real automatic trigger and the plan it will run. Nothing leaves this popup.</p></div>
+        <button class="icon-btn js-close-modal" type="button" aria-label="Close create automation dialog">×</button>
+      </header>
+      <div class="modal-body">
+        <div class="step-label">1 · What starts it?</div>
+        <div class="field-title"><strong>Automatic trigger</strong><span>Manual launch is an action, not a trigger.</span></div>
+        <div class="trigger-options">
+          <button class="trigger-option js-trigger-option" data-trigger="schedule" data-selected="true" type="button"><strong>◷ Schedule</strong><span>Recurring cadence or one specific time.</span><em>Uses the existing plan schedule system</em></button>
+          <button class="trigger-option js-trigger-option" data-trigger="external" data-selected="false" type="button"><strong>⌁ External event</strong><span>Slack, Gmail, webhook, or another connected source.</span><em>Creates an audited external binding</em></button>
+        </div>
+        <div class="form-grid" data-trigger-fields="schedule">
+          <div class="field"><label for="frequency">Frequency</label><select id="frequency"><option>Every 15 minutes</option><option>Hourly</option><option>Daily</option><option>Weekly</option><option>Custom recurrence…</option></select></div>
+          <div class="field"><label for="timezone">Time zone</label><select id="timezone"><option>America/New_York</option><option>UTC</option><option>Workspace default</option></select></div>
+        </div>
+        <div class="form-grid" data-trigger-fields="external" hidden>
+          <div class="field"><label for="source">Connected source</label><select id="source"><option>Select a connected source…</option><option>Slack</option><option>Gmail</option><option>Webhook</option></select></div>
+          <div class="field"><label for="event">Event pattern</label><input id="event" value="ext:slack:message"></div>
+        </div>
+
+        <div class="plan-mode" role="group" aria-label="Plan choice">
+          <button type="button" data-plan-mode="existing" data-selected="true">Use an existing plan</button>
+          <button type="button" data-plan-mode="new" data-selected="false">Create the plan here</button>
+        </div>
+        <div class="form-grid" data-plan-fields="existing">
+          <div class="field full"><label for="plan">Plan to run</label><select id="plan"><option>Alert on new critical-severity work items in papercusp</option><option>Recurring auto-coupling-health grade</option><option>Daily digest — open papercusp-improvement work items</option></select></div>
+        </div>
+        <div class="form-grid" data-plan-fields="new" hidden>
+          <div class="field full"><label for="automation-name">Automation name</label><input id="automation-name" placeholder="e.g. Summarize support escalations"></div>
+          <div class="field full"><label for="outcome">What should the plan produce?</label><input id="outcome" placeholder="Describe the concrete outcome"></div>
+        </div>
+        <div class="truth-note"><strong>Creation behavior:</strong> create the schedule or external binding, attach it to the selected plan, and show the resulting flow immediately. The final control explicitly states whether it will be armed.</div>
+      </div>
+      <footer class="modal-foot">
+        <span id="mock-status">Mockup only · no data will be written</span>
+        <div><button class="btn js-close-modal" type="button">Cancel</button><button class="btn primary" id="mock-create" type="button">Create &amp; arm automation</button></div>
+      </footer>
+    </section>
+  </div>
+
+  <script>
+    const conceptButtons = [...document.querySelectorAll('[data-concept-button]')];
+    const concepts = [...document.querySelectorAll('[data-concept]')];
+    conceptButtons.forEach((button) => button.addEventListener('click', () => {
+      const id = button.dataset.conceptButton;
+      conceptButtons.forEach((candidate) => candidate.dataset.active = String(candidate === button));
+      concepts.forEach((concept) => concept.dataset.active = String(concept.dataset.concept === id));
+    }));
+
+    const modal = document.getElementById('create-modal');
+    const openModal = () => {
+      modal.hidden = false;
+      document.body.style.overflow = 'hidden';
+      requestAnimationFrame(() => modal.querySelector('.js-close-modal').focus());
+    };
+    const closeModal = () => {
+      modal.hidden = true;
+      document.body.style.overflow = '';
+    };
+    document.querySelectorAll('.js-open-modal').forEach((button) => button.addEventListener('click', openModal));
+    document.querySelectorAll('.js-close-modal').forEach((button) => button.addEventListener('click', closeModal));
+    document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !modal.hidden) closeModal(); });
+
+    document.querySelectorAll('.js-trigger-option').forEach((button) => button.addEventListener('click', () => {
+      const selected = button.dataset.trigger;
+      document.querySelectorAll('.js-trigger-option').forEach((candidate) => candidate.dataset.selected = String(candidate === button));
+      document.querySelectorAll('[data-trigger-fields]').forEach((fields) => fields.hidden = fields.dataset.triggerFields !== selected);
+    }));
+    document.querySelectorAll('[data-plan-mode]').forEach((button) => button.addEventListener('click', () => {
+      const selected = button.dataset.planMode;
+      document.querySelectorAll('[data-plan-mode]').forEach((candidate) => candidate.dataset.selected = String(candidate === button));
+      document.querySelectorAll('[data-plan-fields]').forEach((fields) => fields.hidden = fields.dataset.planFields !== selected);
+    }));
+    document.getElementById('mock-create').addEventListener('click', () => {
+      const status = document.getElementById('mock-status');
+      status.textContent = 'Preview complete · no production data changed';
+      status.classList.add('mock-status');
+    });
+  </script>
+</body>
+</html>

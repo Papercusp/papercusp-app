@@ -1,0 +1,20 @@
+{
+  "name": "@papercusp/step-program",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A generic, pure declarative step-program interpreter. A program is an ordered list of steps (each invokes a named op with {{ path }}-interpolated args, an optional `when` guard, and a result `bind`) followed by a conditional `gate`. The interpreter (planStep / selectGateBranch) decides WHAT op to run; the runner (runProgram) drives it, delegating every op to an injected `runOp` seam (the op registry / durability boundary). Also ships a safe no-eval boolean/comparison expression evaluator, type-preserving `{{ path }}` interpolation, and a structured-block poll reducer (confidence-weighted votes + an advocate veto). Zero I/O, zero domain coupling — the consumer injects the ops.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "@types/node": "^22.0.0",
+    "vitest": "^4.1.4"
+  }
+}

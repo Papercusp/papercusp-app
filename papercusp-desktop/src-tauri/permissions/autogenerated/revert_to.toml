@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-revert-to"
+description = "Enables the revert_to command without any pre-configured scope."
+commands.allow = ["revert_to"]
+
+[[permission]]
+identifier = "deny-revert-to"
+description = "Denies the revert_to command without any pre-configured scope."
+commands.deny = ["revert_to"]

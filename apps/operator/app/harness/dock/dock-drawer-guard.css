@@ -1,0 +1,25 @@
+/*
+ * Dockview × vaul Drawer interaction guard.
+ *
+ * Plan v4 §11 risk-register: when a vaul drawer (FeaturePeekPanel,
+ * IssueDetail) is open over the dock, dragging a dockview tab can race
+ * with the drawer's pointer-event capture. Disable dockview drag handles
+ * while any drawer is open.
+ *
+ * vaul sets data-vaul-drawer-direction on its content elements when
+ * open. The peek/detail drawers are the only places these appear in the
+ * operator, so suppressing pointer events on the dockview tab strip
+ * during their open-state is safe.
+ */
+
+body:has(.h-feature-peek-drawer[data-state="open"]) .dv-tab,
+body:has(.h-issue-detail-drawer[data-state="open"]) .dv-tab {
+  pointer-events: none;
+}
+
+/* Re-enable on the active tab's close button so users can still close
+   panels while a drawer is open. */
+body:has(.h-feature-peek-drawer[data-state="open"]) .dv-tab .dv-tab-action,
+body:has(.h-issue-detail-drawer[data-state="open"]) .dv-tab .dv-tab-action {
+  pointer-events: auto;
+}

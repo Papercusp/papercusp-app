@@ -1,0 +1,57 @@
+# The `content-fix` launch blueprint — git-sync-content-guard-2026-06-13 (P-006).
+#
+# A SINGLE-ROLE LAUNCH BLUEPRINT (D-007), EVENT-fired — the content-error sibling
+# of `merge-resolution` / `release-fix`. The git-sync content guard (EI-438), when
+# a dirty file fails a content detector (an .mdx that won't compile, a curly quote
+# used as code), EXCLUDES it from the auto-commit (so it never reaches staging) and
+# dispatches a content-fixer agent: it fixes ONLY the syntax of the named files so
+# they pass their detector, changes nothing else, leaves the tree clean, and does
+# NOT push (the next git-sync tick re-checks + commits the now-valid files).
+#
+# Mirrors `merge-resolution` / `release-fix` exactly (D-002 — reuse the machinery,
+# don't invent new): the DETECTION + in-flight dedup + clean-pass clear stay in
+# git-sync (the trigger's concern); the fix→leave-clean contract lives in the
+# content-fixer persona. git-sync fires THIS blueprint by its event key via
+# `fireLaunchBlueprintForEvent('git-sync:content-error')`.
+id: content-fix
+extends: single-agent
+version: 0.1.0
+description: >-
+  Fix a git-sync content-guard quarantine: a content-fixer agent fixes ONLY the
+  syntax of the named files so they pass their content detector (an .mdx that
+  won't compile, a curly quote used as code), changes nothing else, leaves the
+  tree clean, and does not push.
+
+workItem:
+  kind: content-fix
+  idPrefix: CFX
+
+# Spine edges + planner inherited from the `single-agent` parent; override the
+# decider role + this launch's turn budget only. A tight budget — the fix is a
+# small, mechanical syntax repair scoped to the named files.
+spine:
+  decider: content-fixer
+  maxTurns: 15
+
+roles:
+  - id: content-fixer
+    description: >-
+      Fix ONLY the syntax of the quarantined files so they pass their content
+      detector; change nothing else; leave the tree clean and do NOT push.
+
+knobs:
+  harnessKind: content-fix
+  requiresRepo: true
+
+# Event-rule trigger (D-004/D-007): fired by the git-sync content-error event.
+# git-sync resolves this key → THIS blueprint → invokes the content-fixer role via
+# the invoke route (single-role launch). Declared here as the firing seam.
+triggers:
+  event: git-sync:content-error
+
+# Dependencies (derived from the content-fixer persona): it escalates a file it
+# cannot safely fix. Keep in sync via scripts/derive-blueprint-deps.mjs.
+dependencies:
+  tools:
+    - coord:escalate
+  plugins: []

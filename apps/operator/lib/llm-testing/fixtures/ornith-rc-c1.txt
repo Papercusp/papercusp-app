@@ -1,0 +1,15 @@
+ornith COMPREHENSION-test fixture RC-C1 — throwaway, safe to overwrite between runs.
+
+BUG: isAdult(age) must treat exactly 18 as an adult, but right now isAdult(18)
+returns false. The comparison uses the wrong operator. Read it, understand why 18
+is excluded, and fix it so the expectations below all pass. Change ONLY the one
+thing that is wrong.
+
+function isAdult(age) {
+  return age > 18;
+}
+
+EXPECTED after fix:
+  isAdult(18) === true
+  isAdult(17) === false
+  isAdult(21) === true

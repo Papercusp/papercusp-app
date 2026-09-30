@@ -1,0 +1,103 @@
+-- 425-workspace-identity-restamp-completion.sql   (STAGED DRAFT — see ./README.md)
+--
+-- ┌─────────────────────────────────────────────────────────────────────────┐
+-- │ THIS IS A TEMPLATE. It is NOT runner-eligible while it ends in `.draft`  │
+-- │ and lives in staged-migrations/. Do NOT move it into ../sql/ until the   │
+-- │ ⟨FILL⟩ sections are completed from 295-completion-diagnostic.sql output  │
+-- │ and reviewed. Renumber to the next free integer at apply time (fleet had │
+-- │ reached 424 at staging — confirm current max first).                    │
+-- └─────────────────────────────────────────────────────────────────────────┘
+--
+-- Completion of mig 295 (WI-148 workspace-identity restamp) for the harness-
+-- keyed harness_shared tables 295 did not cover, which still hold rows under
+-- workspace_id='default'. Discharges data-scoping-audit P-007 +
+-- workspace-data-isolation-leaks P-002 + P-006 (the audit found these are one
+-- migration). Owner-gated; LOCKSTEP with the same coord/identity restart 295/391
+-- used (migrations-before-serve → health + path-verify → rollback-on-fail).
+--
+-- CONTRACT (inherited verbatim from 295 — DO NOT weaken):
+--   * Registry-driven + COLLISION-SAFE: a 'default' row moves only when its
+--     harness maps to EXACTLY ONE non-default workspace. A slug in >1 non-default
+--     workspaces, or in none, is LEFT under 'default' (fail-safe).
+--   * IDEMPOTENT: every move is gated `WHERE workspace_id='default'`; a re-run, or
+--     a clean DB with no 'default' residue, moves 0 rows.
+--   * Capture/CDC triggers on the moved tables are quieted for the bulk correction
+--     so a workspace-id fix does not storm substrate_outbox as fresh local writes
+--     (391's "only triggers actually present are touched" idiom).
+--   * The runner wraps this file in ONE transaction; a failure (incl. the guard)
+--     rolls back the whole move AND restores every disabled trigger. No
+--     \set / BEGIN / COMMIT here (the runner owns the txn).
+--
+-- ROLLBACK: inverse per-table UPDATE over the same _wsmap425
+--   (SET workspace_id='default' ... WHERE workspace_id = m.real_ws AND <key> = m.slug);
+--   write the exact inverse here once the table list is filled.
+
+-- ── 1. collision-safe map: slug → its UNIQUE non-default workspace ────────────
+--    (verbatim from 295; session-temp so it survives each statement's implicit
+--    commit under plain `psql -f` as well as the runner's single-txn wrap.)
+DROP TABLE IF EXISTS _wsmap425;
+CREATE TEMP TABLE _wsmap425 AS
+SELECT slug, real_ws FROM (
+  SELECT slug, max(workspace_id) AS real_ws, count(*) AS n FROM (
+    SELECT DISTINCT r.workspace_id, p->>'slug' AS slug
+      FROM harness_shared.harness_registry r,
+           jsonb_array_elements(COALESCE(r.payload->'projects','[]'::jsonb)) p
+     WHERE r.workspace_id NOT IN ('default','*','scratch')
+  ) d GROUP BY slug
+) m WHERE n = 1;
+
+-- ── 2. ⟨FILL⟩ quiet capture/CDC triggers on each residual table the diagnostic
+--       reported with movable>0. Use IF EXISTS so absent triggers are skipped
+--       (per-table trigger names vary; the substrate_outbox pair is the common
+--       set — see 295 lines 38-41). Example (uncomment + set real table names):
+--
+--   DO $quiet$
+--   DECLARE t text; trg text;
+--     tbls text[] := ARRAY[ /* ⟨FILL: residual tables with movable>0⟩ */ ];
+--     trgs text[] := ARRAY['capture_substrate_outbox_trg','capture_substrate_outbox_upd_trg'];
+--   BEGIN
+--     FOREACH t IN ARRAY tbls LOOP
+--       FOREACH trg IN ARRAY trgs LOOP
+--         IF EXISTS (SELECT 1 FROM pg_trigger g JOIN pg_class c ON c.oid=g.tgrelid
+--                      JOIN pg_namespace n ON n.oid=c.relnamespace
+--                     WHERE n.nspname='harness_shared' AND c.relname=t
+--                       AND g.tgname=trg AND NOT g.tgisinternal) THEN
+--           EXECUTE format('ALTER TABLE harness_shared.%I DISABLE TRIGGER %I', t, trg);
+--         END IF;
+--       END LOOP;
+--     END LOOP;
+--   END $quiet$;
+
+-- ── 3. ⟨FILL⟩ per-table re-stamp 'default' → real workspace. One statement per
+--       residual table the diagnostic listed with movable>0. Copy the shape that
+--       matches the table's harness key:
+--
+--   -- harness_slug-keyed (most tables):
+--   UPDATE harness_shared.<TABLE> t SET workspace_id = m.real_ws
+--     FROM _wsmap425 m
+--    WHERE t.workspace_id='default' AND t.harness_slug = m.slug;
+--
+--   -- scope-keyed (e.g. engineer_issues; scope = 'harness:<slug>'):
+--   UPDATE harness_shared.<TABLE> t SET workspace_id = m.real_ws
+--     FROM _wsmap425 m
+--    WHERE t.workspace_id='default' AND t.scope = 'harness:' || m.slug;
+
+-- ── 4. ⟨FILL⟩ in-txn GUARD: abort (→ rollback) if a harness the apply window must
+--       NOT strand still has 'default' rows in a key table. Mirror 295's guard;
+--       set <CRITICAL_SLUG> / <KEY_TABLE> to whatever this window protects.
+--
+--   DO $guard425$
+--   DECLARE leftover bigint;
+--   BEGIN
+--     SELECT count(*) INTO leftover FROM harness_shared.<KEY_TABLE>
+--      WHERE workspace_id='default' AND harness_slug='<CRITICAL_SLUG>';
+--     IF leftover > 0 THEN
+--       RAISE EXCEPTION '425 guard: % <CRITICAL_SLUG> row(s) still under default after restamp — aborting', leftover;
+--     END IF;
+--   END $guard425$;
+
+-- ── 5. ⟨FILL⟩ re-enable the triggers disabled in step 2 (success path; a rollback
+--       restores them anyway). Mirror step 2 with ENABLE instead of DISABLE.
+
+-- ── 6. clean up the session-temp map. ────────────────────────────────────────
+DROP TABLE _wsmap425;

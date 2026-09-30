@@ -1,0 +1,11 @@
+Papercusp
+
+Copyright (c) 2026 Papercusp.
+
+Licensed under the Elastic License 2.0 (see LICENSE). Libraries that carry their own
+license file or SPDX header (for example the permissively licensed libs/generic/*)
+are covered by that license instead.
+
+Third-party components keep their own licenses.
+
+Exported from Papercusp/papercup @ af68b44255af32245d5298c51aaaaabc23d2a0e8

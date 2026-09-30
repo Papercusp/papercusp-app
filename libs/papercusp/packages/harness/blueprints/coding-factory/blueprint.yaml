@@ -1,0 +1,233 @@
+# The `coding` harness blueprint — harness-blueprint-orchestration-2026-06-03.
+#
+# A behavior-preserving lift of the legacy per-feature director loop +
+# `classifyDecision` switch into declared spine edges (D-024, flat-graph-first).
+# `deriveNext(coding.spine, …)` is byte-equivalent to `classifyDecision(…)` —
+# proven by the operator-side equivalence test before the live wire-in (P-004).
+#
+# This is the zero-regression anchor for the whole plan: the gym A/B gate (D-014)
+# runs the hardcoded path vs the blueprint path over a task set and must show no
+# regression. Stored git-canonical at `.papercusp/blueprint.yaml` per harness,
+# projected to PG (D-006/D-021).
+id: coding-factory
+extends: base
+version: 0.1.0
+description: >-
+  RETIRED — NOT ACTIVE (2026-06-24, by owner decision). Preserved-but-dormant: its
+  `director` autoloop last fired 2026-05-01 and nothing currently instantiates it.
+  Do NOT treat this as "the active/default coding harness" and do NOT wire new work
+  to it. (It is the per-feature coding spine: director → scoper → architect → worker
+  → validator → reviewer → documenter → curator, opt-in gates tester / security /
+  crosscheck / ui-qa.) Kept intact for future revival — to revive, re-enable
+  instantiation (generate-from-repo `extends`) and restore the director dispatch.
+
+# Structured counterpart of the prose above (WI-5645 — no-retirement-launch-guard):
+# before this field existed, "retired" was ONLY human-readable, so nothing checked
+# it before spending (EI-18177667809538623: an autoloop spent $14.51+ against this
+# blueprint via `external-bench`, which `extends: coding-factory`). Deep-merges
+# through `extends` — every descendant that doesn't declare its own `retired`
+# (external-bench included) inherits this one. To revive: delete this block (or set
+# `retired: null` on a specific child to un-retire just that child) and restore the
+# director dispatch per the prose above.
+retired:
+  at: "2026-06-24"
+  reason: >-
+    Preserved-but-dormant — its `director` autoloop last fired 2026-05-01 and
+    nothing currently instantiates it. Do not wire new work to it or any
+    blueprint extending it.
+
+workItem:
+  kind: feature
+  idPrefix: F
+
+# The autoloop dispatch policy (autoloop-pot-operator-rebuild-2026-06-05 D-005):
+# the orchestrator runs up to 4 feature pipelines at once for a coding harness,
+# filling slots in strict plan-priority order. Per-install config
+# (`parallelWorkers.*` / `maxCostUsd` in .papercusp/config.json) overrides; the
+# orchestrator's imperative SAFETY_CEILING still clamps (D-007). Readiness is
+# inherited from the schema default (the legacy needs-work set) — declared
+# nowhere here on purpose, so the coding pipeline's selection is byte-identical
+# to the pre-lift hardcoded policy.
+dispatch:
+  concurrency: 4
+  priority: plan-order
+
+# The orchestration spine. The decider (director) emits a DecisionVerb each turn;
+# deriveNext maps it to a PipelineAction. Every DECISION_VERB has an explicit
+# edge (parity with the exhaustive switch); a null/unparseable decision hits
+# `default` (stop cleanly — the dispatcher re-scans).
+spine:
+  decider: director
+  maxTurns: 200
+  default:
+    to: idle
+  edges:
+    # ── terminal ──
+    DONE: { to: done }
+    ESCALATE: { to: escalate, reasonFrom: arg }
+    IDLE: { to: idle }
+    # Deprecated — legacy loop treats CHECKPOINT as ESCALATE (milestone gates are
+    # now needs-human plan items).
+    CHECKPOINT: { to: escalate, reasonFrom: arg, reason: "checkpoint (deprecated)" }
+    # ── per-feature lifecycle (carry FEATURE_ID) ──
+    # NEXT_WORKER N=k (parallel lanes) is the GLOBAL orchestrator's job, not the
+    # per-feature pipeline's → unsupported (rejectWhenParallel).
+    NEXT_WORKER: { to: role, role: worker, extras: ["FEATURE_ID={feature}"], rejectWhenParallel: true }
+    NEXT_VALIDATOR: { to: role, role: validator, extras: ["FEATURE_ID={feature}"] }
+    NEXT_ARCHITECT: { to: role, role: architect, extras: ["FEATURE_ID={feature}"] }
+    NEXT_SCOPER: { to: role, role: scoper, extras: ["FEATURE_ID={feature}"] }
+    # ── quality verbs ──
+    NEXT_TESTER: { to: role, role: tester, extras: ["VAL_ID={arg}"] }
+    NEXT_SECURITY: { to: role, role: security-reviewer, extras: [] }
+    GENERATE_TESTS: { to: role, role: test-writer, extras: [] }
+    NEXT_MONITOR: { to: role, role: monitor, extras: [] }
+    # ── opt-in quality gates (dormant by default — the director only EMITS these
+    #    when the harness opts in; "wiring ≠ forcing cost") ──
+    NEXT_CROSSCHECK: { to: role, role: crosscheck, extras: ["FEATURE_ID={feature}"] }
+    NEXT_UI_QA: { to: role, role: ui-qa, extras: ["FEATURE_ID={feature}"] }
+    # ── benign global / phase verbs → stop this pipeline cleanly ──
+    CONVERTED: { to: idle }
+    FEATURE_FREEZE: { to: idle }
+    READY_FOR_PROD: { to: idle }
+    RUN_TESTS: { to: idle }
+    # ── global-only verbs the per-feature pipeline deliberately does not run ──
+    NEXT_HARNESS: { to: unsupported }
+    NEXT_WORKER_CEO_MODE: { to: unsupported }
+
+# The Level-2 runtime DAG: plans→features import (waves + blocked_by parallelism).
+planner:
+  kind: features-import
+
+roles:
+  - { id: director, description: "Per-feature orchestrator; emits the next decision verb." }
+  - { id: scoper }
+  - { id: architect }
+  - { id: worker }
+  - { id: validator }
+  # NOTE: `reviewer` ships/returns at the PR gate, NOT via a per-feature director
+  # verb — it's modeled as an approval gate (gates.approvals), not a spine role.
+  - { id: debugger, reactive: true, description: "Read-only debugger fired before a worker retry." }
+  - { id: documenter }
+  - { id: curator }
+  # Opt-in quality roles — dispatched only when the harness opts in (dormant by
+  # default). Declared so the spine's NEXT_SECURITY / NEXT_CROSSCHECK / NEXT_UI_QA
+  # edges resolve to a real prompt.
+  - { id: security-reviewer, reactive: true }
+  - { id: crosscheck, reactive: true }
+  - { id: ui-qa, reactive: true }
+
+# Reactive overlay (layer 3): the debugger-before-worker gate. Fires before a
+# worker dispatch once attempts ≥ threshold and no debug note exists yet (read-only,
+# does not preempt). The threshold knob is `knobs.debuggerThreshold`.
+reactive:
+  - role: debugger
+    when: { beforeRole: worker, minAttempts: 3, unless: debug-note }
+    preempt: false
+
+# Gates: the finalize recipe. DONE → curator → postCuratorOutputs → documenter →
+# (archive); ESCALATE → curator. unify-agent-launches-as-blueprints P-007: this
+# recipe is now the DECLARATIVE source planFinalization resolves (was a hardcoded
+# constant) — postCuratorOutputs is listed explicitly (it always ran after curator).
+gates:
+  finalize:
+    onDone: [curator, postCuratorOutputs, documenter, archive]
+    onEscalate: [curator]
+
+# Per-blueprint gym config: coding collects its trace from the substrate git diff
+# (the D-015 collectTrace seam). Signals are the deterministic guardrails.
+gym:
+  collectTrace: git-diff
+  signals: [regressionsFromTests, plantedBugCaught]
+  rubric:
+    version: v1
+    model: gpt-5.6-sol:xhigh
+    weights: { d1: 0.5, d2: 0.25, d3: 0.25 }
+
+knobs:
+  harnessKind: coding
+  requiresRepo: true
+  debuggerThreshold: 3
+
+# Coding-specific declared tunables (P-006 / D-003) — these UNION with base's
+# universal params (Dispatch / Backend) when the settings UI introspects a coding
+# harness. KEYED BY config.json instance path (the namespace the settings panel
+# persists). The worker/typecheck/debugger knobs are coding-ONLY (a research/gym
+# harness has its own), which is exactly why HarnessSettingsPanel's old hardcoding
+# of them didn't generalize. `default` carries the runtime default (lanes.ts /
+# the panel) since these have no blueprint-knob default.
+params:
+  "debugger.threshold":
+    label: Debugger gate threshold
+    type: number
+    min: 1
+    max: 20
+    default: 3
+    group: Workers
+    affects: reactive debugger-before-worker gate (fires at attempts ≥ n)
+    description: >-
+      After this many failed worker attempts, a read-only debugger runs before the
+      next worker retry.
+# The build/run environment spec — "what to stand up on a frame"
+# (cloud-deployment-layer-2026-06-06 P-007). First-class + placement-agnostic: the
+# SHAPE is identical local vs cloud. Empty here by design — a coding harness's
+# actual build/test/run commands are PER-REPO, detected by harness:generate-from-repo
+# (which already sets knobs.testCommand) or set per instance, NOT hardcoded across
+# every coding harness. The deployment driver's install() reads the resolved spec to
+# bootstrap a cloud frame; empty arrays ⇒ nothing to stand up (today's local behavior).
+environment:
+  setup: [] # one-time machine setup (toolchains) — e.g. ["nvm install 22"]
+  install: [] # dependency install — e.g. ["npm ci"]
+  build: [] # build — e.g. ["npm run build"]
+  test: [] # test command(s) — usually mirrors knobs.testCommand
+  run: [] # long-running app/dev-server start — e.g. ["npm run dev"]
+  services: [] # background services (DB/cache) — {name, command, port?, healthcheck?}
+  ports: [] # ports the frame must expose
+  env: {} # NON-SECRET env vars (secrets ride deployment.credentialRef)
+
+# Tool/plugin dependencies (official-blueprints-cupboard-publish-2026-06-05
+# D-002): what this blueprint's roles actually call, derived from the role
+# personas (scripts/derive-blueprint-deps.mjs) + validated against the live
+# catalog. The import-time dep-validator (harness:create / init --from /
+# cupboard install-blueprint) resolves these UPFRONT — a missing tool fails
+# with "needs tool X" instead of a mid-run unknown_tool. NOTE: extends-merge
+# REPLACES arrays, so a child declaring its own dependencies.tools replaces
+# this list wholesale (re-declare the full set).
+dependencies:
+  tools:
+    - agent_tools:list
+    - artifacts:append
+    - artifacts:load
+    - artifacts:save
+    - audit:list
+    - coord:ask
+    - docs:get
+    - docs:outline
+    - docs:search
+    - features:get
+    - features:history
+    - features:list_related
+    - features:tag_vocabulary
+    - goals:get
+    - harness:escalation
+    - harness:markdown_index
+    - harness:pending_reviews
+    - harness:phase_path
+    - work_items:claim
+    - work_items:create
+    - memory:search
+    - work_items:comment
+    - plans:add-decision
+    - plans:add-item
+    - plans:get
+    - plans:items
+    - plans:new
+    - plans:promote
+    - plans:set-content
+    - plans:set-importance
+    - plans:set-now
+    - topics:feed
+    - topics:list
+    - topics:tag
+    - watch:create
+    - work_items:list
+  plugins: []

@@ -1,0 +1,18 @@
+[Unit]
+Description=Papercusp Server
+Documentation=https://papercuspai.com
+ConditionFileIsExecutable=/usr/bin/papercusp-server
+
+[Service]
+Type=simple
+Environment="PAPERCUSP_SIDECAR_DIR=/usr/lib/Papercusp Server/sidecar"
+StateDirectory=papercusp/controller
+StateDirectoryMode=0700
+ExecStart=/usr/bin/papercusp-server --headless-service
+Restart=on-failure
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=default.target

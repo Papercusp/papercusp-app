@@ -1,0 +1,64 @@
+# The `change-ledger` blueprint — deterministic-blueprints-migration-2026-06-13 (bucket A).
+#
+# The change-ledger repo-edit scan (git-log the prompt-source roots, one ledger
+# row per (commit, file)) as a SCHEDULED DETERMINISTIC blueprint, mirroring the
+# negative-space pilot (P-110). A program-mode spine whose single step fires a
+# registered typed function (`change-ledger:scan`) wrapping the shipped scan
+# logic — same flag, same git-log scan, same ledger dedupe (behavior-neutral,
+# D-004). No decision gate ⇒ a DETERMINISTIC PIPELINE (the step runs to
+# completion). The bespoke `system:change-ledger-scan` routine action delegates
+# to the SAME shared orchestration (the lib LOGIC stays — the op + the action
+# both call `runChangeLedgerScan`).
+#
+# NOT a dark frontier loop: this is a pure-bookkeeping recorder (no LLM, no queue
+# filing), so there is NO learning-governor gate — only the `papercusp-change-ledger`
+# flag (default ON — the kill-switch). It is seeded ACTIVE; behavior-neutral with the
+# pre-migration routine (same flag, same hourly cadence).
+id: change-ledger
+extends: base
+version: 0.1.0
+description: >-
+  Deterministic recorder: git-log the prompt-source roots over a trailing window
+  and offer one behavior-change-ledger row per (commit, file) (the change-ledger
+  repo-edit scan) on a cadence. Pure bookkeeping — git + SQL, no agent, no LLM.
+
+# A descriptive work-item kind (the deterministic pipeline does not create rows —
+# it offers ledger rows directly); the schema requires the field.
+workItem:
+  kind: mining-run
+  idPrefix: CLG
+
+# Program-mode spine (P-010): one deterministic step, NO gate ⇒ deterministic
+# pipeline. `payload.sinceDays` is the trailing git-log window the routine's
+# payload_template carries (absent ⇒ the op's default of 14). A whole-string
+# `{{ payload.x }}` that is unset interpolates to undefined → the op's optional
+# arg is omitted → its default applies.
+spine:
+  steps:
+    - id: scan
+      op: change-ledger:scan
+      args:
+        sinceDays: "{{ payload.sinceDays }}"
+      bind: scan
+
+knobs:
+  harnessKind: learning
+  # git + SQL bookkeeping over the serving tree needs no checked-out repo here.
+  requiresRepo: false
+
+# Scheduled trigger: the scan cadence, byte-identical to the bespoke
+# `system:change-ledger-scan` routine (hourly at :20, offset from the :00 pileup).
+# The routine fires `system:blueprint-run` with `{ blueprintId: change-ledger }`;
+# the handler detects program-mode and runs the steps inline. SEEDED ACTIVE.
+triggers:
+  schedule:
+    - cron: "0 20 * * * *"
+      action: system:blueprint-run
+      singleton: true        # P-144/D-018: workspace-singleton cadence
+      singletonActive: true  # D-024: always-on bookkeeping — seeds ACTIVE on a fresh workspace (no flag/arming)
+
+# No agent roles (pure-deterministic) and no agent-tool deps — the step calls a
+# registered function, not an agent.
+dependencies:
+  tools: []
+  plugins: []

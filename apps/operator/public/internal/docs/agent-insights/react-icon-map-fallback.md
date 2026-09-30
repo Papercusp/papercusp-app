@@ -1,0 +1,62 @@
+# React icon maps need an explicit fallback
+URL: /internal/docs/agent-insights/react-icon-map-fallback
+
+ICON_MAP[unknownKey] returns undefined; rendering undefined as a component crashes the entire React subtree. Always `??` to a fallback.
+
+## What
+
+Code that looks up a React component from a record by key:
+
+```tsx
+const Icon = ICON_MAP[row.kind];   // ← returns undefined on unknown keys
+return <Icon />;                   // ← crashes the entire subtree
+```
+
+When `row.kind` isn't a key in `ICON_MAP`, the lookup returns
+`undefined`. Rendering `undefined` as a JSX tag throws
+`Element type is invalid` and **takes down the whole component tree**
+above it — including unrelated panels.
+
+## Why it matters
+
+This crashed the **Brainstorm panel** in a way that initially looked
+like a Brainstorm-specific regression. The actual culprit was an
+`IssueRow` rendering an issue with a new `kind` value the icon map
+hadn't been updated for. The crash bubbled up through React's error
+boundary into the parent panel, which happened to be Brainstorm.
+
+The failure mode is especially nasty because:
+
+* It only triggers when data flows in with the unknown key — works
+  fine in dev with seeded data.
+* The crashed component is rarely the one *causing* the crash.
+* React error messages point at the parent, not the bad lookup.
+
+## How to apply
+
+Two-line fix, no exceptions — `??` (or `||`) to a fallback component:
+
+```tsx
+const Icon = ICON_MAP[row.kind] ?? FallbackIcon;
+return <Icon />;
+```
+
+(`FallbackIcon` is illustrative — use whatever neutral lucide glyph the
+surface already imports. Live examples: `iconFor()` in
+`apps/operator/app/harness/dock/AddPanelCatalog.tsx` falls through
+`ICON_MAP[type]` → `Puzzle` (plugin) → `SquareDashed`; `PluginIcon` in
+`apps/operator/app/harness/plugin-utils.tsx` does
+`(name && PLUGIN_ICON_MAP[name]) || Puzzle` — the leading `name &&` also
+guards against a null/undefined icon name before the map lookup.)
+
+**Every** map-based component lookup needs `?? FallbackIcon`. Grep
+for `ICON_MAP[` / `_MAP[` patterns when reviewing panels — anywhere
+the key is from data (not a literal), assume it could be missing.
+
+Same rule applies to `STATUS_BADGE_MAP[status]`,
+`SEVERITY_COLOR_MAP[level]`, etc. — anything that maps user-data
+keys to React components.
+
+If you find a violation while working in a panel, fix it on the spot
+even if it's outside your task — this is a category we can't afford
+in any UI surface.

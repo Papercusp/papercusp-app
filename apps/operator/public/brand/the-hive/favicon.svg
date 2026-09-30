@@ -1,0 +1,12 @@
+<svg width="64" height="64" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The Swarm favicon">
+  <rect width="128" height="128" rx="28" fill="#080A08"/>
+  <path d="M64 14 108 39v50l-44 25-44-25V39z" fill="#10120E" stroke="#FFD166" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M28 77c20-22 48-31 74-25M28 53c23 12 43 29 60 51" stroke="#FFD166" stroke-opacity=".28" stroke-width="3" stroke-linecap="round"/>
+  <g transform="translate(62 56) rotate(-8)">
+    <path d="M-8-3c-8-8-17-7-23 1 7 3 15 2 23-1Z" fill="#FFF2C2" fill-opacity=".38" stroke="#FFF2C2" stroke-opacity=".60" stroke-width="2"/>
+    <path d="M8-3c8-8 17-7 23 1-7 3-15 2-23-1Z" fill="#FFF2C2" fill-opacity=".38" stroke="#FFF2C2" stroke-opacity=".60" stroke-width="2"/>
+    <path d="M0-14c7 6 10 13 10 22 0 12-4 21-10 21S-10 20-10 8c0-9 3-16 10-22Z" fill="#F6B72F" stroke="#FFD166" stroke-width="2.4"/>
+    <path d="M-8 4H8M-8 14H8" stroke="#0F1411" stroke-opacity=".70" stroke-width="3" stroke-linecap="round"/>
+  </g>
+  <path d="M87 33c7-5 15-4 21 1M37 86c-8 4-15 3-22-2" stroke="#FFD166" stroke-width="4" stroke-linecap="round"/>
+</svg>

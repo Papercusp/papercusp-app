@@ -1,0 +1,115 @@
+{
+  "name": "topics:subscribe (D-102, retired 2026-08-09)",
+  "description": "Surface config for the topics:subscribe retirement (coordination-spec-adoption-2026-08-03 D-102). The retired thing is the TOOL DOOR only — the base primitive watch:create { targetKind:'topic', wake:false } keeps every cell, and the whole subscription substrate (subscribeTopic, coord_entity_subscriptions, the full/digest/mention modes) stays live. That is exactly why a bare-word scan is useless here: 'subscribe' matches the substrate this retirement deliberately preserved, plus a dozen unrelated live surfaces (topics:unsubscribe, work_items:subscribe, state:subscribe, conversations:join, the SSE notify path). Identifier-anchored matching on the exact tool name is the only scan that separates the door from the room.",
+  "identifiers": [
+    "topics:subscribe",
+    "topics-subscribe",
+    "topicsSubscribeTool"
+  ],
+  "allowlist": [
+    {
+      "file": "_retired/topics-subscribe/**",
+      "reason": "the retired surface's own preserved source — expected to name itself; not a live reference."
+    },
+    {
+      "file": "**/RESTORE.md",
+      "reason": "retirement documentation describing what was removed and how to restore it — expected to name the retired identifier."
+    },
+    {
+      "file": "scripts/retirement-surfaces/topics-subscribe-2026-08-09.json",
+      "reason": "this surface config itself."
+    },
+    {
+      "file": "packages/operator-core/lib/agent-tools/index.ts",
+      "reason": "the registration block's retirement note, which names the removed import so the next reader does not re-add it. Prose, not a live import."
+    },
+    {
+      "file": "packages/operator-core/lib/agent-tools/events/watch.ts",
+      "reason": "the base primitive's header documents which presets it has and which were retired — the D-007 preset table is the canonical explanation of what topics:subscribe WAS."
+    },
+    {
+      "file": "packages/operator-core/lib/agent-tools/state/subscribe.ts",
+      "reason": "the surviving preset's header contrasts itself with the retired one to explain why the base primitive stayed. Prose."
+    },
+    {
+      "file": "packages/operator-core/lib/agent-tools/coordination/tools/topics-handlers.test.ts",
+      "reason": "the handler test's header records that the topics:subscribe block moved to _retired/ and why the subscribeTopic mock is still needed by the topics:list tests. Prose."
+    },
+    {
+      "file": "libs/papercusp/packages/harness/blueprints/base/prompts/su.md",
+      "reason": "the su routing table names the retired preset while pointing at the base primitive — a deliberate 'do not reach for this' signpost for agents carrying it in memory."
+    },
+    {
+      "file": "packages/operator-core/lib/topic-matcher-io.ts",
+      "reason": "comments describing the SUBSTRATE rows ('the same rows topics:subscribe writes') — the substrate is live and was never retired; only the tool that wrote them via one door is gone. watch:create writes identical rows."
+    },
+    {
+      "file": "packages/operator-core/lib/topic-subscription-store.ts",
+      "reason": "same — substrate prose about row shape, not a tool reference."
+    },
+    {
+      "file": "packages/operator-core/lib/topic-hysteresis.ts",
+      "reason": "same — the hysteresis machine writes subscription rows itself and its comments contrast automatic rows with manually-registered ones."
+    },
+    {
+      "file": "packages/operator-core/lib/adjacency-cross-feed*.ts",
+      "reason": "same — substrate prose; this feed writes subscription rows directly."
+    },
+    {
+      "file": "packages/operator-core/lib/agent-tools/coordination/identity-keyed-state-inventory.test.ts",
+      "reason": "a rebind-coverage rationale string describing how topic subscriptions are re-established; historical prose about the substrate, not a call site."
+    },
+    {
+      "file": "packages/operator-core/lib/agent-tools/coordination/rebind-identity-mid-hold.integration.test.ts",
+      "reason": "header prose noting there is no separate DB-backed 'watch' surface — describes the substrate, not the retired door."
+    },
+    {
+      "file": "apps/operator/docs/agent-briefs-2026-06-05.md",
+      "reason": "a dated 2026-06-05 verification brief — a historical record of what was tested then, not live guidance."
+    },
+    {
+      "file": "apps/operator/public/internal/docs/**",
+      "reason": "generated docs output; the source lives in apps/operator-docs/src. The await-event-primitive insight legitimately documents the D-007 preset table including the retired one."
+    },
+    {
+      "file": "apps/operator-docs/**",
+      "reason": "same — docs describing the preset table historically."
+    },
+    {
+      "file": "apps/operator/dist-sidecar/**",
+      "reason": "generated build output; regenerated from libs/papercusp blueprints."
+    },
+    {
+      "file": "apps/operator/dist-host/**",
+      "reason": "generated build output; regenerated from libs/papercusp blueprints."
+    },
+    {
+      "file": "apps/operator/docs/plans/**",
+      "reason": "plan documents record the retirement decision and its rationale."
+    },
+    {
+      "file": "packages/operator-core/lib/agent-tools/__tests__/wake-vs-inject-axis.test.ts",
+      "reason": "the axis guard's header records that topics:subscribe HELD this slot until the retirement and that the assertion moved up to watch:create. Prose; the assertion itself now reads events/watch.ts."
+    },
+    {
+      "file": "packages/operator-core/lib/external-bench/coordination-runtime.test.ts",
+      "reason": "isCoordinationToolCall() classifies HISTORICAL trace rows. Calls recorded before 2026-08-09 must still classify as coordination or the benchmark silently re-scores past runs — the classifier is deliberately retention-blind, exactly as it kept the retired 'messages:send' semantics in view for WI-6097."
+    },
+    {
+      "file": "packages/operator-core/lib/topic-hysteresis.test.ts",
+      "reason": "header prose contrasting the pure state machine with live actuation against the subscription substrate — the substrate is live."
+    },
+    {
+      "file": "packages/operator-core/lib/topic-matcher-io.integration.test.ts",
+      "reason": "describes the partial-unique upsert on coord_entity_subscriptions ('the SAME rows') — substrate-level, and watch:create writes through the identical path."
+    },
+    {
+      "file": "packages/operator-core/lib/memory/bench/fixtures/prose-corpus.v1.json",
+      "reason": "a FROZEN memory-retrieval benchmark corpus. Editing it would invalidate the benchmark's baselines; it is a historical text snapshot, not code."
+    },
+    {
+      "file": "apps/operator/docs/session-chat-modal-redesign.html",
+      "reason": "a dated design-exploration artifact naming the surface as it existed then; not live guidance."
+    }
+  ]
+}

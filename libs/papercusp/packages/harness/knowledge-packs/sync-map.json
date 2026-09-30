@@ -1,0 +1,19 @@
+{
+  "//": "Which pack item files are SYNCED from the canonical pack (EI-18121649240446176). 'all' = the mirror's item set is exactly the canonical set. A listed id = that one file is kept byte-identical. To deliberately diverge a synced item, remove it here and edit the mirror's copy — silent drift is caught by pack-sync.test.ts; resync via `npm run gen:knowledge-packs`. Manifests are never synced.",
+  "canonical": "coding",
+  "mirrors": {
+    "work": [
+      "batch-repeated-operations",
+      "blockers-are-work",
+      "checkpoint-early",
+      "claim-before-working",
+      "correct-wrong-memories",
+      "directive-provenance",
+      "durable-handoffs",
+      "escalate-with-context",
+      "mitigation-is-not-a-fix",
+      "surface-deferred-items",
+      "verify-the-handoff-arrived"
+    ]
+  }
+}

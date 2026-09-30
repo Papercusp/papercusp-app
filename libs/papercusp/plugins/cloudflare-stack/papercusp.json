@@ -1,0 +1,155 @@
+{
+  "name": "@papercupai/cloudflare-stack",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "Provision a full Cloudflare backend (Pages + Workers + D1 + R2 + KV) for a forked harness. Ships setup/teardown/verify scripts that create real resources in the forker's account and template the harness's project files with the new IDs.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "versionPin": { "mode": "exact" },
+  "license": "MIT",
+  "capabilities": [
+    "secrets:read:CLOUDFLARE_API_TOKEN",
+    "http:fetch:api.cloudflare.com",
+    "compute:exec:wrangler",
+    "compute:exec:curl",
+    "compute:exec:jq",
+    "compute:exec:envsubst"
+  ],
+  "configSchema": {
+    "type": "object",
+    "required": [
+      "accountId",
+      "byoCloudflareToken"
+    ],
+    "properties": {
+      "accountId": {
+        "type": "string",
+        "title": "Cloudflare account ID",
+        "shareable": false,
+        "pattern": "^[a-f0-9]{32}$",
+        "description": "32-hex-char ID from your Cloudflare dashboard URL (dash.cloudflare.com \u2192 right sidebar). Different per forker \u2014 never travels with snapshots."
+      },
+      "byoCloudflareToken": {
+        "type": "string",
+        "title": "Cloudflare API token",
+        "secret": true,
+        "snapshotPolicy": "strip",
+        "description": "API token with these scopes: Pages:Edit, Workers Scripts:Edit, D1:Edit, R2:Edit, Workers KV Storage:Edit, User Details:Read. Create at dash.cloudflare.com/profile/api-tokens. Stripped from snapshots; you must paste a fresh one at fork time."
+      },
+      "projectName": {
+        "type": "string",
+        "title": "Pages project name",
+        "shareable": false,
+        "pattern": "^[a-z0-9][a-z0-9-]{1,52}[a-z0-9]$",
+        "description": "Pages project name (lowercase, hyphens, \u226454 chars). Becomes the `*.pages.dev` subdomain. Leave blank to default to the harness slug.",
+        "default": ""
+      },
+      "workerName": {
+        "type": "string",
+        "title": "Worker script name",
+        "shareable": false,
+        "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
+        "description": "Worker script name (lowercase, hyphens, \u226464 chars). Becomes the `*.workers.dev` subdomain. Leave blank to default to `<harness-slug>-api`.",
+        "default": ""
+      },
+      "d1DatabaseName": {
+        "type": "string",
+        "title": "D1 database name",
+        "shareable": false,
+        "description": "D1 database display name. Leave blank to default to `<harness-slug>-db`.",
+        "default": ""
+      },
+      "r2BucketName": {
+        "type": "string",
+        "title": "R2 bucket name",
+        "shareable": false,
+        "pattern": "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$",
+        "description": "R2 bucket name (lowercase, hyphens, 3\u201363 chars, account-globally-unique). Leave blank to default to `<harness-slug>-assets`.",
+        "default": ""
+      },
+      "kvNamespaceTitle": {
+        "type": "string",
+        "title": "KV namespace title",
+        "shareable": false,
+        "description": "KV namespace title (display name only; substrate-generated ID becomes the binding). Leave blank to default to `<harness-slug>-sessions`.",
+        "default": ""
+      },
+      "skipResources": {
+        "type": "array",
+        "title": "Skip resources",
+        "shareable": false,
+        "default": [],
+        "items": {
+          "type": "string",
+          "enum": [
+            "pages",
+            "worker",
+            "d1",
+            "r2",
+            "kv"
+          ]
+        },
+        "description": "Skip specific resources. Useful if your harness only needs some of them (e.g. Pages-only static site)."
+      }
+    }
+  },
+  "uiSchema": {
+    "accountId": {
+      "ui:help": "dash.cloudflare.com \u2192 right sidebar \u2192 Account ID."
+    },
+    "byoCloudflareToken": {
+      "ui:widget": "password",
+      "ui:help": "Create at dash.cloudflare.com/profile/api-tokens with the scopes listed above."
+    },
+    "skipResources": {
+      "ui:widget": "checkboxes"
+    }
+  },
+  "provision": {
+    "setup": {
+      "path": "provision/setup.sh",
+      "displayName": "Provision Cloudflare backend",
+      "description": "Creates Pages project, Worker, D1 database, R2 bucket, and KV namespace in your Cloudflare account. Templates the harness's project files (wrangler.toml.tmpl, .env.production.tmpl, etc.) with the new IDs. Idempotent: safe to re-run.",
+      "timeoutSec": 600,
+      "cloudProvider": {
+        "id": "cloudflare"
+      },
+      "allowedHosts": [
+        "api.cloudflare.com"
+      ]
+    },
+    "teardown": {
+      "path": "provision/teardown.sh",
+      "displayName": "Tear down Cloudflare backend",
+      "timeoutSec": 300,
+      "cloudProvider": {
+        "id": "cloudflare"
+      }
+    },
+    "verify": {
+      "path": "provision/verify.sh",
+      "timeoutSec": 60,
+      "cloudProvider": {
+        "id": "cloudflare"
+      }
+    }
+  },
+  "icon": "Cloud",
+  "roles": [
+    {
+      "id": "cf-stack-reviewer",
+      "promptPath": "roles/cf-stack-reviewer.md",
+      "whenUseful": "Consult when SPEC additions specifically touch Cloudflare resources \u2014 new R2/D1/KV/DO bindings, edge routing changes, worker-vs-pages decisions, edge secrets, or CF tier-limit boundaries. Use INSTEAD of the generic infra-reviewer when the change is clearly Cloudflare-specific. Skip for product changes that don't touch data persistence or edge config.",
+      "output": {
+        "kind": "features",
+        "featureKind": "infra"
+      },
+      "alwaysFireOn": [
+        "onProvisioned"
+      ],
+      "budgetCents": 75,
+      "featureSize": "small"
+    }
+  ]
+}

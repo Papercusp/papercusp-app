@@ -1,0 +1,85 @@
+# The `scan` launch blueprint — unify-agent-launches-as-blueprints-2026-06-04 (P1, D-003 / D-005).
+#
+# ⚠ DEPRECATED — the SCHEDULED cadence is RETIRED (sentinel-herald-2026-06-21 D-018 / P-023).
+# The Queen is now the constant scanner/placer and the Sentinel reads live workspace
+# state directly (curation:state-of-hive / curation:feed / Overwatch compute-brief —
+# packages/operator-core/lib/sentinel/sentinel-context.ts), so a separate scheduled
+# "sweep + capture" surface is no longer needed as a competing cadence. The
+# `triggers.schedule` block below was REMOVED so nothing materializes an active scan
+# routine (the per-install seam seeds non-singleton triggers ACTIVE). The blueprint +
+# its scanner role survive as an ON-DEMAND launch (system:blueprint-run {blueprintId:scan})
+# for a manual one-off sweep — it just no longer runs on a clock. The
+# `improvements:capture` curation/triage path it feeds is UNCHANGED and still used.
+#
+# A SINGLE-ROLE LAUNCH BLUEPRINT (D-007). The proactive workspace scan:
+# the scanner persona sweeps the app for latent problems + improvement
+# opportunities that no agent flagged — COMPLEMENTARY to the self-improvement
+# loop's pull-from-agents capture (the scanner finds what the pull misses, D-005).
+#
+# The reframe (D-005): the bespoke `operator_scanner_session` + the operator-card
+# recommendation stream DISSOLVE. The scanner's findings become tracked
+# `work_items[kind=change|improvement]` fed into the self-improvement triage
+# (papercusp-self-improvement-loop-2026-06-04 D-003) — ONE triage surface, not a
+# separate card stream. The scanner PERSONA survives as this blueprint's role; the
+# bespoke machinery retires.
+#
+# Single-role = inline-agent (D-007): the decider IS the scanner; it captures each
+# finding via `improvements:capture` (the self-improvement loop's intake), so the
+# output naturally lands as work_items in the one backlog.
+id: scan
+extends: single-agent
+version: 0.1.0
+description: >-
+  Proactive workspace scan: the scanner sweeps for latent problems + improvement
+  opportunities no agent flagged and captures each as a tracked work-item
+  (kind=change|improvement) into the self-improvement triage backlog.
+
+workItem:
+  kind: scan-run
+  idPrefix: SCAN
+
+# Spine edges + planner inherited from the `single-agent` parent; override the
+# decider role + this launch's turn budget only.
+spine:
+  decider: scanner
+  maxTurns: 30
+
+roles:
+  - id: scanner
+    description: >-
+      Sweep the workspace for latent problems + improvement opportunities; capture
+      each finding via improvements:capture so it lands as a tracked work-item.
+
+knobs:
+  harnessKind: scan
+  requiresRepo: true
+  # The scanner's findings route to the self-improvement backlog (D-005), not a
+  # separate operator-card stream. Declared as the output contract.
+  output: work-items
+
+# Scheduled trigger (D-004): RETIRED (sentinel-herald-2026-06-21 D-018 / P-023). The
+# 4-hourly scan cadence is gone — the Queen scans/places continuously and the Sentinel
+# reads live state directly, so a scheduled competing sweep is no longer run. The
+# blueprint stays launchable ON-DEMAND via `system:blueprint-run { blueprintId: scan }`
+# (no `triggers.schedule` ⇒ materializeBlueprintTriggers mints no routine). To bring a
+# manual cadence back, re-add a `triggers.schedule` entry here (and prefer
+# `singleton: true` so it seeds INACTIVE/dark rather than active per-install).
+
+# Dependencies (official-blueprints-cupboard-publish D-002): derived from the
+# blueprint-local scanner persona (scripts/derive-blueprint-deps.mjs) — the
+# read-side sweep surface plus the improvements intake its findings land in.
+dependencies:
+  tools:
+    - audit:list
+    - harness:list
+    - improvements:capture
+    - improvements:digest
+    - work_items:list
+    - pending_events:list
+    - plans:attention
+    - plans:items
+    - search:fulltext
+    - search:query
+    - search:semantic
+    - tasks:list
+  plugins: []

@@ -1,0 +1,29 @@
+/**
+ * Do not edit directly, this file was auto-generated.
+ */
+
+[data-theme="black"], [data-theme-base="black"] {
+  --bg-deepest: #000000; /** Deep surface tiers collapse to pure black on the black page */
+  --bg-deeper: #000000;
+  --bg-deep: #000000;
+  --bg: #000000; /** Pure black page background */
+  --bg-1: #0a0a0a; /** Near-black base surface (tier 1) */
+  --bg-popover: #121212; /** Solid elevated surface for popovers/menus */
+  --bg-raised: #181818; /** Solid raised panel — subtle grey elevation above the black page (frost: bespoke navy) */
+  --bg-raised-high: #202020; /** Solid raised emphasis/hover panel — one step lighter than --bg-raised */
+  --fg: #f5f5f5; /** Near-white primary text */
+  --fg-dim: #b8b8b8; /** Dimmed text */
+  --fg-mute: #808080; /** Muted text */
+  --border: rgba(255, 255, 255, 0.14); /** Neutral border (replaces the sky-tinted frost border) */
+  --border-strong: rgba(255, 255, 255, 0.3); /** Neutral strong border */
+  --accent: #e6e6e6; /** Light-grey accent so interactive chrome stays visible on black */
+  --accent-rgb: 230, 230, 230; /** RGB triplet of --accent for rgba() alpha composition — every theme that overrides accent must override this too, or the frost sky triplet leaks through :root */
+  --accent-strong: #ffffff; /** White strong accent */
+  --accent-strong-rgb: 255, 255, 255; /** RGB triplet of --accent-strong for rgba() alpha composition (same leak rule as accent-rgb) */
+  --accent-cool: #b0b0b0; /** Cool grey accent */
+  --accent-soft: #d8d8d8; /** Light grey — glows/highlights go monochrome on black (frost: sky-200) */
+  --accent-soft-rgb: 216, 216, 216; /** RGB triplet of --accent-soft for rgba() alpha composition (same leak rule as accent-rgb) */
+  --accent-deep: #707070; /** Mid grey — deeper accent tint on black (frost: sky-500) */
+  --accent-deeper: #4a4a4a; /** Dark grey — deepest accent tint on black (frost: sky-700) */
+  --accent-ink: #000000; /** Black text drawn on top of an accent fill */
+}

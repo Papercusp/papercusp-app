@@ -1,0 +1,10 @@
+{
+  "ref": "pot-coordination-health",
+  "id": "pot-coordination-health",
+  "title": "Pot coordination health",
+  "description": "The 15-criteria scorecard for whether the queen/bee/overwatch/scout self-improving loop is healthy — the whole loop turning, not any one stage merely busy. Overwatch emits it every turn. Long-form method: METHOD.md (method_ref pot-coordination-health).",
+  "category": "hive-coordination",
+  "scope": "rubric",
+  "version": "0.1.0",
+  "source": "first-party"
+}

@@ -1,0 +1,62 @@
+# \"Error POSTing to endpoint\" is a keep-alive socket race, not flaky infra
+URL: /internal/docs/agent-insights/mcp-error-posting-to-endpoint-is-keepalive-race
+
+The transient MCP \"Streamable HTTP error: Error POSTing to endpoint\" (no server log, succeeds on immediate retry) is a keep-alive socket-reuse reset — fixed by the operator host's keepAliveTimeout, not by retrying and shrugging.
+
+## The symptom
+
+A papercusp-su (or any) MCP client intermittently fails a tool call with:
+
+```
+Streamable HTTP error: Error POSTing to endpoint
+```
+
+The tells that make this class unmistakable:
+
+* **It succeeds on immediate retry** — the very next attempt works.
+* **There is NO server log** — the request never reached a handler, so
+  `tool_invocations` never records it (the failure is invisible in the ledger,
+  which is why it got culturally normalized as "just transient").
+* It clusters on **write calls** because those are POSTs on a reused socket.
+
+## Why it happens (the mechanism)
+
+It is a classic HTTP keep-alive socket-reuse race, NOT flaky infra, NOT the box
+being "busy", NOT a rate limit:
+
+1. The MCP client keeps a pooled keep-alive socket open between tool calls.
+2. Node's **default `server.keepAliveTimeout` is 5s**. If the client's
+   between-tool-call gap (an interactive agent thinking/composing) exceeds 5s,
+   the server closes the idle socket and sends a FIN.
+3. The client, not yet having processed the FIN, sends its next POST on that
+   socket → **ECONNRESET** → "Error POSTing to endpoint".
+
+The race window is narrow (the client hasn't seen the close yet), so it's
+intermittent — and a retry opens a fresh socket, so it "always works on retry".
+
+## The fix (already landed — WI-1711)
+
+Make the **server's** keep-alive window LONGER than any client/proxy idle-reuse
+window, so the **client** always closes an idle socket first (no disagreement,
+no race). `applyServerTimeouts` (`apps/operator/bin/host-request-deadline.ts`)
+sets `keepAliveTimeout` **default-on at 61s**, with `headersTimeout` lifted above
+it (Node requires `headersTimeout > keepAliveTimeout`). Wired at
+`apps/operator/bin/hono-host.ts` (the `applyServerTimeouts(server)` call).
+Kill-switch: `PAPERCUSP_HTTP_KEEPALIVE_TIMEOUT_MS=0` restores Node's 5s default.
+
+Guard: `apps/operator/bin/host-request-deadline.test.ts` asserts the 61s default
+and the `headersTimeout > keepAliveTimeout` invariant, citing this class.
+
+## What to do when you see it
+
+* **Do not** report it as a rate limit, "contention", or "flaky infra", and do
+  not just retry-and-shrug. It has a named root cause and a landed fix.
+* If a NEW server on the MCP path (a reverse proxy, the resilient `:9071`
+  mcp-proxy, a fresh Node host) shows this class, it is missing the
+  keep-alive-timeout fix — give it a `keepAliveTimeout` comfortably above any
+  upstream client idle-reuse window (the same 61s pattern).
+* The full elimination of any residual client-visible reset (universal
+  resilient-proxy client retry + blue-green deploy) is the larger
+  `backend-reliability-100pct` W1 initiative — not something to hand-roll per call.
+
+Origin: EI-6644 (report predated the WI-1711 fix by \~10h).

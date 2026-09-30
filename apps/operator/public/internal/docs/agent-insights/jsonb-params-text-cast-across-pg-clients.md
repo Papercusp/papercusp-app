@@ -1,0 +1,67 @@
+# jsonb params need ${JSON.stringify(x)}::text::jsonb — every other form breaks on one of the two pg clients
+URL: /internal/docs/agent-insights/jsonb-params-text-cast-across-pg-clients
+
+The live getOrgPg client (custom `types` map) THROWS on object/sql.json jsonb params, while a default postgres() client DOUBLE-ENCODES a pre-stringified param described as jsonb — only stringify + ::text::jsonb round-trips an object on both, so either failure mode ships green in the suite that doesn't exercise it.
+
+## Symptom
+
+Writing an object into a `jsonb` column behaves differently depending on which
+postgres-js client runs the query — and each "obvious" form is broken on
+exactly one of them:
+
+| param form                            | live `getOrgPg()` client                                                                   | default `postgres()` client (testcontainers)                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `${obj}` or `${sql.json(obj)}`        | **THROWS** `The "string" argument must be of type string … Received an instance of Object` | ✅ stores an object                                                          |
+| `${JSON.stringify(obj)}::jsonb`       | ✅ stores an object                                                                         | **double-encodes** — `jsonb_typeof` = `'string'`, reads back as a JS string |
+| `${JSON.stringify(obj)}::text::jsonb` | ✅ object                                                                                   | ✅ object                                                                    |
+
+So an integration-green write can fail (or silently double-encode) live, and a
+live-green write can corrupt rows under the test container — the same
+integration-green ≠ live-green class as
+[db-org-client-rejects-js-date-params](/internal/docs/agent-insights/db-org-client-rejects-js-date-params),
+on the jsonb axis.
+
+## Root cause
+
+`buildClient` (`libs/papercusp/libs/db/src/connection.ts`) passes a custom
+`types: { bigint: … }` map. Supplying a custom types map changes postgres-js's
+parameter-serialization path, and on that path a non-scalar JS value (object,
+`sql.json` wrapper, `Date`) reaches a writer that only accepts
+string/Buffer — hence the throw. A plain `postgres()` client (what the
+integration testbeds build) keeps the default path: it *accepts* objects, but
+when the server describes a param as `jsonb` (any param bound to a jsonb
+column or `::jsonb` cast) it serializes the JS value with `JSON.stringify` —
+so a value you already stringified becomes a quoted JSON **string**, not a
+document.
+
+`::text::jsonb` sidesteps both: the explicit `::text` makes the server
+describe the param as text, so BOTH clients send the plain string, and the
+text→jsonb cast parses the document server-side.
+
+## Rule
+
+For any `jsonb` write that must run on more than one client (lib code shared
+between routine actions and integration tests — i.e. nearly everything in
+`operator-core/lib`):
+
+```ts
+await sql`INSERT INTO t (data) VALUES (${JSON.stringify(value)}::text::jsonb)`;
+```
+
+Never `sql.json(...)`, never a raw object param, never a bare
+`::jsonb` cast on a pre-stringified value. The routines seeds
+(`seed-*-routine.ts`, `trigger_config`) and `lib/fleet-ekg/scan.ts` are
+existing examples of the canonical form.
+
+Read side is symmetric-safe: both clients parse a selected `jsonb` column to
+an object — but defensive readers (`Array.isArray(...) ? … : []`) keep a
+legacy double-encoded row from crashing the projection.
+
+## How it was caught
+
+FB-10's Fleet EKG wrote vectors with `sql.json` — integration-green, then the
+live backfill threw; switching to `${str}::jsonb` fixed live but flipped the
+integration suite red with double-encoded rows (`features.errorRate`
+undefined). A temp-table probe against both clients side-by-side
+(`jsonb_typeof(a)`) isolated the matrix above in one pass — probe both clients
+before trusting either suite on a serialization question.

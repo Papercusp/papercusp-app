@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Two Panes Designed, One Column Shipped</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;800&family=IBM+Plex+Mono:wght@400;500&display=swap" />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #181714;
+      --panel: #24221e;
+      --panel-2: #2d2a25;
+      --line: rgba(255,255,255,.13);
+      --line-strong: rgba(255,255,255,.24);
+      --ink: #f2eee6;
+      --muted: #aaa399;
+      --accent: #70c2b1;
+      --accent-ink: #0f2a25;
+      --kept: #7cc9a0;
+      --dropped: #e08a7a;
+      --partial: #e0b15a;
+      --shadow: 0 18px 40px rgba(0,0,0,.35);
+    }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]) {
+        color-scheme: light;
+        --bg: #f4f2ec;
+        --panel: #ffffff;
+        --panel-2: #ece9e1;
+        --line: rgba(29,27,23,.12);
+        --line-strong: rgba(29,27,23,.28);
+        --ink: #1d1b17;
+        --muted: #6b665c;
+        --accent: #1f7a68;
+        --accent-ink: #ffffff;
+        --kept: #1f7a4a;
+        --dropped: #b8402c;
+        --partial: #9a6a05;
+        --shadow: 0 14px 34px rgba(29,27,23,.14);
+      }
+    }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #f4f2ec;
+      --panel: #ffffff;
+      --panel-2: #ece9e1;
+      --line: rgba(29,27,23,.12);
+      --line-strong: rgba(29,27,23,.28);
+      --ink: #1d1b17;
+      --muted: #6b665c;
+      --accent: #1f7a68;
+      --accent-ink: #ffffff;
+      --kept: #1f7a4a;
+      --dropped: #b8402c;
+      --partial: #9a6a05;
+      --shadow: 0 14px 34px rgba(29,27,23,.14);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(900px 500px at 12% -12%, rgba(112,194,177,.16), transparent 65%),
+        var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    code, .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .86em; }
+    code { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: .05em .35em; white-space: nowrap; }
+
+    .wrap { width: min(100% - 40px, 1480px); margin: 0 auto; padding: 32px 0 64px; display: grid; gap: 44px; }
+
+    header { display: grid; gap: 14px; max-width: 900px; }
+    .eyebrow { color: var(--accent); font-size: 11px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(30px, 4vw, 52px); line-height: 1.02; letter-spacing: -.035em; font-weight: 800; text-wrap: balance; }
+    .lede { margin: 0; font-size: 17px; color: var(--muted); max-width: 66ch; }
+    .lede strong { color: var(--ink); font-weight: 600; }
+    .links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+    .links a {
+      border: 1px solid var(--line-strong); border-radius: 999px; padding: 7px 13px;
+      font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ink); background: var(--panel);
+    }
+    .links a.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+
+    h2 { margin: 0; font-size: 22px; letter-spacing: -.02em; font-weight: 700; text-wrap: balance; }
+    h3 { margin: 0; font-size: 15px; font-weight: 700; }
+    section { display: grid; gap: 18px; }
+    .section-head { display: grid; gap: 6px; max-width: 76ch; }
+    .section-head p { margin: 0; color: var(--muted); }
+
+    /* Designed vs shipped: one composed object per surface */
+    .compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .compare figure { margin: 0; display: grid; gap: 10px; align-content: start; }
+    .compare .tag { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    .compare .tag::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+    .tag.designed { color: var(--accent); }
+    .tag.shipped { color: var(--dropped); }
+    .shot { display: block; border: 1px solid var(--line-strong); border-radius: 10px; overflow: hidden; background: var(--panel); box-shadow: var(--shadow); }
+    .shot img { display: block; width: 100%; height: auto; }
+    .compare figcaption { display: grid; gap: 8px; }
+    .compare figcaption p { margin: 0; color: var(--muted); font-size: 14px; }
+    .facts { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; margin: 0; list-style: none; }
+    .facts li { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 4px 9px; font-size: 12.5px; font-weight: 500; }
+    @media (max-width: 900px) { .compare { grid-template-columns: 1fr; } }
+
+    /* Timeline: order carries information here, so timestamps lead */
+    .timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; border-left: 2px solid var(--line-strong); }
+    .timeline li { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 18px; padding: 14px 0 14px 22px; position: relative; }
+    .timeline li::before { content: ""; position: absolute; left: -7px; top: 22px; width: 12px; height: 12px; border-radius: 50%; background: var(--bg); border: 2px solid var(--accent); }
+    .timeline li + li { border-top: 1px solid var(--line); }
+    .timeline time { color: var(--muted); font-size: 13px; }
+    .timeline .what { display: grid; gap: 6px; max-width: 78ch; }
+    .timeline .what p { margin: 0; }
+    .timeline .src { color: var(--muted); font-size: 12.5px; }
+    blockquote { margin: 4px 0 0; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--panel); border-radius: 0 8px 8px 0; font-size: 14px; }
+    blockquote p { margin: 0; }
+    @media (max-width: 700px) { .timeline li { grid-template-columns: 1fr; gap: 4px; } }
+
+    /* Gap table */
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); }
+    table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 14px; }
+    th, td { text-align: left; vertical-align: top; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+    th { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 700; background: var(--panel-2); }
+    tr:last-child td { border-bottom: 0; }
+    td:first-child { font-weight: 600; white-space: nowrap; }
+    .pill { display: inline-block; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+    .pill.kept { color: var(--kept); }
+    .pill.dropped { color: var(--dropped); }
+    .pill.partial { color: var(--partial); }
+
+    /* Paths */
+    .paths { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+    .paths li { display: grid; grid-template-columns: minmax(0, 46%) minmax(0, 1fr); gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+    .paths li:last-child { border-bottom: 0; }
+    .paths .mono { overflow-wrap: anywhere; }
+    .paths span:last-child { color: var(--muted); }
+    @media (max-width: 700px) { .paths li { grid-template-columns: 1fr; gap: 4px; } }
+
+    /* Wireframe of the fix — CSS boxes, not a picture */
+    .fix { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+    .options { display: grid; gap: 12px; }
+    .option { border: 1px solid var(--line-strong); border-radius: 10px; padding: 16px 18px; background: var(--panel); display: grid; gap: 8px; }
+    .option.recommended { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+    .option .k { font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+    .option p { margin: 0; color: var(--muted); font-size: 14px; }
+    .option ul { margin: 0; padding-left: 18px; color: var(--ink); font-size: 14px; display: grid; gap: 3px; }
+    .wire { border: 1px solid var(--line-strong); border-radius: 12px; background: var(--panel); padding: 12px; display: grid; gap: 10px; }
+    .wire .label { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+    .frame { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); padding: 8px; }
+    .rail { display: grid; gap: 6px; align-content: start; }
+    .rail i { display: block; height: 22px; border-radius: 5px; background: var(--panel-2); border: 1px solid var(--line); }
+    .rail i.on { background: var(--accent); border-color: transparent; }
+    .stage { display: grid; gap: 6px; }
+    .bar { height: 26px; border-radius: 5px; background: var(--panel-2); border: 1px solid var(--line); }
+    .split { display: grid; grid-template-columns: minmax(0, 37%) minmax(0, 1fr); gap: 6px; min-height: 230px; }
+    .box { border: 1px dashed var(--line-strong); border-radius: 6px; padding: 8px; display: grid; gap: 6px; align-content: start; font-size: 11.5px; color: var(--muted); }
+    .box b { color: var(--ink); font-weight: 600; }
+    .row { height: 30px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line); }
+    .row.sel { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+    .strip { height: 22px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 22%, transparent); border: 1px solid var(--accent); }
+    .detail-card { border: 1px solid var(--line); border-radius: 5px; background: var(--panel-2); min-height: 44px; }
+    .wire .note { margin: 0; font-size: 12.5px; color: var(--muted); }
+    @media (max-width: 900px) { .fix { grid-template-columns: 1fr; } }
+
+    footer { color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--line); padding-top: 16px; display: grid; gap: 4px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="eyebrow">Cloud Portal · Work surfaces · audit 2026-09-01</div>
+      <h1>Two panes were designed. One column shipped.</h1>
+      <p class="lede">
+        The mockup board from Aug 31 put a <strong>list on the left and the selected item on the right</strong> in every direction.
+        Direction B was chosen. What went live at <code>127.0.0.1:3081</code> frames the operator's <strong>chat-sidebar rail widgets</strong>
+        (<code>PlansPane</code>, <code>InboxPane</code>) as full pages, so both faces render as one stacked column at any width.
+        Bulk clean-up and bulk resolve — the one thing you asked to be carried over — did come across.
+      </p>
+      <div class="links">
+        <a class="primary" href="./portal-work-plans-inbox.html">Open the original design board</a>
+        <a href="./portal-work-plans-inbox-side-by-side.html">Contact sheet (A · B · C · narrow)</a>
+        <a href="http://127.0.0.1:3081/?app=inbox" target="_blank" rel="noopener">Live Inbox ↗</a>
+        <a href="http://127.0.0.1:3081/?app=plans" target="_blank" rel="noopener">Live Plans ↗</a>
+      </div>
+    </header>
+
+    <section id="inbox">
+      <div class="section-head">
+        <h2>Resolution Inbox</h2>
+        <p>Left: the Direction B render you picked. Right: the live page today, captured at 1800 px wide so viewport is ruled out.</p>
+      </div>
+      <div class="compare">
+        <figure>
+          <span class="tag designed">Designed · Direction B</span>
+          <a class="shot" href="./portal-work-plans-inbox-b.png" target="_blank" rel="noopener"><img src="./portal-work-plans-inbox-b.png" alt="Direction B mockup: Inbox with filter rail, item list, and a decision detail pane on the right" /></a>
+          <figcaption>
+            <p>Filter rail → item list → selected decision with its premise and answer form. Bulk recommendation lives under the filters.</p>
+            <ul class="facts">
+              <li>List 37% · detail 63%</li>
+              <li>Selection in the URL: <code>?app=inbox&amp;filter=needs&amp;item=&lt;id&gt;</code></li>
+              <li>Answer without leaving the list</li>
+            </ul>
+          </figcaption>
+        </figure>
+        <figure>
+          <span class="tag shipped">Shipped · today</span>
+          <a class="shot" href="./portal-work-plans-inbox-shipped-inbox.png" target="_blank" rel="noopener"><img src="./portal-work-plans-inbox-shipped-inbox.png" alt="Live portal Inbox: hero card, bulk strip, find-and-focus, then a single full-width list of rows" /></a>
+          <figcaption>
+            <p>Hero → bulk strip → find-and-focus → full-width rows. A row expands in place; nothing sits beside the list.</p>
+            <ul class="facts">
+              <li>One column, 100% width</li>
+              <li>iframe of <code>:3070/inbox?portalEmbed=1</code></li>
+              <li>Bulk resolve strip kept</li>
+            </ul>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="plans">
+      <div class="section-head">
+        <h2>Plans</h2>
+        <p>The board never rendered B's Plans face on its own; the Work-hub render (A) shows the same Plans list + plan detail, minus the inner “Work” rail that B drops.</p>
+      </div>
+      <div class="compare">
+        <figure>
+          <span class="tag designed">Designed · Plans list + detail (from the A render)</span>
+          <a class="shot" href="./portal-work-plans-inbox-a.png" target="_blank" rel="noopener"><img src="./portal-work-plans-inbox-a.png" alt="Direction A mockup: Plans list with Needs-you and In-motion groups, and the selected plan's dashboard on the right" /></a>
+          <figcaption>
+            <p>“Needs you” and “In motion” groups on the left; the selected plan's progress, working-now agents, decisions, and state/next on the right.</p>
+            <ul class="facts">
+              <li>List 41% · plan 59%</li>
+              <li>Selection in the URL: <code>?app=plans&amp;plan=&lt;slug&gt;</code></li>
+              <li>Plan stays useful while you scan</li>
+            </ul>
+          </figcaption>
+        </figure>
+        <figure>
+          <span class="tag shipped">Shipped · today</span>
+          <a class="shot" href="./portal-work-plans-inbox-shipped-plans.png" target="_blank" rel="noopener"><img src="./portal-work-plans-inbox-shipped-plans.png" alt="Live portal Plans: hero card, cleanup strip, find-and-focus, then a single full-width list of plan cards" /></a>
+          <figcaption>
+            <p>Hero → clean-up strip → find-and-focus → full-width plan cards. Opening a plan replaces the list (dashboard takeover).</p>
+            <ul class="facts">
+              <li>One column, 100% width</li>
+              <li>iframe of <code>:3070/plans?portalEmbed=1</code></li>
+              <li>Bulk clean-up strip kept</li>
+            </ul>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="what-happened">
+      <div class="section-head">
+        <h2>What happened, in order</h2>
+        <p>Every line below is traceable; the session refs are searchable with <code>sessions:read</code>.</p>
+      </div>
+      <ol class="timeline">
+        <li>
+          <time>Aug 31 · 16:15 → 17:04</time>
+          <div class="what">
+            <p>The design board is authored: directions A, B, C plus a narrow state, all list + detail. A contact sheet follows at 17:04.</p>
+            <span class="src">Files: <span class="mono">docs/mockups/portal-work-plans-inbox.{html,ir.json}</span> · session <span class="mono">codex:01a059a6…</span> (su-80325278)</span>
+          </div>
+        </li>
+        <li>
+          <time>Aug 31 · 17:23</time>
+          <div class="what">
+            <p>You choose B and set the one hard requirement.</p>
+            <blockquote><p>“lets go with B. Put yourself on auto mode and implement this yourself now from start to finish. I didn't see the bulk resolving/cleaning for the inbox and plans in your mockups, make sure that functionality is carried over”</p></blockquote>
+            <span class="src">Owner turn · <span class="mono">codex:01a059a6…:11</span></span>
+          </div>
+        </li>
+        <li>
+          <time>Aug 31 · 17:49</time>
+          <div class="what">
+            <p>The implementing session settles the shape — reuse over rebuild, so the bulk flows arrive “by construction”:</p>
+            <blockquote><p>“add two Portal rail entries that frame new chromeless operator routes; those routes mount the existing <code>PlansPane</code> and <code>InboxPane</code> directly, so all current cleanup/resolve logic — including persisted bulk runs and review takeovers — comes across by construction.”</p></blockquote>
+            <span class="src">Agent turn · <span class="mono">codex:01a059a6…:23</span> · plan items P-098 / P-099 on <span class="mono">unified-web-portal-2026-08-29</span></span>
+          </div>
+        </li>
+        <li>
+          <time>Aug 31 eve → Sep 1</time>
+          <div class="what">
+            <p>Shipped exactly that. <code>PlansPane</code> and <code>InboxPane</code> were built for the desktop's chat sidebar (a ~360 px rail), so their single stacked column became the whole page. Nothing in the board's list/detail split was implemented; the operator routes describe themselves as “composition only.”</p>
+            <span class="src">Portal <span class="mono">packages/contracts/src/index.ts:287-288</span> · operator-vite <span class="mono">src/routes/{plans,inbox}.tsx</span></span>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <section id="gap">
+      <div class="section-head">
+        <h2>Designed vs shipped, line by line</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Aspect</th><th>Designed (Direction B)</th><th>Shipped</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Rail placement</td>
+              <td>Plans and Inbox as first-class portal icons with badges</td>
+              <td>Both icons present, placed after Desktops; Inbox badge not yet wired</td>
+              <td><span class="pill kept">Kept</span></td>
+            </tr>
+            <tr>
+              <td>Layout</td>
+              <td>Two panes: list left, selected item right</td>
+              <td>One stacked column at every width</td>
+              <td><span class="pill dropped">Dropped</span></td>
+            </tr>
+            <tr>
+              <td>Selection / detail</td>
+              <td>Inbox: decision detail + answer form beside the list. Plans: plan dashboard beside the list</td>
+              <td>Inbox: row expands in place. Plans: opening a plan replaces the list</td>
+              <td><span class="pill dropped">Dropped</span></td>
+            </tr>
+            <tr>
+              <td>Bulk clean-up / resolve</td>
+              <td>Bulk recommendation card under the filters (added after your note)</td>
+              <td>Full <code>PlansCleanupStrip</code> and <code>InboxBulkStrip</code> flows, persisted runs, review takeover</td>
+              <td><span class="pill kept">Kept</span></td>
+            </tr>
+            <tr>
+              <td>Deep links</td>
+              <td><code>?app=inbox&amp;filter=…&amp;item=…</code> · <code>?app=plans&amp;plan=…</code></td>
+              <td><code>?app=inbox</code> / <code>?app=plans</code> only; inner filter state lives in the iframe's own URL</td>
+              <td><span class="pill partial">Partial</span></td>
+            </tr>
+            <tr>
+              <td>Narrow state</td>
+              <td>Rail collapses to icons; detail becomes a drawer or route-backed screen</td>
+              <td>Rail collapses; the single column just narrows</td>
+              <td><span class="pill partial">Partial</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="where">
+      <div class="section-head">
+        <h2>Where it lives</h2>
+        <p>Paths are repo-relative; the portal is its own checkout under the workspace.</p>
+      </div>
+      <ul class="paths">
+        <li><span class="mono">~/.papercusp-workspaces/papercusp-workspace/.papercusp/apps/portal/packages/contracts/src/index.ts</span><span>Registers <code>plans</code> and <code>inbox</code> as <code>mount:"embedded-pane"</code> pointing at <code>/plans</code> and <code>/inbox</code> on the operator.</span></li>
+        <li><span class="mono">apps/operator-vite/src/routes/plans.tsx · routes/inbox.tsx</span><span>Chromeless full-page routes that render the sidebar panes unchanged (“composition only”).</span></li>
+        <li><span class="mono">apps/operator/app/_components/plans/PlansPane.tsx · plans-pane.css</span><span>The Plans list, filters, clean-up strip; row → dashboard takeover.</span></li>
+        <li><span class="mono">apps/operator/app/_components/inbox/InboxPane.tsx · inbox-pane.css</span><span>The Inbox list, filters, bulk strip; row → in-place <code>OtherDetail</code>.</span></li>
+        <li><span class="mono">apps/operator/app/_components/OperatorChatSidebar.tsx:815, :823</span><span>The other consumer of both panes — the desktop's narrow chat sidebar, which is what their layout was built for.</span></li>
+        <li><span class="mono">docs/mockups/portal-work-plans-inbox.html · .ir.json</span><span>The original board (three directions + narrow) and its UI-IR spec.</span></li>
+      </ul>
+    </section>
+
+    <section id="fix">
+      <div class="section-head">
+        <h2>Closing the gap</h2>
+        <p>Two honest routes. The first keeps everything that shipped and adds the missing pane where the page is already rendered.</p>
+      </div>
+      <div class="fix">
+        <div class="options">
+          <div class="option recommended">
+            <span class="k">Route 1 · Recommended — add the detail pane to the operator's full-page routes</span>
+            <p>Keep the iframe embed. When <code>PlansPane</code> / <code>InboxPane</code> render inside <code>.portal-focused-work-surface</code>, lay them out as list + detail; the sidebar keeps its single column untouched.</p>
+            <ul>
+              <li>Plans: list left (existing rows, filters, clean-up strip); the plan dashboard on the right instead of taking over the page. Selection is URL-backed (<code>?plan=&lt;slug&gt;</code>, nuqs).</li>
+              <li>Inbox: list left (existing rows, bulk strip); <code>OtherDetail</code> + discussion on the right instead of expanding inline. Selection is URL-backed (<code>?item=&lt;id&gt;</code>).</li>
+              <li>Portal deep links forward <code>plan</code> / <code>item</code> into the iframe URL so the board's link shapes work end to end.</li>
+              <li>Under ~900 px the detail becomes a route-backed screen — the board's narrow state.</li>
+            </ul>
+          </div>
+          <div class="option">
+            <span class="k">Route 2 — native portal surfaces</span>
+            <p>Rebuild Plans and Inbox inside the Next portal against the operator's APIs, straight from the board's IR spec. Cleanest deep links and theming, but it duplicates readers and the bulk flows the embed carried over for free — and the board's own recommendation leaned on composition.</p>
+          </div>
+        </div>
+        <div class="wire" aria-label="Wireframe of Route 1: portal rail, then a list column beside a detail column">
+          <span class="label">Route 1 · in the shipped chrome</span>
+          <div class="frame">
+            <div class="rail"><i></i><i></i><i></i><i></i><i class="on"></i><i></i><i></i></div>
+            <div class="stage">
+              <div class="bar"></div>
+              <div class="split">
+                <div class="box">
+                  <b>List · unchanged</b>
+                  <div class="strip" title="bulk strip"></div>
+                  <div class="row"></div>
+                  <div class="row sel"></div>
+                  <div class="row"></div>
+                  <div class="row"></div>
+                  <div class="row"></div>
+                </div>
+                <div class="box">
+                  <b>Detail · new pane</b>
+                  <span>Plans → plan dashboard · Inbox → decision + answer</span>
+                  <div class="detail-card"></div>
+                  <div class="detail-card" style="min-height:70px"></div>
+                  <div class="detail-card"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p class="note">Split 37/63 (Inbox) and 41/59 (Plans), the ratios the board used. The bulk strip stays at the top of the list column.</p>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <span>Audit by su-38293 · work-item WI-2140837 · source file <span class="mono">docs/mockups/portal-work-plans-inbox-designed-vs-shipped.html</span>.</span>
+      <span>Live captures taken 2026-09-01 20:14 UTC from <span class="mono">http://127.0.0.1:3081/</span> at 1800×1000; representative data, not a layout study.</span>
+    </footer>
+  </div>
+</body>
+</html>

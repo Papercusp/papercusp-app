@@ -1,0 +1,67 @@
+# The `su.mode-auto` IDENTITY — identities-v1-2026-08-30 P-021 (D-008 as amended 2026-09-03;
+# D-022 §1/§6).
+#
+# ABSTRACT, like `base`: no workItem/spine, never loaded standalone — a layer in an
+# `extends` stack. The `slots:` key is the identity discriminator (D-013): this document
+# fills the EXCLUSIVE `autonomy` mode axis — the DEFINITION of AUTO mode (the owner's
+# "act, don't ask" switch) in the coding su's own vocabulary. It is bound for the `auto`
+# AND `cold-auto` registry modes (one axis, one dial: cold-auto is AUTO's grant carried
+# across cold wakes, and its carry rider is the registry contract mode:set already
+# delivers).
+#
+# WHAT STAYS KERNEL (D-008 §1/§3): the mode STATE (`harness_shared.agent_modes`, written by
+# `mode:set`, projected into the ⟦CTRL⟧ anchor), the IMPLICATION TABLE (DRAIN ⇒ AUTO,
+# GOAL ⇒ AUTO + IDEATE — `modes/registry.ts`, applied by the registry write itself) and
+# the AUTHORITY semantics (what AUTO suspends — computed by `instruction-lint.ts` from the
+# registry, enforced at the dispatch chokepoint). This document may read AUTO in its own
+# words; it grants nothing (`authority-on-mode-axis` is a BLOCK-tier lint finding).
+#
+# Attached by `mode:set { mode:'auto' }` (`agent_modes` → control anchor `stack` → the
+# ⟦stack⟧ inject-now channel on the next turn; `enabled:false` detaches and VOIDS it) and
+# bound into the FIRST render of a `--auto` / `--mode=drain` / fleet-member launch
+# (`suSessionBinding({ modes })`). Text: `prompts/autonomy.md` — the prose that used to be
+# spliced into EVERY su render from `operating-modes-policy.ts`, now rendered only while
+# the mode is ON. Resolved THROUGH THE PROMPT CHAIN (`identityRoots`), so an installed
+# override of this identity wins over this file.
+id: su.mode-auto
+extends: base
+version: 0.1.0
+description: >-
+  IDENTITY (abstract — a layer, never runnable alone): the AUTO mode definition — the
+  owner's standing "act, don't ask" grant read in the su's vocabulary. Fills the exclusive
+  `autonomy` mode axis; bound for `auto` and `cold-auto`; attached by mode:set, detached
+  on exit (P-021 / D-008).
+
+slots:
+  - slot: autonomy
+contributions:
+  - id: auto-definition
+    purpose: prompt
+    source: fixed
+    refresh: source-change
+    inputKind: prompt-file
+    ref: "mode:su.mode-auto:autonomy"
+  - id: current-mode-state
+    purpose: operational
+    source: provider
+    refresh: turn
+    inputKind: setting
+    ref: mode
+    producerRef: modes/store:agent_modes
+mode:
+  id: auto
+  policyRef: auto
+  title: "AUTO — act, don’t ask"
+  oneLiner: "act on your own judgment, replace questions with disclosures, arm a loop for open-ended work"
+  definitionContributionId: auto-definition
+  implies: []
+  requiresSubject: false
+  launchable: true
+  aliases:
+    - id: cold-auto
+      title: "COLD AUTO — auto across fresh-context wakes"
+      oneLiner: "AUTO carried across scheduled cold wakes: fresh context each fire, continuity via the carry-note"
+      definitionHeading: "## COLD AUTO — the same autonomy component across fresh-context wakes"
+      implies: []
+      requiresSubject: false
+      launchable: false

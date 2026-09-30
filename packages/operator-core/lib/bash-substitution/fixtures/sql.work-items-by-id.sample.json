@@ -1,0 +1,108 @@
+{
+  "evidenceRef": "EI-20285223214931386, follow-on to plan sql-escape-tool-routing-2026-08-12 — buildSqlFixture(pair) over agent-authored dev:pg_query calls, 14d window, status=ok",
+  "extractedAt": "2026-08-12",
+  "totalAtoms": 564,
+  "totalSessions": 130,
+  "sample": [
+    {
+      "sid": "su-e15fb42f-6686-41e7-8368-37f5ec26ef3c",
+      "ts": "2026-08-03 13:44:10.264-04",
+      "atom": "SELECT checkpoint FROM harness_shared.work_items WHERE id = 'WI-8945'"
+    },
+    {
+      "sid": "su-ae348e33-2987-4686-85ae-5e80606fe77b",
+      "ts": "2026-08-02 21:31:10.433-04",
+      "atom": "SELECT feature_id, harness_slug, workspace_id, item_kind, status, taken_by, terminal_owner, left(title,70) AS title, to_timestamp(created_ts/1000) AS created, closed_ts IS NOT NULL AS closed FROM harness_shared.work_items WHERE feature_id = 'WI-1' ORDER BY created_ts"
+    },
+    {
+      "sid": "su-07374fbd-e848-4204-87aa-bb86a31e5a92",
+      "ts": "2026-08-08 11:46:58.392-04",
+      "atom": "SELECT feature_id, jsonb_pretty(payload->'reopenHistory') AS reopen_history FROM harness_shared.work_items WHERE feature_id = 'WI-6210' AND workspace_id = 'papercusp-workspace' AND harness_slug = 'papercusp'"
+    },
+    {
+      "sid": "su-b9269a31-fa09-465f-8690-a04e6bb30470",
+      "ts": "2026-08-03 19:53:05.572-04",
+      "atom": "SELECT feature_id, left(title,150) AS title, length(summary) AS sum_len, left(summary, 1100) AS summary FROM harness_shared.work_items WHERE workspace_id='papercusp-workspace' AND feature_id IN ('EI-10715','EI-10820','EI-11739','EI-8830','EI-8975','EI-8983','EI-9220','EI-9529','EI-9705') ORDER BY feature_id"
+    },
+    {
+      "sid": "su-4a6e2255-f324-4774-a05e-c3bc87e643ac",
+      "ts": "2026-08-09 09:16:03.635-04",
+      "atom": "SELECT feature_id, status, claimed_by, claim_ts, left(summary, 400) AS summary FROM harness_shared.work_items WHERE feature_id IN ('EI-19980426994777682','EI-19980424024388089')"
+    },
+    {
+      "sid": "su-5ca9b11a-23ff-49eb-8dc4-2c2f9f9ea4f8",
+      "ts": "2026-08-01 16:11:47.25-04",
+      "atom": "SELECT feature_id, status, item_kind, substring(title from 1 for 95) AS title, taken_by, to_char(to_timestamp(updated_ts/1000),'MM-DD HH24:MI') AS updated FROM harness_shared.work_items WHERE feature_id IN ('EI-18758340172989350','EI-18827862438924553') AND workspace_id='papercusp-workspace'"
+    },
+    {
+      "sid": "su-6c30f2a4-5941-42fb-8365-494938baf111",
+      "ts": "2026-08-11 22:13:19.805-04",
+      "atom": "SELECT feature_id, status, left(title,80) AS title, taken_by, to_timestamp(updated_ts/1000) AT TIME ZONE 'UTC' AS updated_utc FROM harness_shared.work_items WHERE workspace_id = 'papercusp-workspace' AND feature_id IN ('WI-37711','WI-38048')"
+    },
+    {
+      "sid": "su-ac6e3490-b6da-4858-8be3-99dd040d480b",
+      "ts": "2026-08-12 13:28:16.443-04",
+      "atom": "SELECT feature_id, status, taken_by, last_progress_at FROM harness_shared.work_items WHERE workspace_id='papercusp-workspace' AND feature_id IN ('EI-20248422377293824','EI-20260781488788952','EI-20106946822538304','EI-20262073339398590','EI-20027532687512023','EI-19928050541357086','EI-20262262834884010') ORDER BY feature_id"
+    },
+    {
+      "sid": "su-119d89f6-8690-4544-8727-2d19ae7f3121",
+      "ts": "2026-08-11 17:19:01.548-04",
+      "atom": "SELECT feature_id, status, taken_by, to_char(updated_at,'HH24:MI:SS') upd, (payload->'_completionEvidence') IS NOT NULL AS has_ev, left(coalesce(payload->>'authority',''),8) AS auth, left(coalesce(checkpoint,''),90) AS ckpt FROM harness_shared.work_items WHERE feature_id IN ('WI-37953','WI-37954','WI-37955','WI-37956','WI-37957','WI-37958','WI-37965','WI-37966','WI-37908','WI-37914') ORDER BY feature_id"
+    },
+    {
+      "sid": "su-1c1faa38-1908-4f13-8995-26439379db94",
+      "ts": "2026-08-08 13:52:36.531-04",
+      "atom": "SELECT feature_id, status, to_timestamp(updated_ts/1000)::date AS updated, left(title, 54) AS title FROM harness_shared.work_items WHERE harness_slug='papercusp' AND feature_id IN ('EI-10371','EI-10869','EI-10609','EI-11299','EI-10966') ORDER BY feature_id"
+    },
+    {
+      "sid": "su-fc401d17-1c5d-415b-9406-f963e4f3f2d0",
+      "ts": "2026-08-08 20:23:13.58-04",
+      "atom": "SELECT feature_id, title FROM harness_shared.work_items WHERE feature_id IN ('EI-18710402934363497','EI-18652033720958396','EI-18668965892714266')"
+    },
+    {
+      "sid": "su-6eab8a26-2a45-4253-a708-671fd3182607",
+      "ts": "2026-08-03 12:09:23.442-04",
+      "atom": "SELECT id, created_by, created_at, left(title,60) AS title FROM harness_shared.work_items WHERE id IN ('EI-19448526819046979','EI-19448665862739845') ORDER BY created_at"
+    },
+    {
+      "sid": "su-41d2b6b5-6cba-41d8-b2e0-14fcd9456cc4",
+      "ts": "2026-08-08 11:37:48.793-04",
+      "atom": "SELECT id, state, assignee, payload->>'needsHuman' AS needs_human, payload->'ideaLifecycle'->>'triageDecision' AS triage_decision, payload->'ideaLifecycle'->>'state' AS lifecycle_state, payload ? '_claimHold' AS has_claim_hold FROM harness_shared.work_items WHERE id IN ('EI-19467338750785149','EI-19478827677782665')"
+    },
+    {
+      "sid": "su-39431406-a6ed-4f54-9950-edc8dca2aa9c",
+      "ts": "2026-08-10 00:00:45.734-04",
+      "atom": "SELECT id, status, assignee, kind, payload->'_ei'->>'severity' AS severity, left(title, 90) AS title FROM harness_shared.work_items WHERE id IN ('EI-20005411672741677','EI-20035436440627349')"
+    },
+    {
+      "sid": "su-3792ff4b-fb8f-4f72-9c94-4e2efa4c743e",
+      "ts": "2026-08-02 06:52:52.931-04",
+      "atom": "SELECT jsonb_object_keys(payload) as k FROM harness_shared.work_items WHERE id = 'WI-5441'"
+    },
+    {
+      "sid": "su-ba688366-5b8c-4c66-8fbd-29c0685b0f79",
+      "ts": "2026-08-12 00:16:14.053-04",
+      "atom": "SELECT left(summary, 4000) AS summary FROM harness_shared.work_items WHERE workspace_id='papercusp-workspace' AND id='WI-38066'"
+    },
+    {
+      "sid": "su-83f46df7-9f59-4169-8eec-ddb13a6a3467",
+      "ts": "2026-08-11 20:01:33.533-04",
+      "atom": "SELECT payload->'observation'->'ratings'->'mode-and-subject-integrity' AS r FROM harness_shared.work_items WHERE feature_id='EI-20203104876436965'"
+    },
+    {
+      "sid": "su-4ca244e4-540e-4acc-bb67-9335192fc85f",
+      "ts": "2026-08-03 16:19:47.237-04",
+      "atom": "SELECT substring(summary from 1150 for 2800) AS tail FROM harness_shared.work_items WHERE feature_id = 'EI-19463700807328229'"
+    },
+    {
+      "sid": "su-39431406-a6ed-4f54-9950-edc8dca2aa9c",
+      "ts": "2026-08-09 16:33:13.458-04",
+      "atom": "select feature_id, created_at, created_by, left(title,70) as title from harness_shared.work_items where feature_id in ('EI-20000079246831498','EI-20006410617437313','EI-20005899247570051','EI-20006179456846006') and workspace_id='papercusp-workspace' order by created_at"
+    },
+    {
+      "sid": "su-7c0193ba-13a2-4cee-ab73-9da434861e24",
+      "ts": "2026-08-10 13:21:09.949-04",
+      "atom": "select feature_id, status, taken_by, to_char(last_progress_at,'HH24:MI') as prog from harness_shared.work_items where workspace_id='papercusp-workspace' and feature_id in ('WI-37753','WI-37736','EI-20086238555902880') order by feature_id"
+    }
+  ]
+}

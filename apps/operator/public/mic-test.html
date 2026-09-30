@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mic isolation test</title>
+<style>body{font:14px ui-monospace,monospace;padding:24px;max-width:800px;background:#0c0c10;color:#ddd}
+button{padding:10px 18px;font:inherit;cursor:pointer;background:#2563eb;color:#fff;border:0;border-radius:4px}
+pre{white-space:pre-wrap;background:#1a1a22;padding:12px;border-radius:4px;border:1px solid #333}
+.ok{color:#4ade80}.bad{color:#f87171}.warn{color:#fbbf24}</style>
+<h1>Mic isolation test</h1>
+<p>This page bypasses the operator app entirely. If it can't get mic access, the issue is your browser/system, not the operator code.</p>
+<button id="go">Request microphone</button>
+<pre id="out">click the button</pre>
+<script>
+const out = document.getElementById('out');
+function log(c, s){ out.innerHTML += `\n<span class="${c}">${s.replace(/[<>&]/g,m=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[m]))}</span>`; }
+document.getElementById('go').addEventListener('click', async () => {
+  out.textContent = '';
+  log('warn', `UA: ${navigator.userAgent}`);
+  log('warn', `secure context: ${window.isSecureContext}`);
+  log('warn', `mediaDevices: ${!!navigator.mediaDevices}`);
+  try {
+    const p = await navigator.permissions.query({name:'microphone'});
+    log('warn', `permissions.query → ${p.state}`);
+  } catch(e) { log('bad', `permissions.query: ${e.message}`); }
+  try {
+    const before = await navigator.mediaDevices.enumerateDevices();
+    const inB = before.filter(d=>d.kind==='audioinput');
+    log('warn', `enumerateDevices BEFORE getUserMedia: ${inB.length} audioinput(s) [${inB.map(d=>d.label||'(no label)').join(' | ')}]`);
+  } catch(e){ log('bad', `enumerate failed: ${e.message}`); }
+  try {
+    log('warn', 'calling getUserMedia({audio:true}) — accept the prompt if it appears…');
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    const tracks = stream.getAudioTracks();
+    log('ok', `getUserMedia succeeded — ${tracks.length} track(s); first label: "${tracks[0]?.label || '(no label)'}"`);
+    stream.getTracks().forEach(t=>t.stop());
+    const after = await navigator.mediaDevices.enumerateDevices();
+    const inA = after.filter(d=>d.kind==='audioinput');
+    log('ok', `enumerateDevices AFTER: ${inA.length} audioinput(s) [${inA.map(d=>d.label||'(no label)').join(' | ')}]`);
+  } catch(e){
+    log('bad', `getUserMedia FAILED — name=${e.name}, message=${e.message}`);
+    log('warn', 'no prompt at all + this error = browser blocked silently. fix in chrome://settings/content/microphone');
+  }
+});
+</script>

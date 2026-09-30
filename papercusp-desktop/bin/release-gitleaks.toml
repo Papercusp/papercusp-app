@@ -1,0 +1,208 @@
+title = "Papercusp desktop release bundle gitleaks"
+minVersion = "v8.30.1"
+
+# Keep the complete upstream detector set. The two rule entries below override
+# only the rules whose generated release bytes currently need context-scoped
+# allowlists; every other default detector remains active.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "gcp-api-key"
+description = "Uncovered a GCP API key, which could lead to unauthorized access to Google Cloud services and data breaches."
+regex = '''\b(AIza[\w-]{35})(?:[\x60'"\s;]|\\[nr]|$)'''
+entropy = 4
+keywords = ["aiza"]
+
+[[rules.allowlists]]
+description = "Excalidraw's public Firebase browser configuration in generated SPA chunks"
+condition = "AND"
+targetRules = ["gcp-api-key"]
+paths = [
+    '''(?:^|/)spa/assets/chunk-[A-Za-z0-9_-]+\.js$''',
+    '''(?:^|/)spa/excalidraw/chunk-[A-Za-z0-9_-]+\.js$''',
+]
+regexTarget = "line"
+regexes = [
+    '''(?i)apiKey.{0,240}authDomain.{0,240}projectId''',
+]
+
+[[rules]]
+id = "generic-api-key"
+description = "Detected a Generic API Key, potentially exposing access to various services and sensitive operations."
+regex = '''(?i)[\w.-]{0,50}?(?:access|auth|(?-i:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\x60'"\s;]|\\[nr]|$)'''
+entropy = 3.5
+keywords = [
+    "access",
+    "api",
+    "auth",
+    "key",
+    "credential",
+    "creds",
+    "passwd",
+    "password",
+    "secret",
+    "token",
+]
+
+# The same public Firebase line is also intentionally classified by the
+# generic detector because it contains the apiKey field. Keep that exception
+# separate so it remains explicitly scoped to the generic rule as well.
+[[rules.allowlists]]
+description = "Excalidraw's public Firebase browser configuration under the generic detector"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)spa/assets/chunk-[A-Za-z0-9_-]+\.js$''',
+    '''(?:^|/)spa/excalidraw/chunk-[A-Za-z0-9_-]+\.js$''',
+]
+regexTarget = "line"
+regexes = [
+    '''(?i)apiKey.{0,240}authDomain.{0,240}projectId''',
+]
+
+# The generated Monaco bundle has a stable semantic marker but a content hash
+# in its filename. Keep the path and line marker conjunctive so another file
+# containing a key-like value is never covered by this exception.
+# The shipped vendor tree also carries monaco/monaco/vs; environment-sidecar
+# copies preserve that layout. Admit that exact second shape, not arbitrary
+# nesting, while retaining the same generated NKeyMap line requirement.
+[[rules.allowlists]]
+description = "Monaco's generated NKeyMap data"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)spa/monaco/vs/editor-[A-Za-z0-9_-]+\.js$''',
+    '''(?:^|/)spa/monaco/monaco/vs/editor-[A-Za-z0-9_-]+\.js$''',
+]
+regexTarget = "line"
+regexes = [
+    '''NKeyMap''',
+]
+
+# serve.mjs contains generated third-party/runtime data. Each exception is
+# tied to a literal source marker on the line that produced the false positive;
+# the generic detector still scans every other line in every serve.mjs copy.
+[[rules.allowlists]]
+description = "Known generated third-party/runtime lines in the assembled serve.mjs"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)serve\.mjs$''',
+]
+regexTarget = "line"
+regexes = [
+    '''(?i)\bsecretaries\b''',
+    # gitleaks bounds very large line targets; this marker occurs near the
+    # beginning of the generated BPE table, before that bound.
+    '''(?i)IOKApiI=''',
+    '''(?i)\b50257\b''',
+    # Esbuild's temporary symbol suffix changes when an unrelated import lands.
+    # Match the complete generated expression instead of pinning one suffix.
+    '''(?i)sortKey[0-9]+=[A-Za-z_$][A-Za-z0-9_$]*\.sortKey===void 0\?null:String\([A-Za-z_$][A-Za-z0-9_$]*\.sortKey\)''',
+    '''(?i)\bprojectKey\b''',
+    '''(?i)\bfullAccessRoles\b''',
+    '''(?i)\b(?:canonical[-_ ])?invite[-_ ]secret\b''',
+    '''(?i)case.{0,40}\bkey\b''',
+    '''(?i)\btoken,''',
+    '''(?i)(?:account.{0,80}token|token.{0,80}account)''',
+]
+
+# Two first-party expressions are classified only because minification removes
+# the separator after a name containing "key" / "token". Match the detector's
+# exact finding, rather than its whole (potentially very large) source line, so
+# another credential-like value on that line still fails the release.
+[[rules.allowlists]]
+description = "Known minified first-party expressions in assembled serve.mjs"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)serve\.mjs$''',
+]
+regexTarget = "match"
+regexes = [
+    '''(?i)\.signWithDeviceKey,verdictFns=await''',
+    '''(?i)\btoken[0-9]+,consumed=await\b''',
+]
+
+# The session-port protocol's estimator identifier is a public first-party
+# constant. Minification places it in a generated serve.mjs line that the
+# generic detector parses as a key/value assignment; allow only that exact
+# match and keep every other finding on the line visible.
+[[rules.allowlists]]
+description = "Session-port token estimator identifier in assembled serve.mjs"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)serve\.mjs$''',
+]
+regexTarget = "match"
+regexes = [
+    '''SESSION_PORT_TOKEN_ESTIMATOR="utf8-byte-upper-bound-v1"''',
+]
+
+# The jws package's SignStream constructor assigns a stream object to a field
+# named `secretStream`; minification removes the separator before the next
+# assignment, so the generic detector reads `secretStream,this.signature=` as a
+# key/value pair. The captured bytes are a JavaScript identifier followed by an
+# assignment, never a credential — the unminified source is
+# node_modules/jws/lib/sign-stream.js. Matched against the detector's exact
+# finding rather than the (multi-megabyte) generated line, so any other
+# credential-like value on that same line still fails the release.
+[[rules.allowlists]]
+description = "jws stream-constructor assignment in assembled serve.mjs"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)serve\.mjs$''',
+]
+regexTarget = "match"
+regexes = [
+    '''(?i)\bsecretStream,this\.signature=new\b''',
+]
+
+# Gitleaks also recursively decodes base64-looking substrings before applying
+# the generic detector. Those findings target the decoded match rather than
+# the original (multi-megabyte) source line, so the line markers above cannot
+# cover them. Keep this exception to the exact public BPE vocabulary prefixes
+# observed in the generated bundle; a different decoded key-like phrase must
+# continue to fail the release gate.
+[[rules.allowlists]]
+description = "Known public BPE vocabulary matches decoded from generated serve.mjs"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)serve\.mjs$''',
+]
+regexTarget = "match"
+regexes = [
+    '''Authentication IFJhbms=''',
+    '''\.ContainsKey IGNvbGxhcHNlZA==''',
+    '''cancellationToken IFBhbGVzdGluaWFucw==''',
+    '''authenticated ZHY=''',
+    '''IOKApi4=''',
+    '''PasswordEncoder IHbDqXI=''',
+    '''IllegalAccessException PEJveA==''',
+    '''\.FirebaseAuth dXR0bGU=''',
+    '''authenticity L3BuZw==''',
+    '''IOyekeyEsQ==''',
+    '''jsonwebtoken IOCmhuCmnOCmvw==''',
+    '''KeyXkA==''',
+]
+
+# The privacy page is public documentation, and the same generated sentence is
+# projected into three bundle paths. Keep the prose exception tied to both the
+# exact projection path and its distinctive line text; never exempt the whole
+# privacy directory or either document format.
+[[rules.allowlists]]
+description = "Public personal-vault documentation's same-key restore example"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)apps/operator-docs/src/content/docs/privacy/personal-vault\.mdx$''',
+    '''(?:^|/)internal-docs/privacy/personal-vault\.(?:html|md)$''',
+]
+regexTarget = "line"
+regexes = [
+    '''(?i)same-key restore succeeds,''',
+]

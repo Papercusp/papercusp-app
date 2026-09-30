@@ -1,0 +1,12 @@
+{
+  "kind": "migration-forward-compat-ack",
+  "version": 1,
+  "migration": "941-event-awaits-exact-key-newest-only.sql",
+  "appliedSha256": "aa53ea1d01c6f9439cbe1e21a6e4d63cdd537e1c5af387943e0e374a93053785",
+  "requiresDeployedCommit": "806cdee2dc8a5ff56e80be7abb798dbc28a11d12",
+  "requiresDeployedNote": "store.ts added exactOneShot retire-and-insert with per-subscriber/key advisory serialization before replacement writes",
+  "rationale": "Migration 941 adds a partial unique index for ordinary exact one-shot rows. The compatible writer retires older matching rows under the same per-subscriber/key advisory lock before inserting a replacement, so its active-row invariant matches the index predicate.",
+  "workItem": "EI-21643240969839925",
+  "reviewBy": "2026-10-28",
+  "postDeploy": "renew-review"
+}

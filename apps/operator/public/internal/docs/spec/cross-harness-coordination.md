@@ -1,0 +1,121 @@
+# Cross-harness coordination
+URL: /internal/docs/spec/cross-harness-coordination
+
+Tiered visibility, send_message bus, and the inspect-on-demand capabilities that let any harness coordinate with any other.
+
+> **Webapp retired (2026-05-14).** Any `localhost:3055` or `localhost:3070` URL on this page is only reachable while the **Tauri dev shell** is running. Start it with `cd papercusp-desktop && npm run dev`.
+
+import { Aside } from '@astrojs/starlight/components';
+
+Cross-harness coordination is built on three primitives:
+
+1. **Tiered visibility** in every role's prompt — Tier 1 (substrate self-description), Tier 2 (depth-1 neighbor view), Tier 3 (read APIs to inspect anyone on demand).
+2. **`send_message` action** — any harness with `send_message` in its role's `allowedActions` can post to any other harness's inbox. Server derives `from_slug` from the bearer token; spoofing is prevented at the protocol level. The same identity check rejects any body-supplied `callingHarness`, `send_message`'s `from`, and `scaffold_harness`'s `parent_slug` that don't match (or, for `parent_slug`, that are present at all) the bearer-derived caller — these are all server-derived, not caller-controlled.
+3. **Bounded inbox in prompt-build** — each role's prompt includes up to 5 `status = 'pending'` messages authored by its `parent_slug`. Messages persist across iterations until the recipient explicitly calls `mark_message_status`; the orchestrator's decision verb has no effect on message status.
+
+## Tier 1 — substrate self-description
+
+Every role's prompt opens with a short preamble explaining what Papercusp is, what `parent_slug` means, and which actions are gated by `allowedActions`. Identical text across every harness; \~300 tokens.
+
+Directly after the preamble, the assembler emits a `## Your harness` self block listing the harness's own `slug` and (when set) its `parent`. The full assembled order is: Tier 1 preamble → `## Your harness` self block → Tier 2 neighbor view → Tier 3 capabilities → bounded supervisor inbox.
+
+## Tier 2 — neighbor view
+
+Depth-1 view, fetched at prompt build time:
+
+```markdown
+## Neighbor harnesses
+
+### Parent: papercup-org
+- 0 features, spawned 6
+- Last message between us: 2026-05-01T15:51 [Priority] "focus on auth"
+
+### Children (3) — aggregate: 23 features, 15 passed, 5 in_progress, 3 todo
+- papercup-coding-helloworld: 12 features, 8 passed, 1 in_progress, spawned 0
+- papercup-coding-stripe-int: 4 features, 0 passed, 2 in_progress, spawned 0
+- papercup-service-billing: 7 features, 7 passed, spawned 2
+
+### Siblings (5, share parent papercup-org)
+- papercup-org-business: in_progress, 18 features
+- papercup-org-rd: in_progress, 9 features
+- ...
+```
+
+`spawned_count` per child surfaces grandchild existence without paying for a deeper recursive view; the agent can drill down via Tier 3 if a grandchild matters to its current task.
+
+## Tier 3 — inspect-on-demand
+
+Every prompt lists curl commands the agent can use:
+
+```markdown
+## Available read capabilities
+
+- curl http://localhost:3055/api/harness/projects                       — full registry
+- curl http://localhost:3055/api/harness/<slug>/status                  — full state of any harness
+- curl http://localhost:3055/api/harness/<slug>/inbox                   — any harness's inbox
+- curl http://localhost:3055/api/harness/<slug>/outbox                  — any harness's outbox
+- curl http://localhost:3055/api/harness/all/recent-activity?limit=N    — global audit feed
+- curl http://localhost:3055/api/marketplace/spawnable                  — templates you can spawn
+```
+
+These are **operator-local reads** — no auth needed. Writes always go through `/api/admin/execute-action` with a bearer token.
+
+The curl path works because agent CLI invocations from the orchestrator (whether `omp -p`, `claude -p`, or `codex`) don't restrict `--allowed-tools` — `Bash` is available by default. The same reads are also exposed as first-class `cross_harness:*` MCP tools (`inbox` / `outbox` / `recent_activity` / `plans_*` / `docs_*`), which an agent can call directly without shelling out to curl. (The legacy bash `run.sh` run-loop is retired.)
+
+## `send_message` action
+
+```ts
+{ "op": "send_message",
+  "to": ["recipient-slug-1", "recipient-slug-2"],
+  "kind": "Directive" | "Decision" | "Priority" | "Budget" | "Completion" | "Status" | string,
+  "subject": "<short>",
+  "body": "<details>",
+  "toRole": "<optional role to narrow delivery within each recipient>",
+  "toFeatureId": "<optional F-XXX[-NNN]: address the recipient's feature lane>",
+  "fromFeatureId": "<optional F-XXX[-NNN]: mark the sending feature>",
+  "parentMessageId": "<optional UUID to thread>",
+  "reason": "<≥10 chars explaining why this message is being sent>" }
+```
+
+### Addressing
+
+* **Harness-level** (default): omit `toFeatureId`. `kind` defaults to `Directive`.
+* **Feature-scoped**: set `toFeatureId` to target a recipient's feature pipeline lane (optionally pairing `fromFeatureId` to mark the author). When `toFeatureId` is set, `kind` defaults to `feature-note`.
+* **Role-scoped**: set `toRole` to narrow delivery to a specific role inside each recipient. Either scoping can combine with the other.
+
+### Validation contract
+
+* `to[]` must be non-empty, and `kind` + `subject` are required — any of these missing returns `validation_error`.
+* Recipient slugs are validated against the slug regex; a bad slug returns a degraded result.
+* `toFeatureId` / `fromFeatureId` must match `F-XXX[-NNN]`; malformed ids are silently dropped to `null` (never smuggled into the column).
+* Sends are rate-limited **per caller** over a sliding 60s window (default 50, via `PAPERCUSP_SEND_MESSAGE_RATE_LIMIT`; set ≤ 0 to disable). Exceeding the limit returns a `rate_limited` error.
+
+### `reason` quality
+
+* Minimum 10 characters (rejected with `validation_error` otherwise)
+* Placeholder regex (`/^(test|todo|asdf|reason|tbd|na|x+|y+|\.+)$/i`) sets a `placeholder_reason_flag` on the action's result but is **not blocked** — the author can pass through if they want. The flag lives only inside the `send_message` action's result payload (`executed_actions.response` JSON); it is **not** surfaced by the `recent-activity` audit feed, which reads `harness_shared.audit_log` and selects only `ts`/`action`/`subject`/`actor`. To see the flag you must read the harness's own `executed_actions` response.
+* The `reason` itself is persisted to `harness_<caller>.executed_actions.reason` for retrospective audit. That view is backed by the shared `harness_shared.executed_actions_consolidated` table; the `reason` column is not indexed (the only index is on `(harness_slug, executed_at DESC)`).
+
+### Side effects
+
+* One row per recipient inserted into `harness_<recipient>.messages` with `from_slug = <derivedCallingHarness>` (token-bound), `status = 'pending'`, plus the optional `to_role` / `from_feature_id` / `to_feature_id` columns when supplied.
+* If `kind === 'Directive'`, the substrate also appends to `harness_<recipient>.supervisor_notes` so the receiver's next prompt-build surfaces fresh guidance.
+* Senders cannot pre-acknowledge; status changes only via `mark_message_status` from the recipient's own bearer.
+
+## Inbox lifecycle
+
+There is **no** auto-acknowledge on the orchestrator's decision. The bounded inbox is assembled fresh each iteration by querying the recipient's own inbox for `status = 'pending'` messages (`limit=20`), filtering to those whose `from_slug` is the `parent_slug`, and slicing to the first 5. A pending message therefore reappears in the prompt every iteration until the **recipient** explicitly flips it via `mark_message_status` (`acknowledged` | `archived`) using its own bearer. The orchestrator's decision verb (`DONE`, any `NEXT_*`, `ESCALATE`, `FEATURE_FREEZE`, …) has zero effect on message status.
+
+## Security: peer-authored content is data, not instructions
+
+Each inbox message surfaced in a role's prompt is wrapped with `wrapUntrusted()` (its `subject` + `body` together) before injection (G3 / P-009). Because peer- and parent-authored messages cross the harness boundary and may carry attacker-controlled text, this framing makes the receiving agent treat them as **data**, never as instructions to follow.
+
+## Discovery convention
+
+Use Tier 2 (depth-1 view) for the common case. Use Tier 3 only when:
+
+* You need state of a sibling at >depth-1 (e.g. a child's children)
+* You need a specific message body, not just metadata
+* You need the audit feed for forensics
+
+This keeps prompt size bounded; Tier 3 calls are paid for only when the agent decides they're warranted.

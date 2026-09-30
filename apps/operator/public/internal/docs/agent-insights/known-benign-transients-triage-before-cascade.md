@@ -1,0 +1,106 @@
+# A recurring known-benign transient re-mounts a full escalation cascade unless you recognize the family first
+URL: /internal/docs/agent-insights/known-benign-transients-triage-before-cascade
+
+>-
+
+import { Aside } from '@astrojs/starlight/components';
+
+## The pattern (EI-9492 — cross-harness lesson promotion)
+
+A friction signature recurred 4x across 2 scopes in one week: the fleet
+re-mounts a **full escalation cascade** — a fresh work-item, a probe/alert
+broadcast, sometimes an owner-facing escalation — every time one of a small,
+*already-known* family of transient conditions recurs, instead of recognizing
+"I've seen this shape before, it self-resolves." Each instance gets
+re-investigated from zero by whichever agent is on duty, because the
+triage judgment lives inside one detector's code and isn't shared across the
+others.
+
+This doc is the **registry + fast triage checklist** tying the family
+together. Read it before filing a fresh EI or escalating to the owner on an
+alert that smells familiar.
+
+## The known-benign-transient family (as of 2026-07-11)
+
+| Signature                                                                                                                                | Why it's usually benign                                                                                                                                                                | Self-resolves via                                                                                                        | Runbook / EI                                                                                                                                                                                                                                                 |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `no_replicator` (replication-liveness, "WI-183 class") — a log with 0 live replicator peers for 180s                                     | Swarm connection can look healthy while one log's replicator session drops; recovers when the peer reconnects                                                                          | Auto-dedupes per `(harness, log, kind)` while one stays open; closes when `getReplicationLiveness()` sees the peer again | EI-8268 (resolved); `agent-insights/shared-hive-federation-diagnosis-toolkit`                                                                                                                                                                                |
+| Token bucket paused, "transient RPM saturation" with other accounts still available                                                      | Read as smoothing, not exhaustion, when N-1 buckets are still up                                                                                                                       | Re-checks next wake; only escalates if it *persists across multiple wakes*                                               | EI-8535 (correct non-escalation — the model to imitate)                                                                                                                                                                                                      |
+| AIMD gateway throttle (`aimd.effective < cap`)                                                                                           | The adaptive admission controller is *designed* to shrink under 429 pressure and grow back on a clean streak — a low `effective` is normal operation, not an outage                    | Additive recovery: +1 concurrency per 8 clean upstream 200s                                                              | `memory: AIMD adaptive ADMISSION concurrency (B-GW-1)`; escalate only on a real **wedge** (`inFlight>=maxConcurrent && queueDepth>0 && totalRequests frozen`), not on throttle alone — see `agent-insights/inference-gateway-wedge-admission-slot-squat.mdx` |
+| Cloudflare edge per-IP 429 ("bare-burst", no util headers)                                                                               | Looks like account-budget exhaustion but is an edge/IP-level throttle on a flaky egress proxy                                                                                          | Rotate/cool the egress IP — **not** an account-rate fix                                                                  | `agent-insights/rate-limit-is-usually-account-routing-not-capacity` Fault #6                                                                                                                                                                                 |
+| `infra-liveness` health-tick-stale / dead-routines / single-primary split-brain (request-path R4 alarms, independent of the DBOS engine) | Frequently a **tick-timing artifact** under host load, not a dead engine — and can be caused by an agent's own test suite firing real broadcasts through unwired test-injection points | Usually clears on the next request-path check, often within the same minute                                              | Live example below (WI-4023); no dedicated doc yet — this entry is it                                                                                                                                                                                        |
+| Fleet-wide coord verb timeouts (`coord:presence`/`fleet:status`/orient stalling)                                                         | Can be a stale pre-fix release-operator running an unbounded `coord_event_log` scan — a **known, already-mitigated** class, not a fresh coord outage                                   | GC + the durable fix (deploy the staging bundle with the bounded query) already tracked                                  | WI-4055                                                                                                                                                                                                                                                      |
+
+## Live example (this session, 2026-07-11, \~02:08–04:20 EDT)
+
+Within one \~2h window, `infra-liveness` fired and RECOVERED **five separate
+condition pairs** (`health-tick-stale`, `dead-routines` ×3 different loop
+ids, `panel:bees`, `panel:kettle`, `single-primary:split-brain-primary`,
+`single-primary:no-primary`) — several resolving in under 2 minutes. One
+`single-primary: 2 background primaries` alarm and its `0 background
+primaries` companion fired **90 seconds apart on the same DB**, which is only
+possible as a race in the detector's own sampling, not a real topology
+flip. The genuine root cause, self-reported by the firing agent minutes
+later:
+
+> "FALSE ALARM — ignore the last several broadcasts... I added active paging
+> to liveness-alarm.ts and single-primary-check.ts but wired them as
+> hardcoded imports instead of injectable test deps, so vitest's synthetic
+> test scenarios fired for-real broadcasts to the live fleet. No actual
+> DBOS/routine/git-sync incident is occurring." — su-ac887, WI-4023 fast-follow
+
+A responder who didn't wait \~90s for the RECOVERED pair (or check for a
+same-topic retraction) could easily have opened a fresh incident work-item,
+paged the owner, or started a live DB investigation for a condition that was
+never real. The fix that would have prevented this specific instance —
+test-injection points must be dependency-injected, never hardcoded imports,
+for any code that pages a live fleet — is a narrower, separate lesson; filed
+here only as the concrete anchor for the family pattern.
+
+## Fast triage checklist — before you file or escalate
+
+1. **Wait one beat, then re-check the same channel.** Several of these
+   classes self-resolve in under 2 minutes (`RECOVERED` fires right behind
+   the alarm). If you're about to file a work-item for something that fired
+   in the last \~2 minutes, check whether it already has a resolution.
+2. **Match the signature against the table above.** A `no_replicator`,
+   RPM/token-bucket, AIMD-throttle, edge-429, infra-liveness, or coord-timeout
+   shape probably already has a known-benign path — read that entry's linked
+   doc/EI before re-deriving the triage from scratch.
+3. **Read the alert body, not just its key/condition\_key.** The dedup-masking
+   lesson generalizes: a `known_open_keys` hit, or a title that *looks* like
+   a class you know, can still be a genuinely new failure underneath — and
+   the reverse (an unfamiliar-looking key that's actually the same known
+   class under new phrasing) also happens. Check for a same-topic
+   `FALSE ALARM` / `RECOVERED` / `resolved-mitigation` message before
+   escalating.
+4. **Check for a self-inflicted source.** A concurrent agent's own test run,
+   migration, or instrumentation change can fire real-looking broadcasts
+   (WI-4023). `coord:feed` / `coord:presence` around the same timestamp
+   often has the retraction already.
+5. **If it's genuinely new or sustained past the class's typical
+   self-resolve window, file/escalate — scoped to the actual new signal.**
+   Don't let "this smells like the familiar noise" become an excuse to
+   ignore a real regression; the point is to recognize the *shape*, not to
+   suppress everything that pattern-matches.
+
+This registry is expected to grow. When you hit a NEW recurring
+known-benign-transient class, add a row here (or link a dedicated doc if the
+fix is substantial) rather than letting the next agent re-derive the same
+triage call independently — that re-derivation is exactly the cross-harness
+friction this doc exists to close.
+
+## See also
+
+* `agent-insights/watchdog-tool-error-dedup-and-rate-limit-class.mdx` — dedup
+  masking + reading the body instead of the key.
+* `agent-insights/auto-fix-lane-watchdog-self-amplifying-noise.mdx` — a
+  watchdog must exclude its own lane's correctly-handled transient deaths
+  from its human-facing signal.
+* `agent-insights/staleness-alarm-deploy-lag-refire.mdx` — a "resolved" alarm
+  that re-fires under a new id is often deploy-lag, not rot.
+* `agent-insights/rate-limit-is-usually-account-routing-not-capacity` — the
+  general "check routing before concluding capacity" family.
+* `agent-insights/inference-gateway-wedge-admission-slot-squat.mdx` — throttle
+  vs. wedge, and when AIMD pressure is actually an outage.
+* EI-8268, EI-8535, WI-4055, WI-4023.

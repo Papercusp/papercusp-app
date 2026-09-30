@@ -1,0 +1,34 @@
+/**
+ * adv-history-tab.css — desktop theme binding for the History tab
+ * (plan project-history-tab-desktop-and-portal-2026-09-16, P-002).
+ *
+ * `@papercusp/ui-primitives`' ProjectHistoryView.css is themed purely through its
+ * `--ph-*` token contract (it ships neutral, light-only standalone fallbacks). This
+ * file binds EVERY token of that contract to the operator's semantic theme vars
+ * (apps/operator/app/_semantic.css and its theme variants; mirrored as DTCG tokens in
+ * design/tokens/base.json — e.g. `color.fg.primary` ↔ `--fg`, `color.accent.ink` ↔
+ * `--accent-ink`), scoped to AdvHistoryTab's root element so the binding follows
+ * whichever theme the shell has active and never leaks into other tabs.
+ *
+ * Guarded by adv-history-tab.css.test.ts: every `--ph-*` token the primitive's
+ * stylesheet consumes must be bound here, and every colour binding must reference a
+ * semantic var that _semantic.css actually defines (a rename there fails the test
+ * instead of silently rendering the fallback palette).
+ */
+.pc-project-history {
+  --ph-text: var(--fg);
+  --ph-muted: var(--fg-mute);
+  --ph-border: var(--border);
+  --ph-surface: var(--bg-raised);
+  --ph-surface-sunken: var(--bg);
+  --ph-surface-soft: var(--bg-1);
+  --ph-accent: var(--accent);
+  --ph-on-accent: var(--accent-ink);
+  --ph-accent-text: var(--accent-strong);
+  --ph-brand: var(--accent);
+  --ph-success: var(--good);
+  --ph-danger: var(--bad);
+  --ph-danger-text: var(--bad);
+  --ph-control-h: 32px;
+  --ph-shadow-float: 0 8px 24px rgb(0 0 0 / 0.35);
+}

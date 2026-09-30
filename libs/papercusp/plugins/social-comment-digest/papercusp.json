@@ -1,0 +1,150 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/social-comment-digest",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Starter trigger pack: new comments across connected social accounts coalesce into one periodic digest with sentiment and an escalation list.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": { "mode": "exact" },
+  "capabilities": [],
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "includeSentiment": {
+          "type": "boolean",
+          "title": "Include sentiment",
+          "default": true
+        },
+        "escalationGuidance": {
+          "type": "string",
+          "title": "What needs a human",
+          "default": "Anything hostile, legal, financial, a safety report, or a direct question the owner alone can answer.",
+          "maxLength": 1000
+        },
+        "maxCommentsPerPlatform": {
+          "type": "integer",
+          "title": "Comments summarised per platform",
+          "description": "Passed straight to social:search as `limit`, whose documented ceiling is 50 — so this cannot promise more than one call can return.",
+          "minimum": 1,
+          "maximum": 50,
+          "default": 50
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 1,
+      "windowSeconds": 300
+    },
+    "targets": [
+      {
+        "id": "comment-digest",
+        "kind": "plan",
+        "path": "plan.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trigger"],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey", "payload"],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "pattern": "^ext:(reddit|youtube|facebook-pages|instagram):comment$|^ext:threads:reply$"
+                },
+                "source": {
+                  "type": "string",
+                  "enum": ["reddit", "youtube", "facebook-pages", "instagram", "threads"]
+                },
+                "event": { "type": "string", "enum": ["comment", "reply"] },
+                "sourceId": { "type": "string", "minLength": 1 },
+                "externalId": { "type": "string", "minLength": 1 },
+                "dedupeKey": { "type": "string", "minLength": 1 },
+                "payload": {
+                  "type": "object",
+                  "datatype": "social-post",
+                  "additionalProperties": true,
+                  "required": ["id", "text"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "text": { "type": "string" },
+                    "author": { "type": "string" },
+                    "url": { "type": "string" },
+                    "replyToId": { "type": "string" },
+                    "occurredAt": { "type": "string" }
+                  }
+                }
+              }
+            },
+            "includeSentiment": { "type": "boolean", "default": true },
+            "escalationGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "Anything hostile, legal, financial, a safety report, or a direct question the owner alone can answer."
+            },
+            "maxCommentsPerPlatform": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 50
+            }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "reddit-comment-to-digest",
+        "source": { "kind": "external", "sourceKind": "reddit" },
+        "target": "comment-digest",
+        "eventPattern": "ext:reddit:comment",
+        "filter": { "all": [{ "id": { "exists": true } }, { "text": { "exists": true } }] },
+        "mapping": { "mode": "payload-context" },
+        "stormPolicy": { "maxRuns": 30, "windowSeconds": 300 }
+      },
+      {
+        "id": "youtube-comment-to-digest",
+        "source": { "kind": "external", "sourceKind": "youtube" },
+        "target": "comment-digest",
+        "eventPattern": "ext:youtube:comment",
+        "filter": { "all": [{ "id": { "exists": true } }, { "text": { "exists": true } }] },
+        "mapping": { "mode": "payload-context" },
+        "stormPolicy": { "maxRuns": 3, "windowSeconds": 300 }
+      },
+      {
+        "id": "facebook-pages-comment-to-digest",
+        "source": { "kind": "external", "sourceKind": "facebook-pages" },
+        "target": "comment-digest",
+        "eventPattern": "ext:facebook-pages:comment",
+        "filter": { "all": [{ "id": { "exists": true } }, { "text": { "exists": true } }] },
+        "mapping": { "mode": "payload-context" }
+      },
+      {
+        "id": "instagram-comment-to-digest",
+        "source": { "kind": "external", "sourceKind": "instagram" },
+        "target": "comment-digest",
+        "eventPattern": "ext:instagram:comment",
+        "filter": { "all": [{ "id": { "exists": true } }, { "text": { "exists": true } }] },
+        "mapping": { "mode": "payload-context" }
+      },
+      {
+        "id": "threads-reply-to-digest",
+        "source": { "kind": "external", "sourceKind": "threads" },
+        "target": "comment-digest",
+        "eventPattern": "ext:threads:reply",
+        "filter": { "all": [{ "id": { "exists": true } }, { "text": { "exists": true } }] },
+        "mapping": { "mode": "payload-context" },
+        "stormPolicy": { "maxRuns": 16, "windowSeconds": 300 }
+      }
+    ],
+    "edges": []
+  },
+  "icon": "MessagesSquare"
+}

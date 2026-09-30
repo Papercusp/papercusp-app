@@ -1,0 +1,344 @@
+# Pot git-sync — per-member seeding and the multi-pusher model
+URL: /internal/docs/system/pot-git-sync
+
+How git-sync generalizes to any pot — one routine per member checkout (never homes or views), the push decision table, the all-active seed default, deterministic cron jitter, and the origin-serialized multi-pusher model for shared pots.
+
+import { Aside } from '@astrojs/starlight/components';
+
+# Pot git-sync
+
+The git-sync pipeline (`packages/operator-core/lib/harness/git-sync/run-git-sync.ts`)
+commits the whole tree, fetches, merges, and pushes — for **any** registered
+checkout, not just papercup. This page documents how that pipeline is *wired*
+to pots: which registry entries get a `system:git-sync` routine, who seeds it,
+what the seeded config says, and how N independent peers on a shared pot
+converge on one origin branch. Source plan: `git-sync-any-pot-2026-06-12`
+(see the [plans index](/internal/docs/reference/plans-index)); the pipeline
+itself was built in `git-sync-auto-commit-2026-06-03` and hardened in
+`git-sync-system-audit-2026-06-09`.
+
+The **seed-active default** (P-005) was ratified **all-active** on 2026-06-13
+(plan decision D-008): every member checkout seeds ACTIVE, with joiner-side
+clones still `push: false` so "active" there means a local commit+fetch+merge
+mirror only. The **multi-pusher origin-serialized model** (D-004) has passed its
+P-010 two-peer convergence verification — no ping-pong, no backoff needed — see
+[Verification status](#verification-status).
+
+## The model in one paragraph
+
+A pot = a **home** harness (`harness_kind: 'pot'`, a non-repo state dir) +
+N **member** harnesses (registered clones carrying `hive_slug`). Joiners
+additionally materialize a `remote_hive` home **view** (non-repo) + read-only
+member clones. Git-sync seeds **one routine per member checkout — never homes,
+never views** (plan D-001: "git-sync for a pot" = the set of its members'
+routines). Each routine is an ordinary `harness_shared.routines` row
+(`target_role: 'system:git-sync'`, cron trigger — see
+[Routines](/internal/docs/spec/routines)); the routines engine runs the action,
+which wraps the pure pipeline with locks, escalations, and resolver dispatch.
+
+## Eligibility — which entries get a routine
+
+`git-sync-eligibility.ts` is the **one** verdict module, shared by every seed
+site and by the action's runtime gate, so seed time and run time can never
+disagree. `gitSyncEligibility(entry)` is pure + sync over a registry snapshot;
+reasons in precedence order:
+
+| Reason                 | Entry shape                                                                                                            | Why it never syncs                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ephemeral_debris`     | Slug matches the ephemeral/benchmark INSTANCE regex (xbench / `xbq<hash>` / `*instance*` / memcap / memrun / deleteme) | An ephemeral/benchmark instance harness — must never get a routine. **Checked FIRST**: it is a pure regex match (no IO) so a surviving routine fast-skips before any `stat`. Added after INCIDENT 2026-06-18 (a benchmark fleet left \~170 torn-down per-task instance harnesses each carrying an ACTIVE git-sync routine; the per-tick churn saturated the `:3070` event loop and took psu down). |
+| `remote_hive_view`     | `remote_hive: true`                                                                                                    | Joiner-side pot view — a non-repo dir under `~/.papercusp/remote-pots` (checked before `hive_home`: views are also `kind: 'pot'`)                                                                                                                                                                                                                                                                  |
+| `hive_home`            | `harness_kind: 'pot'` **and** not `self_repo`                                                                          | The pot home is a non-repo state dir — **except** a pot that IS its own repo (the Option-B merge, papercup→papercusp 2026-06-20), marked `self_repo` on the merged registry entry: that entry owns a checkout, is ELIGIBLE, and must be git-synced (else origin freezes). The verdict only fires when `harness_kind === 'pot' && !self_repo`.                                                      |
+| `non_local_deployment` | `deployment.target` present and ≠ `'local'`                                                                            | The checkout lives on a cloud frame, not this box's filesystem                                                                                                                                                                                                                                                                                                                                     |
+| `no_path`              | No registered path, or it vanished from disk                                                                           | Nothing to sync                                                                                                                                                                                                                                                                                                                                                                                    |
+| `not_a_git_repo`       | Path exists but carries no `.git`                                                                                      | Not a clone (`.git` may be a dir or a worktree/submodule file)                                                                                                                                                                                                                                                                                                                                     |
+
+The same verdict also runs as a **runtime gate** at the top of every tick
+(`git-sync-action.ts`): a routine row whose target became ineligible no-ops
+with a logged reason and a `last_status: 'skipped'` metadata patch instead of
+error-escalating every 10 minutes.
+
+## Seeding — one spine, five producers
+
+All seeding flows through `seedGitSyncRoutineForMember`
+(`git-sync-routine.ts`), which composes eligibility → existing-row check →
+push decision → jittered cron → upsert. It **never throws** and never fails
+the calling tool — every failure folds into a reported outcome. It is
+**non-clobbering**: an existing routine row (possibly human-edited) is left
+intact; a re-add/re-join reports `routine_exists`. One carve-out: a
+creator-side re-seed that brings github coords **upgrades** a row that is
+still exactly the untouched machine-default coords-less shape, so the probed
+push and default branch land on the from-repo double-seed ordering
+(`harness:create { pot }` seeds before the coords are stamped); the outcome
+surfaces `upgraded: true`. Anything human-touched — active flipped, cron
+retuned, any config deviation — is never clobbered, and joiner-side or
+coords-less re-seeds still report `routine_exists`.
+
+| Producer                 | Site                                                                                               | Side                                          | Cron jitter key                      |
+| ------------------------ | -------------------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------ |
+| `pot:create_from_repo`   | `agent-tools/pot/_create_from_repo.ts` (step 7.25, new-pot **and** into-pot paths)                 | creator                                       | member slug                          |
+| `pot:add-member`         | `agent-tools/pot/_add-member.ts` (both success paths — a re-add heals a missing row)               | creator                                       | member slug                          |
+| `harness:create { pot }` | `agent-tools/harness/create.ts` (step 5a)                                                          | creator                                       | member slug                          |
+| Pot join                 | `lib/harness/join-pot.ts` (`joinHiveAsView` per-member loop)                                       | joiner                                        | `<slug>:<workspaceId>`               |
+| Bare join link           | `endpoint-route/routes/harness/join-link.ts` (`handleJoinLink`, after clone registration — EI-382) | joiner                                        | `<slug>:<workspaceId>`               |
+| Boot reconcile           | `git-sync-reconcile.ts`, fired once per process from `lib/sync/hyperbee/boot-all.ts`               | detected per member (incl. `joined_via_link`) | slug, or salted when joiner-detected |
+
+The boot reconcile is the **backfill**: it walks each workspace's registry,
+visits each member (its filter is `p.hive_slug || p.joined_via_link` — see the
+bare-link case below), detects joiner-side members by their home entry's
+`remote_hive` flag (or the `joined_via_link` marker, always joiner-side), and
+add-only seeds whatever is missing — so pots created before the seed sites
+existed (or members that slipped past them) converge on next boot. The same
+sweep also runs **P-014 blind-spot detection**: any NON-member registered
+checkout that is git-sync-eligible (a real local repo) yet carries no routine
+row is surfaced in the boot log as `⚠ eligible-but-UNSEEDED` — it is **never
+auto-seeded** (a non-member checkout is not assumed wanted-synced), so a new
+registered-checkout path that forgets to seed at creation is caught instead of
+silently never syncing.
+
+Members joined via a **bare join link** (the Entry-4 `handleJoinLink` route,
+outside `joinHiveAsView`) register the clone with `joined_via_link: true` (no
+`hive_slug` — there is no local pot home). They are seeded **inline at join
+time** (EI-382): `handleJoinLink` seeds the clone joiner-side (`push: false` —
+a local mirror; the contribution path is the owner's pushes / a fork-PR) right
+after registration, best-effort so a seed failure never fails the join. That
+inline seed is the fast path; the boot reconcile is the **backfill** — since
+EI-1623 its member loop filters on `hive_slug || joined_via_link`, so it **does**
+visit bare-link clones and add-only re-seeds any whose join-time seed failed.
+(Link-joins are excluded from the P-014 unseeded scan precisely because the
+member loop already owns them.)
+
+A seeded row carries, in `trigger_config`:
+
+* **`cron`** — jittered every-10-minutes schedule (below);
+* **`push`** — from the decision table (below);
+* **`push_submodules`** — defaults `true`;
+* **`branch`** — the member's `github_default_branch` registry coord when
+  known (the pipeline falls back to its own per-repo branch resolution
+  otherwise).
+
+**`active` is not in `trigger_config`** — it is the routine row's own top-level
+`active` column (passed as a sibling of `triggerConfig`, set from the ratified
+all-active default below).
+
+The inverse of the seed is **`removeGitSyncRoutine`** (shared-pot-hardening
+P-012 leave path): a member LEAVE **deletes the routine row entirely** (the
+member is deregistered), durably — distinct from `setGitSyncRoutineActive(false)`,
+which keeps a disabled row. On leave the row should be gone, not merely inactive.
+
+## Seed-active default (P-005 — ratified all-active, D-008)
+
+Every member checkout seeds **ACTIVE**, both creator-side and joiner-side.
+The constants live in `git-sync-eligibility.ts`:
+
+```ts
+export const GIT_SYNC_SEED_ACTIVE_CREATOR = true;  // D-008 (ratified 2026-06-13)
+export const GIT_SYNC_SEED_ACTIVE_JOINER = true;   // D-008 (ratified 2026-06-13)
+```
+
+Rationale: this follows the flags-default-enabled culture (escalations surface
+problems) and keeps every checkout's local mirror fresh from origin without a
+manual go-live step. Joiner-side `active` is **not** a push — joiner clones are
+`push: false` by the decision table below (fork-PR stays the contribution path),
+so an active joiner routine only commits, fetches, and merges its local mirror.
+The constants stay one-line so a future re-gate (e.g. back to a creator/joiner
+split, or all-inactive) is still a trivial flip.
+
+## The push decision table
+
+`decideGitSyncPush` (`decide-git-sync-push.ts`) is the one place that answers
+"should this seeded routine push?". Rules in precedence order; the first match
+wins (reason tokens are stable, machine-greppable prefixes):
+
+| # | Condition                                     | `push`  | Reason token                     |
+| - | --------------------------------------------- | ------- | -------------------------------- |
+| 1 | No upstream remote (no `github_remote` coord) | `false` | `no_upstream_remote`             |
+| 2 | Joiner-side clone                             | `false` | `joiner_side`                    |
+| 3 | GitHub `permissions.push === false`           | `false` | `github_permissions_push_false`  |
+| 4 | GitHub `permissions.push === true`            | `true`  | `github_permissions_push_true`   |
+| 5 | Permission unknown (`null`)                   | `true`  | `permissions_unknown_optimistic` |
+
+The permissions signal comes from a best-effort probe
+(`lib/harness/github-repo-permissions.ts`: authenticated
+`GET /repos/{owner}/{repo}`, auth via the shared `getOctokit()`/gh-token path;
+any failure returns `null`, never throws). The spine only runs the probe when
+it can change the answer — rules 1–2 win outright without it.
+
+Why the default is asymmetric (rule 5 optimistic, rules 1–2 hard `false`): the
+pipeline's fetch-fail branch is not symmetric in `push`. With `push: false` a
+failed/absent fetch is benign — the repo gets quiet commit-only sync. With
+`push: true` the same failed fetch error-escalates **every tick** and never
+self-heals. So push is only enabled where it plausibly works; a wrong
+optimistic guess surfaces loudly via the `git-sync-error` escalation (plan
+D-002) instead of silently stranding work.
+
+## Cron jitter — and why
+
+`gitSyncCronForKey(key)` (`git-sync-eligibility.ts`) hashes the key (FNV-1a
+32-bit, dependency-free, stable across processes and platforms) to a minute
+offset 0–9 and emits a 6-field every-10-minutes cron:
+
+```
+0 <o>,<o+10>,<o+20>,<o+30>,<o+40>,<o+50> * * * *
+```
+
+Every member keeps a 10-minute cadence, but members land on different minute
+offsets. This cuts same-tick collisions two ways:
+
+* **between members on one box** — N members' ticks don't all contend the
+  routines engine and the network at once;
+* **between peers on a shared pot** (the D-004 case) — the same member slug
+  exists on every peer box, so joiner-side seeding salts the key with the
+  workspace id (`<slug>:<workspaceId>`), de-correlating peers' fire times and
+  shrinking the window for two peers to fetch→push the same origin branch in
+  the same instant.
+
+Jitter is structural, not configurable: the seeding spine always computes the
+cron through this helper (no seed site bypasses it), and the schedule shape is
+the same one papercup's hand-seeded row already uses, parsed by the routines
+engine's `computeNextFireAt`.
+
+## The multi-pusher model (D-004 — verified, D-007)
+
+For shared pots, **every push-capable peer runs its own git-sync
+independently**. There is no single-pusher election and no new coordination
+machinery. Convergence relies on the origin branch as the serializer:
+
+1. Each peer's tick runs commit → fetch → merge → push per repo
+   (submodules deepest-first, superproject last).
+2. When a peer's push is rejected **non-fast-forward** (another peer pushed
+   between its fetch and push), the pipeline re-fetches, re-merges once, and
+   re-pushes (`run-git-sync.ts`, `syncOneRepo`). The loser's local edits ride
+   in on the merge commit.
+3. When that merge **content-conflicts**, the tree is aborted clean (agents
+   never see a half-merged tree), a `git-sync-conflict` escalation is written,
+   and a `merge-resolver` agent is dispatched **on that peer** — resolvers run
+   per peer, against the peer's own checkout. Dispatch is deduped per harness
+   while a resolver is genuinely in-flight (`RESOLVER_INFLIGHT_MS`, 20 min);
+   the launch resolves via the `merge-resolution`
+   [launch blueprint](/internal/docs/agent-insights/launch-blueprints).
+
+Accepted cost: occasional cross-peer merge conflicts, handled by the existing
+escalation + resolver path rather than prevented by election or locking.
+
+### Federation is orthogonal (D-003)
+
+A shared pot's substrate federation
+([pot-scoped federation](/internal/docs/agent-insights/pot-scoped-federation)
+— hyperbee/peer-log over the pot's Ed25519 topic) carries **coordination and
+PG state**. Git origin carries **the tree**. Generalized git-sync neither
+replaces nor depends on federation: a federated pot still syncs its tree
+per-peer through ordinary git remotes, and a pot with no federation at all
+syncs the same way.
+
+## Run-time concerns: locks and escalation keying
+
+Per tick, the action holds the **per-slug** exclusive lock `git-sync:<slug>`
+(auto-registered idempotently, in the same transaction as the acquire) for the
+whole commit → submodule-push → pointer-bump → push sequence, plus every name
+in the routine's `trigger_config.extra_lock_resources` (which are **never**
+auto-registered — an unknown name skips the tick with a loud log). Held by a
+peer → skip this tick. Papercup's row lists the legacy global `git-sync` +
+`libs-papercusp-submodule` names there, so the documented back-off protocol
+("acquire `exclusive(git-sync)` to make papercup's git-sync back off") keeps
+working — see
+[named resource locks](/internal/docs/agent-spawning/named-resource-locks) and
+[repo conventions](/internal/docs/system/repo-conventions) for the papercup
+specifics.
+
+Escalations key on `(harness_slug, phase)` with the **constant** phase
+`'git-sync'`. The old constant `'staging'` shared its row with other
+`phase='staging'` writers — auto-rebase's `rebase_conflict` rows clobbered
+git-sync's and vice versa via `ON CONFLICT DO UPDATE` — and a branch-derived
+phase would orphan open rows whenever a routine's branch changed. A
+git-sync-owned constant ends both.
+
+Both changes ship with migrations — locks `sql/015` (registry prose for the
+per-slug naming) and db `sql/237` (papercup's `extra_lock_resources` + re-key
+of open escalation rows `'staging'` → `'git-sync'`) — which apply via the
+migration runner (`db:migrate`).
+
+**Per-agent commit attribution** is flag-gated by `GIT_SYNC_DERIVED_ATTRIBUTION`
+(default **OFF**; `git-sync-dx-hardening-2026-06-17` P-004). When ON, the action
+supplies the live coord-presence roster (active agents + their declared
+`current_files`) so the pipeline peels each declaring agent's dirty files into
+its **own** commit — intent subject + `Co-Authored-By` trailer, preserving the
+`[skip ci]` marker — before the catch-all whole-tree commit. Attribution is
+**derived from presence, never agent-authored** (agents stay git-free); with the
+flag OFF it falls back to the single whole-tree commit. The same flag also drives
+**assign-don't-broadcast** for content escalations (the human surface above
+targets the agents who edited the quarantined files instead of the whole fleet).
+
+## Failure surfaces (links, not prose)
+
+* **`git-sync-conflict`** — merge conflict; tree aborted clean, resolver
+  dispatched (above). Read via the `harness:escalation` tool; pipeline history
+  on the `/admin/git` tab.
+* **`git-sync-error`** — repeated push failures and/or oversized-file
+  exclusions (EI-18: GitHub hard-rejects blobs ≥100MB; dirty files over
+  `max_blob_bytes`, default 95MB, are excluded from the auto-commit and
+  reported instead of permanently wedging the push). Never clobbers an open
+  conflict escalation. Long form: plan `git-sync-system-audit-2026-06-09`.
+* Every tick also appends a pipeline event row (sync/conflict/error rates over
+  time) — surfaced on the `/admin/git` tab.
+
+### Content guard (EI-438)
+
+A **second escalation+resolver path**, parallel to the conflict path: a broken
+file (an `.mdx` that won't compile, a curly quote used as code) is **quarantined**
+from the auto-commit by the content guard (`run-git-sync.ts`) so it never reaches
+`staging` — quarantine, don't stall. The action then escalates it under its
+**own phase `git-sync-content`** (kind `git-sync-content-error`), a separate
+`(harness_slug, phase)` row from the conflict/error escalation (phase `git-sync`),
+so a content quarantine and a merge conflict **coexist and clear independently**.
+
+A **`content-fixer`** agent is dispatched to repair the quarantined files,
+deduped while one is genuinely in-flight (the same posture as the merge-resolver).
+After `MAX_CONTENT_FIXER_ATTEMPTS` (**5**) consecutive failing ticks with the
+file still broken, it **stops auto-dispatching** and surfaces to a human **once**
+(on the transition) — never an infinite silent fix loop; the file stays
+quarantined regardless, so `staging` is never at risk while it waits. A clean
+re-check tick clears the escalation and resets the counter.
+
+The whole guard is flag-gated by **`GIT_SYNC_CONTENT_GUARD`** (default **ON**) —
+an instant kill-switch: when OFF, `runGitSync` is passed an empty detector set
+and commits exactly as before this plan (no quarantine/escalation/fixer), no
+deploy needed. A flag-infra error falls back to the default (ON), keeping the
+safety on. Source plan: `git-sync-content-guard-2026-06-13`.
+
+## Verification status
+
+D-004 is **empirically verified** (plan P-010, decision D-007, 2026-06-12). The
+verification lives as a permanent regression suite —
+`packages/operator-core/lib/harness/git-sync/two-peer-convergence.integration.test.ts`
+— rather than the originally-planned one-shot manual run on a second operator
+stack: two member slugs in one process reproduce the two-stack topology exactly
+(peers share *nothing* but the git origin — per-slug routine rows, escalation
+rows, and lock resources are all peer-local), while making the race
+interleavings deterministic. The resolver *dispatch loop* runs for real
+(conflict → escalation → merge-resolution blueprint → invoke-route POST, served
+by an in-test HTTP server); the resolver *agent* is scripted maximally
+adversarial — it never agrees with the other peer's resolution.
+
+Results (all deterministic, every run):
+
+* **In-pass push race** — a peer push landing between our fetch and our push is
+  absorbed by the non-FF retry (`run-git-sync.ts` push-reject → re-fetch →
+  re-merge → re-push), for both the clean-re-merge and re-conflict variants.
+* **Disjoint edits** — both land; union on origin; zero escalations, zero
+  resolver dispatches.
+* **Overlapping edit** — exactly the losing peer escalates and dispatches one
+  resolver; a second conflicted tick while it is in flight does NOT re-dispatch;
+  the resolution clears the escalation and the fleet converges.
+* **Resolver race** (the ping-pong probe) — both peers conflict against a
+  third-party tip, both resolvers run, their resolutions interleave so the
+  second push is non-FF-rejected and its re-merge re-conflicts with the first
+  resolution. Outcome: bounded at ONE extra pass (`resolved: 2, pushAttempts:
+  2`), fleet converged two ticks later. **No ping-pong** — convergence is
+  structural: origin serializes pushes, and every accepted push descends from
+  the tip its merge consumed, so a peer with no new local work always merges a
+  descendant cleanly.
+
+The contingent mitigation (a resolver-dispatch backoff when origin advanced
+since the conflicting fetch) is therefore **not implemented** — unbounded
+re-conflict requires new divergent work each round, which is real work
+arriving, not a resolver race.

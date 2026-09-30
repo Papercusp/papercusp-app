@@ -1,0 +1,10 @@
+{
+  "ref": "su-agent-behavior",
+  "id": "su-agent-behavior",
+  "title": "SU agent behavior (per-run generic agent scorecard — all dimensions)",
+  "description": "Per-run agent-behavior scorecard (23 criteria, pass/partial/fail/unknown; partial/fail carry attribution agent|system|ambiguous): tool discipline through system-enablement — incl. mode compliance (a DEDICATED battery per mode, M0–M4: AUTO-off/AUTO/IDEATE/IDEATE×AUTO/DRAIN), platform-mechanism execution (templates/schedules/watch/backup driven END-TO-END and live-verified), fleet stewardship, blocker/red-gate ownership, peer responsiveness, continuity (incl. the compaction probe — auto-compaction behavior AND machinery), and system-enablement (the platform graded from the same run). Grade single runs; read the aggregate via rubrics:trend. Exam + evidence method: METHOD.md (method_ref su-agent-behavior); EVERY criterion carries its own copy-runnable REPLICATION DRILL in criterion.replication (WI-4287 backbone + WI-4323 backfill — each of the 23 aspects gets its own end-to-end testing procedure, not just batched-tool-calls).",
+  "category": "agent-behavior",
+  "scope": "rubric",
+  "version": "0.5.0",
+  "source": "first-party"
+}

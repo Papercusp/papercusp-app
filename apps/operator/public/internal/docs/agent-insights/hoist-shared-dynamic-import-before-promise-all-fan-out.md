@@ -1,0 +1,85 @@
+# Hoist a shared dynamic import before Promise.all when 2+ fan-out branches need the same module
+URL: /internal/docs/agent-insights/hoist-shared-dynamic-import-before-promise-all-fan-out
+
+Two independent async branches inside one Promise.all that each fire their own first-time `await import('same-specifier')` can race Vitest's vi.mock interception — one branch gets the mock, the other silently gets the real module.
+
+## Symptom
+
+A handler fans out N independent async sources via one `Promise.all([...])`.
+Two (or more) of those sources each independently call
+`await import('same/specifier')` — byte-identical import, same importing
+module, fired essentially back-to-back (both start executing synchronously
+during `Promise.all`'s array construction, before either hits its own first
+`await`). A unit test `vi.mock`s that specifier to stub it out. One call site
+consistently gets the mocked module; the other consistently gets the **real**
+one — confirmed only by literally printing which function instance came back
+(`fn.toString()`), not visible from code review. The "losing" branch then hits
+real infrastructure (a live DB, a real network call, …) from inside a unit
+test that otherwise asserts everything is mocked.
+
+Concrete instance (EI-14127): `plans:attention`'s handler fanned out \~14
+sources via `Promise.all`; two of them each called
+`await import("@papercusp/db-org")` to get `getOrgPg`. In
+`attention-parallel.test.ts`'s `vi.mock('@papercusp/db-org', ...)`, the
+earlier-in-file-order branch got the mock; the later one (a needs-human
+work-items read) got the real `getOrgPg`, pulling 235 real rows from the live
+shared Postgres into a test asserting zero items.
+
+Same underlying hazard, independently rediscovered in
+`work-items.ts` (EI-9658, WI-4118/P-007, 2026-07-11): two same-literal
+`await import('./work-items-events')` call sites resolved one-mocked/one-real
+under `vi.mock`.
+
+## Root cause
+
+Almost certainly a race in how Vitest's SSR transform intercepts dynamic
+`import()`: the first of two near-simultaneous *first-time* dynamic imports of
+the same specifier from the same file gets routed through the mock registry;
+a second one fired in the same microtask window can resolve through a
+different path and get the real module before (or without) the mock
+substitution taking effect. This is distinct from the circular-import /
+fire-and-forget hazard in
+[mock the leaf sink, not the mid-cycle module](/agent-insights/mocking-fire-and-forget-emits-through-a-circular-dynamic-import)
+— no circularity is required here, just **two concurrent first-time imports of
+the identical specifier** inside one `Promise.all` fan-out.
+
+## The fix: hoist ONE shared import promise above the `Promise.all`
+
+Collapse the two-or-more concurrent first-time imports of the same specifier
+into exactly one, so there is only one dynamic-import call site for Vitest's
+mock interception to race against:
+
+```ts
+// Single hoisted import — every branch that needs this module awaits the
+// SAME promise instead of each calling `await import(...)` independently.
+const dbOrgImportP = import("@papercusp/db-org");
+
+await Promise.all([
+  (async () => {
+    const { getOrgPg } = await dbOrgImportP;
+    // ...
+  })(),
+  (async () => {
+    const { getOrgPg } = await dbOrgImportP;
+    // ...
+  })(),
+]);
+```
+
+If the second branch instead lives in its own downstream module, prefer
+giving that module its own **static** top-level import of the shared
+dependency (resolved once when the module itself is dynamically imported at
+a single call site) rather than a second inline `await import('same/specifier')`
+in the fan-out — see `needs-human-work-items-source.ts`, which does exactly
+this after being split out of `attention.ts`.
+
+## Rule of thumb
+
+Before adding a new source/branch to an existing `Promise.all` fan-out, check
+whether any sibling branch already dynamically imports the same specifier for
+the first time in that tick. If so, **hoist a single shared
+`const xImportP = import(specifier)`** above the `Promise.all` and have every
+branch `await xImportP` — never let 2+ branches each independently
+`await import('same/specifier')`. This is a structural fix (eliminates the
+race by construction), not a test-only workaround, so it holds under `vi.mock`
+in tests AND avoids a redundant module-cache lookup per branch in production.

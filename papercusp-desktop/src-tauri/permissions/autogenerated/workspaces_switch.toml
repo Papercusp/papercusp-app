@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspaces-switch"
+description = "Enables the workspaces_switch command without any pre-configured scope."
+commands.allow = ["workspaces_switch"]
+
+[[permission]]
+identifier = "deny-workspaces-switch"
+description = "Denies the workspaces_switch command without any pre-configured scope."
+commands.deny = ["workspaces_switch"]

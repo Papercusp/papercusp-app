@@ -1,0 +1,470 @@
+<title>Session popup — contrast study</title>
+
+<style>
+  :root {
+    --ground: #f6f7f9; --raised: #ffffff; --ink: #101720; --ink-2: #3d4a58;
+    --muted: #5b6875; --rule: #dfe4ea; --rule-2: #c8d1db;
+    --accent: #0a6f9e; --accent-wash: #e8f2f8;
+    --good: #1a7f52; --warn: #9a6a06; --bad: #a83232;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0a0e14; --raised: #111821; --ink: #e4ecf4; --ink-2: #b3c2d0;
+      --muted: #8496a8; --rule: #1c242e; --rule-2: #2b3743;
+      --accent: #5cc6f5; --accent-wash: #10202c;
+      --good: #4ec98d; --warn: #e0b45c; --bad: #f08a8a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0a0e14; --raised: #111821; --ink: #e4ecf4; --ink-2: #b3c2d0;
+    --muted: #8496a8; --rule: #1c242e; --rule-2: #2b3743;
+    --accent: #5cc6f5; --accent-wash: #10202c;
+    --good: #4ec98d; --warn: #e0b45c; --bad: #f08a8a;
+  }
+  :root[data-theme="light"] {
+    --ground: #f6f7f9; --raised: #ffffff; --ink: #101720; --ink-2: #3d4a58;
+    --muted: #5b6875; --rule: #dfe4ea; --rule-2: #c8d1db;
+    --accent: #0a6f9e; --accent-wash: #e8f2f8;
+    --good: #1a7f52; --warn: #9a6a06; --bad: #a83232;
+  }
+
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 15px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 40px 24px 96px; }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(26px, 3.4vw, 38px); line-height: 1.15; font-weight: 680;
+    letter-spacing: -0.02em; text-wrap: balance; margin: 0 0 14px;
+  }
+  .lede { max-width: 64ch; font-size: 16.5px; color: var(--ink-2); margin: 0; }
+  .lede strong { color: var(--ink); font-weight: 620; }
+  h2 { font-size: 20px; font-weight: 660; letter-spacing: -0.01em; margin: 0 0 6px; text-wrap: balance; }
+  h3 { font-size: 15.5px; font-weight: 650; margin: 0 0 4px; }
+  p { margin: 0 0 12px; max-width: 68ch; }
+  section { margin-top: 52px; }
+  .sec-head { border-top: 2px solid var(--ink); padding-top: 12px; margin-bottom: 22px; }
+  .sec-head .eyebrow { margin-bottom: 6px; }
+  .sec-head p { color: var(--muted); margin: 4px 0 0; font-size: 14.5px; }
+  code, .m { font-family: var(--mono); font-size: 0.88em; }
+  code { background: var(--accent-wash); color: var(--accent); padding: 1px 5px; border-radius: 3px; }
+
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--accent-wash);
+    padding: 14px 17px; border-radius: 0 5px 5px 0; font-size: 14.5px;
+    color: var(--ink-2); margin: 22px 0 0;
+  }
+  .callout strong { color: var(--ink); }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* ── the sweep table ─────────────────────────────────── */
+  .scroller { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 520px; }
+  th, td { text-align: left; padding: 8px 14px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.07em;
+    text-transform: uppercase; color: var(--muted); font-weight: 500;
+    border-bottom-color: var(--rule-2);
+  }
+  td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .swatch {
+    display: inline-block; width: 13px; height: 13px; border-radius: 2px;
+    vertical-align: -2px; margin-right: 7px; border: 1px solid rgba(128,128,128,0.35);
+  }
+  tr.is-pick td { background: var(--accent-wash); }
+  tr.is-pick td:first-child { font-weight: 640; }
+  .verdict-no { color: var(--bad); font-family: var(--mono); font-size: 12px; }
+  .verdict-yes { color: var(--good); font-family: var(--mono); font-size: 12px; }
+
+  /* ── specimen grid ───────────────────────────────────── */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(272px, 1fr)); gap: 20px; }
+  .card {
+    border: 1px solid var(--rule); border-radius: 8px; background: var(--raised);
+    overflow: hidden; display: flex; flex-direction: column;
+  }
+  .card--pick { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-wash); }
+  .card-head { padding: 13px 15px 12px; border-bottom: 1px solid var(--rule); }
+  .card-head .k {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted);
+    display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  }
+  .pick-flag { color: var(--accent); border: 1px solid currentColor; border-radius: 2px; padding: 0 4px; letter-spacing: 0.05em; }
+  .card-head h3 { margin: 5px 0 3px; }
+  .card-head p { font-size: 13px; color: var(--muted); margin: 0; }
+  .card-foot {
+    margin-top: auto; padding: 11px 15px 13px; border-top: 1px solid var(--rule);
+  }
+  .card-foot dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; }
+  .card-foot dt { font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+  .card-foot dd { margin: 0; font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+  /* ══ SPECIMENS — locked to the operator's real dark palette ══════════
+     They depict the app, so they ignore the viewer's page theme: judging
+     a dark UI's contrast on a light ground would measure the wrong thing. */
+  .sp {
+    --ground-sp: #0d1829;
+    --card-sp: #1d3048;
+    --edge: #5182a0;
+    --fg: #e7f7ff; --fg-dim: #b9d4e8; --fg-mute: #7f9bb4;
+    --accent-sp: #38bdf8; --accent-ink: #051827; --accent-soft: #bae6fd;
+    --warn-sp: #fbbf24;
+    background: var(--ground-sp); color: var(--fg);
+    font-family: var(--sans); font-size: 11px; line-height: 1.5;
+    padding: 9px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .sp-sec { padding: 8px 10px; border-radius: 5px; background: var(--card-sp); }
+  .sp-h {
+    display: flex; align-items: center; gap: 6px; margin: 0 0 6px;
+    font-size: 10px; text-transform: uppercase; font-weight: 700;
+  }
+  .sp-n {
+    font-family: var(--mono); font-size: 9.5px; font-weight: 600;
+    padding: 0 5px; border-radius: 999px; font-variant-numeric: tabular-nums;
+    background: rgba(255,255,255,0.10); color: var(--fg);
+  }
+  .sp-row { display: flex; gap: 8px; padding: 2px 0; font-size: 10.5px; }
+  .sp-k { flex: none; width: 60px; color: var(--fg-mute); }
+  .sp-v { min-width: 0; color: var(--fg-dim); }
+  .sp-txt { font-size: 10.5px; color: var(--fg-dim); margin: 0; }
+  .sp-empty { font-size: 10.5px; color: var(--fg-mute); font-style: italic; margin: 0; }
+
+  /* — C1: outlined cards. Contrast from the STROKE. — */
+  .sp--c1 .sp-sec { border: 1px solid var(--edge); }
+  .sp--c1 .sp-h { color: var(--fg); }
+
+  /* — C2: capped cards. The label becomes the mode-pill's filled cap. — */
+  .sp--c2 .sp-sec { border: 1px solid var(--edge); padding: 0 0 8px; overflow: hidden; }
+  .sp--c2 .sp-h {
+    margin: 0 0 7px; padding: 4px 10px;
+    background: var(--accent-sp); color: var(--accent-ink);
+  }
+  .sp--c2 .sp-n { background: rgba(5,24,39,0.22); color: var(--accent-ink); }
+  .sp--c2 .sp-row, .sp--c2 .sp-body { padding-left: 10px; padding-right: 10px; }
+  .sp--c2 .sp-sec[data-attn] { border-color: var(--warn-sp); }
+  .sp--c2 .sp-sec[data-attn] .sp-h { background: var(--warn-sp); }
+
+  /* — C3: capped + quiet empties + clustered. — */
+  .sp--c3 { gap: 7px; }
+  .sp--c3 .sp-sec { border: 1px solid var(--edge); padding: 0 0 8px; overflow: hidden; }
+  .sp--c3 .sp-h {
+    margin: 0 0 7px; padding: 4px 10px;
+    background: var(--accent-sp); color: var(--accent-ink);
+  }
+  .sp--c3 .sp-n { background: rgba(5,24,39,0.22); color: var(--accent-ink); }
+  .sp--c3 .sp-row, .sp--c3 .sp-body { padding-left: 10px; padding-right: 10px; }
+  .sp--c3 .sp-sec[data-attn] { border-color: var(--warn-sp); }
+  .sp--c3 .sp-sec[data-attn] .sp-h { background: var(--warn-sp); }
+  .sp-cluster {
+    font-size: 9px; text-transform: uppercase; font-weight: 700;
+    color: var(--fg-mute); margin: 3px 0 0; padding: 0 2px;
+  }
+  .sp-cluster:first-child { margin-top: 0; }
+  /* A settled section is ONE line, not a card with a blank in it. */
+  .sp-quiet {
+    display: flex; align-items: baseline; gap: 7px;
+    padding: 2px 4px; font-size: 10px; color: var(--fg-mute);
+  }
+  .sp-quiet b { font-weight: 700; text-transform: uppercase; font-size: 9px; color: var(--fg-mute); }
+  .sp-quiet span { font-style: italic; }
+  .sp-quiet::before {
+    content: ""; flex: none; width: 5px; height: 5px; border-radius: 50%;
+    background: currentColor; opacity: 0.45; transform: translateY(-1px);
+  }
+
+  .foot { margin-top: 60px; padding-top: 16px; border-top: 1px solid var(--rule); font-size: 12.5px; color: var(--muted); }
+  .foot p { max-width: none; }
+</style>
+
+<div class="wrap">
+
+  <p class="eyebrow">Session chat popup · contrast study v2 · 2026-08-02</p>
+  <h1>Treatment C, pushed until the contrast is actually structural</h1>
+  <p class="lede">
+    You picked C and said it still wasn't enough. It wasn't — and measuring it showed why:
+    <strong>the version I showed you was trying to carry section separation with a fill</strong>,
+    and on a ground this dark a fill cannot carry anything. Below is what C looks like when the
+    separation is moved onto the two things that <em>do</em> have range here — the stroke and a
+    filled header — plus the comprehension work that makes the rail readable rather than merely
+    divided.
+  </p>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Why v1 fell flat</p>
+      <h2>Fill lightness is a dead end on #0d1829</h2>
+      <p>Every candidate card fill, measured against the popup ground it sits on.</p>
+    </div>
+
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr><th>Card fill</th><th>vs ground</th><th>Reads as a separate surface?</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="swatch" style="background:#182233"></span><span class="m">rgba(255,255,255,.045)</span> — v1's C</td>
+            <td class="num">1.11:1</td>
+            <td><span class="verdict-no">no — indistinguishable</span></td>
+          </tr>
+          <tr>
+            <td><span class="swatch" style="background:#182a42"></span><span class="m">#182a42</span></td>
+            <td class="num">1.23:1</td>
+            <td><span class="verdict-no">barely</span></td>
+          </tr>
+          <tr class="is-pick">
+            <td><span class="swatch" style="background:#1d3048"></span><span class="m">#1d3048</span> — used below</td>
+            <td class="num">1.33:1</td>
+            <td>a hint of surface, no more</td>
+          </tr>
+          <tr>
+            <td><span class="swatch" style="background:#263c58"></span><span class="m">#263c58</span></td>
+            <td class="num">1.58:1</td>
+            <td>visible, but the rail starts to look grey and washed</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="margin-top:16px">
+      Even the lightest fill that still looks like the product tops out around <strong>1.6:1</strong>.
+      That is the whole ceiling available from fill — which is why v1's cards read as barely-there.
+      The stroke, by contrast, has real room:
+    </p>
+
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr><th>Border</th><th>vs card</th><th>vs ground</th><th>Clears the 3:1 non-text floor?</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="swatch" style="background:#2c4c64"></span><span class="m">sky @ .28</span></td>
+            <td class="num">1.48:1</td><td class="num">1.97:1</td>
+            <td><span class="verdict-no">no</span></td>
+          </tr>
+          <tr>
+            <td><span class="swatch" style="background:#385f79"></span><span class="m">sky @ .38</span></td>
+            <td class="num">1.96:1</td><td class="num">2.61:1</td>
+            <td><span class="verdict-no">no</span></td>
+          </tr>
+          <tr class="is-pick">
+            <td><span class="swatch" style="background:#5182a0"></span><span class="m">#5182a0</span> — used below</td>
+            <td class="num">3.22:1</td><td class="num">4.28:1</td>
+            <td><span class="verdict-yes">yes, with headroom</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <p>
+        <strong>And the strongest lever isn't colour at all — it's a shape you already use.</strong>
+        The mode pills carry their axis name in a filled accent cap
+        (<span class="m">--accent</span> ground, <span class="m">--accent-ink</span> text,
+        <strong>8.40:1</strong>). Giving section headings that same cap makes a section start
+        unmissable, and it costs no new design language: the rail and the control band end up
+        speaking the same one.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Three strengths</p>
+      <h2>C1 → C3, same direction, more of it</h2>
+      <p>Real tokens, real type sizes, real content from your own Orders rail.</p>
+    </div>
+
+    <div class="grid">
+
+      <!-- C1 -->
+      <div class="card">
+        <div class="card-head">
+          <div class="k">C1</div>
+          <h3>Outlined cards</h3>
+          <p>C with the separation moved onto a stroke that actually clears the floor.</p>
+        </div>
+        <div class="sp sp--c1">
+          <div class="sp-sec">
+            <p class="sp-h">Mission</p>
+            <div class="sp-row"><span class="sp-k">effective</span><span class="sp-v">execute-owner-directed-scope</span></div>
+            <div class="sp-row"><span class="sp-k">authority</span><span class="sp-v">act-with-disclosure</span></div>
+            <div class="sp-row"><span class="sp-k">route</span><span class="sp-v">self</span></div>
+          </div>
+          <div class="sp-sec">
+            <p class="sp-h">Modes <span class="sp-n">2</span></p>
+            <p class="sp-txt">AUTO — act, don't ask</p>
+            <p class="sp-txt">GRADE — fleet-execution-health</p>
+          </div>
+          <div class="sp-sec">
+            <p class="sp-h">Walls</p>
+            <p class="sp-empty">Nothing blocked on you.</p>
+          </div>
+          <div class="sp-sec">
+            <p class="sp-h">Carry</p>
+            <p class="sp-empty">No carry-note ever written.</p>
+          </div>
+        </div>
+        <div class="card-foot">
+          <dl>
+            <dt>edge</dt><dd>3.22:1</dd>
+            <dt>head</dt><dd>12.21:1</dd>
+            <dt>ladder</dt><dd>1.40× / 1.88×</dd>
+          </dl>
+        </div>
+      </div>
+
+      <!-- C2 -->
+      <div class="card">
+        <div class="card-head">
+          <div class="k">C2</div>
+          <h3>Capped cards</h3>
+          <p>The heading becomes a filled cap — the mode pill's own shape. Attention states turn the cap amber.</p>
+        </div>
+        <div class="sp sp--c2">
+          <div class="sp-sec">
+            <p class="sp-h">Mission</p>
+            <div class="sp-row"><span class="sp-k">effective</span><span class="sp-v">execute-owner-directed-scope</span></div>
+            <div class="sp-row"><span class="sp-k">authority</span><span class="sp-v">act-with-disclosure</span></div>
+            <div class="sp-row"><span class="sp-k">route</span><span class="sp-v">self</span></div>
+          </div>
+          <div class="sp-sec">
+            <p class="sp-h">Modes <span class="sp-n">2</span></p>
+            <div class="sp-body"><p class="sp-txt">AUTO — act, don't ask</p>
+            <p class="sp-txt">GRADE — fleet-execution-health</p></div>
+          </div>
+          <div class="sp-sec" data-attn>
+            <p class="sp-h">Walls <span class="sp-n">1</span></p>
+            <div class="sp-body"><p class="sp-txt">P-006 — owner must settle</p></div>
+          </div>
+          <div class="sp-sec">
+            <p class="sp-h">Carry</p>
+            <div class="sp-body"><p class="sp-empty">No carry-note ever written.</p></div>
+          </div>
+        </div>
+        <div class="card-foot">
+          <dl>
+            <dt>cap</dt><dd>8.40:1</dd>
+            <dt>edge</dt><dd>3.22:1</dd>
+            <dt>attn</dt><dd>amber cap + edge</dd>
+          </dl>
+        </div>
+      </div>
+
+      <!-- C3 -->
+      <div class="card card--pick">
+        <div class="card-head">
+          <div class="k">C3 <span class="pick-flag">recommended</span></div>
+          <h3>Capped, clustered, quiet when empty</h3>
+          <p>C2 plus the comprehension work: settled sections stop being cards, and the rest group by what they answer.</p>
+        </div>
+        <div class="sp sp--c3">
+          <p class="sp-cluster">What it was told</p>
+          <div class="sp-sec">
+            <p class="sp-h">Mission</p>
+            <div class="sp-row"><span class="sp-k">effective</span><span class="sp-v">execute-owner-directed-scope</span></div>
+            <div class="sp-row"><span class="sp-k">authority</span><span class="sp-v">act-with-disclosure</span></div>
+            <div class="sp-row"><span class="sp-k">route</span><span class="sp-v">self</span></div>
+          </div>
+          <div class="sp-sec">
+            <p class="sp-h">Modes <span class="sp-n">2</span></p>
+            <div class="sp-body"><p class="sp-txt">AUTO — act, don't ask</p>
+            <p class="sp-txt">GRADE — fleet-execution-health</p></div>
+          </div>
+          <p class="sp-quiet"><b>Directives</b> <span>none open</span></p>
+          <p class="sp-quiet"><b>Facts</b> <span>none in scope</span></p>
+
+          <p class="sp-cluster">What it's carrying</p>
+          <div class="sp-sec" data-attn>
+            <p class="sp-h">Walls <span class="sp-n">1</span></p>
+            <div class="sp-body"><p class="sp-txt">P-006 — owner must settle</p></div>
+          </div>
+          <p class="sp-quiet"><b>Carry</b> <span>no note written</span></p>
+        </div>
+        <div class="card-foot">
+          <dl>
+            <dt>cap</dt><dd>8.40:1</dd>
+            <dt>edge</dt><dd>3.22:1</dd>
+            <dt>saved</dt><dd>~40% of rail height</dd>
+          </dl>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The comprehension half</p>
+      <h2>Six of your eleven sections currently say "nothing"</h2>
+      <p>Contrast makes the sections findable. This is what makes them <em>readable</em>.</p>
+    </div>
+
+    <p>
+      Count what the two rails are actually telling you right now. Orders: <em>no open owner
+      directives</em>, <em>no standing facts in scope</em>, <em>nothing blocked on you</em>,
+      <em>no carry-note ever written</em>. Activity: <em>not waiting on any event</em>,
+      <em>no locks held or waiting</em>. That is <strong>six full sections — each with a heading,
+      a card and a body — spent reporting absence</strong>, and under C1/C2 every one of them gets
+      the same bordered card, the same cap, the same visual weight as the sections carrying real
+      state.
+    </p>
+    <p>
+      Louder borders make that <em>worse</em>, not better: the eye is drawn equally to four boxes
+      that say nothing and one that says a decision is waiting on you. So C3 does the obvious thing —
+      a section with nothing in it stops being a card and becomes one dim line. Nothing is hidden and
+      nothing is collapsed behind a click; the information is still there, it just stops shouting.
+      What's left standing as a card is, by construction, what's true.
+    </p>
+
+    <div class="callout">
+      <p>
+        <strong>The two cluster labels do the last bit of work.</strong> "What it was told" versus
+        "what it's carrying" is the actual distinction between these sections — mission, modes,
+        directives and facts are inputs; walls and carry are state the agent accumulated. Naming
+        that split turns a flat list of six headings into two ideas, which is the difference between
+        reading the rail and scanning it.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Recommendation</p>
+      <h2>Ship C3; C2 is the fallback if the caps feel loud</h2>
+    </div>
+    <p>
+      C3 is the one that answers both halves of what you asked. The caps and the 3.22:1 edge make
+      section boundaries unmissable, the three-tier text ladder (1.40× heading-to-value, 1.88×
+      value-to-key) fixes the inverted hierarchy, and the quiet-empty rule stops the added contrast
+      from amplifying noise.
+    </p>
+    <p>
+      The one real risk is the accent caps reading as loud with four or five cards on screen at
+      once. If that happens live, the cap desaturates to <span class="m">#2a6f93</span> with
+      <span class="m">--fg</span> text (5.05:1) and everything else stays — C2 and C3 are the same
+      build with one token changed, not two designs.
+    </p>
+  </section>
+
+  <div class="foot">
+    <p>
+      Ratios are sRGB relative luminance per WCAG 2.1, computed against the popup ground
+      <span class="m">--bg-popover #0d1829</span> and the card fill <span class="m">#1d3048</span>.
+      Specimen type sizes, spacing and content match the live rail. Nothing here is implemented
+      yet — say the word and C3 goes in as a scoped change to <span class="m">AgentOrders.css</span>
+      and its Activity-rail counterpart, with the quiet-empty rule as a render branch in the
+      components rather than a style.
+    </p>
+  </div>
+
+</div>

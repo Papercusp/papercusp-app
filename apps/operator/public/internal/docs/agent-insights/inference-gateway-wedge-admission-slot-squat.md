@@ -1,0 +1,110 @@
+# Inference-gateway :8788 wedges under a sustained 429 storm — admission slots squat the throttle-wait
+URL: /internal/docs/agent-insights/inference-gateway-wedge-admission-slot-squat
+
+The gateway looks 'unreachable' fleet-wide (learning/gym/cup egress down) but /healthz returns 200 in <1ms. The tell is inFlight pinned at maxConcurrent + totalRequests FROZEN + queue growing unbounded. Root cause: under a sustained pool-wide opus-4-8 429 storm every proxy() holds its admission slot for the full ~30s internal throttle-wait, so all 24 slots fill with WAITERS and throughput collapses. Restart unwedges; the durable fix is a bounded admission queue (maxQueued load-shed). NOT the same as the upstream-stall mode (STALLED count distinguishes them).
+
+## What
+
+The pot inference gateway (`papercup-inference-gateway.service`, `127.0.0.1:8788`,
+`packages/operator-core/lib/inference-gateway/gateway.ts`) can **wedge** so that
+every LLM egress through it times out — surfacing fleet-wide as
+`learning-infra-health: 🔴 inference-gateway :8788 unreachable` and gym/cup
+"no-ideas"/timeouts. Observed **3× in one night** (2026-06-19→20), each needing a
+manual restart.
+
+**The trap:** `/healthz` answers **200 in \<1ms** the whole time, so it looks
+"up." It is NOT up — it is doing zero work.
+
+## Diagnose (the signature)
+
+```bash
+curl -s -m4 http://127.0.0.1:8788/healthz | python3 -m json.tool
+```
+
+Wedged iff, across two samples a few seconds apart:
+
+* `inFlight` is pinned at `maxConcurrent` (24), AND
+* `totalRequests` is **frozen** (not advancing), AND
+* `queueDepth` is **growing** (saw it climb 17 → 2,000 → 3,600).
+
+(Healthy-under-load looks similar — `inFlight=24` — but `totalRequests` is
+*climbing* and `queueDepth` stays small. The frozen counter is the tell.)
+
+Then read the journal for the trigger:
+
+```bash
+journalctl --user -u papercup-inference-gateway.service -n 60 --no-pager
+```
+
+A wedge shows a sustained **pool-wide 429 storm**: repeated
+`all accounts transiently throttled on claude-opus-4-8 → wait 15000ms`,
+failover walking every account, and `proxy handler crashed: aborted` (clients
+giving up during the long waits).
+
+## Root cause
+
+`proxy()` runs **inside** the `PriorityAdmissionQueue` slot
+(`queue.run(pri, () => proxy(...))`), and it **holds that slot for its entire
+lifetime** — including the internal retry/backoff *wait* it does to ride out a
+transient throttle (`TRANSIENT_TOTAL_WAIT_BUDGET_MS` ≈ 30s, the "all accounts
+throttled → wait" branch). Under a **sustained** pool-wide opus-4-8 429 storm,
+*every* in-flight request burns \~30s of wait while squatting a slot → all 24
+slots fill with **waiters**, throughput craters to \~0.8 req/s, and the queue
+grows without bound. The admission queue's `pump()` is fine; the slots are just
+all occupied by requests that are *waiting, not working*.
+
+This is **NOT** the upstream-stall mode (a hung `doFetch` with no deadline). You
+can tell them apart: the stall mode trips the upstream-timeout abort and logs
+`upstream STALLED (aborted)`; grep the journal —
+`journalctl … | grep -c "STALLED (aborted)"` is **0** for the slot-squat wedge.
+Both modes were fixed (see below); don't re-diagnose one as the other.
+
+## Fix it now
+
+```bash
+systemctl --user restart papercup-inference-gateway.service
+```
+
+Clears the leaked/occupied slots + the queue instantly (the queued requests were
+already dead). Verify `/healthz` `total` climbs and `queued`≈0. The gateway runs
+`tsx` from the **staging working tree**, so a restart also picks up any committed
+gateway.ts change.
+
+## Durable fix (shipped 2026-06-20)
+
+**Bounded admission queue (load-shed)** — `priority-admission.ts` gained a
+`maxQueued` cap + `QueueFullError`; `run()` rejects synchronously when all slots
+are busy AND the queue is at `maxQueued` (default 256, env
+`PAPERCUSP_GATEWAY_MAX_QUEUED`). The gateway returns a fast **429 + retry-after**
+instead of growing an unbounded backlog, so it **degrades gracefully and
+self-recovers** when the storm passes — no more manual restarts. A `shed429`
+counter is exposed in `/healthz`. (The shed path also drains the unread request
+body + `Connection: close`, else the un-consumed socket leaks / hangs a graceful
+shutdown.)
+
+Separately, the **upstream-stall** mode was fixed with an activity-reset abort on
+the upstream fetch (a generous headers deadline + a per-chunk body-idle deadline,
+so a stalled upstream aborts → releases the slot → fails over, while a
+legitimately long stream is never clipped).
+
+## Root trigger + follow-ups (not gateway bugs)
+
+The wedge is a *failure mode*; the **trigger** is capacity: opus-4-8 demand
+exceeds what the 8-Max-account pool can supply, so the pool hits sustained
+pool-wide 429s. The gateway can't manufacture capacity — under sustained
+over-demand callers now get retryable 429s (degraded, not down). Levers tracked
+in **WI-264** (reduce fleet opus-4-8 concurrency / add accounts / per-model
+admission weighting). **WI-263** proposes a circuit-breaker so slots don't squat
+the 30s wait once the whole pool is throttled (restores throughput + recovery
+speed) — it trades against the deliberate brief-throttle wait-budget, so it wants
+review before shipping.
+
+## Gotcha while diagnosing
+
+If your `papercusp-su` MCP client has also dropped (common during a `/loop`),
+don't idle — drive coord/work\_items over the HTTP bridge to `:3070/api/mcp`. See
+`recovering-a-dropped-mcp-client-via-the-http-bridge` /
+`mcp-tools-drop-after-loop-curl-fallback`. And any **manual** test request
+through the gateway MUST frame itself as Claude Code (first `system` block =
+the Claude Code identity) or it 429s spuriously — see
+`max-oauth-first-system-block-must-be-claude-code-identity`.

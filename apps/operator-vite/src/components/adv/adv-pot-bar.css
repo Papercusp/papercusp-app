@@ -1,0 +1,152 @@
+/*
+ * adv-pot-bar.css — the POT selector row (AdvPotBar).
+ *
+ * Owner ask 2026-07-27: the /adv chrome used to carry an "ADVANCED ORCHESTRATION
+ * / <title>" bar whose right half held the pot cluster (POT · selector ·
+ * sub-pots · New · Share) plus the status pills. Because that bar sat ABOVE the
+ * tab strip it implied every tab was pot-scoped — confusing on the
+ * workspace-scoped ones (HUD aggregates every session in the workspace). The bar
+ * is gone: the tab strip is the topmost chrome now, and the cluster moved INTO
+ * the tabs that are actually pot-scoped, as their first row (with the status
+ * pills only on HUD, the cluster's designated home).
+ *
+ * These rules therefore had to leave AdvShell.tsx's inline <style>: the row no
+ * longer renders inside AdvShell's own markup, and a stylesheet that only
+ * applies "while AdvShell happens to be mounted" is the exact fragility
+ * adv-header-pills.css was extracted to fix. The `.pc-advshell__action` BASE and
+ * the AdvNowRunning variants (--start/--stop/--waiting) live in that shared
+ * sheet; the selector-specific rules below are moved here verbatim and keep
+ * their `pc-advshell__*` class names — they are referenced by name from tests
+ * and from AdvNowRunning/PotsRunningPill/AgentsRunningPill.
+ */
+
+/* The row itself. `flex:none` — this is fixed chrome above the tab body, never
+   the flexible region (see .pc-advshell__tabbody, which is). Wraps rather than
+   colliding: on a narrow window the pills drop to a second line instead of
+   painting over the selector (the same failure the old header row hit —
+   learning-tab-visibility P-007). */
+.pc-potbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  min-width: 0;
+  flex: none;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border, rgba(125, 211, 252, 0.15));
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+}
+
+/* ── pot label + selector + sub-pot toggle + New/Share/Beacon/Workspaces/
+      Register sub-pots (moved from AdvShell) ── */
+/* WRAPS (2026-07-27). `.pc-potbar` already wrapped, but that only helps the
+   status pills — every control here lives in this INNER div, which did not wrap
+   and is `flex-shrink: 0`, so a narrow pane clipped the tail of the row off-screen
+   instead of reflowing it. That was survivable at five children; the Work tab's
+   beacon / Workspaces / Register sub-pots landed here the same day and made it
+   eight, and /adv routinely renders in a ~250px column next to the chat sidebar +
+   Mug pane, where the last four controls simply vanished. Wrapping is the fix —
+   `min-width: 0` so the row may actually shrink to its container, and an explicit
+   row-gap so a wrapped second line does not collide with the first. */
+.pc-advshell__selector {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  row-gap: 6px;
+  min-width: 0;
+}
+.pc-advshell__selector-label {
+  color: var(--fg-mute, #7f9bb4);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.pc-advshell__scope-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--fg-mute, #7f9bb4);
+  cursor: pointer;
+}
+.pc-advshell__scope-toggle input {
+  margin: 0;
+  width: 12px;
+  height: 12px;
+  cursor: pointer;
+  accent-color: var(--accent, #38bdf8);
+}
+.pc-advshell__select-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  min-width: 190px;
+  border: 1px solid var(--border-strong, rgba(125, 211, 252, 0.32));
+  border-radius: 10px;
+  background: var(--bg-popover, #0d1829);
+  color: var(--fg, #e7f7ff);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 0 11px;
+  cursor: pointer;
+  outline: none;
+}
+.pc-advshell__select-trigger[data-disabled] {
+  color: var(--fg-mute, #7f9bb4);
+  cursor: default;
+}
+.pc-advshell__action--new {
+  background: color-mix(in srgb, var(--accent), transparent 88%);
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent), transparent 58%);
+}
+.pc-advshell__action--new:hover {
+  background: color-mix(in srgb, var(--accent), transparent 78%);
+  color: var(--fg);
+}
+.pc-advshell__action--share {
+  background: color-mix(in srgb, var(--accent), transparent 86%);
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent), transparent 62%);
+}
+.pc-advshell__action--share:hover {
+  background: color-mix(in srgb, var(--accent), transparent 74%);
+  color: var(--fg);
+}
+/* Shared = the green "done" tint the Share button takes once the pot IS shared,
+   labelled with the live directory visibility (Public / Invite). It stayed
+   CLICKABLE as of 2026-07-27 — it reopens the share dialog, because the Work
+   tab's hive header (the only other way back into it) was deleted. Rendered as a
+   passive <span> in exactly one remaining place: the legacy per-harness
+   shared.json badge on a NON-pot harness, which has no dialog to open. */
+.pc-advshell__action--shared {
+  background: var(--good-bg);
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good), transparent 60%);
+}
+span.pc-advshell__action--shared {
+  cursor: default;
+}
+button.pc-advshell__action--shared:hover {
+  background: color-mix(in srgb, var(--good), transparent 78%);
+  color: var(--fg);
+}
+
+/* The row now lives INSIDE .pc-advshell__body, which flattens in-page buttons
+   (`box-shadow: none !important` on any non-focus-visible button — see
+   AdvShell's inline <style>). That reset is right for page-body buttons but it
+   also strips the hives pill's "is-running" ring, which is a STATE affordance,
+   not a bevel. Re-assert exactly that one shadow. */
+.pc-potbar .pc-advshell__action--pots.is-running:not(:focus-visible) {
+  box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.14) !important;
+}

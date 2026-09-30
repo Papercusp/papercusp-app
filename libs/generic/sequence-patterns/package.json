@@ -1,0 +1,18 @@
+{
+  "name": "@papercusp/sequence-patterns",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Find the ORDERED action sequences that recur across independent actors in a timestamped event stream. Segments each actor's stream on an idle gap so adjacency means something, gates on distinct-cohort breadth (a shared pattern, not one actor's habit), and ranks by LIFT rather than frequency — which structurally demotes the ambient heartbeat/telemetry sequences that outrank real patterns in every instrumented system, with no denylist to maintain. Suppresses sub-patterns already explained by a longer extension. Zero I/O, zero domain coupling, zero dependencies.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  }
+}

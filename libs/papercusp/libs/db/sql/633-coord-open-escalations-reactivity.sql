@@ -1,0 +1,43 @@
+-- 633-coord-open-escalations-reactivity.sql
+--
+-- EI-14209: the operator Inbox pane (InboxPane.tsx -> useInboxAttention ->
+-- usePlanAttention -> the `plans.attention` sync query) needed a manual page
+-- reload to show a brand-new escalation — live-verified for BOTH plan-scoped
+-- and plan-less escalations. The original bug report pinned this on
+-- coord:escalate's `coord:emit` lifecycle notification addressing `to: []`
+-- when no `plan_slug` is passed (packages/operator-core/lib/agent-tools/
+-- coordination/tools/escalate.ts) — but that `coord:emit`/`to` audience only
+-- controls AGENT coord-inbox delivery (sendMessage -> coord_event_log,
+-- surface='messages'), which is wired (harness_shared.coord_event_log's
+-- emit_change_notify trigger, 275-…) to invalidate only
+-- ['dev.coordFeed','coord.history','coord.inbox'] — never 'plans.attention'
+-- (see packages/operator-core/lib/sync-resolver/table-to-query-names.ts).
+--
+-- The REAL root cause: harness_shared.coord_open_escalations (the small
+-- open-escalation projection table plans:attention's listEscalations source
+-- actually reads — 355-coord-open-escalations-projection.sql) has NEVER had
+-- an emit_change_notify trigger attached at all, so NO escalation open OR
+-- resolve — regardless of plan_slug — ever pushes a `sync_invalidate` event.
+-- The client only ever saw the new row on its next unrelated poll/refresh or
+-- a manual reload. Fixing only the `to`/audience gap (the filer's suggested
+-- fix) would NOT have fixed the reported symptom, since that channel was
+-- never wired to `plans.attention` in the first place.
+--
+-- FIX: attach the standard emit_change_notify trigger (000-baseline.sql /
+-- 368-fix-emit-change-notify-guc.sql) to coord_open_escalations, and map that
+-- table to ['plans.attention'] in table-to-query-names.ts (companion TS
+-- change, same commit) — mirroring the 215-engineer-issues-reactivity.sql
+-- pattern. INSERT covers a newly-opened escalation; DELETE covers a resolve
+-- (coord_open_escalations_maintain deletes the row on 'escalation_resolved'),
+-- so the Inbox also live-drops a row the moment it's resolved elsewhere.
+-- coord_open_escalations has no `id` column (PK is workspace_id+msg_id) —
+-- emit_change_notify() already handles id-less tables generically (yields a
+-- JSON-null `args.id`; see 368's comment), and the `plans.attention` mapping
+-- is a bare full-bust target (no per-row scope needed, matching how
+-- harness_plans -> plans.attention is wired today).
+--
+-- Idempotent (CREATE OR REPLACE TRIGGER, PG14+, matches 107/213/215/222/227/275).
+
+CREATE OR REPLACE TRIGGER emit_change_notify_trg
+  AFTER INSERT OR DELETE ON harness_shared.coord_open_escalations
+  FOR EACH ROW EXECUTE FUNCTION harness_shared.emit_change_notify();

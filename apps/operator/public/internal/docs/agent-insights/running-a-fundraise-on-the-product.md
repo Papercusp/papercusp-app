@@ -1,0 +1,76 @@
+# Running a fundraise on the product
+URL: /internal/docs/agent-insights/running-a-fundraise-on-the-product
+
+Operator runbook for the fundraise-automation build: the pipeline-deal datatype, the seven-target fundraise trigger pack, the send-approval gate, what the owner still supplies, and the order to arm it in.
+
+The fundraise-automation build (plan `fundraise-automation-2026-08-23`) turns an investor pipeline into a workflow the product runs on itself. This is the operator's view: what exists, what it will and will not do, what the owner still supplies, and which gates are real.
+
+## The premise, and the constraint it creates
+
+The outreach system is the demo. A fundraise visibly run by the product on its own trigger substrate is a stronger claim than a deck. But investors are the most spam-calibrated audience there is, so an automated email that *feels* automated is negative signal — worse than sending nothing. Everything below is shaped by that single constraint: agents do the research, correlation, classification, and drafting; a human fingerprint stays on every send.
+
+## What is built
+
+**The `pipeline-deal` datatype** (registry, `generic-kind`) — one tracked counterparty conversation with a stage, a tier, a warm path, and an outreach-approval record. It is deliberately domain-neutral: a sales, BD, or hiring pipeline uses the same type with a different stage vocabulary, because canonical shapes belong in the registry rather than being reinvented per app. People are referenced as canonical `contact` instances and conversations as `email-message` / `calendar-event` refs — this build invents no investor-flavoured copy of any of them.
+
+**The `fundraise-pipeline` trigger pack** (`libs/papercusp/plugins/fundraise-pipeline/`) — seven plan targets and seven bindings:
+
+| Target                     | Binding                      | Fires                           |
+| -------------------------- | ---------------------------- | ------------------------------- |
+| `fund-research-brief`      | `research-enrichment`        | manual, per batch               |
+| `first-touch-draft`        | `first-touch-outreach`       | manual, always deliberate       |
+| `classify-and-draft-reply` | `investor-reply-to-pipeline` | `ext:gmail:message.received`    |
+| `no-reply-follow-up`       | `follow-up-ladder`           | manual + per-deal cadence       |
+| `investor-meeting-prep`    | `meeting-to-investor-prep`   | `ext:gcal:event-upcoming`       |
+| `post-meeting-followup`    | `meeting-to-post-followup`   | internal edge, `plan-completed` |
+| `weekly-pipeline-review`   | `weekly-review`              | manual + weekly cadence         |
+
+**The send-approval gate** (`packages/operator-core/lib/fundraise/outreach-approval.ts`) and **the tiering rule** (`pipeline-tiering.ts`), both pure, both tested.
+
+## Three properties that are structural, not promised
+
+**It cannot send mail.** The pack requests `gmail.readonly` and `gmail.compose` and deliberately no `gmail.send`. Every outbound path ends at `gmail:create-draft`. This is a property of the granted scopes, not of the agent following instructions — which is the difference between a safeguard and a request. A test fails loudly if a future edit adds a send scope.
+
+**Approval binds to content, not to a deal.** An approval carries the `draftRef` it was granted against, so approving a draft does not approve whatever that draft is later regenerated into. Without this, an agent could obtain approval on innocuous content and send something else under it. The gate also fails closed: a missing, malformed, expired, or future-dated approval denies, because "could not check" must never render as "approved" when the irreversible action is mail landing in a partner's inbox.
+
+**The agent requests approval and never grants it.** The first-touch plan writes `state: 'pending'` and only that. The weekly review reports the pending queue and mutates nothing. Both are guarded by tests.
+
+## What the owner still supplies
+
+The machinery is complete; the *data* is not, and deliberately was not invented.
+
+**The target list (P-001).** Names come from the owner or from research, never from an agent's recall — a fabricated fund thesis is exactly the kind of confident-sounding error that destroys a first touch. Each candidate enters as a `pipeline-deal` work-item at `stage: sourced`, and `classifyTarget` decides admission:
+
+* thesis match `weak`, or unresearched → **dropped**. Dropping names is a successful outcome of qualification, not a shortfall.
+* matched + a **confirmed** warm path → **tier 1**
+* matched, no confirmed warm path → **tier 2**
+* there is no tier 3, and the function has no way to express one.
+
+`assessList` warns when a list has no warm paths (a mapping gap, not a sourcing outcome), when it grows past \~150 (usually a qualification failure), or when qualification dropped nobody (a pass that admits everyone is not qualifying).
+
+**The intro graph (P-002).** For each tier-1 candidate the owner supplies the connector and the relationship; the agent drafts the forwardable blurb. A warm path counts only when `connectorConfirmed` is true — a connector who would not vouch for the framing will decline, and the target is then burned. Upgrading an acquaintance into a referral costs both the connector and the target, so the code treats unconfirmed as cold rather than guessing.
+
+## The pipeline surfaces (P-009)
+
+No new board was built, because the existing planes already carry this. `pipeline-deal` is a work-item kind, so deals are visible and queryable through the ordinary work-item surfaces; one plan per active conversation gives the Workflows tab its CRM view; and the trigger-activity feed is the fundraise log. The convention is the deliverable here, not new UI.
+
+One gap found while building: `datatype_registry.display` and its validating schema both ship, but `meta:define-datatype` accepts no `display` argument, so a runtime-declared datatype cannot get a display contract through the documented boundary. Filed as `EI-21281502817375396`; it affects rendering polish, not function.
+
+## The gates that are real
+
+**Live Slack/Gmail acceptance.** Every event-driven binding rides live Gmail/Calendar. Until that acceptance passes, the pack installs and validates but the external bindings cannot fire. This is the single hard blocker on the whole ambition, and it needs the owner's provider credentials plus a desktop session — the highest-leverage thirty minutes available here.
+
+**Cloud workspaces.** The "send a link and they try it" funnel (P-010–P-012) depends on hosted sandbox workspaces landing in the `byoc-cloud-workspaces` lane. Until then the demo is driven locally. What is ready now: the spectator scenario has real content to show, because the pipeline board, the research briefs, and the draft history are all genuine artifacts of a real fundraise rather than a seeded fixture. The most persuasive demo instance remains the owner's own fundraise workspace, where the visiting investor is a row on the board.
+
+**Nothing is armed by installation.** Installing the pack makes the declaration available and nothing more. Connect, instantiate, and arm remain separate, explicitly autonomy-governed steps, and every binding ships disarmed.
+
+## Arming it, in order
+
+1. Pass live Gmail/Calendar acceptance.
+2. Install the pack; confirm every binding reads disarmed.
+3. Seed and qualify the list; confirm `assessList` is quiet before going further.
+4. Instantiate and arm `weekly-pipeline-review` **first** — the human gate should exist before anything that produces drafts for it to review.
+5. Arm `research-enrichment`, then `first-touch-outreach`.
+6. Arm the reply and meeting bindings last, once drafts are landing and reading well.
+
+That order is not arbitrary: it puts the review gate in place before the queue it governs, and it exercises the drafting quality on deliberate manual sends before any event-driven path can produce one unattended.

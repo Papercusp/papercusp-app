@@ -1,0 +1,16 @@
+{
+  "name": "@papercusp/token-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic DTCG → multi-format tooling for Style Dictionary: OKLCH/hex/rgba colour transforms, a Tailwind v4 @theme emitter, a typed-TS emitter, and source preflight guards. Brand-value-free; shared across projects.",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "dependencies": {
+    "culori": "^4.0.1"
+  },
+  "peerDependencies": {
+    "style-dictionary": "^4 || ^5"
+  }
+}

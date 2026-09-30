@@ -1,0 +1,169 @@
+# PostHog
+URL: /internal/docs/posthog/index
+
+How Papercusp self-hosts PostHog, what it's used for today (feature flags + opt-in telemetry), and the privacy contract for shipped builds.
+
+Papercusp runs a self-hosted PostHog instance for feature-flag management, plus an **opt-in telemetry path** that forwards crash/usage reports to that instance. Session replay, surveys, error tracking, and LLM observability remain **not enabled** for V1, but the platform is installed so they can be turned on later without re-architecting.
+
+## What this section covers
+
+* **[Feature flags](./feature-flags)** — every flag, how to flip them, how they're wired into the operator, the V1 ship contract, and the admin UI.
+
+This index page covers PostHog as a platform: what's deployed, where, the privacy contract, and ops notes. Subsections cover specific features built on top.
+
+## Why self-host
+
+Two reasons matter:
+
+* **Privacy posture.** Flags and telemetry both live on infrastructure we operate, so opting in points the data at our own server rather than a third party. Note that "zero PostHog references" is *no longer* the on-disk contract: every build bundles a public `phc_…` capture key (`POSTHOG_PUBLIC_DEFAULTS`) and ships `posthog-js` as a production dependency, and a production build with telemetry opted in *does* make outbound PostHog requests. Feature-flag fetches stay gated by `testingFeatures` (off by default), but telemetry is a separate subsystem with its own opt-in — see [Telemetry](#telemetry-opt-in) and the revised [Privacy contract](#privacy-contract-what-the-shipped-binary-does).
+* **Control.** Flags + future analytics live on infrastructure we operate. No third-party flag service to migrate off if the relationship sours, no per-MAU pricing tier to mind.
+
+The trade is real: we operate the server. Two ingestion services on the box currently crash-loop on every restart cycle — harmless for flags but worth knowing about (see [Known issues](#known-issues)).
+
+## Where it runs
+
+| Resource      | Value                                                                       |
+| ------------- | --------------------------------------------------------------------------- |
+| Domain        | `flags.papercuspai.com`                                                     |
+| Host          | Hetzner CX52 — also runs Defguard mesh + Caddy                              |
+| Compose path  | `/opt/posthog/`                                                             |
+| Compose files | `docker-compose.hobby.yml` + `docker-compose.override.yml`                  |
+| TLS           | Let's Encrypt, terminated by the shared Defguard Caddy                      |
+| Reverse proxy | Caddy → `posthog-web:8000` over docker network `papercusp-edge`             |
+| Auto-start    | systemd unit `posthog.service` (enabled)                                    |
+| Discovery     | Cloudflare A record, **DNS only** (proxy off — Caddy needs port 443 for LE) |
+
+## Ports and topology
+
+```
+                    Cloudflare (DNS only, no proxy)
+                              │
+                  flags.papercuspai.com → 178.105.127.33
+                              │
+                              ▼
+   ┌─────────────────────────────────────────────────────────────┐
+   │  Hetzner CX52 — Ubuntu 24.04                                │
+   │  ┌────────────────────────────────────────────────────────┐ │
+   │  │  Defguard Caddy (TLS terminator, free LE cert)         │ │
+   │  └─────┬──────────────────────────────────┬───────────────┘ │
+   │        │ mesh.papercuspai.com             │ flags.…         │
+   │        ▼                                  ▼                 │
+   │  defguard-core:8000                  posthog-web:8000       │
+   │                                                             │
+   │  Docker networks:                                           │
+   │    - papercusp-edge  (shared: defguard-caddy + posthog-web) │
+   │    - defguard_default  (defguard internals)                 │
+   │    - posthog_default   (posthog internals)                  │
+   └─────────────────────────────────────────────────────────────┘
+```
+
+## Privacy contract (what the shipped binary does)
+
+There are **two** independent PostHog paths, with two independent gates. Don't conflate them:
+
+* **Feature-flag fetches** are gated by `testingFeatures` and resolve config from the discovery file `~/.papercusp/posthog.json`. This is what the rest of this section is mostly about.
+* **Telemetry forwarding** is a *separate* subsystem with its own opt-in (the setup-wizard toggle) and its own resolution chain that ends at a bundled public key. `testingFeatures` does **not** gate telemetry. See [Telemetry](#telemetry-opt-in).
+
+### Feature-flag resolution
+
+The flag resolver (`packages/operator-core/lib/posthog-config.ts`) decides at runtime whether to fetch live flag definitions. The resolution order is:
+
+1. **Env vars** — `PAPERCUSP_POSTHOG_HOST` + `PAPERCUSP_POSTHOG_KEY` + optional `PAPERCUSP_POSTHOG_TESTING_FEATURES`. For CI and explicit dev overrides. Resolver `source: "env"`.
+2. **Discovery file** — `~/.papercusp/posthog.json`. The canonical home for the project key + personal API key + the `testingFeatures` flag. Resolver `source: "discovery-file"` when `testingFeatures: true`, or `"discovery-file-opt-out"` when the file has keys but `testingFeatures: false`.
+3. **Unconfigured** — no file, no env. No outbound flag request happens; the operator serves flags from the bundled `FLAG_DEFAULTS`. Resolver `source: "unconfigured"`.
+
+> `FLAG_DEFAULTS` is **not** "every flag off." Under the current *alpha flags-default-on* policy (measured against `ALL_FLAG_KEYS`/`FLAG_DEFAULTS` in `libs/flags/src/types.ts`, 2026-07-01: 149 flags total, 139 default to `true` and only 10 default to `false`) the vast majority ship live by default (defaults-ON include `THE_HIVE`, `BLUEPRINT_AWARE_SETTINGS`, `PROMPT_STUDIO`, `CLAUDE_CRED_SYNC`, `OPUS_BUDGET_PACING`, `QUEEN_CARD_INTERCEPTION`, `STORAGE_SETTINGS`, and many more). The 10 defaulting to `false` are governed by a shrink-only allowlist (`KNOWN_DARK_FLAGS` + `DARK_FLAGS_HIGH_WATERMARK` in `libs/flags/src/production-defaults.test.ts`) — a new flag can only ship dark by displacing an existing dark flag or by explicit owner sign-off to raise the watermark, never by a quiet append (see the Feature flags + PostHog section of the root `CLAUDE.md`). "Unconfigured" means "serve the bundled defaults without phoning home for flags," not "everything disabled."
+
+The four `source` values above are the *resolver's* report. The separate flag-bootstrap payload's `source` is always one of `defaults` / `posthog` / `override` (`libs/flags/src/server.ts`).
+
+A fresh install on an end-user machine ends up in path 3 by default, so **no flag fetch** happens. To opt into live flag fetches, the user (or admin) must either:
+
+* Drop a discovery file with `testingFeatures: true`, or
+* Set `PAPERCUSP_POSTHOG_TESTING_FEATURES=true` in their environment.
+
+The discovery file's keys are **not** shipped inside the desktop installer; the build pipeline strips it. (The `testingFeatures` value itself *can* be written by the shipped operator — see the loopback admin master switch under [Admin access](#admin-access).)
+
+## Telemetry (opt-in)
+
+Telemetry is a real, shipping capability — distinct from feature flags — that forwards crash/usage reports to our PostHog instance. It is **off until the user opts in** via the setup wizard's telemetry step, but it does not require the discovery file and is **not** gated by `testingFeatures`.
+
+Two halves:
+
+* **Server-side** (`packages/operator-core/lib/telemetry-flush.ts`). `flushTelemetry()` moves buffered reports into a local archive and forwards the un-forwarded rows as one batch to PostHog's `/batch/` HTTP endpoint. The forward gate is:
+
+  ```
+  NODE_ENV === 'production'
+    AND (setup_wizard_state.telemetry_enabled === true
+         OR PAPERCUSP_INTERNAL_BUILD === 'true')
+  ```
+
+  When the gate fails it still archives locally (so users can see their own reports) — it just doesn't forward.
+
+* **Browser-side** (`apps/operator/app/_components/PostHogProvider.tsx`). Mounted unconditionally in the SPA root layout. On mount it GETs `/api/desktop/telemetry-config`; if telemetry is enabled it dynamic-imports `posthog-js` and inits autocapture + pageview tracking (session replay stays off — that's a separate consent we don't have).
+
+`posthog-js` (`^1.219.0`) is a **production dependency** of the desktop app, and the provider/route code ships in every build. The dynamic import means the `posthog-js` *chunk* is only network-fetched when telemetry is enabled — but "the bundle ships zero PostHog code" is no longer accurate.
+
+### Telemetry config resolution
+
+Host + project key for telemetry resolve from (in order):
+
+1. **Env** — `PAPERCUSP_POSTHOG_HOST` + `PAPERCUSP_POSTHOG_KEY`.
+2. **Discovery file** — `~/.papercusp/posthog.json` (`host` + `projectKey`).
+3. **`POSTHOG_PUBLIC_DEFAULTS`** — bundled with every build (`packages/operator-core/lib/posthog-public-defaults.ts`). This is the leg the flag resolution order does not have: the host and a public `phc_…` capture key are compiled into the binary, so a user's opt-in alone is enough to forward — no "drop a JSON file" step. The bundled `phc_…` key is **anonymous-capture only**; it cannot read events or mutate flag definitions. Write-side keys (`personalApiKey`, `webhookSecret`) are never bundled.
+
+This is a **deliberate loosening** of the original V1 "zero PostHog references" privacy contract (mac-desktop-release-readiness D-010, owner ratification deferred): the contract is now "public-defaults + opt-in," not "no PostHog references at all."
+
+## Discovery file schema
+
+`~/.papercusp/posthog.json` — the **keys** (`projectKey` / `personalApiKey` / `webhookSecret`) are placed by an admin by hand, but the `testingFeatures` field *is* written by the shipped operator's loopback-only admin master switch (`POST /api/flags/testing-features`, see [Admin access](#admin-access)):
+
+```json
+{
+  "version": 1,
+  "host": "https://flags.papercuspai.com",
+  "projectKey": "phc_xxx",
+  "personalApiKey": "phx_xxx",
+  "projectId": 1,
+  "testingFeatures": false,
+  "webhookSecret": ""
+}
+```
+
+| Field             | Required when `testingFeatures: true` | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ----------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `host`            | yes                                   | PostHog server URL                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `projectKey`      | yes                                   | The public `phc_…` project token. Used by `posthog-node` to identify the project.                                                                                                                                                                                                                                                                                                                                                             |
+| `personalApiKey`  | yes                                   | The private `phx_…` key. Needed for **local flag evaluation** (the SDK polls flag definitions every 10s and evaluates in-process — fast, no per-request round-trip). Without this the SDK falls back to remote evaluation with different semantics.                                                                                                                                                                                           |
+| `projectId`       | no                                    | PostHog's numeric project id. Informational only — the flag-flip + dashboard-URL code addresses the project as `@current` (resolved from the personal API key), so this field isn't read by the resolver. The flag resolver (`packages/operator-core/lib/posthog-config.ts`) consumes only `host` / `projectKey` / `personalApiKey` / `testingFeatures` — it does **not** read `webhookSecret` (that's a separate module, the webhook route). |
+| `testingFeatures` | n/a                                   | The flag-fetch master switch. `false` (default) means "don't fetch live flag definitions." `true` means "fetch flag definitions live." Gates flag fetches **only** — it does not gate [telemetry](#telemetry-opt-in).                                                                                                                                                                                                                         |
+| `webhookSecret`   | no                                    | If set, validates incoming `POST /api/flags/webhook` calls from PostHog (auth header `x-papercusp-webhook-secret`) so live flag flips can fan out via SSE. Read by the webhook route, not the resolver. The env var `PAPERCUSP_POSTHOG_WEBHOOK_SECRET` takes **precedence** over this field. Absent means clients refresh on a polling interval instead.                                                                                      |
+
+File permissions are `0600` so it's not world-readable.
+
+## Admin access
+
+Admins use the **Admin → Features** tab in the operator (`/admin/features`) to flip flags, including the `testingFeatures` master switch. The admin section is loopback-only (the operator's Hono host binds `127.0.0.1` by default, on port `3070`) and intentionally unlinked from the nav — reach it by typing the URL. (Port `3055` is the Vite *dev* server, not the shipped host.)
+
+Flipping the master switch from this UI calls the loopback-only `POST /api/flags/testing-features`, which **writes** `testingFeatures` into `~/.papercusp/posthog.json` (mode `0600`, merging the existing file). So the shipped app *does* write that one field — only the keys must be placed by an admin by hand.
+
+See [feature-flags](./feature-flags) for the full UI walkthrough.
+
+## PostHog UI
+
+When `testingFeatures: true` is set, the PostHog dashboard is reachable at `https://flags.papercuspai.com`. Credentials are stored in `/opt/posthog/credentials.env` on the Hetzner box. The dashboard is the authoritative source for flag history — every flip is logged with timestamp + actor.
+
+## Known issues
+
+* **`posthog-ingestion-error-tracking` and `posthog-ingestion-general` crash-loop**. They retry connecting to Kafka and exit cleanly every \~30s. Cosmetic — these services handle inbound event capture, which we don't use yet. Will resolve when analytics is turned on later (or when their compose config is fixed for hobby-style deployments).
+* **No webhook configured upstream**. PostHog→operator `/api/flags/webhook` isn't wired in the PostHog UI. Live SSE flag-flip notifications use the SDK's 10-second polling interval instead. Acceptable for now; flag flips aren't user-frequent.
+
+## Future enabling
+
+Beyond the shipping flag + telemetry paths, the remaining PostHog surfaces can be turned on without re-architecting:
+
+* **Analytics** — server-side `capture()` for product usage beyond the current crash/usage telemetry. The telemetry flush already POSTs to PostHog's `/batch/`; broader analytics would add more event kinds behind the same opt-in.
+* **Session replay** — `posthog-js` already ships (it's a prod dependency loaded on demand for telemetry), but session recording is explicitly **disabled** (`disable_session_recording: true`) because it's a separate consent we don't have. Enabling it means a new opt-in, not a new dependency.
+* **LLM observability** — wrap the Anthropic / OpenAI clients with `@posthog/ai/anthropic` (`withTracing`). Free for the first 100k generations/mo on hobby. Ready when we decide to instrument.
+* **Error tracking** — wire `posthog.captureException` server-side; needs no client SDK.
+
+The contract to preserve is now *no PostHog data leaves an end-user machine unless they opt in* (the public capture key and `posthog-js` chunk ship in every build; what's gated is the **forwarding**, not the code).

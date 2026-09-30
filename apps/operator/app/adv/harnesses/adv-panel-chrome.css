@@ -1,0 +1,550 @@
+/* Shared chrome for the /adv Working-tab dock panels — the Work-items
+ * design language (WorkItemsPanel is the reference; these rules are lifted
+ * from its former scoped <style> block verbatim, then adopted by the other
+ * panels so the whole dock reads as one family).
+ *
+ * Vocabulary:
+ *   .pc-advpanel          — panel root (column flex, fills the dock slot;
+ *                           no background — the dock group surface shows
+ *                           through, same as Work items)
+ *   .pc-advpanel__bar     — top toolbar strip (search/filters/refresh)
+ *   .pc-advpanel__input   — frost text input, 28px control height
+ *   .pc-advpanel__select  — house <Select> trigger sized to match the input
+ *   .pc-advpanel__iconbtn — flat 28×28 frost icon button (refresh et al.)
+ *   (a labeled button is just <Button> — see app/harness/Button.tsx; the old
+ *    .pc-advpanel__btn re-implemented its neutral look and was folded in, P-015)
+ *   .pc-advpanel__chip    — pill filter chip / sub-view tab (aria-pressed
+ *                           or aria-selected marks the active one)
+ *   .pc-advpanel__empty   — loading / empty / error placeholder text
+ *
+ * All colours are semantic tokens per the theme contract
+ * (/internal/docs/design/tokens) — flat per HR9, no elevation. */
+
+.pc-advpanel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.pc-advpanel__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+}
+
+/* A bar that carries STATUS CHIPS rather than a fixed toolbar wraps to a second
+ * line instead of fragmenting its contents (dep-graph-design-pass-2026-08-08
+ * P-003). Chips are atomic and self-describing, so a second row costs nothing and
+ * reads fine; a squeezed nowrap row instead crushes each control, and the horizontal
+ * -scroll alternative hides controls behind a scrollbar the user has no reason to
+ * suspect is there. Opt-in, because a real toolbar (fixed icon actions) should NOT
+ * wrap — it should stay one row and let its content shrink. */
+.pc-advpanel__bar--wrap {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+/* Frost text input — sky-tinted border, accent focus ring. */
+.pc-advpanel__input {
+  flex: 1;
+  min-width: 80px;
+  padding: 4px 9px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--fg, #e7f7ff);
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  border: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  border-radius: 6px;
+}
+.pc-advpanel__input::placeholder {
+  color: var(--fg-mute, #7f9bb4);
+}
+.pc-advpanel__input:focus {
+  outline: none;
+  border-color: var(--accent, #38bdf8);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent, #38bdf8), transparent 80%);
+}
+
+/* House Select trigger. triggerClassName drops Select's default inline
+ * style, so this provides the FULL trigger layout (not just colours),
+ * sized to match the input. */
+.pc-advpanel__select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 9px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--fg, #e7f7ff);
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  border: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  border-radius: 6px;
+  cursor: pointer;
+  outline: none;
+}
+.pc-advpanel__select:hover {
+  border-color: var(--accent, #38bdf8);
+}
+.pc-advpanel__select:focus-visible {
+  border-color: var(--accent, #38bdf8);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent, #38bdf8), transparent 80%);
+}
+
+/* Flat 28×28 frost icon button — bare <button> renders as the silver 3D OS
+ * default (no globals baseline), so every icon action gets this. */
+.pc-advpanel__iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  color: var(--fg-mute, #7f9bb4);
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  border: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  border-radius: 6px;
+  cursor: pointer;
+}
+.pc-advpanel__iconbtn:hover:not(:disabled) {
+  color: var(--fg, #e7f7ff);
+  border-color: var(--accent, #38bdf8);
+}
+.pc-advpanel__iconbtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Pill filter chip / sub-view tab. Active state via aria-pressed (boolean
+ * filters) or aria-selected (tab-shaped pickers) — the flat tinted-fill
+ * recipe from /internal/docs/design#buttons. */
+.pc-advpanel__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  /* A chip is ATOMIC — it is a single labelled pill, and a pill broken across two
+   * lines stops reading as one control (P-003). The dep-graph "Issues only" toggle
+   * fragmented into three pieces for exactly this reason. */
+  white-space: nowrap;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--fg-mute, #7f9bb4);
+  background: transparent;
+  border: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  border-radius: 999px;
+  cursor: pointer;
+}
+.pc-advpanel__chip:hover {
+  color: var(--fg, #e7f7ff);
+  border-color: color-mix(in srgb, var(--accent, #38bdf8), transparent 50%);
+}
+.pc-advpanel__chip[aria-pressed='true'],
+.pc-advpanel__chip[aria-selected='true'] {
+  color: var(--fg, #e7f7ff);
+  background: color-mix(in oklab, var(--accent, #38bdf8), transparent 84%);
+  border-color: color-mix(in oklab, var(--accent, #38bdf8), transparent 50%);
+}
+
+/* Generic column-filter bar (generic-column-filters-2026-06-14 Phase 2): a
+ * wrapping chip row — the filter icon, active-filter chips, the +Add-filter
+ * Select (rendered as a chip), and Clear-all. Reuses .pc-advpanel__chip for the
+ * pills; this rule only owns the row layout (wrap + gap). */
+.pc-advpanel__filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+}
+.pc-advpanel__filterbar:empty {
+  display: none;
+}
+
+/* 'facets' layout (ColumnFilterBar layout="facets"): every filterable column is
+ * always visible as a labeled group of value chips with counts, so filters read
+ * as filters at a glance (QueueFilterBar-style). No bottom rule — it composes
+ * inside a host toolbar rather than separating a list. */
+.pc-advpanel__filterbar--facets {
+  border-bottom: 0;
+}
+.pc-advpanel__facetgroup {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+.pc-advpanel__facetlabel {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0; /* design-primitives lint: no nonzero letter-spacing in app UI */
+  color: var(--fg-mute, #7f9bb4);
+  margin-right: 1px;
+}
+.pc-advpanel__chipcount {
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--fg-mute, #7f9bb4);
+  padding-left: 2px;
+}
+.pc-advpanel__chip[aria-pressed='true'] .pc-advpanel__chipcount {
+  color: inherit;
+}
+
+/* Loading / empty / error placeholder. */
+.pc-advpanel__empty {
+  padding: 16px;
+  font-size: 12.5px;
+  color: var(--fg-mute, #7f9bb4);
+}
+.pc-advpanel__empty--err {
+  color: var(--bad, #f87171);
+}
+
+.pc-advpanel__spin {
+  animation: pc-advpanel-spin 0.8s linear infinite;
+}
+@keyframes pc-advpanel-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Dependency graph pane (dependency-health-pane-2026-08-02).
+ *
+ * EDGES ARE THE SECONDARY MARK. The owner's direct feedback on the first mockup
+ * was "the edges are much too big" (D-003 req 1), so this is a REQUIREMENT and
+ * not taste: edges are hairline, low-contrast, and drawn UNDER the nodes. The
+ * layering and the node boxes carry the signal; an edge only has to be
+ * followable. Every colour comes from a design token with a fallback, so theme
+ * changes govern rather than hardcoded hexes.
+ * ───────────────────────────────────────────────────────────────────────────── */
+.pc-depgraph {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.pc-depgraph__canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+
+/* Hairline and subdued — the WEIGHT stays 1px because heavy strokes are what drew
+ * the original complaint ("the edges are much too big", D-003 req 1).
+ *
+ * ⚠ WEIGHT AND CONTRAST ARE DIFFERENT KNOBS, and conflating them is how this pane
+ * ended up with 79 edges nobody could see. The 2026-08-08 report was the opposite
+ * complaint — the pane "looks like a grid of cards" — and the resolution is not to
+ * relitigate either: hold the hairline, raise the opacity off the floor (0.45 → 0.7),
+ * and spend the new legibility budget on DIRECTION (the arrowheads below) rather than
+ * on thickness. A 1px stroke at 0.7 is still unmistakably the secondary mark. */
+.pc-depgraph__edge {
+  stroke: var(--fg-mute, #7f9bb4);
+  stroke-opacity: 0.7;
+  stroke-width: 1;
+}
+
+/* A terminal blocker no longer gates. Fainter + dashed: still visible, because
+ * the lineage explains WHY the dependent became free, but clearly not live.
+ * Raised in step with the base so the RATIO that encodes "inert" survives — the
+ * distinction has to stay legible, which at 0.2 it was not. */
+.pc-depgraph__edge--satisfied {
+  stroke-opacity: 0.34;
+  stroke-dasharray: 3 3;
+}
+
+/* DIRECTION (dep-graph-design-pass-2026-08-08 P-004). An undirected dependency graph
+ * cannot say which end blocks which — the single fact the pane exists to convey. One
+ * arrowhead class per edge class, mirroring the stroke colours above, because SVG2
+ * `context-stroke` is unevenly supported and an arrowhead that silently falls back to
+ * black on a dark panel is worse than no arrowhead at all. */
+.pc-depgraph__arrowhead {
+  stroke: none;
+}
+.pc-depgraph__arrowhead--default {
+  fill: var(--fg-mute, #7f9bb4);
+  fill-opacity: 0.8;
+}
+.pc-depgraph__arrowhead--satisfied {
+  fill: var(--fg-mute, #7f9bb4);
+  fill-opacity: 0.4;
+}
+.pc-depgraph__arrowhead--dangling {
+  fill: var(--bad, #f87171);
+  fill-opacity: 0.85;
+}
+
+/* An unresolvable blocker is a DEFECT, not decoration — the one edge class that
+ * earns colour, because "written but gates nothing" is what the pane exists to
+ * make visible (INV-13). */
+.pc-depgraph__edge--dangling {
+  stroke: var(--bad, #f87171);
+  stroke-opacity: 0.75;
+  stroke-dasharray: 2 4;
+}
+
+.pc-depgraph__node {
+  cursor: pointer;
+}
+.pc-depgraph__node rect {
+  fill: var(--bg-2, rgba(255, 255, 255, 0.045));
+  stroke: var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  stroke-width: 1;
+}
+.pc-depgraph__node:hover rect {
+  stroke: var(--accent, #38bdf8);
+}
+.pc-depgraph__node--selected rect {
+  stroke: var(--accent, #38bdf8);
+  stroke-width: 2;
+}
+/* A dangling placeholder is not a work item — it must not look like one. */
+.pc-depgraph__node--dangling rect {
+  fill: color-mix(in oklab, var(--bad, #f87171), transparent 88%);
+  stroke: var(--bad, #f87171);
+  stroke-dasharray: 3 3;
+}
+
+/* P-012 — plan provenance (`source_plan_slug`), drawn as a left edge-marker.
+ *
+ * ⚠ SPECIFICITY IS LOAD-BEARING HERE, not incidental. The marker is a <rect> INSIDE
+ * .pc-depgraph__node, so every rule above that targets a bare `rect` descendant also
+ * matches it — `.pc-depgraph__node--dangling rect` (0,2,1) would otherwise paint this
+ * 3px marker translucent-red AND dashed on any dangling node. This selector is
+ * deliberately (0,2,1) too, and placed AFTER those rules so it wins the tie. Moving it
+ * earlier in the file, or weakening it to `.pc-depgraph__node-planmark`, silently
+ * reintroduces that bleed.
+ */
+.pc-depgraph__node rect.pc-depgraph__node-planmark {
+  fill: var(--accent-strong, #7dd3fc);
+  stroke: none;
+  stroke-dasharray: none;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+/* TYPOGRAPHIC HIERARCHY (dep-graph-design-pass-2026-08-08 P-006). Inverted from the
+ * original: the TITLE is what a reader recognises a node BY, so it gets the weight and
+ * the full-contrast fill; the id is the reference you look something up with, so it is
+ * the small muted label above it. With id bright/bold and title muted/smaller — the way
+ * round it was — a screen of cards reads as a wall of identifiers, which is a large part
+ * of why the pane did not read as a graph of work. */
+.pc-depgraph__node-id {
+  fill: var(--fg-mute, #7f9bb4);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0; /* design-primitives lint: no nonzero letter-spacing in app UI */
+}
+.pc-depgraph__node-title {
+  fill: var(--fg, #e7f7ff);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* STATE, as a dot. Fill and border on the node are already spoken for (dangling and
+ * selection), so state gets its own mark rather than overwriting a live signal. Four
+ * coarse buckets — see stateBucket() in DepGraphPanel.tsx, which deliberately is NOT
+ * the gating oracle. */
+.pc-depgraph__node-state {
+  stroke: none;
+}
+.pc-depgraph__node-state--done {
+  fill: var(--good, #4ade80);
+  fill-opacity: 0.75;
+}
+.pc-depgraph__node-state--bad {
+  fill: var(--bad, #f87171);
+  fill-opacity: 0.85;
+}
+.pc-depgraph__node-state--active {
+  fill: var(--accent, #38bdf8);
+  fill-opacity: 0.85;
+}
+.pc-depgraph__node-state--open {
+  fill: var(--fg-mute, #7f9bb4);
+  fill-opacity: 0.5;
+}
+
+/* The corpus-scoping explainer (P-001) — plain prose beside the chips, not a chip
+ * itself: it is a standing statement of the pane's rule, not a piece of state, and
+ * dressing a rule up as a chip invites a reader to try clicking it. */
+.pc-depgraph__note {
+  font-size: 10.5px;
+  color: var(--fg-mute, #7f9bb4);
+  white-space: nowrap;
+}
+
+/* ── FOCUS (dep-graph-design-pass-2 P-006) ────────────────────────────────────────
+ * Hovering or selecting a node emphasises ITS edges and neighbours and recedes the
+ * rest. At 84 edges crossing a 129-node layered DAG this is the difference between
+ * a picture you can trace a lineage through and one that reads as a grid of cards.
+ *
+ * ⚠ EMPHASIS IS OPACITY ONLY — never stroke-width. The predecessor plan's D-001
+ * settled the owner's "the edges are much too big" by buying legibility with
+ * CONTRAST and DIRECTION rather than WEIGHT; a focus mode that thickened the focused
+ * edges would re-open that exact complaint one interaction later. Note the focused
+ * edge below RAISES opacity to 1 and leaves `stroke-width: 1` untouched, and the
+ * satisfied/dangling variants keep their own dash patterns because focus must not
+ * overwrite what an edge IS — only how loudly it is currently speaking.
+ *
+ * Transitioning `opacity` (not a layout or paint-heavy property) keeps this off the
+ * layout path — it is a compositor-only change, which matters because it fires on
+ * every mouseenter across a canvas of 129 nodes. */
+.pc-depgraph__edge--focus {
+  stroke: var(--accent, #38bdf8);
+  stroke-opacity: 1;
+}
+.pc-depgraph__edge--dim {
+  stroke-opacity: 0.08;
+}
+.pc-depgraph__node--dim {
+  opacity: 0.28;
+}
+.pc-depgraph__node--focus rect {
+  stroke: var(--accent, #38bdf8);
+}
+.pc-depgraph__edge,
+.pc-depgraph__node {
+  transition: opacity 120ms ease, stroke-opacity 120ms ease;
+}
+/* Respect a reduced-motion preference: the emphasis still happens, it just does not
+ * animate. The information is in the contrast, never in the transition. */
+@media (prefers-reduced-motion: reduce) {
+  .pc-depgraph__edge,
+  .pc-depgraph__node {
+    transition: none;
+  }
+}
+
+/* ── THE KEY (dep-graph-design-pass-2 P-005) ──────────────────────────────────────
+ * Every swatch is drawn with the REAL mark's own class, so the legend cannot drift
+ * from what it documents (see DepGraphLegend's header). Consequently there are no
+ * colours here at all — only layout. Adding a colour to this block would recreate
+ * the second source of truth the component deliberately avoids. */
+.pc-depgraph__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  align-items: center;
+  margin: 0;
+  padding: 4px 8px 6px;
+  list-style: none;
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+}
+.pc-depgraph__legend li {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--fg-mute, #7f9bb4);
+  white-space: nowrap;
+}
+.pc-depgraph__legendswatch {
+  flex-shrink: 0;
+  overflow: visible;
+}
+/* The node swatches reuse `.pc-depgraph__node`, which carries `cursor: pointer` for the
+ * real, clickable nodes. A key is not clickable — inheriting that would promise an
+ * interaction that does not exist. */
+.pc-depgraph__legend .pc-depgraph__node {
+  cursor: default;
+}
+
+/* "Clear selection" (P-007) — the Button primitive's accent variant carries the
+ * emphasis; this only stops the label wrapping in the now-wrapping bar. */
+.pc-depgraph__clearsel {
+  white-space: nowrap;
+}
+
+/* The truncation notice. Warn-coloured because a clipped graph mistaken for a
+ * complete one is the failure mode this chip exists to prevent. */
+.pc-depgraph__chip--warn {
+  color: var(--warn, #fbbf24);
+  border-color: color-mix(in oklab, var(--warn, #fbbf24), transparent 60%);
+}
+
+/*
+ * ZOOM CONTROLS (P-008). A tight group so the four chips read as ONE control
+ * rather than four unrelated ones in an already-dense bar — the same crowding
+ * risk the layout notes in DepGraphPanel.tsx. `gap:2px` against the bar's own
+ * wider gap is what does the grouping; no box or divider is needed for it.
+ */
+.pc-depgraph__zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* The stepper ends are single glyphs — keep them square-ish and stop the "%"
+ * readout jittering the group's width as the number changes 50% → 100% → 125%. */
+.pc-depgraph__zoom button {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Disabled at the ends of the ladder: dimmed rather than removed, so the group
+ * does not change shape (a control that vanishes at the extremes reads as a
+ * rendering fault, and re-flows the chips beside it). */
+.pc-depgraph__zoom button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/*
+ * ACCESSIBILITY EQUIVALENT (P-006). D-001 recorded that a node-edge SVG is the
+ * least accessible of the five treatments and that the weakness is STRUCTURAL.
+ * This list carries the same depth/lineage data and drives the same selection,
+ * so it is a real equivalent control surface: visually hidden, but reachable by
+ * keyboard and screen reader, and it becomes VISIBLE on focus so a sighted
+ * keyboard user can see where they are. `display:none` would remove it from the
+ * a11y tree entirely, defeating the point.
+ */
+.pc-depgraph__a11y {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.pc-depgraph__a11y:focus-within {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: auto;
+  clip: auto;
+  max-height: 40%;
+  white-space: normal;
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+}
+.pc-depgraph__a11y button {
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  color: var(--fg, #e7f7ff);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.pc-depgraph__a11y button:focus-visible {
+  outline: 2px solid var(--accent, #38bdf8);
+  outline-offset: 2px;
+}

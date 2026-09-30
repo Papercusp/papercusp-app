@@ -1,0 +1,59 @@
+# PG-backed default seams silently write the LIVE dev DB from unit tests
+URL: /internal/docs/agent-insights/pg-backed-default-seams-leak-into-live-db-from-unit-tests
+
+An injectable seam whose DEFAULT implementation writes Postgres (and swallows failures) runs for real in any handler-level unit test that forgets to stub it — on the dev box that means real rows in the live DB, polluting peers' baselines. Stub every PG-backed seam in beforeEach; prefer REQUIRED deps over optional-with-real-default.
+
+## Symptom
+
+Rows appear in a live `harness_shared` table that no real workflow wrote —
+synthetic ids (`EI-LIVE`, `ws-1` workspace) accumulating a pair at a time.
+During the consume-edges wave, B-13's reconciliation baseline of the brand-new
+`improvement_dispatches` ledger found 12 phantom "open dispatches", all
+`workspace_id='ws-1'`, growing every few minutes — two more after every
+`test:affected` run anywhere in the fleet.
+
+## Root cause
+
+The `system:improvement-implement` handler test
+(`improvement-implement-action.test.ts`) stubbed the fire / mark-dispatched /
+flip seams but not the **dispatch-ledger seam** added the same morning
+(`setImprovementDispatchLedger`, B-04). The seam's default is the real
+PG-backed `recordDispatchFired` — and like most accounting writes it
+**swallows + warns on failure** so it can never block its production caller.
+That failure-swallowing is exactly what makes the leak silent in tests:
+
+* On CI / a box without PG: the write fails, warns, test stays green.
+* On the dev box with live PG on `:5432`: the write **succeeds**, test stays
+  green, and the live table gains a synthetic row per run.
+
+Two properties have to coincide, and both are common here: (1) an injectable
+seam whose *default* is a live PG write, (2) a handler-level unit test that
+exercises the code path with the seam left at its default.
+
+## Fix / rule
+
+1. **Handler-level unit tests stub EVERY seam with a PG-backed default** in
+   `beforeEach` — not just the ones the test asserts on. The leak came from the
+   seam nobody was asserting on.
+2. **When adding a new PG-backed seam to a handler that already has tests, add
+   the stub to those tests in the same change** — the seam author is the only
+   one who knows it landed.
+3. Where the dependency is a per-call deps object (not a module setter),
+   **make the PG-backed member REQUIRED, not optional-with-real-default** — a
+   required member fails the type-check in every fixture the moment it's added,
+   which finds all the leak sites at compile time. This is why
+   `ResolveDeps.closeDispatches` (resolve-core.ts) is required even though it
+   has an obvious default; `defaultDeps` wires the real one for production.
+4. Synthetic-row debris in a live control-plane table is safe to delete by its
+   test signature (`workspace_id='ws-1'`, fixture item ids) — but tell whoever
+   is baselining that table first.
+
+## How to spot it
+
+Unexplained live rows whose `workspace_id` matches a test fixture (`ws-1`,
+`ws-ledger`, `default`) or whose ids look like fixtures (`EI-LIVE`, `EI-DEAD`,
+`F-STALE`). Correlate `fired_at`/`created_at` timestamps with test runs —
+"grows by N per test-file execution" is the signature. The writer is a seam
+default reachable from a unit test: grep the handler under test for
+`set...(null)`-style seam resetters and check each seam's default for
+`getOrgPg`.

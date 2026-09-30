@@ -1,0 +1,78 @@
+# papercusp-android-shell — 'Papercusp Official: Android Shell' (scope:
+# aspect, category: shell; official-mobile-app-templates-2026-08-20 P-009).
+# Machine twin: @papercusp/template-kit src/reference-templates.ts
+# PAPERCUSP_ANDROID_SHELL_TEMPLATE — the kit suite pins this file to it.
+id: papercusp-android-shell
+version: "0.1.0"
+scope: aspect
+category: shell
+summary: >-
+  The Android chassis for official Papercusp mobile apps: a thin Compose
+  application module, pinned Gradle/AGP/Kotlin/Java/SDK/NDK inputs,
+  incremental UniFFI Kotlin generation, four cargo-ndk ABIs, secure
+  capability and cleartext policy, native/unit/instrumentation acceptance,
+  and release APK/AAB provenance with external-only signing inputs and 16 KB
+  alignment. Product screens, domain flows, endpoints, brand, and optional
+  service dependencies stay in the consuming app.
+components: []
+contracts: []
+decisionPoints:
+  - id: android-identity
+    prompt: >-
+      What namespace, application ID, package path, display name, version
+      source, and launcher identity are used?
+  - id: android-sdk-floor
+    prompt: >-
+      Does the app keep the default minimum SDK or raise it for a selected
+      capability?
+  - id: android-local-network
+    prompt: >-
+      Is a debug-only local cleartext endpoint required, and how is it
+      constrained so release remains cleartext-free?
+  - id: android-capabilities
+    prompt: >-
+      Which optional permissions, features, services, Gradle plugins,
+      repositories, and manifest entries are enabled?
+  - id: android-release
+    prompt: >-
+      Which external signing-property names, release channel, version input,
+      and provenance destination are used?
+composesWith:
+  - papercusp-mobile-base
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+checks:
+  - id: android-shell-contract
+    run: checks/android-shell-contract.test.ts
+    summary: >-
+      the parameterized Compose/Gradle/cargo-ndk source pins identity,
+      toolchains, generated bindings, ABI inputs, privacy, test roots, and
+      external-only signing without developer-home or product assumptions
+  - id: android-shell-assertions
+    run: checks/android-shell-commands.test.ts
+    summary: >-
+      every MOB-AND host leg runs directly, writes an atomic machine evidence
+      record, and proves binding generation, exact packaged ABIs, lint,
+      unit/instrumentation smoke, merged-manifest privacy, provenance,
+      missing-signing rejection, and 16 KB alignment
+musts:
+  - id: pinned-android-chassis
+    rule: "One thin Compose app module pins Gradle 8.14.3, AGP 8.13.2, Kotlin 2.0.21, Java 17, compile/target SDK 36, NDK 27.0.12077973, and an explicitly chosen minimum SDK"
+    enforcedBy: android-shell-contract
+  - id: generated-binding-before-compile
+    rule: "Gradle generates Kotlin from the one UniFFI UDL/config/lock input set before preBuild and declares the generated output"
+    enforcedBy: android-shell-contract
+  - id: exact-abi-and-alignment
+    rule: "Fresh cargo-ndk output and packaged APK/AAB contain exactly arm64-v8a, armeabi-v7a, x86, and x86_64; checksum exports and every 64-bit release ELF/APK satisfy the 16 KB contract"
+    enforcedBy: android-shell-assertions
+  - id: native-tests-and-privacy
+    rule: "Lint, non-zero JVM unit and instrumentation smoke, merged-manifest permission allowlisting, and release cleartext prohibition execute on an Android-capable host"
+    enforcedBy: android-shell-assertions
+  - id: provenance-and-external-signing
+    rule: "A publishable APK/AAB pair binds one version and clean source commit to atomic SHA-256 provenance, while signing names have no templated values and their absence fails publish preflight"
+    enforcedBy: android-shell-assertions
+  - id: product-capabilities-stay-owned
+    rule: "Optional permissions, services, plugins, repositories, and provider dependencies appear only when selected; product screens, routes, data, endpoints, brand, and domain behavior never enter the shell"
+    enforcedBy: prose-only

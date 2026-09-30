@@ -1,0 +1,74 @@
+{
+  "$doc": "Neutral example for @papercusp/template-kit TemplateChecksConfig.mobileBase. Replace every path and forbidden token for the materialized app; no secret values belong here.",
+  "app": { "name": "harbor-mobile", "root": "." },
+  "mobileBase": {
+    "rustMsrv": "1.88",
+    "rootCargo": "Cargo.toml",
+    "cargoLock": "Cargo.lock",
+    "crateManifests": [
+      "crates/harbor_core/Cargo.toml",
+      "crates/harbor_bindings/Cargo.toml",
+      "crates/harbor_cli/Cargo.toml"
+    ],
+    "udl": "crates/harbor_bindings/src/harbor.udl",
+    "uniffiConfig": "crates/harbor_bindings/uniffi.toml",
+    "bindgen": "crates/harbor_bindings/src/bin/uniffi-bindgen.rs",
+    "tokenSource": "design/mobile-tokens.json",
+    "generatedTokenFiles": [
+      "android/app/src/main/java/dev/harbor/design/DesignTokens.kt",
+      "ios/Harbor/DesignTokens.swift"
+    ],
+    "requiredPaths": ["Makefile", "android", "ios", "tools"],
+    "scanRoots": ["crates", "android", "ios", "design", "tools"],
+    "forbiddenTokens": [
+      "Papercusp",
+      "Papercup",
+      "SideStage",
+      "com.example",
+      "example.invalid",
+      "mobile_app",
+      "MobileApp",
+      "__TEMPLATE_"
+    ],
+    "allowlistedFiles": ["docs/template-provenance.md"],
+    "secretPathPatterns": [
+      "(^|/)local\\.properties$",
+      "(^|/)google-services\\.json$",
+      "(^|/)GoogleService-Info\\.plist$",
+      "\\.(jks|keystore|p12|mobileprovision)$"
+    ],
+    "portableCommands": [
+      {
+        "id": "rust-fmt",
+        "command": ["cargo", "fmt", "--all", "--", "--check"]
+      },
+      {
+        "id": "rust-clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "timeoutMs": 600000
+      },
+      {
+        "id": "rust-test",
+        "command": ["cargo", "test", "--workspace"],
+        "timeoutMs": 600000
+      },
+      {
+        "id": "binding-smoke",
+        "command": ["cargo", "test", "-p", "harbor_bindings", "binding_smoke"],
+        "timeoutMs": 600000
+      },
+      {
+        "id": "token-drift",
+        "command": ["node", "tools/generate-mobile-tokens.mjs", "--check"]
+      }
+    ]
+  }
+}

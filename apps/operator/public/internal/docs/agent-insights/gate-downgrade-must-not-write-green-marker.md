@@ -1,0 +1,62 @@
+# A downgrade/skip verdict must never write the gate's green marker
+URL: /internal/docs/agent-insights/gate-downgrade-must-not-write-green-marker
+
+When a standing gate downgrades a FAIL to SKIPPED ('the box was starved, not a real regression'), it must NOT record the same last-green marker a genuine pass writes — the downgrade then satisfies the green-freshness TTL and silently suppresses real re-runs, hiding the very failure it downgraded. Cost here: a real replication bug hidden for ~22h while the gate reported green.
+
+## The trap
+
+A standing gate that fires hourly stays cheap with a freshness TTL: if `last-green`
+is younger than `GATE_SUCCESS_TTL_H` (22h), exit instantly — "nothing to do this
+window." Separately, the gate has an *evidence-gated downgrade*: if the only failing
+scenarios are in a known restart-heavy class **and** a banked frame log shows genuine
+CPU starvation (event-loop-lag >1s), downgrade the FAIL to `SKIPPED-STARVATION` (a load
+artifact, not a regression).
+
+Both are individually reasonable. Together they had a silent, load-bearing bug: the
+downgraded run still fell through to the "no reds ⇒ record green" path and wrote
+`last-green`. That marker then satisfied the 22h freshness TTL, so **every subsequent
+hourly tick exited `FRESH` without running — for \~22h.** A real replication bug (WI-5481:
+post-restart DHT recovery takes 341-378s against a 90s SLA) sat RED behind that marker the
+whole time, invisible, while the gate reported green. The downgrade didn't just mislabel
+one run; it suppressed the gate from ever catching the failure.
+
+## The rule
+
+**A "couldn't measure" verdict must never write the same success marker as "measured and
+passed."** A downgrade/skip is the *absence of a red*, not the *presence of a green* — it
+proves nothing. If it writes the green marker, the gate lies for the entire TTL window and
+hides real regressions behind its own optimism.
+
+For a freshness-TTL'd gate:
+
+* **Genuine full pass** → write `last-green` (satisfies the long green TTL).
+* **Downgrade / skip** (starvation, busy display, all-legs-skipped, storm) → write a
+  *distinct* marker (`last-downgrade`) with its own **shorter** retry TTL, and report a
+  distinct verdict string. It must never touch `last-green`.
+* The shorter downgrade-retry TTL is not optional: pure "re-run every hour until genuinely
+  green" makes a chronically-starved box do an expensive full run every hour, which worsens
+  the very starvation it is downgrading — a feedback loop. A few-hour backoff surfaces a real
+  red same-day without the loop.
+
+## Smell test
+
+If you're staring at a gate that reports GREEN while you *know* something is failing, or a
+gate that "stopped re-running," check: **does any non-pass verdict (skip / downgrade / busy /
+storm) write or refresh the success/freshness marker?** If a downgrade path and the green
+path share one marker, that's the bug. Also check the *state* left behind — a single bad
+downgrade that already wrote `last-green` keeps suppressing until the TTL lapses; relabel or
+clear that marker, don't just fix the code.
+
+## The fix (this gate)
+
+`papercusp-desktop/bin/live-federation-gate.sh`: the `SKIPPED-STARVATION` local-matrix
+downgrade now writes `last-downgrade` (with a `GATE_DOWNGRADE_TTL_H`, default 3h, retry
+backoff) and reports `GATE: SKIPPED-STARVATION (not a fresh green)`, instead of falling
+through to the `last-green` write; the fresh-exit honors `last-downgrade` at the shorter TTL.
+The stuck `last-green` from the original downgrade was relabeled to `last-downgrade` so the
+next fire ran honestly.
+
+This is the mechanical companion to the release ruling that a starvation-downgrade never
+satisfies first-green for GO/NO-GO (plan `p2p-public-release-remaining-lanes-2026-07-16`,
+D-005): the ruling says a downgrade isn't a green; this insight is *why the gate's own
+bookkeeping must encode that* or the ruling is quietly defeated by a shared marker.

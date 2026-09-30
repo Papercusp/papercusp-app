@@ -1,0 +1,63 @@
+# The `doc-steward` launch blueprint — docs-corpus-audit-and-engine-improvements-2026-06-20
+# (WS2 P-008) + deterministic-commit-workitem-attribution-2026-06-22 (P-005 consumer).
+#
+# A SINGLE-ROLE LAUNCH BLUEPRINT (like `merge-resolution`), EVENT-fired. The post-git-sync
+# doc-freshness sweep, on detecting a doc whose anchored CODE drifted, fires the `docs:drift`
+# event; this blueprint resolves the role + invoke URL and dispatches a doc-steward agent to
+# re-verify/regenerate the stale docs against the current code, harness_docs:verify each (which
+# clears the drift flag), and leave the tree clean (git-sync commits — no push).
+#
+# This is the CONSUMER that closes the doc-drift loop: detection is deterministic (drift.ts /
+# the freshness sweep); the doc-steward is the LLM that does the judgement-bearing fix. It is
+# the live counterpart of the retired coding-factory `documenter` step, fired declaratively the
+# same way merge-resolution is fired on `git-sync:conflict`.
+id: doc-steward
+visibility: public
+extends: single-agent
+version: 0.1.0
+description: >-
+  Bring drifted docs back in sync with the code: a doc-steward re-verifies/regenerates each stale
+  doc the freshness sweep flagged (code is truth; preserve historical runbook knowledge),
+  harness_docs:verify to clear the flag, leave the tree clean, and does NOT push.
+
+workItem:
+  kind: doc-drift
+  idPrefix: DOC
+
+# Spine + planner inherited from `single-agent`; override the decider role + turn budget.
+# A multi-doc fix by a careful model needs room — match the merge-resolver's 40.
+spine:
+  decider: doc-steward
+  maxTurns: 40
+
+roles:
+  - id: doc-steward
+    description: >-
+      Re-verify/regenerate each drifted doc against the current code (code is the sole source of
+      truth), preserve historical runbook knowledge (supersede + annotate, never delete),
+      harness_docs:verify each fixed doc to stamp the new baseline + clear the flag, leave the
+      tree clean, and do NOT push.
+
+knobs:
+  harnessKind: doc-steward
+  requiresRepo: true
+
+# Event-rule trigger: fired by the doc-freshness sweep's `docs:drift` event. The sweep resolves
+# this key → THIS blueprint → invokes the doc-steward role via the invoke route (single-role
+# launch), exactly as git-sync fires `merge-resolution` on `git-sync:conflict`.
+triggers:
+  event: docs:drift
+
+# Dependencies: the doc-steward reads the corpus + the anchored code, rewrites the doc, and
+# re-stamps its freshness; it escalates a doc it can't faithfully reconcile. (read/edit/bash/git
+# are base capabilities — declared only the doc-specific + coord tools, like merge-resolution.)
+dependencies:
+  tools:
+    - docs:get
+    - docs:search
+    - harness_docs:verify
+    - harness_docs:anchor
+    - harness_docs:record
+    - work_items:get
+    - coord:escalate
+  plugins: []

@@ -1,0 +1,211 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    :root{
+      --bg:#07101d;--bg-1:#0b1220;--bg-2:rgba(255,255,255,0.045);--bg-3:rgba(255,255,255,0.075);
+      --bg-raised:#112235;--fg:#e7f7ff;--fg-dim:#b9d4e8;--fg-mute:#7f9bb4;
+      --border-muted:rgba(125,211,252,0.08);--border:rgba(125,211,252,0.15);--border-strong:rgba(125,211,252,0.32);
+      --accent:#38bdf8;--accent-soft:#bae6fd;--good:#34d399;--warn:#fbbf24;--bad:#fb7185;
+      --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    }
+    body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:12px;-webkit-font-smoothing:antialiased;}
+    a{color:#7dd3fc}a:hover{color:#bae6fd}
+    .ic{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+    .tabs{display:flex;gap:2px;padding:8px 14px 0;border-bottom:1px solid var(--border-muted)}
+    .tab{padding:5px 12px;font-size:12px;color:var(--fg-mute);border-bottom:2px solid transparent}
+    .tab.on{color:var(--fg);border-bottom-color:var(--accent)}
+    .top{display:flex;align-items:center;gap:8px;padding:9px 14px 0}
+    .seg{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+    .seg span{display:inline-flex;align-items:center;gap:5px;padding:4px 11px;font-size:11px;color:var(--fg-mute);border-right:1px solid var(--border-muted)}
+    .seg span:last-child{border-right:0}
+    .seg span b{font-variant-numeric:tabular-nums;font-weight:650;color:var(--fg-dim)}
+    .seg span.hot{color:var(--warn)}.seg span.hot b{color:var(--warn)}
+    .seg span.on{background:rgba(56,189,248,0.14);color:var(--accent-soft)}
+    .search{margin-left:8px;display:flex;align-items:center;gap:6px;width:210px;padding:4px 9px;border-radius:8px;background:var(--bg-3);border:1px solid var(--border);color:var(--fg-mute);font-size:11.5px}
+    .sort{margin-left:auto;display:flex;align-items:center;gap:5px;font-size:11px;color:var(--fg-mute);padding:3px 9px;border:1px solid var(--border);border-radius:8px}
+    .cols{flex:1;display:grid;grid-template-columns:1.35fr 2fr 1fr 46px 46px;gap:8px;padding:10px 14px 14px;min-height:0}
+    .col-h{display:flex;align-items:center;gap:6px;padding:7px 9px;border:1px solid var(--border);border-bottom:0;border-radius:4px 4px 0 0;background:var(--bg-2);font-size:11px;font-weight:760;color:var(--fg-mute)}
+    .col-h .n{margin-left:auto;color:var(--fg);font-variant-numeric:tabular-nums}
+    .col-h.needs{color:var(--warn);border-color:rgba(251,191,36,0.35);background:rgba(251,191,36,0.08)}.col-h.needs .n{color:var(--warn)}
+    .col-h.working{color:#bbf7d0}
+    .col-h.blocked{color:var(--bad)}
+    .col-b{border:1px solid var(--border);border-radius:0 0 4px 4px;background:var(--bg-2);padding:7px;display:flex;flex-direction:column;gap:6px;min-height:0}
+    .card{position:relative;display:block;padding:9px;border:1px solid var(--border);border-radius:6px;background:var(--bg);overflow:hidden}
+    .card.needs{border-color:rgba(251,191,36,0.45)}
+    .card.blocked{border-color:rgba(251,113,133,0.35)}
+    .ch{display:flex;align-items:center;gap:6px;min-width:0}
+    .handle{font-family:var(--mono);font-size:9.5px;color:var(--fg-mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+    .rsn{display:block;font-size:12px;font-weight:550;line-height:1.35;margin-top:3px}
+    .why{display:block;font-size:10.5px;color:var(--fg-mute);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .why.ask{color:#fde68a}.why.block{color:#fecaca}
+    .meta{display:flex;align-items:center;gap:8px;margin-top:6px}
+    .t{display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--fg-mute);font-variant-numeric:tabular-nums}
+    .t.hot{color:var(--fg-dim)}.t.hot .ic{color:var(--good)}
+    .avs{display:flex;align-items:center;margin-left:auto}
+    .av{width:18px;height:18px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;font-family:var(--mono);color:#051827;border:2px solid var(--bg);margin-left:-5px}
+    .av:first-child{margin-left:0}
+    .dotg{width:4px;height:4px;border-radius:999px;background:var(--good)}
+    .liven{margin-left:6px;display:inline-flex;align-items:center;gap:3px;padding:0 5px;border-radius:999px;font-size:9px;font-weight:700;color:#bbf7d0;border:1px solid rgba(52,211,153,0.5);background:rgba(52,211,153,0.14)}
+    .track{position:absolute;left:0;right:0;bottom:0;height:2px;background:color-mix(in srgb,var(--fg-mute) 14%,transparent)}
+    .fill{display:block;height:100%;background:color-mix(in srgb,var(--accent) 70%,transparent)}
+    .rail{display:flex;flex-direction:column;align-items:center;gap:8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-2);padding:9px 0}
+    .rail .lbl{writing-mode:vertical-rl;transform:rotate(180deg);font-size:10.5px;font-weight:700;color:var(--fg-mute);letter-spacing:.02em}
+    .rail .n{font-size:11px;font-variant-numeric:tabular-nums;color:var(--fg-dim);font-weight:650}
+    .more{font-size:10.5px;color:var(--fg-mute);text-align:center;padding:6px}
+  </style>
+</helmet>
+<div style="display:flex;flex-direction:column;width:1440px;height:858px;overflow:hidden">
+  <div class="tabs">
+    <span class="tab">Goals</span><span class="tab">Sessions</span><span class="tab on">Plans</span><span class="tab">Work items</span>
+  </div>
+  <div class="top">
+    <div class="seg">
+      <span class="on">All <b>350</b></span>
+      <span class="hot">Needs you <b>3</b></span>
+      <span>Working <b>14</b></span>
+      <span>Blocked <b>2</b></span>
+      <span>Ready <b>87</b></span>
+      <span>Done <b>244</b></span>
+    </div>
+    <span class="search">Filter plans…</span>
+    <span class="sort"><svg class="ic" viewBox="0 0 24 24"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg>Sort: Last work</span>
+  </div>
+
+  <div class="cols">
+    <!-- NEEDS YOU (wide) -->
+    <div style="display:flex;flex-direction:column;min-height:0">
+      <div class="col-h needs">Needs you<span class="n">3</span></div>
+      <div class="col-b">
+        <div class="card needs">
+          <span class="ch"><span class="handle">ei-100-security-posture-closure</span></span>
+          <span class="rsn">EI-100 security posture closure</span>
+          <span class="why ask">D-001 ratify: reuse route-tier auth?</span>
+          <span class="meta">
+            <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>2m</span>
+            <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>41s</span>
+            <span class="avs"><span class="av" style="background:#7dd3fc">76</span><span class="av" style="background:#a78bfa">6e</span><span class="liven"><span class="dotg"></span>4</span></span>
+          </span>
+          <span class="track"><span class="fill" style="width:33%"></span></span>
+        </div>
+        <div class="card needs">
+          <span class="ch"><span class="handle">event-system-drift-to-derived</span></span>
+          <span class="rsn">Event system drift to derived</span>
+          <span class="why ask">2 decisions waiting · attest sweep scope</span>
+          <span class="meta">
+            <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>9h</span>
+            <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>9h</span>
+          </span>
+          <span class="track"><span class="fill" style="width:13%"></span></span>
+        </div>
+        <div class="card needs">
+          <span class="ch"><span class="handle">rem-dream-recombination</span></span>
+          <span class="rsn">Rem dream recombination</span>
+          <span class="why ask">approval gate: plan is draft</span>
+          <span class="meta">
+            <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>4h</span>
+            <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>2d</span>
+          </span>
+          <span class="track"><span class="fill" style="width:22%"></span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- WORKING (widest, rich cards) -->
+    <div style="display:flex;flex-direction:column;min-height:0">
+      <div class="col-h working">Working<span class="n">14</span></div>
+      <div class="col-b">
+        <div class="card">
+          <span class="ch"><span class="handle">ei-100-security-posture-closure</span></span>
+          <span class="rsn">EI-100 security posture closure</span>
+          <span class="why">su-76a83: recording D-001 · su-6e294: P-045 verification</span>
+          <span class="meta">
+            <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>2m</span>
+            <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>41s</span>
+            <span class="t">3/9 items</span>
+            <span class="avs"><span class="av" style="background:#7dd3fc">76</span><span class="av" style="background:#a78bfa">6e</span><span class="av" style="background:#f9a8d4">f4</span><span class="av" style="background:#fbbf24">82</span><span class="liven"><span class="dotg"></span>4</span></span>
+          </span>
+          <span class="track"><span class="fill" style="width:33%"></span></span>
+        </div>
+        <div class="card">
+          <span class="ch"><span class="handle">p2p-git-public-release</span></span>
+          <span class="rsn">P2P git public release</span>
+          <span class="why">su-50a5a: release verification evidence sweep</span>
+          <span class="meta">
+            <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>12m</span>
+            <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>2m</span>
+            <span class="t">21/30 items</span>
+            <span class="avs"><span class="av" style="background:#34d399">7f</span><span class="av" style="background:#fda4af">50</span><span class="av" style="background:#7dd3fc">c9</span><span class="liven"><span class="dotg"></span>3</span></span>
+          </span>
+          <span class="track"><span class="fill" style="width:70%"></span></span>
+        </div>
+        <div class="card">
+          <span class="ch"><span class="handle">agent-launch-unification</span></span>
+          <span class="rsn">Agent launch unification</span>
+          <span class="why">su-6e294: P-045 verification sweep</span>
+          <span class="meta">
+            <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>3m</span>
+            <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>3m</span>
+            <span class="t">44/45 items</span>
+            <span class="avs"><span class="av" style="background:#a78bfa">6e</span><span class="liven"><span class="dotg"></span>1</span></span>
+          </span>
+          <span class="track"><span class="fill" style="width:98%"></span></span>
+        </div>
+        <div class="card">
+          <span class="ch"><span class="handle">owner-plans-single-pane</span></span>
+          <span class="rsn">Owner plans single pane</span>
+          <span class="why">su-82be7 parked 1h — holds WI-40971 (owner pause)</span>
+          <span class="meta">
+            <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>1h</span>
+            <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>18m</span>
+            <span class="t">9/11 items</span>
+            <span class="avs"><span class="av" style="background:#7dd3fc">5a</span><span class="av" style="background:#fbbf24">82</span><span class="liven"><span class="dotg"></span>2</span></span>
+          </span>
+          <span class="track"><span class="fill" style="width:82%"></span></span>
+        </div>
+        <p class="more">+10 more — sorted by last work</p>
+      </div>
+    </div>
+
+    <!-- BLOCKED -->
+    <div style="display:flex;flex-direction:column;min-height:0">
+      <div class="col-h blocked">Blocked<span class="n">2</span></div>
+      <div class="col-b">
+        <div class="card blocked">
+          <span class="ch"><span class="handle">focused-gui-server-split</span></span>
+          <span class="rsn">Focused GUI server split</span>
+          <span class="why block">gate: D-035 proofs incomplete</span>
+          <span class="meta">
+            <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>2d</span>
+            <span class="t">7/11</span>
+          </span>
+          <span class="track"><span class="fill" style="width:63%"></span></span>
+        </div>
+        <div class="card blocked">
+          <span class="ch"><span class="handle">byoc-cloud-capacity</span></span>
+          <span class="rsn">BYOC cloud capacity</span>
+          <span class="why block">blocked-by: focused-gui-server-split</span>
+          <span class="meta">
+            <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>5d</span>
+            <span class="t">0/12</span>
+          </span>
+          <span class="track"><span class="fill" style="width:0%"></span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- READY rail (collapsed) -->
+    <div class="rail"><span class="n">87</span><span class="lbl">Ready</span></div>
+    <!-- DONE rail (collapsed) -->
+    <div class="rail"><span class="n">244</span><span class="lbl">Done</span></div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

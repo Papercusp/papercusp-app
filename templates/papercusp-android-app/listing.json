@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-android-app",
+  "id": "papercusp-android-app",
+  "title": "Papercusp Official: Android App",
+  "description": "Whole-app template: the thin official Android root that composes the shared Rust/UniFFI mobile base with the Compose/Gradle/cargo-ndk Android shell and verifies exact closure plus complete decision answers.",
+  "category": "app",
+  "scope": "app",
+  "version": "0.1.0",
+  "source": "first-party"
+}

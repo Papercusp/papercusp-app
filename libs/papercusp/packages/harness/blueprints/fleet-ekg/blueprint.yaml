@@ -1,0 +1,72 @@
+# The `fleet-ekg` blueprint — deterministic-blueprints-migration-2026-06-13 (P-120).
+#
+# The Fleet EKG (SQL-only, no agent) as a SCHEDULED DETERMINISTIC blueprint,
+# mirroring the negative-space pilot (P-110). A program-mode spine whose single
+# step fires a registered typed function (`fleet-ekg:scan`) wrapping the shipped
+# EKG logic — same flag, same governor budget, same tick (behavior-neutral,
+# D-004). No decision gate ⇒ a DETERMINISTIC PIPELINE (the step runs to
+# completion). The bespoke `system:fleet-ekg-scan` routine action delegates to the
+# SAME shared orchestration (the lib LOGIC stays — the op + the action both call
+# `runFleetEkgScan`).
+#
+# Dark stays dark: the op runs the SAME `papercusp-fleet-ekg` flag +
+# learning-governor preflight the routine did — the loop is triple-gated
+# (inactive seed + dark flag + unbudgeted governor) until the self-learning-frontier
+# P-001 arming gate closes.
+id: fleet-ekg
+extends: base
+version: 0.1.0
+description: >-
+  Deterministic learning loop: embed recent agent sessions into behavioral
+  vectors, detect fleet-wide distribution shifts vs the trailing baseline,
+  attribute against the behavior-change ledger, and alarm unattributable MAJOR
+  shifts (the Fleet EKG) on a cadence. Pure SQL, no agent.
+
+# A descriptive work-item kind (the deterministic pipeline does not create rows —
+# it embeds + persists shifts + alarms directly); the schema requires the field.
+workItem:
+  kind: scan-run
+  idPrefix: EKG
+
+# Program-mode spine (P-010): one deterministic step, NO gate ⇒ deterministic
+# pipeline. `payload.*` are the detection windows / thresholds the routine's
+# payload_template carries (absent ⇒ the op's defaults). A whole-string
+# `{{ payload.x }}` that is unset interpolates to undefined → the op's optional
+# arg is omitted → its default applies.
+spine:
+  steps:
+    - id: scan
+      op: fleet-ekg:scan
+      args:
+        embedDays: "{{ payload.embedDays }}"
+        windowHours: "{{ payload.windowHours }}"
+        baselineDays: "{{ payload.baselineDays }}"
+        minEvents: "{{ payload.minEvents }}"
+        minWindowSessions: "{{ payload.minWindowSessions }}"
+        minBaselineSessions: "{{ payload.minBaselineSessions }}"
+        psiModerate: "{{ payload.psiModerate }}"
+        psiMajor: "{{ payload.psiMajor }}"
+        jsdModerate: "{{ payload.jsdModerate }}"
+        jsdMajor: "{{ payload.jsdMajor }}"
+      bind: scan
+
+knobs:
+  harnessKind: learning
+  # SQL-only behavioral embedding needs no repo.
+  requiresRepo: false
+
+# Scheduled trigger (D-004): the EKG cadence, byte-identical to the bespoke
+# `system:fleet-ekg-scan` routine (every 6h at :50, offset from the deploy
+# rhythm). The routine fires `system:blueprint-run` with `{ blueprintId: fleet-ekg }`;
+# the handler detects program-mode and runs the steps inline. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 50 */6 * * *"
+      action: system:blueprint-run
+      singleton: true  # P-144/D-018: workspace-singleton cadence — one dark @singleton routine per workspace
+
+# No agent roles (pure-deterministic) and no agent-tool deps — the step calls a
+# registered function, not an agent.
+dependencies:
+  tools: []
+  plugins: []

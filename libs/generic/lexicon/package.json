@@ -1,0 +1,22 @@
+{
+  "name": "@papercusp/lexicon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A generic terminology resolver: maps a canonical term key to a display label keyed by an active brand pack. Ships pure singular/plural/lowercase resolution over a closed set of term keys, a registry of brand packs, and a `configure*()` host seam so an ambient (non-React) caller can resolve against the host-selected pack. Zero domain coupling beyond the shipped packs; the selection mechanism (which pack is active) is injected by the host, never imported.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@papercusp/module-singleton": "*"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

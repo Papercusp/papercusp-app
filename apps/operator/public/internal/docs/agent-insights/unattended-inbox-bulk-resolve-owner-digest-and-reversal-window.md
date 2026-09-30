@@ -1,0 +1,22 @@
+# Unattended Inbox bulk-resolve owner digest and reversal window
+URL: /internal/docs/agent-insights/unattended-inbox-bulk-resolve-owner-digest-and-reversal-window
+
+How scheduled Inbox resolver passes notify the owner exactly once, expose their durable audit report, and carry a bounded reply-based compensation handle for every auto-applied item.
+
+## Contract
+
+A run whose `requested_by` is exactly `system:inbox-bulk-resolve` is unattended. When `inbox:bulk-run-settle` finishes such a pass, it must deliver one owner digest even when the run auto-applied everything and settled directly to `complete`; a completed run with no recommendations is the case most likely to be invisible without this edge. Owner-triggered foreground runs do not emit this digest.
+
+Delivery extends existing rails rather than introducing an outbox: `bulk-run-owner-digest.ts` writes a deterministic `ntfy-0-<sha256>` coord message to `human` and calls `notifyAttentionOnce` with dedupe key `inbox-bulk-resolve:<runId>:owner-digest`. A retry may re-enter both calls, but the same run never creates a second inbox message or a second mobile/desktop delivery. Delivery failure is fail-soft relative to run settlement; the durable run rows remain the source of truth and make a later replay safe.
+
+## What the owner receives
+
+The digest names the run, terminal phase, count, and item ids/titles/actions/rationales for the auto-applied rows. Large runs preview a bounded prefix and link the complete persisted report at `/?opcbr=<runId>&oprpt=opcbr`; the report is the authoritative untruncated evidence trail. The message carries structured `extra` fields `unattendedBulkRun`, `runId`, `reportHref`, `reversalWindowUntil`, and `reversibleItemIds`. The attention-notification row carries the same coordinates in string-safe form.
+
+## Reversal semantics
+
+The reversal window is 24 hours measured from `finished_at` (falling back to `updated_at`, then `created_at` only for legacy/incomplete rows). The coord message is explicitly replyable. Before `reversalWindowUntil`, the owner replies with one or more item ids to reverse; the run item's stored `item_ref`, `action_id`, `rationale`, and evidence are the compensation authority. This is intentionally a compensation conversation, not a fabricated universal inverse: attention terminal actions span append-only coordination events, work-item state, conversations, and acknowledgements, so pretending they share one mechanical rollback would be dishonest. The original audit row remains immutable after compensation.
+
+## Verification
+
+`bulk-run-owner-digest.test.ts` pins the 24-hour calculation, full auto-applied id set, complete-report deep link, replay-safe dual delivery, structured compensation fields, and the owner-triggered no-notify boundary. Any new unattended settle path must call `deliverUnattendedRunOwnerDigest` or prove it cannot terminate a scheduled pass.

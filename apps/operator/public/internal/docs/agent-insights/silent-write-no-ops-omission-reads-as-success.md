@@ -1,0 +1,109 @@
+# A write that can no-op must SAY so — omitting the field is not neutral, it reads as success
+URL: /internal/docs/agent-insights/silent-write-no-ops-omission-reads-as-success
+
+When a write helper returns null on failure and the caller renders that as an omitted result field, the reply still says ok:true — so the omission is indistinguishable from success and fails toward the hazard. Includes the audit-row technique for retroactively falsifying a \"the write did not persist\" report.
+
+## The shape
+
+A helper returns `T | null`, where `null` means *the write did not happen*. The caller renders it
+defensively:
+
+```ts
+claimHold: held?.applicable ? held.hold : undefined,   // release.ts:555, before
+```
+
+This looks careful, and the intent is right: **never report a hold that was not written.** There is
+even a test pinning it — *"a hold-engine miss (null) omits claimHold rather than reporting a false
+hold."*
+
+It is still wrong, because the author was choosing between two options when there are three:
+
+| option                  | what the caller sees                               | verdict                            |
+| ----------------------- | -------------------------------------------------- | ---------------------------------- |
+| report the value anyway | `claimHold: true` when nothing was written         | a lie — correctly rejected         |
+| **omit the field**      | `ok:true`, no `claimHold`                          | **indistinguishable from success** |
+| **name the failure**    | `ok:true` + `claimHoldFailed: "…did NOT persist…"` | what you want                      |
+
+The reply still says `ok:true` — it describes a *different* operation that genuinely succeeded (the
+release). A missing field next to `ok:true` reads as "fine, nothing to report". Omission is not a
+neutral third state; it inherits the surrounding success.
+
+## Why this is a bug and not a style nit
+
+**Ask which direction the wrong answer fails in.** Here it fails toward the hazard in *both*
+directions, which is the tell:
+
+* an unwritten **park** reads as parked → the item stays self-selectable, and a peer picks up work
+  someone deliberately set down;
+* an unwritten **unpark** reads as cleared → the row stays invisible to `claim_next` /
+  `scheduler:get_next` and nothing in the reply says so.
+
+Fails-toward-caution is a nit. Fails-toward-the-hazard is a bug.
+
+It is also not hypothetical, and not new. The same silent no-op is already on the record twice:
+
+* **EI-15345 / WI-5261**, documented at `work-items.ts:6373` — a `release { claimHold:true }` call
+  "reported success but `_claimHold` was NEVER persisted, so `scheduler:get_next` kept re-serving
+  the item."
+* **EI-9807** — all four non-force write verbs "silently returning ok:true while no-oping."
+
+In the first case the *cause* was fixed (workspace resolution) and the *failure shape* was left in
+place. That is the recurring mistake: fixing why the write failed does not stop the next failure
+from being invisible.
+
+## The rule
+
+**A helper whose `null` means "nothing was written" must have every caller either surface that or
+deliberately, visibly ignore it.** Two specifics:
+
+1. **`null` returned from more than one place is already a smell.** `setWorkItemClaimHold` returns
+   `null` when it located no row (`feature_id` + `harness` filter matched nothing) *and* when its
+   `UPDATE` matched nothing. Those have different repairs — wrong scope vs. a race — and the caller
+   cannot tell them apart. If you cannot widen the return type, at least say in the message which
+   predicate was applied (the fix names the `harness_slug` it filtered on, so the caller can retry).
+2. **Grep the callers before you call it fixed.** Of 14 `setWorkItemClaimHold` call sites, several
+   discard the return entirely — `plan-items/reconcile-linked-work-items.ts:609/1017/1026` and
+   `dbos/in-process-periodic.ts:996`. That reconciler is the plan-item ↔ work-item sync, so a
+   silently-null unpark there leaves a work-item parked and unselectable by `plan_items:claim` —
+   which is exactly the symptom that gets reported, one layer away from the cause.
+
+The fix is additive and cheap: keep omitting the value (that guarantee, and its test, stay), and add
+a field that names the miss.
+
+## The forensic half: an audit row is a retroactive persistence oracle
+
+A report of the form *"the tool said ok but the write did not persist"* is normally hard to falsify
+after the fact — the payload has since changed, and reading the code only tells you what *should*
+have happened.
+
+But when the write path emits an audit row **after** the write succeeds, that row is proof the write
+landed. In `setWorkItemClaimHold` the ordering is explicit:
+
+```ts
+if (!rows[0]) return null;      // ← no row matched: return before auditing
+// ... INSERT INTO harness_shared.audit_log ('work_items:claim_hold:set' | ':clear')
+```
+
+So `action LIKE 'work_items:claim_hold%'` for a subject is a timestamped ledger of every *effective*
+hold change:
+
+```sql
+SELECT to_timestamp(ts/1000.0) AT TIME ZONE 'UTC' AS at_utc, actor, action,
+       details ->> 'mode' AS mode, details ->> 'reason' AS reason
+  FROM harness_shared.audit_log
+ WHERE subject = '<work-item id>' AND action LIKE 'work_items:claim_hold%'
+ ORDER BY ts DESC;
+```
+
+That settled EI-21966077123218777 in one query: a `claim_hold:clear` row landed **15 seconds before
+the report was filed**, so the clear the report said had failed had demonstrably persisted.
+
+Generalise the move: **before arguing from code about whether a write happened, look for a
+side-effect the code emits only on success** — an audit row, a ledger entry, an event, an
+`updated_ts` bump. Reading the code tells you what the path does; the side-effect tells you what it
+did.
+
+And note the limit, which matters as much: the audit log proves the writes that *went through this
+helper*. It cannot see a writer that bypasses it — `_claimHold` can enter a row at CREATE time with
+no provenance and no audit row (EI-18698328828208444). So an absent audit row is "not written **by
+this path**", never "not written". Say which one you measured.

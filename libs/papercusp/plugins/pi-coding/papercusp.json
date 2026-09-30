@@ -1,0 +1,30 @@
+{
+  "name": "@papercupai/pi-coding",
+  "version": "0.1.1",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "Embed the Pi coding-agent terminal as a dashboard tab.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "capabilities": [
+    "ui:dashboard-tab"
+  ],
+  "dashboardTabs": [
+    {
+      "id": "pi",
+      "label": "Pi",
+      "icon": "Terminal",
+      "replaces": [
+        "pi"
+      ],
+      "componentRoot": "@papercusp/papercusp-shared",
+      "componentId": "PiTerminalsDock",
+      "embedMode": "inline-dock"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {}
+  },
+  "icon": "Terminal"
+}

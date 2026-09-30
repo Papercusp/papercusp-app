@@ -1,0 +1,78 @@
+# Agent prompts — canonical sources vs projections (edit the source, never a copy)
+URL: /internal/docs/agent-insights/prompt-sources-canonical-vs-projections
+
+Where each agent prompt's CANONICAL source lives and which copies are projections (DB override, desktop sidecar bundle, ~/.claude/AGENTS.md, rendered launch outputs). Edit the source; re-seed/rebuild the projection.
+
+# Agent prompts: canonical sources vs projections
+
+Every agent-facing prompt is **assembled at launch** from version-controlled sources.
+The text you read in a running session, in the packaged desktop app, in the database, or
+in a rendered `~/.papercusp/*` file is a **projection** of those sources — never the place
+to edit. Changing a projection is silently overwritten the next time the source projects.
+
+> **Rule:** find the CANONICAL source, edit it, then refresh the projection it feeds
+> (re-seed / rebuild). Never hand-edit a projection as if it were the source.
+
+## Canonical sources (edit HERE)
+
+| Prompt                                                           | Canonical source                                                                     |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| **su base persona** (domain-neutral, all clients/pots)           | `libs/papercusp/packages/harness/blueprints/base/prompts/su.md`                      |
+| **papercup-pot su instance overlay** (papercusp-specific su ops) | `apps/operator/prompts/pot-instances/papercup-pot.su.md`                             |
+| psu playbooks                                                    | `apps/operator/prompts/papercusp-su-{engineer,power}.tools.md`                       |
+| chat-surface roles (operator/oracle/…)                           | `apps/operator/prompts/<role>.{persona,tools}.md`                                    |
+| harness spawn roles (scoper/worker/…)                            | `libs/papercusp/packages/harness/blueprints/<bp>/prompts/<role>.md`                  |
+| per-tool guidance                                                | the tool's `defineTool({ guidance })` in `packages/operator-core/lib/agent-tools/**` |
+
+A psu su launch is assembled by `buildSuLaunchSpec` (`packages/operator-core/lib/role-launch-spec.ts`)
+→ `prompt-build.ts`: **base persona file** + client overlay + wire/legend + the spliced
+papercup `CLAUDE.md` (the Project guide) + the **instance overlay** — concatenated in that order.
+
+## Projections (do NOT edit as source; refresh them)
+
+1. **`hive_settings` DB override** — table `harness_shared.hive_settings`, key
+   `promptOverride.<role>` (e.g. `promptOverride.su`), keyed by `(workspace_id, harness_slug)`.
+   When `FLAGS.SU_BLUEPRINT_PERSONA` (`papercusp-su-blueprint-persona`) is on, `buildSuLaunchSpec`
+   reads the **instance overlay from this DB row** (`getHiveInstancePromptOverride`), **not** from
+   the file. It is **not** auto-seeded from the file on boot, so editing
+   `papercup-pot.su.md` does nothing live until you **re-seed**:
+
+   ```bash
+   FILE=apps/operator/prompts/pot-instances/papercup-pot.su.md
+   curl -s -X POST http://127.0.0.1:3070/api/agent-mcp/pot-override-set \
+     -H 'Content-Type: application/json' \
+     --data "$(jq -Rs '{potSlug:"papercusp",kind:"prompt",name:"su",value:.}' < "$FILE")"
+   ```
+
+   (Loopback-only route → `setHiveInstancePromptOverride`; `potSlug` is the pot HOME slug —
+   `papercusp` here. The additive-override guard only WARNS, it does not block. The base persona
+   file, by contrast, is read live from disk — no re-seed needed for `base/prompts/su.md`.)
+
+2. **`papercusp-desktop` sidecar bundle** —
+   `papercusp-desktop/src-tauri/sidecar/{harness/blueprints,prompts}/…`. Real-file SNAPSHOTS
+   bundled into the packaged desktop app (`tauri.conf.json` resources `sidecar/**/*`), refreshed
+   by `papercusp-desktop/bin/build-desktop-sidecar.sh` at desktop build. Don't hand-edit — they
+   regenerate from the repo sources on the next build. (On the dev box, psu reads the repo
+   sources directly, so the sidecar only matters for the shipped app.)
+
+3. **`~/.claude/AGENTS.md`** — the Claude-local mirror of the base persona's
+   *Default posture (AUTO mode OFF)* route gate. Hand-maintained: keep it in sync when the base
+   gate changes, but the blueprint is canonical (make fleet-wide changes there, never only here).
+
+4. **Rendered launch outputs** — `~/.papercusp/*-collaborator*.md`, captured prompts, and
+   anything under `papercup-release`. Always regenerated; never edit.
+
+## Dev live-reload
+
+`PAPERCUSP_RELOAD_PROMPTS=1` makes **file-sourced** prompts load on the next launch with no
+restart. The **DB override is not a file** — it needs the re-seed above to go live.
+
+## Checklist — after editing a su prompt
+
+1. Edit the **canonical source** file (table above).
+2. If you touched the **instance overlay** (`papercup-pot.su.md`) → **re-seed** the
+   `promptOverride.su` DB row (curl above), else live psu sessions keep the stale text.
+3. If you touched the base persona's **Default-posture gate** → sync `~/.claude/AGENTS.md`.
+4. The **sidecar** copies regenerate on the next desktop build — don't hand-edit them.
+5. Run the SU-playbook check: `npm --prefix apps/operator run llm-test -- --target su`
+   (and `cd packages/operator-core && npx vitest run tools-md-sync` if a `<role>.tools.md` changed).

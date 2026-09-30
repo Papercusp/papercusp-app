@@ -1,0 +1,30 @@
+[package]
+name = "papercusp-desktop"
+version = "0.0.1"
+description = "Papercusp desktop shell — Tauri webview + Node sidecar"
+authors = ["Papercusp Team"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77"
+
+[[bin]]
+name = "papercusp-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-os = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Sidecar lifecycle
+portpicker = "0.1"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

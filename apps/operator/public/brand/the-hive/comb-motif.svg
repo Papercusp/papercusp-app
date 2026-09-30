@@ -1,0 +1,22 @@
+<svg width="720" height="240" viewBox="0 0 720 240" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The Swarm comb motif">
+  <rect width="720" height="240" fill="#0B0E0B"/>
+  <g opacity=".72" stroke="#FFD166" stroke-width="1.6" stroke-linejoin="round">
+    <path d="M64 24 104 47v46l-40 23-40-23V47z"/>
+    <path d="M144 24 184 47v46l-40 23-40-23V47z"/>
+    <path d="M224 24 264 47v46l-40 23-40-23V47z"/>
+    <path d="M104 93 144 116v46l-40 23-40-23v-46z"/>
+    <path d="M184 93 224 116v46l-40 23-40-23v-46z"/>
+    <path d="M264 93 304 116v46l-40 23-40-23v-46z"/>
+  </g>
+  <g opacity=".28" stroke="#F6B72F" stroke-width="1.3" stroke-linejoin="round">
+    <path d="M424 4 464 27v46l-40 23-40-23V27z"/>
+    <path d="M504 4 544 27v46l-40 23-40-23V27z"/>
+    <path d="M584 4 624 27v46l-40 23-40-23V27z"/>
+    <path d="M464 73 504 96v46l-40 23-40-23V96z"/>
+    <path d="M544 73 584 96v46l-40 23-40-23V96z"/>
+    <path d="M624 73 664 96v46l-40 23-40-23V96z"/>
+    <path d="M504 142 544 165v46l-40 23-40-23v-46z"/>
+    <path d="M584 142 624 165v46l-40 23-40-23v-46z"/>
+  </g>
+  <circle cx="600" cy="88" r="110" fill="#F6B72F" opacity=".07"/>
+</svg>

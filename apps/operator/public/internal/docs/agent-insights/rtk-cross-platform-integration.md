@@ -1,0 +1,111 @@
+# RTK (Rust Token Killer) cross-platform integration matrix — and why its Linux disappearance went unnoticed
+URL: /internal/docs/agent-insights/rtk-cross-platform-integration
+
+The rtk 0.43.0 PreToolUse auto-rewrite hook, per-platform install matrix and the crates.io name-collision gotcha — PLUS the 2026-09-05 finding that rtk is NO LONGER INSTALLED on the Linux dev box, so the hook is a silent fail-open no-op. Read the status banner before trusting any 'live' claim here.
+
+import { Aside } from '@astrojs/starlight/components';
+
+The Linux row of the matrix below said **"Surface A, live"** from 2026-07-06 until 2026-09-05. It is no longer true, and nothing surfaced the change.
+
+**Measured 2026-09-05** (EI-22418311654376080):
+
+* `command -v rtk` → not found.
+* `/home/linuxbrew/.linuxbrew/bin/rtk` (the exact path this page named) → `No such file or directory`.
+* **Positive control**, same call: `/home/linuxbrew/.linuxbrew/bin/brew` **is** present and the directory is readable with 98 entries — so this is a genuine absence of `rtk`, not an unreadable or vanished directory.
+* `brew list` contains no rtk; a privileged `find / -xdev` returned only `redux-toolkit`/`rtk-query` hits.
+
+Until a re-install is verified, treat every "live" claim on this page as **historical record of what was verified on 2026-07-06**, not as a description of the running system.
+
+RTK (Rust Token Killer, `rtk-ai/rtk`, Apache-2.0) is a single Rust binary that
+compresses shell-command output 60–90% before it reaches the LLM. We integrate
+it as a **Claude Code `PreToolUse` hook** (`rtk hook claude`) that rewrites
+`<cmd>` → `rtk <cmd>` for compressible commands. This page is the verified
+cross-platform install + behavior matrix.
+
+## The load-bearing lesson: fail-open is the right SAFETY choice and the wrong OBSERVABILITY choice
+
+The hook self-gates on `command -v rtk >/dev/null 2>&1 || exit 0`. That guard is
+**correct** — a missing output compressor must never block an agent's command.
+But it is also why the disappearance was undetectable from inside the system that
+depends on it: when the binary went away the hook silently stopped doing anything.
+No error, no log line, no degraded-mode warning.
+
+Every artifact a reader would consult still described a live integration —
+`hooks.json` still wires `rtk hook claude`, and this page still named the exact
+install path and labelled it "live". The only thing that disagreed was
+`command -v rtk`, and nothing was watching it.
+
+**Generalise it:** any `|| exit 0` on a dependency probe should be paired with
+something that notices the probe has been failing for weeks. Absence of an error
+is not evidence the path ran. A fail-open gate on an absent dependency makes that
+dependency's removal invisible to the system that depends on it.
+
+## ⚠️ Install gotcha: `cargo install rtk` gets the WRONG package
+
+`cargo install rtk` (crates.io) installs **"Rust Type Kit" v0.1.0** — a totally
+unrelated FFI-type-generation tool (verified 2026-07-06: it has no `hook`
+subcommand, its `--help` says "query Rust types and produce FFI types"). This is
+a real name collision. **Never `cargo install rtk`.** Use one of the correct
+sources below.
+
+## Per-platform install (all yield the real `rtk … hook claude`)
+
+| Platform                          | Install                                                                                                   | Version got            | Status                                                                                                            |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| **Linux** (dev box)               | Homebrew bottle (`brew install rtk`) → `/home/linuxbrew/.linuxbrew/bin/rtk`                               | 0.43.0 when installed  | ⛔ **ABSENT as of 2026-09-05** — binary not present; hook fail-opens to a no-op. Was "Surface A, live" 2026-07-06. |
+| **macOS** (x86\_64 Sonoma 14.8.5) | `brew install rtk` → `/usr/local/bin/rtk`                                                                 | 0.43.0                 | Verified 2026-07-06; **not re-verified since**                                                                    |
+| **Windows** (prebuilt, PREFERRED) | Download `rtk-x86_64-pc-windows-msvc.zip` from the GitHub release, extract to `C:\tools\rtk`, add to PATH | 0.43.0                 | Version-matches Linux/Mac; **not re-verified since**                                                              |
+| **Windows** (from source)         | `cargo install --git https://github.com/rtk-ai/rtk` → `%USERPROFILE%\.cargo\bin\rtk.exe`                  | 0.42.4 (tracks master) | Works; slightly behind the release                                                                                |
+
+Only the Linux row was re-probed on 2026-09-05. The macOS and Windows rows are
+unchanged historical records and carry the same staleness risk this page exists
+to warn about — re-probe before relying on either.
+
+Release assets for v0.43.0: `rtk-{x86_64,aarch64}-apple-darwin.tar.gz`,
+`rtk-{x86_64-musl,aarch64-gnu}-unknown-linux.tar.gz`,
+`rtk-x86_64-pc-windows-msvc.zip`, `.deb`/`.rpm`. (`gh release view v0.43.0 --repo rtk-ai/rtk --json assets`.)
+
+## Behavior verified per platform (2026-07-06, su-d2654) — HISTORICAL
+
+Everything in this section describes what was true on 2026-07-06. The Linux leg
+is known **not** to hold today (see the banner).
+
+* **Linux — full e2e** through fresh `claude -p` sessions (claude 2.1.201):
+  (1) `git status` rewrote to `rtk git status` + ledger row recorded;
+  (2) `PAPERCUSP_AGENT_SESSION=1 git reset --hard HEAD` **DENIED** by the
+  shared-tree guard in-engine (guard runs before rtk; deny wins);
+  (3) failing `node --test` output byte-identical raw-vs-rtk, exit 1 both.
+* **macOS — full e2e**: fresh `claude -p` ran `git status`, the pasted-verbatim
+  output was the rtk-**compressed** format (`* main` / `clean — nothing to
+  commit`), NOT standard git format, AND the gain ledger incremented (2→3) —
+  the two together prove the hook loaded + rewrote + compressed. Component
+  checks 4/4 (hook JSON, compression, failing-verbatim + exit code, ledger).
+* **Windows — rtk binary verified** (both 0.43.0 prebuilt and 0.42.4 from-git):
+  `rtk hook claude` reads PreToolUse JSON on stdin and emits the correct
+  `{"hookSpecificOutput":{…,"updatedInput":{"command":"rtk git status"}}}`;
+  `rtk hook check git status` → `rtk git status`. The **blog claim that native
+  Windows has "no auto-rewrite hook, only a CLAUDE.md fallback" is outdated** —
+  the `hook claude` subcommand is present and functional on the native Windows
+  build. A full live Windows `claude -p` e2e was NOT run because Claude Code is
+  not installed/authed on the Windows VM (and native Windows is not a
+  fleet-spawn or interactive-su target — our agents run on Linux/macOS); the
+  updatedInput-application is Claude Code's platform-independent engine
+  behavior, already proven on Linux + macOS.
+
+## Ledger locations (for verifying a spawn actually rewrote)
+
+* Linux: `~/.local/share/rtk/history.db` (sqlite; table `commands`, cols
+  `timestamp, original_cmd, rtk_cmd, saved_tokens, project_path, …`).
+* macOS: read it via `rtk gain` / `rtk gain -H` (the `bash -lc` login shell
+  gives the right PATH; a non-login ssh shell may not find `sqlite3`).
+* The authoritative "did the rewrite execute" signal is a **new ledger row**
+  (or the compressed output format), not the model's paraphrase of the output.
+* A ledger that stops gaining rows is the cheapest available detector for the
+  silent-absence failure described in the banner.
+
+## Related
+
+* The deny-evasion this exposed + its fix: see
+  `agent-insights/pretooluse-updatedinput-evades-deny-patterns` (WI-3159).
+* Surface-B fleet rollout checklist: WI-3164.
+* The absence finding + its positive-control method: EI-22418311654376080.

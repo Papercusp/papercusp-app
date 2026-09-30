@@ -1,0 +1,68 @@
+# The `neologism` blueprint — deterministic-blueprints-migration-2026-06-13 (P-120).
+#
+# The neologism miner (SQL/fs-only, no agent) as a SCHEDULED DETERMINISTIC
+# blueprint, mirroring the negative-space pilot (P-110). A program-mode spine
+# whose single step fires a registered typed function (`neologism:mine`) wrapping
+# the shipped miner logic — same flag, same governor budget, same tick
+# (behavior-neutral, D-004). No decision gate ⇒ a DETERMINISTIC PIPELINE (the
+# step runs to completion). The bespoke `system:neologism-mine` routine action
+# delegates to the SAME shared orchestration (the lib LOGIC stays — the op + the
+# action both call `runNeologismMine`).
+#
+# Dark stays dark: the op runs the SAME `papercusp-neologism-miner` flag +
+# learning-governor preflight the routine did — the loop is triple-gated
+# (inactive seed + dark flag + unbudgeted governor) until the self-learning-frontier
+# P-001 arming gate closes.
+id: neologism
+extends: base
+version: 0.1.0
+description: >-
+  Deterministic learning loop: mine coord traffic + the insights corpus for
+  emergent recurring vocabulary with no corresponding primitive and file the
+  capped abstraction-proposal candidates (the neologism miner) on a cadence.
+  Pure SQL/fs, no agent.
+
+# A descriptive work-item kind (the deterministic pipeline does not create rows —
+# it mines + files improvements directly); the schema requires the field.
+workItem:
+  kind: mining-run
+  idPrefix: NEO
+
+# Program-mode spine (P-010): one deterministic step, NO gate ⇒ deterministic
+# pipeline. `payload.*` are the emergence fire-bars / windows the routine's
+# payload_template carries (absent ⇒ the op's defaults). A whole-string
+# `{{ payload.x }}` that is unset interpolates to undefined → the op's optional
+# arg is omitted → its default applies.
+spine:
+  steps:
+    - id: mine
+      op: neologism:mine
+      args:
+        windowDays: "{{ payload.windowDays }}"
+        recentDays: "{{ payload.recentDays }}"
+        minRecentMentions: "{{ payload.minRecentMentions }}"
+        minSpeakers: "{{ payload.minSpeakers }}"
+        growthFactor: "{{ payload.growthFactor }}"
+        maxPerTick: "{{ payload.maxPerTick }}"
+      bind: mine
+
+knobs:
+  harnessKind: learning
+  # SQL/fs-only term mining needs no repo.
+  requiresRepo: false
+
+# Scheduled trigger (D-004): the miner cadence, byte-identical to the bespoke
+# `system:neologism-mine` routine (every 6h at :35, offset from the deploy
+# rhythm). The routine fires `system:blueprint-run` with `{ blueprintId: neologism }`;
+# the handler detects program-mode and runs the steps inline. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 35 */6 * * *"
+      action: system:blueprint-run
+      singleton: true  # P-144/D-018: workspace-singleton cadence — one dark @singleton routine per workspace
+
+# No agent roles (pure-deterministic) and no agent-tool deps — the step calls a
+# registered function, not an agent.
+dependencies:
+  tools: []
+  plugins: []

@@ -1,0 +1,35 @@
+.build-history-page { --bg-1: var(--surface); --bg-2: var(--surface-2); --bg-popover: #101c2b; --fg-mute: var(--muted); }
+.build-history-page *, .build-plan-dialog * { box-sizing: border-box; }
+.build-history-page button, .build-history-page input, .build-history-page select, .build-plan-dialog button { font: inherit; color: inherit; }
+.build-history-page button, .build-plan-dialog button { cursor: pointer; border: 1px solid var(--border); border-radius: 7px; padding: .4rem .7rem; background: var(--surface-2, #182536); }
+.build-history-page button:focus-visible, .build-history-page a:focus-visible, .build-plan-dialog button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.build-metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.build-metric, .build-verification-banner, .build-history-toolbar, .build-plan-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.build-metric { display: grid; gap: 4px; }
+.build-metric strong { font-size: 1.5rem; }
+.build-metric span, .build-metric small, .build-plan-meta-row, .build-item-meta, .build-commit-meta { color: var(--muted); font-size: .8rem; }
+.build-verification-banner { margin: 12px 0; display: flex; align-items: center; gap: 12px; }
+.build-verification-banner p { margin: 4px 0; }
+.build-history-toolbar { display: grid; grid-template-columns: 2fr repeat(3, 1fr); gap: 10px; }
+.build-history-toolbar label { display: grid; gap: 4px; }
+.build-history-toolbar input, .build-history-toolbar select { min-width: 0; width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); }
+.build-history-results-heading, .build-plan-actions, .build-plan-meta-row, .build-item-meta, .build-item-heading, .build-commit-title, .build-validation-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.build-plan-list { display: grid; gap: 12px; }
+.build-plan-heading { cursor: pointer; }
+.build-plan-heading h2 { margin: 8px 0; }
+.build-plan-body { padding-top: 12px; display: grid; gap: 12px; }
+.build-plan-status, .build-item-kind, .build-item-state { border: 1px solid var(--border); padding: 3px 6px; border-radius: 5px; }
+.build-plan-evidence-grid, .build-item-evidence-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.build-evidence-block, .build-validation-contract, .build-item { padding: 12px; border: 1px solid var(--border); border-radius: 8px; overflow-wrap: anywhere; }
+.build-evidence-block h4 { margin: 0 0 8px; }
+.build-item-list, .build-item-commits ul { list-style: none; padding: 0; display: grid; gap: 10px; }
+.build-validation-contract dl { display: grid; grid-template-columns: auto 1fr; gap: 6px; }
+.build-validation-contract dd { margin: 0; }
+.build-history-empty { text-align: center; padding: 24px; }
+.build-show-more { margin: 16px 0; }
+.build-plan-dialog-overlay { position: fixed; inset: 0; z-index: 100; background: #000b; }
+.build-plan-dialog { position: fixed; inset: 4vh 4vw; z-index: 101; display: flex; flex-direction: column; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: #101c2b; color: #e7f7ff; overflow: auto; }
+.build-plan-dialog-header, .build-plan-dialog-provenance { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.build-plan-dialog-document { flex: 1; min-height: 200px; overflow: auto; }
+.build-plan-dialog dd { margin: 4px 0; }
+@media (max-width: 760px) { .build-metric-grid, .build-history-toolbar, .build-plan-evidence-grid, .build-item-evidence-grid { grid-template-columns: 1fr; } .build-plan-dialog { inset: 2vh 2vw; padding: 12px; } }

@@ -1,0 +1,32 @@
+-- 353: P-007 (plan-templates-and-rubric-v2) Stage 2b — DROP the v1 standalone
+--      rubrics table (mig 326 DDL / 327 seed).
+--
+-- A RUBRIC IS A PLAN now (D-002). The rubrics store (packages/operator-core/lib/rubrics.ts)
+-- is PLANS-ONLY: every rubric is a `template: rubric` plan (harness_shared.harness_plans);
+-- rubrics:list/get/search read those plans, and proposeRubric/ratifyRubric author/promote
+-- them via withPlanLock. The founding hive-coordination-health rubric was migrated from
+-- this table to a plan by migration 338, and the code re-point (drop listTableRubrics +
+-- the table read-leg + the mergeRubricLegs union) is DEPLOYED to :3070 and live-verified
+-- (rubrics:get resolves the rubric from its plan; mig 371 later adds a 14th criterion to
+-- that plan). So nothing reads or writes
+-- harness_shared.rubrics anymore — drop it.
+--
+-- STAGED EXPAND/CONTRACT (D-007/D-008): this irreversible DROP is the *contract* step,
+-- intentionally a separate migration applied ONLY AFTER the code-removal was deployed +
+-- live-verified. The OLD code's listTableRubrics had NO try/catch, so dropping the table
+-- under old code would have thrown in loadAllRubrics -> getRubric -> broken the Overwatch
+-- every-turn scorecard emit. Verified before applying: the :3070 release operator + the
+-- bg-host both restarted onto the new code; the new loadAllRubrics never queries this table.
+--
+-- SAFE TO DROP: no foreign key, view, or other DB object references harness_shared.rubrics
+-- (verified via pg_constraint / pg_depend). A structured observation's `rubricRef` is a
+-- free-text id in the engineer_issues.payload jsonb, not an FK — unaffected.
+--
+-- IDEMPOTENT (IF EXISTS) + CASCADE (sweeps the generated `_search` column, the GIN/btree
+-- indexes, and the status CHECK constraint with the table). On a fresh-DB replay this runs
+-- AFTER 326 (create) / 327 (seed) / 338 (table -> plan copy), so 338's SELECT FROM the
+-- table still resolves; this DROP is the last word.
+--
+-- The runner wraps each file in its own transaction + strips psql metacommands, so NO
+-- top-level BEGIN;/COMMIT;.
+DROP TABLE IF EXISTS harness_shared.rubrics CASCADE;

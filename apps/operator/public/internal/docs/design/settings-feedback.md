@@ -1,0 +1,541 @@
+# Settings pages — designer feedback
+URL: /internal/docs/design/settings-feedback
+
+Concrete UX feedback across all 13 settings pages, captured live at /settings. Cross-cutting issues first, per-page detail second, prioritized fix list at the end.
+
+:::note\[Several cross-cutting fixes have since shipped]
+`/settings/*` still exists (`apps/operator/app/settings/layout.tsx`,
+served via the operator-vite `routes/settings/*`), but the rail this
+memo critiques has been redesigned — largely along these
+recommendations. Verified against the current `layout.tsx`:
+**C1 (grouping) shipped** — the rail is now grouped into "Get started",
+"Identity & devices", "Assistants", "Keys & OAuth", "App preferences",
+and "Advanced". **C3 (search) shipped** — a keyword-mapped "Search"
+input sits atop the rail. **C9 (Advanced tagging) shipped** — an
+"Advanced" group carries the diagnostic pages (`advanced: true`), and
+C9 also shipped *in-page*: every Advanced rail link renders a literal
+"Advanced" chip (`pc-settings-nav-chip`, `layout.tsx`), and the
+operator stats report is now a default-collapsed diagnostics section
+(see the Operator note below). **C10 (mobile) shipped** — below 720px
+`.pc-settings-shell` collapses to a single column and the rail's
+search + groups are hidden in favor of a `<select>`-style page-picker
+(`.pc-settings-mobile-picker`, built from the `Select` component); the
+content renders full-width below. **C2 renames partly shipped** —
+Oracle → "Oracle assistant", Voice → "Voice & speech", Agent backend →
+"AI backend" (Operator is "Papercup agent", not the suggested
+"Operator agent"; API keys is now "Keys & OAuth"). The page set also
+changed: the **Orchestrator** page is gone, and new pages were added
+(Setup Wizard, User preferences, Memory, Oh-My-Pi (omp), OMP
+integration, Backups), so this is no longer "13 pages". The C1, C3,
+C9, and C10 cross-cutting items are addressed.
+
+The **top-priority per-page fix (Operator §) has also substantially
+shipped** — see that section. The remaining surviving per-page notes
+(Voice density, Mobile access device naming, Plugin runtime, etc.)
+still apply where those slugs exist.
+:::
+
+Captured live by walking every page in `/settings/*` against the
+running operator at `localhost:3070`. Screenshots in
+`/tmp/set-*.png`. Read alongside `app/settings/layout.tsx` and the
+individual `app/settings/<slug>/page.tsx` files.
+
+The shape of feedback: cross-cutting issues hit every page so
+fixing them is the highest-leverage work; per-page issues are
+calibrated against the cross-cutting recommendations.
+
+***
+
+# The 13 pages, in nav order
+
+| Slug               | Purpose                                        |
+| ------------------ | ---------------------------------------------- |
+| Personalization    | Visual-effects toggle (1 control)              |
+| Oracle             | Oracle assistant prompt + memory               |
+| Operator           | Operator prompt + budget + stats               |
+| Voice              | STT / TTS / full-agent engine config           |
+| API keys           | Anthropic / OpenAI / EL / Cartesia / etc.      |
+| Agent backend      | claude-code vs omp + path detection            |
+| Meridian           | Embedded Meridian web UI (iframe)              |
+| Orchestrator       | Adaptive worker tier rubric                    |
+| Profile            | Email + name + project dir + model preferences |
+| Publishing         | Per-machine tenant identity for \*.preview     |
+| Plugin runtime     | Loaded plugins + load errors (debug)           |
+| Mobile access      | Pair phone + paired-device list                |
+| Keyboard shortcuts | All key bindings, customizable                 |
+
+That's a lot. The rest of this memo is about getting it down to
+something a user can navigate.
+
+***
+
+# Cross-cutting issues — fix once, every page benefits
+
+## C1. Flat list of 13 is too many; needs grouping
+
+Current rail is a flat list. By the time a user gets to "Plugin
+runtime" they've scrolled past unrelated pages. Mental hierarchy:
+
+* **Identity & devices** — Profile, Mobile access, Publishing
+* **Assistants** — Oracle, Operator, Voice
+* **Engines & infrastructure** — Agent backend, Meridian,
+  Orchestrator, Plugin runtime
+* **Keys** — API keys
+* **App preferences** — Personalization, Keyboard shortcuts
+
+**Fix:** group the rail into 4-5 sections with subtle section
+headers. Pattern matches macOS / iOS / GitHub / VS Code settings.
+Don't collapse — just visually group with a 4-6px gap and a small
+uppercase eyebrow label.
+
+## C2. Naming convention is mixed
+
+Within the rail you have:
+
+* *Role names*: Oracle, Operator, Voice
+* *Infrastructure*: Agent backend, Plugin runtime, Orchestrator
+* *Top-level concept*: API keys, Profile
+* *Device/OS*: Mobile access, Keyboard shortcuts
+* *Polish*: Personalization
+
+Every user has to mentally translate "where do my Anthropic credentials
+live, is it API keys or Agent backend or Meridian?". They're not
+synonymous but they all *feel* like they could be the right page.
+
+**Fix:** within the grouping (C1) the names matter less because the
+section headers do the disambiguation. Once grouped, also rename
+slightly:
+
+* "Oracle" → "Oracle assistant"
+* "Operator" → "Operator agent"
+* "Voice" → "Voice & speech"
+* "Agent backend" → "AI backend"
+* "Plugin runtime" → "Plugin runtime *(advanced)*"
+
+The "*(advanced)*" tag tells a user they probably don't need this
+unless they know they need it.
+
+## C3. No search
+
+13 pages with sub-sections each. The user with a specific question
+("where do I change my OpenAI key?") has to think in the app's IA
+instead of just typing.
+
+**Fix:** add a *"Search settings…"* input at the top of the rail.
+Filters page links by title and known keyword. (A mapping like
+`{ 'openai': ['api-keys', 'voice'] }` is enough for v1.)
+
+## C4. Inconsistent Save patterns
+
+Across the 13 pages:
+
+* **API keys** — single Save for Core, separate Save for Voice (two saves).
+* **Voice** — Save inline next to specific fields (Conv AI voice has its own Save).
+* **Profile** — single Save bottom-of-page.
+* **Agent backend** — single Save.
+* **Orchestrator** — single Save.
+* **Personalization** — implicit (auto-save on change?).
+* **Oracle / Operator** — unclear from the dump, looks like in-place edit with separate save.
+* **Mobile access** — no Save (each pair/revoke is its own action).
+
+A user can't tell after editing "did this save?" without scrolling
+to find the button. Different rules per page.
+
+**Fix:** one pattern, applied everywhere:
+
+* **Auto-save** for single-control pages (Personalization, Mobile access).
+* **Sticky save row** for forms (Oracle, Operator, Profile, Voice,
+  Agent backend, Orchestrator, API keys). Floats at bottom-of-page
+  while editing; shows "Unsaved changes" + \[Save] + \[Cancel]; greys
+  out when no diff.
+* **Toast on save** confirms ("Saved 2 seconds ago"). Same toast for
+  every page.
+
+## C5. Status-when-empty inconsistency
+
+API keys uses *"Currently not set"*. Profile shows fields blank with
+no status string. Agent backend says *"Effective backend right now:
+omp"* (positive language). Orchestrator says *"empty rubric will use
+defaults"* (different language for same concept). 5+ different
+conventions for "this isn't configured."
+
+**Fix:** one pattern — `Empty value | Not set` (italic gray below
+input). For computed/derived defaults, append: *"Not set — using
+default `{value}`"*.
+
+## C6. Help-text placement is inconsistent
+
+* Some fields have help *above* the field (Anthropic API key).
+* Others have help *below* the field (Conv AI voice).
+* Others have it as a tooltip or info-icon (Profile model selectors).
+
+**Fix:** help below the input, always. Italic gray, \~13px. Reserve
+*above* the input for warnings (red tint).
+
+## C7. Page titles repeat the rail link
+
+Every page starts with `<h1>` matching the rail link
+(`Personalization` rail → `Personalization` heading). The rail
+already shows what page you're on (active link is bolded /
+highlighted). The H1 is redundant.
+
+**Fix:** drop the H1 OR replace it with the *page action* (e.g.
+"Personalization · 1 setting" or "Voice · 4 engines configured").
+Information-bearing title, not a label.
+
+## C8. No "what changed" / undo
+
+After saving anything, the user has no way to:
+
+* See what they just changed (no diff display).
+* Revert the change without manually undoing in the field.
+* See when a setting was last changed (Profile shows it; others don't).
+
+**Fix:** every page footer shows *"Last updated 5/7/2026, 9:50:19
+PM by you"* (Profile already does this — generalize). Add an
+*"Undo last change"* link visible for \~30s after save.
+
+## C9. Debug surfaces aren't labeled as such
+
+Plugin runtime, Agent backend, and the Orchestrator's "Recent
+allocations" table are diagnostic — useful for one user in a hundred
+debugging a problem, irrelevant to the rest. They sit alongside
+"Profile" and "Voice" with no visual signal that they're optional.
+
+**Fix:** label these with a small `Advanced` chip in the rail; or
+move to a collapsible *"Advanced"* section in the rail (per C1).
+Visual hint that says "you probably don't need this."
+
+## C10. Mobile responsiveness untested
+
+The 2-column shell (`pc-settings-shell`) likely fails below \~700px.
+Settings is the kind of thing users adjust on a phone (especially
+once Mobile access is set up — they'll want to manage paired
+devices from the phone they paired).
+
+**Fix:** below `--breakpoint-md`, collapse the rail to a
+`<select>` page-picker at the top (or a hamburger). Render content
+full-width below.
+
+***
+
+# Per-page notes
+
+## Personalization
+
+**Issue:** single dropdown ("Visual effects: System default / Full /
+Minimal"). As a top-level rail item it feels heavyweight; under
+"App preferences" (C1) it'd fit.
+
+**Fix:** consider folding into Profile if Profile is renamed to
+*"Account & preferences"*. Or keep separate but expand — what about
+theme, density, language? At single-control depth it's not a page.
+
+:::note\[Expanded since]
+The "expand" path was taken. Personalization is no longer a single
+dropdown — it now hosts theme selection plus a full custom-theme
+editor (`ThemeEditor`) and a saved-prompts section
+(`SavedPromptsSection`) alongside the visual-effects control, so the
+"single dropdown / not a page" framing (and the page table's "1
+control") no longer matches the current page.
+:::
+
+## Oracle
+
+**Issue:** very long uneditable-looking system prompt + memory area.
+Users see a wall of text. The persistent memory section labeled
+*"Persistent memory · Outline"* — unclear what *Outline* is doing
+there.
+
+**Fix:**
+
+* Collapse system prompt under *"Edit prompt"* expander; preview
+  first 3 lines.
+* Memory section header should explain memory's purpose in one line
+  ("Notes the Oracle remembers across conversations").
+* Remove "Outline" labels (or surface as a side-rail TOC if the
+  prompts are long).
+
+## Operator
+
+**Issue:** mixes 3 concerns:
+
+1. Visual effects (duplicate of Personalization page!)
+2. 7-day operator stats (Cards seen / Dispatched / etc.)
+3. Daily budget
+
+The duplicate visual-effects toggle is genuinely confusing — does
+setting it here override the global one? They should be one
+control.
+
+The stats panel is a *report*, not a *setting*. It doesn't belong on
+a settings page.
+
+**Fix:**
+
+* Remove the visual-effects toggle from this page (or remove from
+  Personalization, depending on which is canonical).
+* Move the stats panel to the operator panel itself (footer or new
+  /operator/stats route).
+* Keep this page focused on prompt + budget + behavior controls.
+
+:::note\[Substantially shipped]
+This top-priority per-page fix has landed. The visual-effects toggle
+is gone from this page (grep for `visual.effect` over
+`app/settings/operator/` returns nothing; the control now lives only
+on the canonical Personalization page). The 7-day stats are no longer
+a flat report on the page — they're wrapped in a Radix
+`Collapsible` "Papercup diagnostics" section, collapsed by default
+(`statsOpen` defaults to `false`), with the explicit copy *"collapsed
+by default because it is a report, not a setting."* The page H1 is
+also now "Papercup", not "Operator" (C7's information-bearing-title
+spirit). Moving stats off the settings surface entirely (to an
+`/operator/stats` route) remains an open option.
+:::
+
+## Voice
+
+**Issue:** dense — 5+ sub-sections of engine choice (Full-agent
+engine, Agent ID, Conv AI voice, STT, TTS, possibly Wake word). All
+flat, no hierarchy.
+
+The radio choices are hard to read because they're flat lines:
+
+```
+Off — use the STT + TTS pair below
+OpenAI Realtime (gpt-4o-realtime)
+Google Gemini Live (multimodal) — needs Google AI key
+ElevenLabs Conversational AI (Claude Haiku)
+elevenlabs-conversational (legacy alias)
+```
+
+The "(legacy alias)" entry shouldn't be in user-facing UI; it's a
+back-compat artifact.
+
+**Fix:**
+
+* Wrap each engine group in a card (Full-agent / STT / TTS / Wake
+  word) with a subtle border and section heading.
+* For each engine choice, render as a card-row with: name,
+  description, capability badges (local / cloud / BYO key), and a
+  selection radio. Like Apple's iCloud / Mac storage chooser.
+* Hide "elevenlabs-conversational (legacy alias)" — accept that
+  value if posted, but don't render it.
+* The Conv AI voice ID input + Preview + Save inline is good
+  (action where the data is), but conflicts with the C4
+  sticky-save pattern. Reconcile: this is a *test action*
+  (preview), it can stay inline; the actual *save* should be
+  global at the page footer.
+
+## API keys
+
+**Issue:**
+
+* The `⚠ These keys stay on your computer…` disclaimer is a wall
+  of text. Important info, but nobody reads walls.
+* Two save buttons (Core + Voice & cloud).
+* Field state inline (`sk-_••••xjQA Clear` button) is good but
+  inconsistent — *"Currently not set"* is plain text, not a styled
+  state.
+
+**Fix:**
+
+* Reduce the disclaimer to one line + a "Where are these stored?"
+  link to a longer explanation.
+* One sticky save (C4).
+* Standardize the cleared state — show *"Not set"* in italic gray;
+  show populated state as `••••xjQA` + small `Clear` button.
+* Consider grouping by usage instead of by section: each key has a
+  badge for what it powers ("Used by Voice / Used by Plugin: Linear /
+  etc."), so the user understands consequences before clearing.
+
+## Agent backend
+
+**Issue:** dense diagnostic content.
+
+* Path detection box at top (`claude: ✓ /home/...`)
+* Effective backend right now ("omp · env overrides active")
+* 3-way radio (auto / claude-code / omp)
+* Custom command override
+* Per-role JSON model overrides (a JSON textbox — hostile UI)
+* Notes about headless harness scripts not inheriting
+
+**Fix:**
+
+* This page reads like an SRE dashboard. Tag as Advanced (C9).
+* Replace the JSON textbox with a form: rows like
+  `Role: orchestrator | Model: __dropdown__ | ✕`. Same data, no
+  syntax errors possible.
+* Move the headless-harness shell-export note to a tooltip or
+  collapsible "About headless runs" section.
+
+## Meridian
+
+**Issue:** an embedded iframe with no Papercusp chrome. If
+Meridian's site goes down the page is just blank. Tabs (*Settings /
+Telemetry / Profiles*) are inside Meridian's UI, not Papercusp's,
+so users can't tell which UI they're interacting with.
+
+**Fix:**
+
+* Make the iframe context obvious — "This is Meridian's own UI
+  embedded for convenience" callout above. *Open in browser ↗* link
+  is good.
+* Skeleton state while iframe loads.
+* Error state when iframe fails: *"Meridian isn't responding —
+  open at meridian.local:8000"*.
+
+## Orchestrator
+
+**Issue:** very specific concept (adaptive-mode tier rubric).
+The page is technically clear but uses internal jargon: *"adaptive
+mode"*, *"NEXT\_WORKER decision"*, *"calibration drift"*. New users
+won't know what these mean.
+
+**Fix:**
+
+* Lead with a one-paragraph explainer of when adaptive mode is
+  active and what it does.
+* The "Recent allocations" table is a debug/audit surface — move
+  to a collapsible *"Recent decisions"* expander, default closed.
+* Tier names ("Tier 1 / Tier 2 / Tier 3") are placeholder. Let the
+  user name them ("light / standard / deep") or label by
+  worker-count.
+
+## Profile
+
+**Issue:** mixes identity (email, display name, project dir) with
+preferences (preferred models per role). The model preferences feel
+like they belong with Agent backend.
+
+**Fix:**
+
+* Keep identity here.
+* Move "Preferred models" to Agent backend (or a new "Models" page)
+  — they're agent config, not personal info.
+
+## Publishing
+
+**Issue:** explanation is good. Page is sparse otherwise. No status
+visible (am I currently published? to which subdomain? when did I
+last publish?).
+
+**Fix:** show current state — *"Published 2 harnesses · last at
+foo.preview\.papercuspai.com 3h ago"*. Each row has a Revoke /
+Re-publish action.
+
+## Plugin runtime
+
+**Issue:** pure debug surface. Loaded plugins, load errors,
+initialized pairs, hook subscriptions — none of this is
+user-actionable. Useful for diagnosing problems.
+
+**Fix:**
+
+* Tag as Advanced (C9).
+* Promote *"Reset cache"* to be the visible primary action (it's
+  the only thing a user might do here).
+* Collapse "Loaded plugins" into a count + expander.
+* Treat load errors as alerts — when there's an error, surface it
+  in the main UI, not buried under "Plugin runtime".
+
+## Mobile access
+
+**Issue:** the paired-device list is **really** noisy. Captured
+state shows 8+ devices, all named *"(unnamed)"*, with timestamps and
+*Revoke* buttons. No way to give a device a friendly name. No bulk
+"Revoke all stale (>7d)" action.
+
+The "Pair a new device" workspace selector dropdown lists 5 named
+workspaces — but they're all internal-looking ("Default", "Scratch",
+"5.1.26 test", "TEST2", "TEST3"). Test data leaking into UI.
+
+**Fix:**
+
+* Allow naming devices on first pair ("This is my iPhone 14").
+* Group expired/old devices under *"X stale (>7d) — revoke all"*.
+* Filter "TEST2" / "TEST3" / "5.1.26 test" out of the workspace
+  selector unless the user is in a test mode. (Or rename their
+  user-facing labels.)
+* Show *"3 active · 5 stale"* counter at the top.
+
+## Keyboard shortcuts
+
+**Issue:** functional but visually dense — long flat list of every
+shortcut grouped by section. No filter, no search, no "show only
+my custom bindings".
+
+**Fix:**
+
+* Search input at the top filters by action name.
+* Toggle: "Show all" / "Customized only".
+* Group sections in collapsible cards (Quick actions, Global,
+  Navigation, etc.) — open the section the user is editing.
+
+***
+
+# Cross-cutting visual quality
+
+A few things that aren't single-page issues but show up everywhere:
+
+* **Vertical density.** Settings pages have lots of vertical
+  whitespace between sections — but not enough between fields.
+  Tighten field-spacing, loosen section-spacing.
+* **Active-rail indicator is subtle.** With 13 items the active
+  page should be unmistakable — bolder font weight + a 2-3px left
+  border accent.
+* **Primary buttons are inconsistent.** Some pages use heavy filled
+  buttons (Save, Pair); others use ghost outlines (Test current
+  backend). Pick one primary style and apply per-action role:
+  primary action filled, secondary ghost, destructive red.
+* **Form widths.** Fields run full-width on every page. For short
+  values (a key, a model name) a max-width of \~600px keeps the eye
+  from sweeping across the screen. For long values (system prompt,
+  rubric) full-width is right.
+* **Empty/null badges.** Some pages show booleans as text ("Currently
+  not set"); others use chips. Pick chips: small pill, gray for
+  unset, green for set.
+
+***
+
+# Top-priority list
+
+If the designer can ship one cross-cutting fix:
+
+> **C4 (Save patterns).** Sticky save row + toast confirmation,
+> applied to every form page. Highest leverage — it's the single
+> most-used interaction across all 13 pages and it's currently
+> inconsistent on every one.
+
+If they can ship one per-page fix:
+
+> **Operator §** — remove the duplicate visual-effects toggle and
+> move the 7-day stats panel off the settings page. Settings pages
+> shouldn't be reports.
+
+Three more cheap wins:
+
+1. **C1 (rail grouping)** — 30 min of CSS + the existing data; no
+   new code paths.
+2. **Mobile access §** — let users name devices on pair. The
+   `(unnamed) … (unnamed) … (unnamed)` list is currently unusable.
+3. **Plugin runtime + Agent backend tagged Advanced** — sets the
+   right user expectation that these pages are "tools, not knobs."
+
+***
+
+# How I gathered this
+
+* Loaded `localhost:3070/settings/<slug>` for each of the 13 pages.
+* Captured rendered text + a screenshot for each.
+* Cross-referenced against `app/settings/layout.tsx` for the
+  authoritative page list and rail order.
+* Did not edit any settings; observations are from the pages as they
+  rendered.
+* Screenshots: `/tmp/set-personalization.png`, `/tmp/set-oracle.png`,
+  `/tmp/set-operator.png`, `/tmp/set-voice.png`,
+  `/tmp/set-api-keys.png`, `/tmp/set-agent.png`,
+  `/tmp/set-meridian.png`, `/tmp/set-orchestrator.png`,
+  `/tmp/set-profile.png`, `/tmp/set-publishing.png`,
+  `/tmp/set-plugin-runtime.png`, `/tmp/set-mobile.png`,
+  `/tmp/set-shortcuts.png`.

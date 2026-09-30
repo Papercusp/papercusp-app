@@ -1,0 +1,876 @@
+/**
+ * Quick Panel — styles for the global-shortcut popup's tabbed body
+ * (quick-panel-saved-prompts-2026-07-13 P-005/P-006; single-pane Workflowy
+ * outline: quick-panel-workflowy-clone-2026-07-14).
+ *
+ * Design notes: consumes the app's semantic tokens (--bg*, --fg*, --border,
+ * --accent*) so both themes come for free; every control is FLAT (design hard
+ * rule 9 — no gradients / raised shadows); the panel is a compact palette
+ * window (~760×540), so type runs at 12–13px and the layout fills the whole
+ * viewport with its own scroll regions (never the page body).
+ */
+
+/* ---------------------------------------------------------------- shell */
+
+.pc-qp {
+  position: fixed;
+  inset: 0;
+  /* Fill the window even when /quick-panel renders CHROMELESS (the standalone
+     popup / dev:quickpanel preview). The route-transition wrapper
+     (<main data-route-transition-page>) sets a transform, which makes IT — not
+     the viewport — the containing block for this fixed element; with the app
+     chrome absent that <main> collapses to height:0, so `inset:0` alone gives
+     the panel 0 height and clips the tabs. Viewport-relative height is immune to
+     the collapsed ancestor (WI-4806). */
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+  overflow: hidden;
+  /* Offset for the docked Papercup/Pot-Health sidebar (OperatorChatSidebar
+     mounted by page.tsx — owner ask 2026-07-14). The sidebar maintains
+     --op-chat-w on :root (56px collapsed rail / drag width open) and removes
+     it on unmount, so this pads to exactly the rail and collapses to zero
+     when the sidebar is flagged off. */
+  padding-left: var(--op-chat-w, 0px);
+}
+
+/* The docked OperatorChatSidebar (mounted by page.tsx behind
+   OPERATOR_CHAT_SIDEBAR) is position:fixed anchored top/bottom, which resolves
+   against the same transformed 0-height <main> described above — collapsing
+   the sidebar to 0 height inside the popup. Pin it viewport-relative here,
+   exactly like .pc-qp itself (WI-4806). */
+.pc-qp .op-chat-sidebar {
+  top: 0;
+  bottom: auto;
+  height: 100vh;
+}
+
+/* The sidebar also injects a GLOBAL body shift (body.has-op-chat
+   { padding-left: var(--op-chat-w) + … }) so ordinary pages absorb its width.
+   In this popup that shift is redundant (.pc-qp pads itself, above) and
+   actively harmful: the route-transition <main> is the containing block for
+   the panel's fixed elements, so padding body moves main to x=--op-chat-w and
+   every "fixed" element inherits that offset — double-shifting the tabs/pane
+   off-viewport (WI-4806). Neutralize the body shift whenever the quick panel
+   is the mounted page; higher specificity beats the injected rule regardless
+   of <style> insertion order. */
+body.has-op-chat:has(.pc-qp) {
+  padding-left: 0;
+}
+
+.pc-qp__root {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Header status strip — hosts the shared AdvShell "N POT running" + "N agents
+   running" pills (quick-panel-status-pills-2026-07-13). Compact flat row above
+   the tabs; the pills bring their own button styling (adv-header-pills.css). */
+.pc-qp__statusbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 7px 10px;
+  flex: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+  /* The POT/agents pills' expand popovers are plain absolute drops (no
+     portal, z-index 80 inside the pill). Raise the strip's stacking context
+     so a popover paints OVER the tabs/pane below instead of being cut off
+     by them (owner report 2026-07-14). */
+  position: relative;
+  z-index: 90;
+}
+
+.pc-qp__tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+  flex: none;
+}
+
+.pc-qp__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-dim);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.pc-qp__tab:hover {
+  color: var(--fg);
+}
+
+.pc-qp__tab[data-state='active'] {
+  color: var(--fg);
+  border-bottom-color: var(--accent-strong);
+}
+
+.pc-qp__tab:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.pc-qp__pane {
+  flex: 1;
+  min-height: 0;
+  display: none;
+}
+
+.pc-qp__pane[data-state='active'] {
+  display: flex;
+  flex-direction: column;
+}
+
+.pc-qp__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px 20px;
+  color: var(--fg-mute);
+  font-size: 12px;
+  text-align: center;
+  flex: 1;
+}
+
+.pc-qp__emptysub {
+  max-width: 42ch;
+  color: var(--fg-mute);
+}
+
+/* ------------------------------------------------------------- docs tab */
+
+.pc-qp__docsframe {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  background: var(--bg);
+}
+
+/* -------------------------------------------------------- brainstorm tab */
+
+.pc-qp__brainstorm {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.pc-qp__bsbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+  flex: none;
+}
+
+.pc-qp__bslabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  /* no letter-spacing: the design-primitives lint bans nonzero tracking in app UI */
+  color: var(--fg-mute);
+}
+
+.pc-qp__bsbody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pc-qp__bsbody > * {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ----------------------------------------------------------- prompts tab
+   Single-pane Workflowy outline (quick-panel-workflowy-clone-2026-07-14):
+   the old preview column is gone — notes, affordances and variable fill all
+   render inline under their bullet. */
+
+.pc-qp__prompts {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.pc-qp__outlinecol {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* toolbar */
+
+.pc-qp__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.pc-qp__search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-1);
+  color: var(--fg-mute);
+}
+
+.pc-qp__search:focus-within {
+  border-color: var(--accent);
+}
+
+.pc-qp__search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  color: var(--fg);
+  font-size: 12px;
+  outline: none;
+}
+
+.pc-qp__search input::placeholder {
+  color: var(--fg-mute);
+}
+
+/* flat icon button (rule 9) */
+
+.pc-qp__iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg-dim);
+  cursor: pointer;
+  flex: none;
+}
+
+.pc-qp__iconbtn:hover:not(:disabled) {
+  background: var(--bg-2);
+  color: var(--fg);
+}
+
+.pc-qp__iconbtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.pc-qp__iconbtn.on {
+  color: var(--accent-strong);
+}
+
+.pc-qp__iconbtn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* The create button — a real labeled button (owner ask 2026-07-14: the old
+   24px bare-icon button read as an unclickable dot). Flat accent per design
+   hard rule 9 (no gradients/raised shadows). */
+.pc-qp__newbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  /* Flat primary: solid accent fill + ink label. The old style put the LIGHT
+     --accent-strong text on the LIGHT --accent-soft (via --accent-bg) chip —
+     light-on-light in every theme, unreadable. --accent-ink is the token defined
+     for text drawn ON an accent fill, so this stays legible across all themes. */
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  flex: none;
+}
+
+.pc-qp__newbtn:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.pc-qp__newbtn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* zoom breadcrumbs (Home › parent › …) */
+
+.pc-qp__crumbbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 4px 10px 0;
+  font-size: 11px;
+  color: var(--fg-mute);
+  flex: none;
+  min-width: 0;
+}
+
+.pc-qp__crumbseg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pc-qp__crumbsep {
+  color: var(--fg-mute);
+  flex: none;
+}
+
+.pc-qp__crumb {
+  border: none;
+  background: none;
+  padding: 1px 3px;
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  max-width: 22ch;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pc-qp__crumb:hover {
+  color: var(--accent-strong);
+  background: var(--bg-1);
+}
+
+.pc-qp__crumb:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* pinned strip */
+
+.pc-qp__pins {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.pc-qp__pin {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pc-qp__pin:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+.pc-qp__pin.on {
+  /* --accent-soft is a LIGHT tint in every theme, so the label must be
+     --accent-ink (the on-accent text token), not the equally-light
+     --accent-strong — that pairing was 1.26:1 (WI-4834's class). */
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  background: var(--accent-soft, var(--bg-2));
+}
+
+/* the outline */
+
+.pc-qp__outline {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0;
+  outline: none;
+}
+
+.pc-qp__outline:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* zoomed-node header — the hoisted node's title + note, Workflowy-style */
+
+.pc-qp__zoomhead {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px 4px;
+}
+
+/* Wrapping auto-grow variant of the title editor (see .pc-qp__titlegrow).
+   Double class: .pc-qp__titlegrow is defined LATER with the same specificity,
+   and these font metrics must win over its 12.5px. */
+.pc-qp__titlegrow.pc-qp__zoomgrow {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.pc-qp__zoomtitle {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  resize: none;
+  font: inherit;
+  line-height: inherit;
+  color: var(--fg);
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 0;
+}
+
+.pc-qp__zoomtitle::placeholder {
+  color: color-mix(in srgb, var(--fg-dim), transparent 45%);
+}
+
+.pc-qp__rowgroup {
+  min-width: 0;
+}
+
+.pc-qp__node {
+  position: relative; /* anchors the drop indicator */
+  display: flex;
+  /* Titles wrap onto multiple lines, so chrome aligns to the FIRST line. */
+  align-items: flex-start;
+  gap: 4px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  padding-right: 8px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  min-width: 0;
+}
+
+/* Center the fixed-height chrome (16px buttons, 10-11px chips) on the title's
+   first line (12.5px × 1.45 ≈ 18px). */
+.pc-qp__node > .pc-qp__caret,
+.pc-qp__node > .pc-qp__bulletbtn {
+  margin-top: 1px;
+}
+
+.pc-qp__node > .pc-qp__tags,
+.pc-qp__node > .pc-qp__count {
+  margin-top: 3px;
+}
+
+.pc-qp__node > .pc-qp__nodepin {
+  margin-top: 4px;
+}
+
+.pc-qp__node:hover {
+  background: var(--bg-1);
+}
+
+.pc-qp__node.sel {
+  background: var(--bg-2);
+  border-left-color: var(--accent-strong);
+}
+
+/* Weight sits on the grow WRAPPER: the height-replica ::after must wrap with
+   the same metrics as the textarea, and bold changes line breaks. */
+.pc-qp__node.folder .pc-qp__titlegrow {
+  font-weight: 600;
+}
+
+.pc-qp__node.done .pc-qp__nodetitle {
+  text-decoration: line-through;
+  color: var(--fg-mute);
+}
+
+.pc-qp__node.done .pc-qp__bullet {
+  opacity: 0.45;
+}
+
+/* while a row is the drag source it stays in place, dimmed */
+.pc-qp__node.dragsrc {
+  opacity: 0.35;
+}
+
+/* projected drop position — a 2px accent line at the target depth */
+.pc-qp__dropline {
+  position: absolute;
+  right: 8px;
+  height: 2px;
+  background: var(--accent-strong);
+  border-radius: 1px;
+  pointer-events: none;
+  /* `left` is set inline to the projected indent */
+}
+
+.pc-qp__dropline.above {
+  top: -1px;
+}
+
+.pc-qp__dropline.below {
+  bottom: -1px;
+}
+
+.pc-qp__caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--fg-mute);
+  cursor: pointer;
+  flex: none;
+  transform: rotate(90deg);
+  transition: transform var(--dur-fast, 120ms) var(--ease-out, ease-out);
+}
+
+.pc-qp__caret.closed {
+  transform: rotate(0deg);
+}
+
+.pc-qp__caret.leaf {
+  visibility: hidden;
+}
+
+/* The bullet is a real control now (Workflowy grammar: click = zoom,
+   drag = move). Flat halo on hover; touch-action none so dnd-kit's
+   PointerSensor owns the gesture. */
+.pc-qp__bulletbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  padding: 0;
+  cursor: grab;
+  flex: none;
+  touch-action: none;
+}
+
+.pc-qp__bulletbtn:hover {
+  background: var(--bg-2);
+}
+
+.pc-qp__bulletbtn:active {
+  cursor: grabbing;
+}
+
+.pc-qp__bulletbtn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.pc-qp__bullet {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+  flex: none;
+}
+
+.pc-qp__node.sel .pc-qp__bullet {
+  background: var(--accent-strong);
+}
+
+/* Inline node-title editor (the Workflowy behavior: the outline text IS the
+   editor). Styled as bare text — the ROW carries hover/selection chrome, so
+   the input itself stays invisible until you type.
+
+   Long titles WRAP like Workflowy: the textarea sits in a one-cell grid whose
+   ::after replicates the text (`data-rv`) with identical metrics, so the cell
+   — and therefore the textarea — auto-grows to the wrapped height with no JS
+   measurement. Font metrics live on the WRAPPER so textarea and replica can
+   never drift. */
+.pc-qp__titlegrow {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-family: inherit;
+  line-height: 1.45;
+}
+
+.pc-qp__titlegrow::after {
+  content: attr(data-rv) ' ';
+  visibility: hidden;
+  grid-area: 1 / 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.pc-qp__nodetitle {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  resize: none;
+  font: inherit;
+  line-height: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 0;
+  cursor: text;
+}
+
+.pc-qp__nodetitle::placeholder {
+  color: color-mix(in srgb, var(--fg-dim), transparent 45%);
+}
+
+/* #tag / @tag chips parsed from the title — click filters the outline */
+
+.pc-qp__tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.pc-qp__tag {
+  border: none;
+  padding: 0 5px;
+  font-size: 10px;
+  /* Ink on the soft tint — matches this rule's own :hover, which already used
+     --accent-ink; the rest state was left on the light-on-light --accent-strong
+     (1.26:1, WI-4834's class). */
+  color: var(--accent-ink);
+  background: var(--accent-soft, var(--bg-2));
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pc-qp__tag:hover {
+  color: var(--accent-ink, var(--fg));
+  background: var(--accent);
+}
+
+.pc-qp__nodepin {
+  color: var(--accent-strong);
+  flex: none;
+}
+
+.pc-qp__count {
+  font-size: 10px;
+  color: var(--fg-mute);
+  background: var(--bg-2);
+  border-radius: 999px;
+  padding: 0 6px;
+  flex: none;
+}
+
+/* floating copy of the dragged row under the pointer (DragOverlay) */
+
+.pc-qp__dragghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 12.5px;
+  color: var(--fg);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: nowrap;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* inline note (the prompt BODY, Workflowy-style): bare dim textarea under the
+   title. Unfocused it clamps to one line (the component zeroes its inline
+   height on blur); focused it auto-grows via scrollHeight. */
+
+.pc-qp__notewrap {
+  padding-right: 8px;
+  min-width: 0;
+}
+
+.pc-qp__note {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.4;
+  padding: 0 0 2px;
+  resize: none;
+  outline: none;
+  overflow: hidden;
+}
+
+.pc-qp__note:not(:focus) {
+  max-height: 1.5em;
+}
+
+.pc-qp__note::placeholder {
+  color: color-mix(in srgb, var(--fg-mute), transparent 40%);
+}
+
+/* inline affordances under the selected bullet (complete / pin / copy /
+   /name / usage / delete) — the superpowers the retired preview pane hosted */
+
+.pc-qp__affordwrap {
+  padding-right: 8px;
+  min-width: 0;
+}
+
+.pc-qp__afford {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 2px 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.pc-qp__affordspacer {
+  flex: 1;
+}
+
+.pc-qp__usemeta {
+  font-size: 11px;
+  color: var(--fg-mute);
+  white-space: nowrap;
+}
+
+.pc-qp__name {
+  font-size: 11px;
+  color: var(--accent-strong);
+  background: var(--bg-2);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+/* fill-on-copy variables (renders inside the afford row; full-width wrap) */
+
+.pc-qp__vars {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  flex-basis: 100%;
+}
+
+.pc-qp__varslabel {
+  font-size: 11px;
+  color: var(--fg-mute);
+  flex: none;
+}
+
+.pc-qp__varfield {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pc-qp__varname {
+  font-size: 11px;
+  color: var(--accent-strong);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.pc-qp__varfield input {
+  width: 110px;
+  padding: 2px 6px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.pc-qp__varfield input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* keyboard hints */
+
+.pc-qp__hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 4px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--fg-mute);
+  font-size: 10.5px;
+  flex: none;
+}
+
+.pc-qp__hints kbd {
+  font-family: inherit;
+  font-size: 10px;
+  padding: 0 3px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-1);
+  color: var(--fg-dim);
+}

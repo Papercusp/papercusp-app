@@ -1,0 +1,386 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/fundraise-pipeline",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Fundraise pipeline trigger pack: investor replies, follow-up cadence, meeting prep, and post-meeting next steps ride the canonical pipeline-deal datatype. Every outbound path drafts and stops — sending is gated on a recorded human approval.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": { "mode": "exact" },
+  "capabilities": [],
+  "oauth": [
+    {
+      "provider": "google",
+      "scopes": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/contacts.readonly"
+      ],
+      "fieldName": "googleWorkspace"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["googleWorkspace"],
+    "properties": {
+      "googleWorkspace": {
+        "type": "string",
+        "title": "Google Workspace connection",
+        "secret": true,
+        "shareable": false,
+        "snapshotPolicy": "strip",
+        "oauth": {
+          "provider": "google",
+          "scopes": [
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.compose",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/contacts.readonly"
+          ]
+        },
+        "description": "OAuth credential for Gmail drafting plus Calendar/Contacts context. Never copied into a snapshot and never shared with a forker. Note the absence of any gmail.send scope: this pack cannot send mail even if instructed to."
+      }
+    }
+  },
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pipelineTag": {
+          "type": "string",
+          "title": "Pipeline tag",
+          "description": "Which pipeline these deals belong to. Scopes every lookup so an unrelated inbound email is never mistaken for an investor reply.",
+          "default": "fundraise",
+          "maxLength": 60
+        },
+        "followUpDays": {
+          "type": "integer",
+          "title": "Days of silence before a follow-up is drafted",
+          "minimum": 1,
+          "maximum": 60,
+          "default": 5
+        },
+        "maxFollowUps": {
+          "type": "integer",
+          "title": "Maximum follow-ups per deal",
+          "description": "After this many unanswered follow-ups the deal moves to dormant. Bounded on purpose: an unbounded ladder is what turns outreach into spam.",
+          "minimum": 0,
+          "maximum": 4,
+          "default": 2
+        },
+        "toneGuidance": {
+          "type": "string",
+          "title": "Tone guidance",
+          "default": "Direct, specific, and short. No flattery, no superlatives, no manufactured urgency. Write as the founder, not as a system.",
+          "maxLength": 1000
+        },
+        "proofArtifactUrl": {
+          "type": "string",
+          "title": "Live proof artifact URL",
+          "description": "The link a first touch carries: the live workflow artifact showing how that very email was produced. This is the hook; without it a cold email is just a cold email.",
+          "maxLength": 500
+        },
+        "briefStyle": {
+          "type": "string",
+          "title": "Brief style",
+          "enum": ["concise", "detailed"],
+          "default": "concise"
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 10,
+      "windowSeconds": 3600
+    },
+    "targets": [
+      {
+        "id": "fund-research-brief",
+        "kind": "plan",
+        "path": "plan-fund-research.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["deal"],
+          "properties": {
+            "deal": {
+              "type": "object",
+              "datatype": "pipeline-deal",
+              "additionalProperties": true,
+              "required": ["counterparty", "stage", "tier"],
+              "properties": {
+                "counterparty": { "type": "string", "minLength": 1 },
+                "stage": { "type": "string", "minLength": 1 },
+                "tier": { "type": "integer", "minimum": 1, "maximum": 2 }
+              }
+            },
+            "briefStyle": { "type": "string", "enum": ["concise", "detailed"], "default": "concise" },
+            "pipelineTag": { "type": "string", "maxLength": 60, "default": "fundraise" }
+          }
+        }
+      },
+      {
+        "id": "classify-and-draft-reply",
+        "kind": "plan",
+        "path": "plan-classify-reply.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trigger"],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey", "payload"],
+              "properties": {
+                "key": { "const": "ext:gmail:message.received" },
+                "source": { "const": "gmail" },
+                "event": { "const": "message.received" },
+                "sourceId": { "type": "string", "minLength": 1 },
+                "externalId": { "type": "string", "minLength": 1 },
+                "dedupeKey": { "type": "string", "minLength": 1 },
+                "payload": {
+                  "type": "object",
+                  "datatype": "email-message",
+                  "additionalProperties": true,
+                  "required": ["id", "threadId", "from", "subject", "messageId", "direction"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "threadId": { "type": "string", "minLength": 1 },
+                    "from": { "type": "string", "minLength": 1 },
+                    "subject": { "type": "string", "minLength": 1 },
+                    "messageId": { "type": "string", "minLength": 1 },
+                    "direction": { "const": "inbound" }
+                  }
+                }
+              }
+            },
+            "pipelineTag": { "type": "string", "maxLength": 60, "default": "fundraise" },
+            "toneGuidance": { "type": "string", "maxLength": 1000 }
+          }
+        }
+      },
+      {
+        "id": "no-reply-follow-up",
+        "kind": "plan",
+        "path": "plan-follow-up.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["deal"],
+          "properties": {
+            "deal": {
+              "type": "object",
+              "datatype": "pipeline-deal",
+              "additionalProperties": true,
+              "required": ["counterparty", "stage", "tier"],
+              "properties": {
+                "counterparty": { "type": "string", "minLength": 1 },
+                "stage": { "type": "string", "minLength": 1 },
+                "tier": { "type": "integer", "minimum": 1, "maximum": 2 }
+              }
+            },
+            "followUpDays": { "type": "integer", "minimum": 1, "maximum": 60, "default": 5 },
+            "maxFollowUps": { "type": "integer", "minimum": 0, "maximum": 4, "default": 2 },
+            "toneGuidance": { "type": "string", "maxLength": 1000 },
+            "pipelineTag": { "type": "string", "maxLength": 60, "default": "fundraise" }
+          }
+        }
+      },
+      {
+        "id": "investor-meeting-prep",
+        "kind": "plan",
+        "path": "plan-meeting-prep.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trigger"],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey", "payload"],
+              "properties": {
+                "key": { "const": "ext:gcal:event-upcoming" },
+                "source": { "const": "gcal" },
+                "event": { "const": "event-upcoming" },
+                "sourceId": { "type": "string", "minLength": 1 },
+                "externalId": { "type": "string", "minLength": 1 },
+                "dedupeKey": { "type": "string", "minLength": 1 },
+                "payload": {
+                  "type": "object",
+                  "datatype": "calendar-event",
+                  "additionalProperties": true,
+                  "required": ["id", "start", "attendees"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "summary": { "type": "string" },
+                    "start": { "type": "string", "minLength": 1 },
+                    "end": { "type": "string" },
+                    "attendees": { "type": "array", "minItems": 1 }
+                  }
+                }
+              }
+            },
+            "briefStyle": { "type": "string", "enum": ["concise", "detailed"], "default": "concise" },
+            "pipelineTag": { "type": "string", "maxLength": 60, "default": "fundraise" }
+          }
+        }
+      },
+      {
+        "id": "post-meeting-followup",
+        "kind": "plan",
+        "path": "plan-post-meeting.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trigger"],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["payload"],
+              "properties": {
+                "payload": {
+                  "type": "object",
+                  "datatype": "calendar-event",
+                  "additionalProperties": true,
+                  "required": ["id", "start"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "summary": { "type": "string" },
+                    "start": { "type": "string", "minLength": 1 },
+                    "end": { "type": "string" },
+                    "attendees": { "type": "array" }
+                  }
+                }
+              }
+            },
+            "toneGuidance": { "type": "string", "maxLength": 1000 },
+            "pipelineTag": { "type": "string", "maxLength": 60, "default": "fundraise" }
+          }
+        }
+      },
+      {
+        "id": "first-touch-draft",
+        "kind": "plan",
+        "path": "plan-first-touch.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["deal"],
+          "properties": {
+            "deal": {
+              "type": "object",
+              "datatype": "pipeline-deal",
+              "additionalProperties": true,
+              "required": ["counterparty", "stage", "tier"],
+              "properties": {
+                "counterparty": { "type": "string", "minLength": 1 },
+                "stage": { "type": "string", "minLength": 1 },
+                "tier": { "type": "integer", "minimum": 1, "maximum": 2 }
+              }
+            },
+            "proofArtifactUrl": { "type": "string", "maxLength": 500 },
+            "toneGuidance": { "type": "string", "maxLength": 1000 },
+            "pipelineTag": { "type": "string", "maxLength": 60, "default": "fundraise" }
+          }
+        }
+      },
+      {
+        "id": "weekly-pipeline-review",
+        "kind": "plan",
+        "path": "plan-weekly-review.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "pipelineTag": { "type": "string", "maxLength": 60, "default": "fundraise" }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "investor-reply-to-pipeline",
+        "source": {
+          "kind": "external",
+          "sourceKind": "gmail",
+          "oauthField": "googleWorkspace"
+        },
+        "target": "classify-and-draft-reply",
+        "eventPattern": "ext:gmail:message.received",
+        "filter": {
+          "all": [
+            { "direction": "inbound" },
+            { "threadId": { "exists": true } },
+            { "from": { "exists": true } },
+            { "subject": { "exists": true } },
+            { "messageId": { "exists": true } }
+          ]
+        },
+        "mapping": { "mode": "payload-context" },
+        "stormPolicy": { "maxRuns": 20, "windowSeconds": 3600 }
+      },
+      {
+        "id": "meeting-to-investor-prep",
+        "source": {
+          "kind": "external",
+          "sourceKind": "gcal",
+          "oauthField": "googleWorkspace"
+        },
+        "target": "investor-meeting-prep",
+        "eventPattern": "ext:gcal:event-upcoming",
+        "filter": {
+          "attendees.0": { "exists": true }
+        },
+        "mapping": { "mode": "payload-context" },
+        "stormPolicy": { "maxRuns": 5, "windowSeconds": 3600 }
+      },
+      {
+        "id": "meeting-to-post-followup",
+        "source": { "kind": "internal", "event": "plan-completed" },
+        "target": "post-meeting-followup",
+        "mapping": { "mode": "payload-context" }
+      },
+      {
+        "id": "follow-up-ladder",
+        "source": { "kind": "manual" },
+        "target": "no-reply-follow-up",
+        "mapping": { "mode": "payload-context" }
+      },
+      {
+        "id": "research-enrichment",
+        "source": { "kind": "manual" },
+        "target": "fund-research-brief",
+        "mapping": { "mode": "payload-context" }
+      },
+      {
+        "id": "first-touch-outreach",
+        "source": { "kind": "manual" },
+        "target": "first-touch-draft",
+        "mapping": { "mode": "payload-context" }
+      },
+      {
+        "id": "weekly-review",
+        "source": { "kind": "manual" },
+        "target": "weekly-pipeline-review",
+        "mapping": { "mode": "payload-context" }
+      }
+    ],
+    "edges": [
+      {
+        "from": "meeting-to-investor-prep",
+        "to": "meeting-to-post-followup",
+        "event": "plan-completed",
+        "correlation": "inherit"
+      }
+    ]
+  },
+  "icon": "TrendingUp"
+}

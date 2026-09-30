@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Papercusp</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; padding: 0; height: 100%; background: #0a0a0a; color: #e7e7e7;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { display: grid; place-items: center; height: 100vh; gap: 14px; padding: 32px; box-sizing: border-box; text-align: center; }
+  h1 { letter-spacing: 0.08em; font-size: 14px; margin: 0; color: #9a9a9a; text-transform: uppercase; }
+  .spinner { width: 24px; height: 24px; border: 2px solid #2a2a2a; border-top-color: #6ea8ff; border-radius: 50%; animation: spin 800ms linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .msg { color: #9a9a9a; font-size: 13px; max-width: 480px; line-height: 1.6; }
+  code, kbd { font-family: ui-monospace, "JetBrains Mono", "Menlo", monospace; font-size: 12px; color: #6ea8ff; }
+  .err { color: #fca5a5; }
+  .check-list { list-style: none; padding: 0; margin: 8px 0 0; max-width: 420px; width: 100%; text-align: left; }
+  .check-list li { padding: 6px 10px; border-radius: 6px; margin-bottom: 4px; background: #141414; display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; }
+  .check-list .name { width: 80px; color: #9a9a9a; }
+  .check-list .badge { font-size: 10.5px; padding: 1px 6px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .badge.ok { background: #064e3b; color: #6ee7b7; }
+  .badge.missing { background: #4c1d24; color: #fca5a5; }
+  .badge.error { background: #4b3b00; color: #fcd34d; }
+  .check-list .detail { color: #9a9a9a; flex: 1; word-break: break-word; }
+  .hint-block { margin-top: 12px; padding: 10px 14px; background: #1a1d22; border-radius: 6px; max-width: 480px; text-align: left; font-size: 12.5px; line-height: 1.5; }
+  .hint-block strong { color: #fcd34d; }
+  .install-btn { margin-top: 12px; padding: 8px 16px; background: #1f3a5f; color: #cce4ff; border: 1px solid #2d5688; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .install-btn:hover { background: #244878; }
+  .install-btn:disabled { opacity: 0.5; cursor: wait; }
+  .install-log { margin-top: 8px; padding: 8px 12px; background: #0a0a0a; border-radius: 4px; max-width: 480px; max-height: 200px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 11.5px; color: #9a9a9a; text-align: left; white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>PAPERCUSP</h1>
+    <div class="spinner" id="spinner"></div>
+    <p class="msg" id="msg">starting harness sidecar…</p>
+    <ul class="check-list" id="checks" style="display:none"></ul>
+    <div class="hint-block" id="install-hint" style="display:none"></div>
+    <button class="install-btn" id="install-btn" style="display:none">Install AI Stack (claude + meridian + omp)</button>
+    <pre class="install-log" id="install-log" style="display:none"></pre>
+    <p class="msg" id="dev-hint" style="display:none">
+      Dev mode? Run <code>npm run dev:papercusp</code> in another terminal, then refresh.
+    </p>
+  </div>
+<script>
+  // Determine the sidecar base URL.
+  //   Production: Tauri's main.rs sets window.__papercuspBase to
+  //               http://localhost:<picked-port> once the sidecar is up.
+  //   Dev: point at :3055 (the externally-run Next dev server).
+  function sidecarBase() {
+    if (window.__papercuspBase) return window.__papercuspBase;
+    if (location.hostname === 'tauri.localhost' || location.protocol === 'tauri:') {
+      return 'http://localhost:3055';
+    }
+    return location.origin;
+  }
+
+  function badge(status) {
+    return `<span class="badge ${status}">${status}</span>`;
+  }
+
+  function renderChecks(payload) {
+    const ul = document.getElementById('checks');
+    ul.style.display = '';
+    ul.innerHTML = payload.checks.map(c => `
+      <li>
+        <span class="name">${c.name}</span>
+        ${badge(c.status)}
+        <span class="detail">${(c.detail ?? '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</span>
+      </li>
+    `).join('');
+  }
+
+  function renderHint(payload) {
+    const failed = payload.checks.filter(c => c.status !== 'ok');
+    if (!failed.length) return;
+    const hint = document.getElementById('install-hint');
+    const lines = [];
+    if (failed.find(c => c.name === 'node')) {
+      lines.push('<strong>Node 20+</strong> — install from <code>https://nodejs.org/</code> or via <code>nvm</code>.');
+    }
+    if (failed.find(c => c.name === 'postgres')) {
+      lines.push('<strong>PostgreSQL on :5432</strong> — install from <code>https://postgresql.org/download/</code>, then <code>brew services start postgresql</code> (mac) or <code>sudo systemctl start postgresql</code> (Linux).');
+    }
+    if (failed.find(c => c.name === 'pi')) {
+      lines.push('<strong>omp (oh-my-pi)</strong> — default agent backend. Install via <code>npm i -g @oh-my-pi/cli</code>. Then run <code>omp /login</code>.');
+    }
+    if (failed.find(c => c.name === 'meridian')) {
+      lines.push('<strong>meridian</strong> — routes omp through your Claude Max subscription (no API key required). Install via <code>npm i -g @rynfar/meridian</code>, then run <code>meridian</code> in a terminal to start the daemon on <code>:3456</code>.');
+    }
+    if (failed.find(c => c.name === 'claude')) {
+      lines.push('<strong>claude CLI (optional)</strong> — only needed if you switch to <code>AGENT_BACKEND=claude-code</code>. Install via the official script at <a href="https://docs.anthropic.com/en/docs/claude-code/setup" target="_blank">docs.anthropic.com</a>, or run <code>claude login</code> if already installed.');
+    }
+    if (failed.find(c => c.name === 'bash')) {
+      lines.push('<strong>bash</strong> — needed to run the orchestrator. macOS/Linux already have it; Windows: install <a href="https://git-scm.com/download/win" target="_blank">Git for Windows</a>, which ships <code>bash.exe</code>.');
+    }
+    if (failed.find(c => c.name === 'harness')) {
+      lines.push('<strong>harness package</strong> — set <code>PAPERCUSP_HARNESS_DIR</code> or symlink <code>~/autonomous-harness</code> to your harness checkout.');
+    }
+    hint.innerHTML = lines.join('<br><br>');
+    hint.style.display = '';
+    // Surface one-click installer if any of the auto-installable
+    // components are missing. (Bash + node + postgres + harness are
+    // host-level prereqs we can't fix from the app.)
+    const autoInstallable = ['claude', 'meridian', 'pi'];
+    if (failed.some(c => autoInstallable.includes(c.name))) {
+      document.getElementById('install-btn').style.display = '';
+    }
+  }
+
+  function appendLog(line) {
+    const log = document.getElementById('install-log');
+    log.style.display = '';
+    log.textContent += line;
+    log.scrollTop = log.scrollHeight;
+  }
+
+  async function runInstall() {
+    const btn = document.getElementById('install-btn');
+    btn.disabled = true;
+    btn.textContent = 'Installing…';
+    appendLog(`→ POST ${sidecarBase()}/api/desktop/install-claude-stack\n`);
+    try {
+      const r = await fetch(`${sidecarBase()}/api/desktop/install-claude-stack`, { method: 'POST' });
+      if (!r.ok || !r.body) throw new Error('install responded ' + r.status);
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // Parse SSE: blocks separated by \n\n.
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          let event = 'message';
+          let data = '';
+          for (const line of block.split('\n')) {
+            if (line.startsWith('event:')) event = line.slice(6).trim();
+            else if (line.startsWith('data:')) data += line.slice(5).trim();
+          }
+          if (!data) continue;
+          let payload;
+          try { payload = JSON.parse(data); } catch { continue; }
+          if (event === 'log' && payload.line) appendLog(payload.line);
+          else if (event === 'step') appendLog(`[${payload.name}] ${payload.status}\n`);
+          else if (event === 'done') {
+            appendLog(`\n${payload.ok ? '✓ done' : '✗ failed'}: ${payload.hint || payload.reason || ''}\n`);
+            btn.textContent = payload.ok ? 'Re-running checks…' : 'Install failed — retry';
+            btn.disabled = !payload.ok;
+            // Reload preflight on success.
+            if (payload.ok) setTimeout(() => location.reload(), 1500);
+          }
+        }
+      }
+    } catch (err) {
+      appendLog(`error: ${err.message}\n`);
+      btn.disabled = false;
+      btn.textContent = 'Install failed — retry';
+    }
+  }
+
+  document.getElementById('install-btn').addEventListener('click', runInstall);
+
+  let attempt = 0;
+  let everReached = false;
+  let consecutiveOk = 0;
+
+  async function tick() {
+    attempt += 1;
+    const msg = document.getElementById('msg');
+    try {
+      const r = await fetch(`${sidecarBase()}/api/desktop/preflight`, { cache: 'no-store' });
+      if (!r.ok) throw new Error('preflight responded ' + r.status);
+      const data = await r.json();
+      everReached = true;
+      msg.classList.remove('err');
+      msg.textContent = data.ok
+        ? 'all checks passed — opening…'
+        : 'sidecar up; some prerequisites are missing:';
+      renderChecks(data);
+      renderHint(data);
+      if (data.ok) {
+        consecutiveOk += 1;
+        if (consecutiveOk >= 1) {
+          // Real navigation — leave this bootstrap page.
+          location.href = `${sidecarBase()}/harness`;
+          return;
+        }
+      } else {
+        consecutiveOk = 0;
+      }
+    } catch (err) {
+      if (!everReached) {
+        msg.textContent = `starting harness sidecar… (attempt ${attempt})`;
+      } else {
+        msg.classList.add('err');
+        msg.textContent = `sidecar unreachable: ${err.message}`;
+      }
+    }
+    setTimeout(tick, 1000);
+  }
+
+  // After 8s with no sidecar contact, show the dev-mode hint.
+  setTimeout(() => {
+    if (!everReached) {
+      document.getElementById('dev-hint').style.display = '';
+    }
+  }, 8000);
+
+  tick();
+</script>
+</body>
+</html>

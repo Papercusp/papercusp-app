@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    // Match the current Node/tsx runner, including require(ESM). NodeNext
+    // preserves extensionless imports in this CommonJS package. The retired
+    // node10 resolver prevented TS7 from checking any runner source at all.
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node", "@wdio/globals/types", "@wdio/mocha-framework", "expect-webdriverio"]
+  },
+  "include": ["./**/*.ts"]
+}

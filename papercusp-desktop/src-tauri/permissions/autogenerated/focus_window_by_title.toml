@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-focus-window-by-title"
+description = "Enables the focus_window_by_title command without any pre-configured scope."
+commands.allow = ["focus_window_by_title"]
+
+[[permission]]
+identifier = "deny-focus-window-by-title"
+description = "Denies the focus_window_by_title command without any pre-configured scope."
+commands.deny = ["focus_window_by_title"]

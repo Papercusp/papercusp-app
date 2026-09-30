@@ -1,0 +1,8 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Queen mark monochrome">
+  <path d="M64 8 113 36v56l-49 28-49-28V36z" stroke="currentColor" stroke-width="3.2" stroke-linejoin="round"/>
+  <path d="M35 48 48 30l16 19 16-19 13 18-8 37H43z" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+  <circle cx="64" cy="72" r="25" stroke="currentColor" stroke-opacity=".62" stroke-width="1.8"/>
+  <path d="M47 75h34M52 65h24M57 55h14" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/>
+  <path d="M64 42v54" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="M31 91h66" stroke="currentColor" stroke-opacity=".42" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

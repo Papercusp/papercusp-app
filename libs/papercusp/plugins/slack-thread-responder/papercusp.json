@@ -1,0 +1,143 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/slack-thread-responder",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Starter trigger pack: a Slack mention launches a plan that responds in the originating thread.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": { "mode": "exact" },
+  "capabilities": [],
+  "oauth": [
+    {
+      "provider": "slack",
+      "scopes": [
+        "app_mentions:read",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "mpim:history",
+        "commands",
+        "chat:write",
+        "connections:write"
+      ],
+      "fieldName": "slackSocket"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["slackSocket"],
+    "properties": {
+      "slackSocket": {
+        "type": "string",
+        "title": "Slack Socket Mode connection",
+        "secret": true,
+        "shareable": false,
+        "snapshotPolicy": "strip",
+        "oauth": {
+          "provider": "slack",
+          "scopes": [
+            "app_mentions:read",
+            "channels:history",
+            "groups:history",
+            "im:history",
+            "mpim:history",
+            "commands",
+            "chat:write",
+            "connections:write"
+          ]
+        },
+        "description": "Opaque dual-token Socket Mode connection. App and bot tokens never enter the pack or a snapshot."
+      }
+    }
+  },
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "responseGuidance": {
+          "type": "string",
+          "title": "Reply guidance",
+          "default": "Concise, helpful, and specific to the triggering message.",
+          "maxLength": 1000
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 10,
+      "windowSeconds": 60
+    },
+    "targets": [
+      {
+        "id": "thread-reply",
+        "kind": "plan",
+        "path": "plan.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trigger"],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey", "payload"],
+              "properties": {
+                "key": { "const": "ext:slack:mention" },
+                "source": { "const": "slack" },
+                "event": { "const": "mention" },
+                "sourceId": { "type": "string", "minLength": 1 },
+                "externalId": { "type": "string", "minLength": 1 },
+                "dedupeKey": { "type": "string", "minLength": 1 },
+                "payload": {
+                  "type": "object",
+                  "datatype": "chat-message",
+                  "additionalProperties": true,
+                  "required": ["id", "channelId", "threadId", "text"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "channelId": { "type": "string", "minLength": 1 },
+                    "threadId": { "type": "string", "pattern": "^\\d+(?:\\.\\d+)?$" },
+                    "text": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            },
+            "responseGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "Concise, helpful, and specific to the triggering message."
+            }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "slack-mention-to-thread-reply",
+        "source": {
+          "kind": "external",
+          "sourceKind": "slack",
+          "oauthField": "slackSocket"
+        },
+        "target": "thread-reply",
+        "eventPattern": "ext:slack:mention",
+        "filter": {
+          "all": [
+            { "channelId": { "exists": true } },
+            { "threadId": { "exists": true } },
+            { "text": { "exists": true } }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      }
+    ],
+    "edges": []
+  },
+  "icon": "MessageSquareReply"
+}

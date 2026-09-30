@@ -1,0 +1,50 @@
+{
+  "name": "@papercusp/agent-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server exposing workspace-knowledge tools to in-app concierges (Operator, Oracle) and out-of-process pi sessions.",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/server.ts",
+    "./provisioning": "./src/provisioning.ts",
+    "./auth": "./src/auth.ts",
+    "./plugin-events": "./src/plugin-events.ts",
+    "./validation-context": "./src/validation-context.ts",
+    "./gate-bypass": "./src/gate-bypass.ts",
+    "./role-config": "./src/role-config.ts",
+    "./_bulk": "./src/_bulk.ts",
+    "./goals": "./src/tools/goals/_core.ts",
+    "./goal-deps": "./src/tools/goals/goal-deps.ts",
+    "./goal-pause": "./src/tools/goals/pause-record.ts",
+    "./goal-history": "./src/tools/goals/history.ts"
+  },
+  "scripts": {
+    "test": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts --passWithNoTests",
+    "typecheck": "node ../../scripts/lint-tsc-agent-mcp.mjs",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@mcp-ui/server": "^6.1.0",
+    "@modelcontextprotocol/sdk": "*",
+    "@papercusp/db-org": "*",
+    "@papercusp/host-platform": "file:../../libs/host-platform",
+    "@papercusp/operator-core": "*",
+    "@papercusp/plugin-sdk": "*",
+    "@papercusp/result-encoding": "*",
+    "@papercusp/sse": "file:../../libs/generic/sse",
+    "@papercusp/tooldef": "*",
+    "@papercusp/tooldef-http": "*",
+    "postgres": "*",
+    "zod": "*"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "js-tiktoken": "*"
+  },
+  "peerDependencies": {
+    "@papercusp/db-org": "*"
+  }
+}

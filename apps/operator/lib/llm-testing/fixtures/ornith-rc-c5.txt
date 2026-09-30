@@ -1,0 +1,17 @@
+ornith COMPREHENSION-test fixture RC-C5 — throwaway, safe to overwrite between runs.
+
+BUG: average(arr) must return the mean of the numbers, and 0 for an EMPTY array,
+but right now average([]) returns NaN (a division by zero). Read it, understand the
+empty-array case, and fix it so the expectations below all pass. Change ONLY what is
+needed.
+
+function average(arr) {
+  let sum = 0;
+  for (const x of arr) sum += x;
+  return sum / arr.length;
+}
+
+EXPECTED after fix:
+  average([2, 4, 6]) === 4
+  average([])        === 0
+  average([5])       === 5

@@ -1,0 +1,16 @@
+{
+  "agent": "claude",
+  "capturedAt": "2026-09-22T15:04:32.774Z",
+  "generator": "scripts/capture-turn-classifier-fixtures.mjs",
+  "sourceSha256": "85011158d13b20cdafd4ede5c4b438e198b703fc09092c69079fe6af27e7a50f",
+  "sourceRowCount": 3071,
+  "capturedRowCount": 189,
+  "windowStartIndex": 2873,
+  "completionIndex": 3038,
+  "trailingRowCount": 23,
+  "discriminator": "at least one type:'user' row carrying a tool_result block (the D-003 trap)",
+  "verdictPreservingSanitizer": "proven at capture: raw vs sanitized agree on every row, in-fence and out-of-fence",
+  "completionsConsidered": 29,
+  "windowsRejectedAsNonDiscriminating": 2,
+  "note": "Captured from a real on-disk transcript; every field the classifier does not read was dropped at capture time."
+}

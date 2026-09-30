@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# pre-push — two guards:
+#
+#   1. "main is automation-only" (staging-branch-pipeline-2026-06-06) — a HARD block.
+#   2. Affected-test author-warning (catch-test-lags-migration-at-the-author #4) — a
+#      loud, OVERRIDABLE soft-block that runs `npm run test:affected` for the
+#      about-to-push staging changes, so an author pushing a migration sees their own
+#      test fallout BEFORE it reds the fleet's green-checkpoint gate (which on
+#      2026-06-23 stalled the gate ~4h when a component migration's ~6 affected test
+#      files weren't updated by the author and only the FLEET gate caught it).
+#
+# GitHub-side branch protection is unavailable on this repo (private repo, free plan
+# → 403), so this LOCAL hook is the enforcement point — sufficient here because every
+# pusher (agents, git-sync, green-checkpoint) runs on this box and all worktrees share
+# the common .git hooks dir.
+#
+# Install (idempotent; done by the cutover, re-run if .git is ever recreated):
+#   cp bin/git-hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+#
+# stdin: one line per ref being pushed: "<local ref> <local sha> <remote ref> <remote sha>"
+
+# ── Guard 1: main is automation-only ─────────────────────────────────────────────────
+# green-checkpoint is the ONE writer allowed to fast-forward `main` (it sets
+# PAPERCUSP_MAIN_PUSH_OK=1). Everyone else — agents, humans, git-sync — pushes `staging`.
+# This must run first and exit-0 fast for the privileged path. We read stdin into an
+# array up front so guard 2 can reuse it.
+refs=()
+pushing_staging=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  refs+=("$local_ref $local_sha $remote_ref $remote_sha")
+  if [ "${PAPERCUSP_MAIN_PUSH_OK:-}" != "1" ] && [ "$remote_ref" = "refs/heads/main" ]; then
+    echo "✖ push to main BLOCKED: main is automation-only — green-checkpoint fast-forwards it from green staging." >&2
+    echo "  Your work lands on staging (git-sync owns commit+push); main advances when the suite is green." >&2
+    echo "  See CLAUDE.md §Branch discipline + apps/operator/lib/release/README.md." >&2
+    exit 1
+  fi
+  if [ "$remote_ref" = "refs/heads/staging" ]; then pushing_staging=1; fi
+done
+
+# ── Guard 2: affected-test author-warning (staging pushes only) ────────────────────────
+# Bail FAST + silently for every path that must not run a test suite on push:
+#
+#   • git-sync's scheduled auto-push (PAPERCUSP_GIT_SYNC_PUSH=1, set by the git-sync
+#     git runner — run-git-sync.ts defaultRunGit). git-sync commits `--no-verify` and
+#     pushes on a ≤10-min cron; running `test:affected` here would WEDGE it. This is the
+#     single most important skip — it is why this guard is warn-only + heavily gated.
+#   • green-checkpoint's main fast-forward (PAPERCUSP_MAIN_PUSH_OK=1) — already past
+#     guard 1, and the suite already ran in the checkpoint.
+#   • explicit author opt-out (SKIP_AFFECTED=1).
+#   • non-interactive / CI shells (no TTY) — never block an unattended push.
+#   • pushes that are NOT to staging (the only branch the gate cares about).
+[ "${PAPERCUSP_GIT_SYNC_PUSH:-}" = "1" ] && exit 0
+[ "${PAPERCUSP_MAIN_PUSH_OK:-}" = "1" ] && exit 0
+[ "${SKIP_AFFECTED:-}" = "1" ] && exit 0
+case "${CI:-}" in 1|true) exit 0 ;; esac
+[ "$pushing_staging" = "1" ] || exit 0
+# No controlling terminal → an automated/background push; warn-only must never block it.
+[ -t 1 ] || [ -t 2 ] || exit 0
+
+# Locate the repo root so the hook works from any worktree / .git/hooks invocation.
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -f "$repo_root/package.json" ] || exit 0
+
+echo "▶ pre-push: running affected unit tests (npm run test:affected) for your staging push…" >&2
+echo "  This catches test-lags-migration at YOU instead of the fleet's green gate." >&2
+echo "  Override with SKIP_AFFECTED=1 git push (e.g. for a docs-only or known-safe push)." >&2
+
+# Run the fast unit affected set. AFFECTED_BASE=origin/staging so the diff is YOUR
+# about-to-push delta vs the shared remote, not vs origin/main (which may be many
+# commits behind staging). `|| affected_rc=$?` keeps `set -e`-free bash from aborting.
+affected_rc=0
+( cd "$repo_root" && AFFECTED_BASE=origin/staging npm run --silent test:affected ) || affected_rc=$?
+
+if [ "$affected_rc" -ne 0 ]; then
+  echo "" >&2
+  echo "⚠️  pre-push: AFFECTED UNIT TESTS FAILED (exit $affected_rc)." >&2
+  echo "    Your push touches code whose affected tests are RED. Pushing this to staging" >&2
+  echo "    will red the fleet's green-checkpoint gate and stall every peer's deploy." >&2
+  echo "    Fix the tests (a migration usually needs its ~N consumer test files updated)," >&2
+  echo "    OR re-push with SKIP_AFFECTED=1 if you have a deliberate reason." >&2
+  echo "    Push ABORTED (soft-block; SKIP_AFFECTED=1 overrides)." >&2
+  exit 1
+fi
+
+echo "✔ pre-push: affected unit tests passed." >&2
+exit 0

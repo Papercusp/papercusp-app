@@ -1,0 +1,113 @@
+# mcp-handler's detached write pump crashes the host on client disconnect (ERR_INVALID_STATE)
+URL: /internal/docs/agent-insights/mcp-handler-enqueue-after-close-crash
+
+When an MCP/SSE client disconnects mid-stream, cancelling mcp-handler's response stream closes its adapter controller and the library's detached write pump then enqueues onto it → TypeError[ERR_INVALID_STATE] → unhandledRejection → the whole operator host crash-loops. Fix is to DRAIN, never cancel, the inner stream in primeSseResponse.
+
+import { Aside } from '@astrojs/starlight/components';
+
+## The signature
+
+`:3070` (or any operator host) **crash-loops under MCP load**, with a fatal:
+
+```
+TypeError [ERR_INVALID_STATE]: Invalid state: Controller is already closed
+    at ReadableStreamDefaultController.enqueue (node:internal/...)
+    ... processTicksAndRejections
+[hono-host] fatal unhandledRejection — exiting
+```
+
+It correlates with **clients disconnecting mid-stream** — exactly the
+`chat:ask_choice` / blocking-tool shape, or any agent that drops a streaming
+`tools/call` while the SSE body is still open. One dropped client takes the
+**whole fleet** down (Node ≥15 terminates on unhandledRejection).
+
+## Why it happens
+
+`mcp-handler@1.1.0`'s streamable-HTTP POST path uses
+`createServerResponseAdapter` (`node_modules/mcp-handler/dist/index.js`): it
+exposes the response body as a `ReadableStream` and **writes to that stream's
+controller from a detached promise** — `void fn(fakeServerResponse)` (≈L822).
+The write pump is:
+
+```js
+while (true) { const { done, value } = await reader.read(); if (done) break; res.write(value); }
+// res.write → controller.enqueue(data)   (≈L781)
+```
+
+`ReadableStreamDefaultController.enqueue` **throws synchronously** if the
+controller is already closed. Because the pump runs inside a `void`-ed promise,
+that throw is an **unhandledRejection** with nothing to catch it.
+
+The controller gets closed early on **client disconnect**. For event-stream
+responses our wrapper `primeSseResponse`
+(`packages/operator-core/lib/endpoint-route/routes/transport/_mcp-handler.ts`)
+is the *only* consumer of mcp-handler's adapter stream, and its old `cancel`
+handler did `return reader.cancel(reason)` — which **force-closes mcp-handler's
+adapter controller while its pump is still writing**. Next `res.write` → throw.
+
+mcp-handler's adapter stream has **no `cancel` handler** (dist ≈L826). So
+`reader.cancel()` never actually *propagated* the disconnect to the tool — it
+only closed the controller (the crash). Disconnect reaches the tool/transport
+through a **different** channel: `request.signal` → mcp-handler's `"close"`
+event → `transport.onclose`. So the old cancel was a propagation **no-op** and a
+crash **trigger** at the same time. Removing it loses nothing.
+
+## The fix — drain, don't cancel
+
+In `primeSseResponse`, on client disconnect **drain the inner stream to
+completion in the background** instead of cancelling it. mcp-handler's own
+`res.end()` then stays the **only** thing that closes its controller, so an
+enqueue-after-close can never occur:
+
+```ts
+cancel() {
+  cancelled = true;
+  void (async () => {
+    try {
+      await lastRead;                 // serialize: never read concurrent with an in-flight pull
+      for (;;) { const { done } = await reader.read(); if (done) break; }
+    } catch { /* inner torn down */ }
+  })();
+}
+```
+
+Also guard the forwarding enqueue (`if (cancelled) return; try { controller.enqueue(value) } catch {}`)
+and track the in-flight pull read (`lastRead`) so the drain never issues a read
+concurrent with a pending `pull` read (that throws *"read while another read is
+in progress"*).
+
+Disconnect still reaches blocking tools via `request.signal` (unchanged). The
+process-level backstop in `apps/operator/bin/hono-host.ts`'s
+`unhandledRejection`/`uncaughtException` guards stays as defense-in-depth for
+the rare non-streaming residual — it delegates the swallow-or-exit decision to
+`isBenignHostError()` (`apps/operator/bin/host-benign-errors.ts`), which now
+classifies **five** client-caused/transient-infra classes, not just this one:
+EI-12's `isBenignStreamClose` (this page — `ERR_INVALID_STATE` / "Controller is
+already closed"), EI-714's `isBenignRequestParse` (a malformed-JSON-RPC-body
+`SyntaxError` from the same detached pump), a transient torn-down-PG-connection
+`isTransientPgConnectionError` (2026-06-18), an inotify-watcher-budget
+`isBenignFileWatcherError` (EI-3385, 2026-06-24), and an unresolvable-harness
+`isUnresolvablePlanScopeError` (WI-148). Everything **not** in that predicate
+set still fails fast (exits) — the multi-tenant contract this page describes
+(one bad client costs its own request, never the process) is now enforced by
+that shared classifier, not by a single inline stream-close check.
+
+## Don'ts
+
+* **Don't** propagate a client disconnect by cancelling a `ReadableStream` whose
+  producer is a library you don't control and that writes from a detached
+  promise — you'll convert a benign disconnect into an unhandledRejection. Drain
+  it, or stop the producer through its own abort/close channel
+  (`request.signal`), not by closing its controller out from under it.
+* **Don't** rely on `reader.cancel()` to "tell the tool to stop" unless the
+  inner stream actually has a `cancel` handler wired to that effect.
+* **Don't** call `reader.read()` from a `cancel` handler without first awaiting
+  any in-flight `pull` read.
+
+## Reproduce / pin
+
+`packages/operator-core/lib/endpoint-route/routes/transport/__tests__/sse-prime.test.ts`
+— the EI-12 case captures the inner controller, writes one frame *after* the
+outer reader is cancelled, and asserts no throw. It fails on the old
+`reader.cancel()` behavior (post-cancel `enqueue` throws `ERR_INVALID_STATE`)
+and passes on the drain fix.

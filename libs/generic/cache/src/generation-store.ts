@@ -1,0 +1,33 @@
+import type { GenerationStore } from './types';
+
+const SEP = '\0';
+
+/**
+ * In-memory bumpable-generation store. The default; also the reference the host's
+ * NOTIFY-fed / PG-backed store is expected to behave like. Generations are keyed per
+ * (workspaceId, tag) so workspaces never share a generation namespace (D-010).
+ */
+export class InMemoryGenerationStore implements GenerationStore {
+  private readonly gens = new Map<string, number>();
+
+  private k(workspaceId: string, tag: string): string {
+    return workspaceId + SEP + tag;
+  }
+
+  current(workspaceId: string, tag: string): number {
+    return this.gens.get(this.k(workspaceId, tag)) ?? 0;
+  }
+
+  bump(workspaceId: string, tags: readonly string[]): void {
+    for (const tag of tags) {
+      const key = this.k(workspaceId, tag);
+      this.gens.set(key, (this.gens.get(key) ?? 0) + 1);
+    }
+  }
+
+  snapshot(workspaceId: string, tags: readonly string[]): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const tag of tags) out[tag] = this.current(workspaceId, tag);
+    return out;
+  }
+}

@@ -1,0 +1,77 @@
+# Unified voice uses one brain, and deep analysis must come back through that same lane
+URL: /internal/docs/agent-insights/unified-voice-one-brain-and-deep-lane
+
+The hosted voice session is transport, not cognition. Final user transcripts are relayed into the Papercup pane, answers come back through voice:say and papercup-says, and hard-thinking questions use the deep-delegation lane so the answer returns to the same conversation instead of going to the Mug.
+
+## The invariant
+
+Hosted voice is now **one transport feeding one brain**:
+
+1. the provider session hears the user
+2. `OperatorVoiceSession` relays the final transcript into the Papercup pane
+3. the pane does the thinking
+4. the pane answers through `voice:say`
+5. `papercup-says-pump` fans that same answer back to every attached client
+
+That is the system. If a design introduces a second place that can "just answer
+voice turns directly," it is reintroducing the retired split-brain bug.
+
+## The trap this replaced
+
+The old path let a voice surface call a local converse brain while typed text
+and Papercup-pane input used a different route. That produced:
+
+* divergent answers between typed and spoken turns
+* no single conversation of record
+* no clean way for long analysis to return through the same voice session
+
+The fix was to demote the hosted voice engine to **front-end transport**. Its
+tool call returns only a fast acknowledgment; the actual answer arrives later
+from the pane.
+
+## The answer path
+
+`operator-voice-session-deps.ts` pushes a relay persona into the hosted session.
+That persona must:
+
+* call the tool on every user turn
+* never answer from its own knowledge
+* speak the tool result verbatim
+
+The tool result is intentionally short (`VOICE_RELAY_ACK`). The real answer comes
+from the pane through `voice:say`, then:
+
+* lands in the shared PG FIFO
+* is drained by `papercup-says-pump` while a voice session is live
+* is broadcast as both transcript and audio to every attached client
+* is persisted into the shared conversation thread
+
+So typed and spoken turns now land on the same conversation and leave through
+the same voice-out path.
+
+## The deep lane is for thinking, not the Mug
+
+When the user asks a question that needs real investigation, the Papercup must
+not disappear for minutes and must not hand cognition to the Mug. The split is:
+
+* **buildable work**: `<handoff_to_mug>` so the Mug places it
+* **hard thinking**: `voice:delegate_deep` / `<delegate_deep>` so a background
+  analysis agent returns an answer
+
+`papercup-deep-delegate.ts` creates a durable `research-task`, spawns an
+ephemeral analysis worker, and the worker's `completion.summary` becomes the
+answer. That answer is injected back into the pane as `[deep-answer WI-NNN] …`,
+which means it is spoken and written through the **same one-brain pipeline**.
+
+## Debugging checklist
+
+If voice looks wrong, check these seams in order:
+
+1. Did `OperatorVoiceSession` relay the final transcript into the pane?
+2. Did the pane answer with `voice:say`?
+3. Did the answer land in the shared papercup-says FIFO?
+4. Was `papercup-says-pump` active because a hosted voice session was live?
+5. If it was a hard-thinking ask, did a deep-delegation work item complete and
+   inject `[deep-answer …]` back into the pane?
+
+If any proposal bypasses those seams, it is probably wrong.

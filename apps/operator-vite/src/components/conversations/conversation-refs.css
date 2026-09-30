@@ -1,0 +1,39 @@
+/**
+ * conversation-refs.css — the plain (non-work-item) reference chip.
+ *
+ * A work-item ref renders through `HydratedWorkRefPill`, which brings its own
+ * state-coloured styling; only `plan` and `conversation` refs need a look of
+ * their own here. Deliberately NEUTRAL: the ref-pill vocabulary reserves colour
+ * for lifecycle STATE, and a plan/conversation ref has no state to show — a
+ * coloured chip here would read as a status it does not have.
+ */
+.pc-convref__chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 0 6px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg, inherit);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.6;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pc-convref__chip:hover,
+.pc-convref__chip:focus-visible {
+  border-color: var(--accent, currentColor);
+  color: var(--accent, inherit);
+}
+
+/* A conversation ref navigates WITHIN the pane rather than opening a popup, so
+   it reads as a sibling link, not a drill-out. */
+.pc-convref__chip--conversation {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}

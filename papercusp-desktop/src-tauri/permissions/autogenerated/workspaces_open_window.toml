@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspaces-open-window"
+description = "Enables the workspaces_open_window command without any pre-configured scope."
+commands.allow = ["workspaces_open_window"]
+
+[[permission]]
+identifier = "deny-workspaces-open-window"
+description = "Denies the workspaces_open_window command without any pre-configured scope."
+commands.deny = ["workspaces_open_window"]

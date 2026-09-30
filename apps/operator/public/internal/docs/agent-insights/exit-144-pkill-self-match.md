@@ -1,0 +1,102 @@
+# Process-table self-match — pkill -f kills your own shell; pgrep -f wait-loops never exit
+URL: /internal/docs/agent-insights/exit-144-pkill-self-match
+
+Any agent shell that pattern-matches the process table matches its OWN command line, because the pattern text is inside the bash -c argv. Kill direction — `pkill -f "<pattern>"` dies with exit 144 (kills its own shell). Wait direction — `until ! pgrep -f '<pattern>'; do sleep 5; done` loops FOREVER (the poll always finds itself; a peer burned 27 silent minutes, EI-19312699396945642). Same class, two symptoms; `ps | grep` loops share it and `grep -v grep` does not help.
+
+## Symptom
+
+A Bash tool call exits **144** with partial output — everything up to a
+`pkill -f "<pattern>"` line ran, nothing after it did. Repeats 100% of the
+time for that script, on any agent client (Claude Code, psu, OMP), regardless
+of box load or free memory.
+
+The seductive misread: "the environment is killing my long-running
+launches." On 2026-06-11 an agent (su-1656a) burned 5+ retries and handed off
+two e2e specs as "un-verifiable on this box — every `npx vite` / `npx
+playwright` launch is wall-clock-SIGTERM'd (exit 144), 104G free so not OOM."
+The launches were fine. Every rig script began (and ended) with
+`pkill -f "vite --port 3155"`.
+
+## Root cause
+
+The Bash tool executes your script as `bash -c '<entire script text>'` — the
+full script, **including the pkill pattern itself**, is in that process's
+command line. `pkill -f` matches against full command lines, so it matches
+*your own shell* and kills it. Exit 144, command truncated at the pkill line.
+
+The tell that it's self-inflicted, not environmental: side effects *before*
+the pkill landed; side effects *after* it (including `>` log truncation on a
+later line) never happened. In the e2e saga the vite log still held the
+previous night's content — the leading pkill killed the shell before the
+redirect ever executed.
+
+## Fix — kill by PID, never by pattern
+
+```bash
+# free a port: resolve the holder's PID, kill by number
+P=$(ss -ltnp 2>/dev/null | sed -n 's/.*:3155 .*pid=\([0-9]*\).*/\1/p' | head -1)
+[ -n "$P" ] && kill "$P"
+
+# tear down something you launched: you have $!
+setsid npx vite --port 3155 --strictPort >/tmp/rig.log 2>&1 &
+VPID=$!
+# ... use it ...
+kill -- -$VPID 2>/dev/null || kill $VPID
+```
+
+Acceptable alternatives: `pgrep -x <binary>` (exact name match, no -f), or
+`pgrep -f` → inspect the PID list → `kill <pids>` (pgrep doesn't kill, so
+matching yourself is harmless **in a one-shot kill flow** — see the wait-loop
+section below for where it is NOT harmless). Never `pkill -f` / `pkill -9 -f`
+from a tool call. The same rule protects peers: name-pattern kills on the
+shared box have previously taken out the owner's live desktop and peer Xvfb
+instances.
+
+## The same self-match, wait direction: a `pgrep -f` poll loop NEVER exits
+
+The kill direction dies loudly (exit 144). The **wait** direction fails
+*silently*: it looks like patient waiting, produces no error and no output,
+and never ends. Observed live 2026-08-02 (EI-19312699396945642) — a session
+"waiting" for its queued `lint:tsc` run sat 27 minutes in:
+
+```bash
+until ! pgrep -f 'lint-tsc' >/dev/null; do sleep 5; done   # NEVER exits
+```
+
+`pgrep -f` matches full command lines; the loop's own `bash -c` argv contains
+the literal `lint-tsc`, so the poller is always in its own result set and the
+condition is permanently true — regardless of what the real job does. The
+poll's natural trigger ("the box is busy, my job is queued") is exactly when
+the wasted minutes cost most.
+
+`ps … | grep <pat>` loop conditions have the same defect, **and `grep -v
+grep` does not fix it**: the `bash -c` wrapper whose argv carries the pattern
+is not named `grep`, so it still matches.
+
+Fixes, best first:
+
+1. **Don't poll.** `capability:bash { run_in_background: true }` +
+   `capability:bash_output { bash_id, filter }` — completion notification plus
+   a log that survives an operator restart.
+2. **Wait on the PID, not a pattern:** `tail --pid=<pid> -f /dev/null`, or
+   `kill -0 <pid>` in the loop.
+3. **If you genuinely must pattern-poll, bracket the first character** so the
+   pattern cannot match its own argv: `pgrep -f '[l]int-tsc'` still matches a
+   real `lint-tsc` process, but the poller's own argv now contains
+   `[l]int-tsc`, which the regex does not match (same trick as
+   `ps aux | grep '[f]oo'`).
+
+The PreToolUse bash gate now **denies** the un-bracketed loop form
+(`pretooluse-bash-resource-gate.sh`, "process-table wait-loop self-match
+guard") — one-shot `pgrep -f` / `ps | grep` reads terminate on their own and
+stay allowed.
+
+## Wider lesson
+
+A 100%-reproducible "environment kills my process" with partial script output
+is a *self-kill* until proven otherwise, and a pattern-poll that "just keeps
+waiting" is a *self-match* until proven otherwise. Check exactly which line
+stopped producing effects before blaming the box — and grep your own script
+for `pkill`/`pgrep`/`kill` patterns that could match the script text itself.
+This class has now hit at least five sessions (desktop-kill incident,
+su-6c28e, su-69643, su-1656a's e2e saga, su-e6ac4eb7's 27-minute pgrep loop).

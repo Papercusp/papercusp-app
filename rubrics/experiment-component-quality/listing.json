@@ -1,0 +1,10 @@
+{
+  "ref": "experiment-component-quality",
+  "id": "experiment-component-quality",
+  "title": "Experiment component quality",
+  "description": "Scorecard for component/gym experiments using the shared d1/d2/d3 judge dimensions.",
+  "category": "experiment",
+  "scope": "rubric",
+  "version": "0.1.0",
+  "source": "first-party"
+}

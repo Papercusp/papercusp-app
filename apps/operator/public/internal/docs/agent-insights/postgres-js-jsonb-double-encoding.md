@@ -1,0 +1,98 @@
+# postgres-js double-encodes ${JSON.stringify(x)}::jsonb
+URL: /internal/docs/agent-insights/postgres-js-jsonb-double-encoding
+
+Binding a jsonb column with JSON.stringify + ::jsonb wraps the value twice under a fresh pool — but the operator runtime client (getOrgPg) is the inverse. Use ${JSON.stringify(x)}::text::jsonb, which is correct under BOTH. See postgres-js-jsonb-binding.
+
+import { Aside } from '@astrojs/starlight/components';
+
+This page is **half the picture**. The double-encoding it describes is real **only
+for a fresh `postgres()` pool / the testcontainer client**. Under the operator
+**runtime** client (`getOrgPg().sql`) the behaviour is the *inverse*:
+`${JSON.stringify(x)}::jsonb` stores a correct object and `sql.json(x)` **throws**
+(so the "Fix" below — switch to `sql.json()` — would *break production*, and was
+in fact reverted for the getOrgPg projections). **The form that is correct under
+BOTH clients is `${JSON.stringify(x)}::text::jsonb`** (the explicit `::text` cast
+forces a plain text param → parsed once server-side). Prefer it everywhere. Full
+client-by-client matrix + verification: **[postgres-js-jsonb-binding](/internal/docs/agent-insights/postgres-js-jsonb-binding)**.
+
+## Symptom
+
+A jsonb column federated through the substrate CDC-outbox keeps gaining a layer
+of JSON-string escaping every merge cycle:
+
+```
+[]  →  "[]"  →  "\"[]\""  →  "\"\\\"[]\\\"\""  →  …  (unbounded)
+```
+
+Downstream effect: the migration-102 capture guard (`OLD.* IS DISTINCT FROM
+NEW.*`) correctly fires on every pass because the value genuinely changes, so
+`substrate_outbox` **never reaches a fixed point** — unbounded intra-peer
+self-amplification. The Stage-6 `feature-content-federation.integration` test
+surfaced this as "outbox never converged"; it is also a live data-corruption
+bug (jsonb columns silently stored as escaped strings) in any federated
+projection with a non-null jsonb field.
+
+## Root cause
+
+postgres-js JSON-serializes a JS value **itself** when it binds a parameter for
+a json/jsonb context. So:
+
+```ts
+await sql`INSERT ... VALUES (${JSON.stringify(row.notes ?? [])}::jsonb)`;
+```
+
+double-encodes:
+
+1. `JSON.stringify([])` → the JS string `"[]"` (layer 1)
+2. postgres-js serializes **that string** for the `::jsonb` cast → the jsonb
+   **string** `"[]"`, not the array `[]` (layer 2)
+
+Each capture → drain → re-apply round-trip reads the (already-escaped) value
+back and stringifies it again. Proven with a standalone postgres-js round-trip
+probe: `JSON.stringify(value)::jsonb` accumulates layers; `sql.json(value)` is
+idempotent (`[]` stays `[]`, `[{m:'hi'}]` stays `[{m:'hi'}]`).
+
+## Fix
+
+Bind via postgres-js's `sql.json()` helper (single, correct serialization) — no
+manual `JSON.stringify`, no `::jsonb` cast:
+
+```ts
+// WRONG — double-encodes
+${JSON.stringify(row.notes ?? [])}::jsonb
+${row.metadata == null ? null : JSON.stringify(row.metadata)}::jsonb
+
+// RIGHT — postgres-js serializes once
+${sql.json(row.notes ?? [])}
+${row.metadata == null ? null : sql.json(row.metadata)}   // keep the NULL guard
+```
+
+Keep the `== null ? null :` guard for nullable jsonb columns so a missing value
+stores SQL `NULL`, not a JSON `null`.
+
+Fixed sites (all in `packages/operator-core/lib/sync/hyperbee/projections/`):
+`issues.notes`, `harness-features.metadata` + `.tags`, `usage.payload`,
+`contributors.device_attestations`.
+
+## Guard against regression
+
+Grep for the anti-pattern before shipping a projection:
+
+```bash
+grep -rn 'JSON.stringify.*}::jsonb' packages/operator-core/lib
+```
+
+Any hit is a double-encode. `revoked_pubkeys` (a native PG `text[]`, bound
+directly without `JSON.stringify`) is fine — this only affects `jsonb` columns
+fed a `JSON.stringify` result.
+
+The real guard is the ESLint rule **`papercusp/no-bare-jsonb-cast`** (wired
+`error` for `packages/operator-core/lib`, `packages/coordination/src`,
+`libs/papercusp/libs/db/src` — it also catches a bare `${someVar}::jsonb`
+where the `JSON.stringify` happened on an earlier line, which the grep above
+misses). Don't assume it's actually clean, though: as of 2026-07-02,
+`npx eslint packages/operator-core/lib` still reports 50+ live violations
+re-introduced after the original sweep — see
+**[postgres-js-jsonb-binding](/internal/docs/agent-insights/postgres-js-jsonb-binding)**
+and **EI-6682**. Run eslint on the file you're touching; don't take "the rule
+exists" as proof the codebase is currently compliant.

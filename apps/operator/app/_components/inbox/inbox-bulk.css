@@ -1,0 +1,437 @@
+/* ── Inbox BULK RESOLVE command strip (inbox-bulk-resolve-2026-08-23, P-006)
+   ────────────────────────────────────────────────────────────────────────────
+   Owner-approved direction A (D-003): one full-width band between the "Needs
+   you" masthead and the search/filter toolbar, holding three states in the same
+   slot (idle / running / review).
+
+   A SEPARATE FILE, not more of inbox-pane.css, for two reasons: the strip is a
+   flag-gated surface that must be removable as a unit, and inbox-pane.css is
+   concurrently edited — a 200-line append there is a merge conflict for no
+   benefit. It is imported by InboxBulkStrip.tsx, so it loads only where the
+   strip does.
+
+   Colors follow the pane's existing token convention: `var(--token, literal)`
+   with the literal matching the approved mockup, so the strip inherits a themed
+   host and still renders correctly standalone. The blue (#1688ff) is the pane's
+   own active-chip blue; the violet (#8b5cf6) is its accent — review state reuses
+   the accent deliberately, so "waiting on you" reads the same here as elsewhere
+   in the pane. */
+
+.op-inbox__bulk-slot { display: flex; flex-direction: column; gap: 6px; padding: 0 0 8px; }
+
+/* ── Shared resolver settings / launch receipt (bulk-resolver P-005) ───── */
+.op-resolver-settings { min-width: 0; }
+.op-resolver-settings__trigger {
+  width: 100%; min-width: 0; justify-content: flex-start; gap: 6px;
+  color: var(--fg-mute, #a6a6ad);
+  border-color: var(--border, rgba(255,255,255,0.14));
+}
+.op-resolver-settings__trigger > span {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.op-resolver-settings__spin { animation: op-inbox-bulk-spin 900ms linear infinite; }
+.op-resolver-settings__panel {
+  width: min(440px, calc(100vw - 24px)); padding: 12px;
+  border: 1px solid var(--border, rgba(255,255,255,0.14));
+  border-radius: 12px; background: var(--bg-popover, #0d1829);
+  box-shadow: 0 18px 54px rgba(0,0,0,0.62);
+}
+.op-resolver-settings__panel-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
+.op-resolver-settings__panel-head strong { font-size: 12px; color: var(--fg, #e7e7ea); }
+.op-resolver-settings__panel-head span,
+.op-resolver-settings__fixed-copy,
+.op-resolver-settings__hint {
+  margin: 0; font-size: 10px; line-height: 1.4; color: var(--fg-mute, #8a8a91);
+}
+.op-resolver-settings__grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px;
+}
+.op-resolver-settings__grid > label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.op-resolver-settings__grid > label > span {
+  font-size: 9px; font-weight: 720; text-transform: uppercase;
+  color: var(--fg-mute, #8a8a91);
+}
+.op-resolver-settings__grid .h-combobox,
+.op-resolver-settings__grid .h-combobox__box { width: 100%; min-width: 0; }
+.op-resolver-settings__fixed-copy { margin-top: 10px; }
+.op-resolver-settings__hint { margin-top: 7px; color: var(--warn, #fbbf24); }
+.op-resolver-settings__saved,
+.op-resolver-settings__error {
+  display: flex; align-items: center; gap: 6px; margin-top: 8px;
+  padding-top: 8px; border-top: 1px solid var(--border, rgba(255,255,255,0.1));
+  font-size: 10px; line-height: 1.35;
+}
+.op-resolver-settings__saved { color: var(--good, #6ee7b7); }
+.op-resolver-settings__error { color: var(--bad, #f87171); }
+.op-resolver-settings__error > button {
+  margin-left: auto; min-height: 24px; padding: 0 8px; font-size: 10px;
+}
+.op-resolver-settings--receipt {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0;
+  padding-bottom: 7px; border-bottom: 1px solid color-mix(in srgb, var(--border, #ffffff22) 70%, transparent);
+  font-size: 10px;
+}
+.op-resolver-settings__eyebrow {
+  flex: 0 0 auto; font-size: 8.5px; font-weight: 760;
+  text-transform: uppercase; color: var(--good, #6ee7b7);
+}
+.op-resolver-settings__summary {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg, #e7e7ea);
+}
+.op-resolver-settings__fixed { margin-left: auto; flex: 0 0 auto; color: var(--fg-mute, #8a8a91); }
+.op-resolver-settings__liveness {
+  display: flex; align-items: center; gap: 6px; flex: 1 0 100%;
+  color: var(--warn, #fbbf24); font-size: 10px;
+}
+.op-resolver-settings__liveness > button {
+  display: inline-flex; align-items: center; gap: 4px; margin-left: auto;
+  min-height: 24px; padding: 0 8px; border-radius: 7px;
+  border: 1px solid color-mix(in srgb, var(--warn, #fbbf24) 52%, transparent);
+  color: var(--warn, #fbbf24); background: color-mix(in srgb, var(--warn, #fbbf24) 9%, transparent);
+}
+.op-resolver-settings__liveness > button:disabled { opacity: 0.58; }
+
+/* ── IDLE: the one button ─────────────────────────────────────────────── */
+.op-inbox__bulk-start {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  min-height: 50px; padding: 0 14px; border-radius: 12px; cursor: pointer;
+  color: #eff6ff; text-align: left;
+  border: 1px solid color-mix(in srgb, #38bdf8 55%, transparent);
+  background: linear-gradient(145deg, color-mix(in srgb, #1688ff 84%, transparent), color-mix(in srgb, #0766d8 78%, transparent));
+  box-shadow: 0 10px 28px color-mix(in srgb, #1688ff 30%, transparent);
+  transition: box-shadow 120ms ease, transform 120ms ease, opacity 120ms ease;
+}
+.op-inbox__bulk-start:hover:not(:disabled) {
+  box-shadow: 0 12px 32px color-mix(in srgb, #1688ff 40%, transparent);
+  transform: translateY(-1px);
+}
+.op-inbox__bulk-start:active:not(:disabled) { transform: translateY(0); }
+/* Disabled at zero rows is a REAL state, not decoration: a run over nothing is
+   never correct, and the route refuses one — so the button must not offer it. */
+.op-inbox__bulk-start:disabled {
+  cursor: default; opacity: 0.45; box-shadow: none;
+  background: var(--bg-3, rgba(255, 255, 255, 0.04));
+  border-color: var(--border, rgba(255, 255, 255, 0.14));
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__bulk-start-copy {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  min-width: 0; flex: 1 1 auto;
+}
+.op-inbox__bulk-start-title { font-size: 13.5px; font-weight: 760; line-height: 1.1; }
+.op-inbox__bulk-start-sub {
+  font-size: 10px; font-weight: 550; color: #cfe6ff; opacity: 0.9;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+}
+.op-inbox__bulk-start:disabled .op-inbox__bulk-start-sub { color: var(--fg-mute, #8a8a91); }
+
+/* ── Shared frame for the running/review bands ────────────────────────── */
+.op-inbox__bulk {
+  display: flex; flex-direction: column; gap: 8px; width: 100%;
+  padding: 11px 13px; border-radius: 12px; margin-bottom: 8px;
+}
+.op-inbox__bulk--running {
+  border: 1px solid color-mix(in srgb, #38bdf8 45%, transparent);
+  background: color-mix(in srgb, #1688ff 10%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, #1688ff 14%, transparent);
+}
+.op-inbox__bulk--review {
+  gap: 9px; padding: 12px 13px;
+  border: 1px solid color-mix(in srgb, var(--accent, #8b5cf6) 50%, transparent);
+  background: color-mix(in srgb, var(--accent, #8b5cf6) 10%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--accent, #8b5cf6) 16%, transparent);
+}
+.op-inbox__bulk-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.op-inbox__bulk-spacer { flex: 1 1 auto; }
+.op-inbox__bulk-title {
+  font-size: 12.5px; font-weight: 730; color: var(--fg, #e7e7ea);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.op-inbox__bulk--review .op-inbox__bulk-title { font-size: 13px; font-weight: 740; }
+.op-inbox__bulk-elapsed {
+  flex: 0 0 auto; font-size: 10px; color: var(--fg-mute, #8a8a91);
+  font-variant-numeric: tabular-nums;
+}
+.op-inbox__bulk-icon { display: inline-flex; align-items: center; color: #7dd3fc; }
+.op-inbox__bulk-icon--review { color: color-mix(in srgb, var(--accent, #8b5cf6) 70%, #ffffff); }
+
+.op-inbox__bulk-spin { display: inline-flex; align-items: center; color: #7dd3fc; }
+.op-inbox__bulk-spin > svg { animation: op-inbox-bulk-spin 900ms linear infinite; }
+@keyframes op-inbox-bulk-spin { to { transform: rotate(360deg); } }
+/* Respect the OS setting rather than spinning regardless: the strip's live-ness
+   is already carried by the progress bar and the counts. */
+@media (prefers-reduced-motion: reduce) {
+  .op-inbox__bulk-spin > svg { animation: none; }
+  .op-inbox__bulk-fill { transition: none; }
+}
+
+/* ── RUNNING: progress + counts ───────────────────────────────────────── */
+.op-inbox__bulk-track {
+  height: 5px; border-radius: 999px; overflow: hidden;
+  background: var(--bg-3, rgba(255, 255, 255, 0.08));
+}
+.op-inbox__bulk-fill {
+  height: 100%; border-radius: 999px; min-width: 2px;
+  background: linear-gradient(90deg, #1688ff, #7dd3fc);
+  transition: width 220ms ease;
+}
+.op-inbox__bulk-counts {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  font-size: 10.5px; font-weight: 650; font-variant-numeric: tabular-nums;
+}
+.op-inbox__bulk-count { display: inline-flex; align-items: center; gap: 5px; }
+.op-inbox__bulk-count > i { width: 7px; height: 7px; border-radius: 999px; background: currentColor; }
+.op-inbox__bulk-count--good { color: var(--good, #6ee7b7); }
+.op-inbox__bulk-count--review { color: color-mix(in srgb, var(--accent, #8b5cf6) 60%, #ffffff); }
+.op-inbox__bulk-count--left { color: var(--fg-mute, #8a8a91); }
+.op-inbox__bulk-counts--accounting {
+  padding-top: 2px;
+  border-top: 1px solid color-mix(in srgb, var(--border, #ffffff22) 55%, transparent);
+}
+
+/* ── REVIEW: accept-all + dismiss ─────────────────────────────────────── */
+.op-inbox__bulk-actions { display: flex; align-items: center; gap: 7px; }
+.op-inbox__bulk-accept-all {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  flex: 1 1 auto; min-height: 38px; border-radius: 9px; cursor: pointer;
+  font-size: 12.5px; font-weight: 750; color: #d1fae5;
+  border: 1px solid color-mix(in srgb, var(--good, #34d399) 60%, transparent);
+  background: linear-gradient(145deg, color-mix(in srgb, #10b981 35%, transparent), color-mix(in srgb, #047857 40%, transparent));
+}
+.op-inbox__bulk-accept-all:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--good, #34d399) 80%, transparent);
+}
+.op-inbox__bulk-accept-all:disabled { opacity: 0.5; cursor: default; }
+.op-inbox__bulk-continue {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  flex: 1 1 auto; min-height: 38px; border-radius: 9px; cursor: pointer;
+  font-size: 12.5px; font-weight: 750; color: #dbeafe;
+  border: 1px solid color-mix(in srgb, #38bdf8 58%, transparent);
+  background: linear-gradient(145deg, color-mix(in srgb, #0ea5e9 28%, transparent), color-mix(in srgb, #0369a1 36%, transparent));
+}
+.op-inbox__bulk-continue:hover:not(:disabled) {
+  border-color: color-mix(in srgb, #7dd3fc 82%, transparent);
+}
+.op-inbox__bulk-continue:disabled { opacity: 0.5; cursor: default; }
+.op-inbox__bulk-ghost {
+  display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+  min-height: 26px; padding: 0 9px; border-radius: 7px;
+  font-size: 10.5px; font-weight: 650; color: var(--fg-mute, #c2c2c9);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14)); background: transparent;
+}
+.op-inbox__bulk-ghost:hover { color: var(--fg, #e7e7ea); border-color: var(--fg-mute, #a6a6ad); }
+.op-inbox__bulk-ghost--wide { min-height: 38px; padding: 0 12px; font-size: 11.5px; }
+.op-inbox__bulk-hint { margin: 0; font-size: 10px; line-height: 1.4; color: var(--fg-mute, #8a8a91); }
+
+/* A failed start / failed launch is SHOWN. */
+.op-inbox__bulk-notice {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 9px; border-radius: 8px; font-size: 10.5px; line-height: 1.4;
+  color: var(--bad, #f87171);
+  border: 1px solid color-mix(in srgb, var(--bad, #f87171) 40%, transparent);
+  background: color-mix(in srgb, var(--bad, #f87171) 8%, transparent);
+}
+.op-inbox__bulk-notice > span { flex: 1 1 auto; min-width: 0; }
+.op-inbox__bulk-notice-x {
+  display: inline-flex; flex: 0 0 auto; cursor: pointer;
+  background: transparent; border: 0; color: inherit; opacity: 0.7; padding: 2px;
+}
+.op-inbox__bulk-notice-x:hover { opacity: 1; }
+
+/* ── Per-row recommendation block ─────────────────────────────────────── */
+.op-inbox__rec {
+  margin: 0 10px 10px; padding: 9px 10px; border-radius: 10px;
+  display: flex; flex-direction: column; gap: 7px;
+  border: 1px solid color-mix(in srgb, var(--accent, #8b5cf6) 40%, transparent);
+  background: color-mix(in srgb, var(--accent, #8b5cf6) 8%, transparent);
+}
+.op-inbox__rec-head {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 10px; font-weight: 750; text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent, #8b5cf6) 55%, #ffffff);
+}
+.op-inbox__rec-flag {
+  padding: 1px 6px; border-radius: 999px; text-transform: none;
+  font-size: 9.5px; font-weight: 650;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+  color: var(--fg-mute, #8a8a91);
+}
+/* `low` is a lapsed consult — an inference, not evidence (D-002). It is warned,
+   not merely labelled, because accepting it is the owner vouching for a guess. */
+.op-inbox__rec-flag--low {
+  color: var(--warn, #fbbf24);
+  border-color: color-mix(in srgb, var(--warn, #fbbf24) 45%, transparent);
+}
+.op-inbox__rec-flag--consulted { color: var(--fg-mute, #a6a6ad); }
+
+.op-inbox__rec-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.op-inbox__rec-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  min-height: 30px; padding: 0 11px; border-radius: 8px;
+  font-size: 11px; font-weight: 640; color: var(--fg-mute, #c2c2c9);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14)); background: transparent;
+}
+.op-inbox__rec-pill.is-danger {
+  color: var(--bad, #f87171);
+  border-color: color-mix(in srgb, var(--bad, #f87171) 40%, transparent);
+}
+/* The pre-picked option. Deliberately NOT a button: it is a statement of what
+   will happen if you press Accept, and a second clickable control here invites
+   the owner to think they have already chosen. */
+.op-inbox__rec-pill.is-selected {
+  font-weight: 700; color: #eff6ff;
+  border-color: color-mix(in srgb, #1688ff 75%, transparent);
+  background: linear-gradient(145deg, color-mix(in srgb, #1688ff 84%, transparent), color-mix(in srgb, #0766d8 78%, transparent));
+  box-shadow: 0 4px 14px color-mix(in srgb, #1688ff 22%, transparent);
+}
+.op-inbox__rec-why { margin: 0; font-size: 11px; line-height: 1.45; color: var(--fg-mute, #c2c2c9); }
+
+.op-inbox__rec-draft {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 7px 9px; border-radius: 8px;
+  border: 1px dashed var(--border, rgba(255, 255, 255, 0.18));
+  background: var(--bg-3, rgba(255, 255, 255, 0.03));
+}
+.op-inbox__rec-draft-label {
+  font-size: 9.5px; font-weight: 700; text-transform: uppercase;
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__rec-draft-text { font-size: 11px; line-height: 1.45; color: var(--fg, #e7e7ea); }
+.op-inbox__rec-draft-input {
+  width: 100%; resize: vertical; font: inherit; font-size: 11px; line-height: 1.45;
+  color: var(--fg, #e7e7ea); background: transparent;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+  border-radius: 6px; padding: 5px 7px;
+}
+.op-inbox__rec-draft-input:focus-visible {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent, #8b5cf6) 55%, transparent);
+}
+
+.op-inbox__rec-warn {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10.5px; line-height: 1.4; color: var(--warn, #fbbf24);
+}
+.op-inbox__rec-actions { display: flex; align-items: center; gap: 6px; }
+.op-inbox__rec-spacer { flex: 1 1 auto; }
+.op-inbox__rec-accept {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+  min-height: 32px; padding: 0 13px; border-radius: 8px;
+  font-size: 11.5px; font-weight: 720; color: #6ee7b7;
+  border: 1px solid color-mix(in srgb, var(--good, #34d399) 55%, transparent);
+  background: color-mix(in srgb, var(--good, #34d399) 14%, transparent);
+}
+.op-inbox__rec-accept:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--good, #34d399) 80%, transparent);
+}
+.op-inbox__rec-accept:disabled { opacity: 0.45; cursor: default; }
+.op-inbox__rec-ghost {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+  min-height: 32px; padding: 0 11px; border-radius: 8px;
+  font-size: 11.5px; font-weight: 640; color: var(--fg-mute, #c2c2c9);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14)); background: transparent;
+}
+.op-inbox__rec-ghost:hover { color: var(--fg, #e7e7ea); border-color: var(--fg-mute, #a6a6ad); }
+
+/* ── Per-row status badge during a run ────────────────────────────────── */
+.op-inbox__rowstate {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 6px; border-radius: 999px;
+  font-size: 9.5px; font-weight: 700; text-transform: uppercase;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+  color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__rowstate--auto_resolved {
+  color: var(--good, #6ee7b7);
+  border-color: color-mix(in srgb, var(--good, #34d399) 45%, transparent);
+}
+.op-inbox__rowstate--recommended {
+  color: color-mix(in srgb, var(--accent, #8b5cf6) 55%, #ffffff);
+  border-color: color-mix(in srgb, var(--accent, #8b5cf6) 50%, transparent);
+}
+.op-inbox__rowstate--failed {
+  color: var(--bad, #f87171);
+  border-color: color-mix(in srgb, var(--bad, #f87171) 45%, transparent);
+}
+.op-inbox__rowstate--skipped { color: var(--fg-mute, #8a8a91); }
+.op-inbox__rowstate--owner_action { color: var(--warn, #fbbf24); }
+.op-inbox__rowstate--cleanup_candidate { color: #c4b5fd; }
+.op-inbox__rowstate--retry_needed { color: #7dd3fc; }
+.op-inbox__rowstate--routed { color: #93c5fd; }
+.op-inbox__rowstate--investigate { color: var(--warn, #fbbf24); }
+
+/* ── CARD variant (inbox-three-column-resolver-states-2026-09-06 P-003) ──
+   The same three states as a compact card for the split page's 210px rail —
+   the board's `.f-bulk`. Stack mode never renders it; the band above stays
+   byte-identical there. Everything is a modifier ON the band's classes, so
+   the two cannot drift. */
+.op-inbox__bulk-slot--card,
+.op-inbox__bulk--card {
+  gap: 8px; margin: 0; padding: 10px; border-radius: 10px; box-shadow: none;
+  border: 1px solid color-mix(in srgb, var(--accent, #8b5cf6) 32%, transparent);
+  background: color-mix(in srgb, var(--accent, #8b5cf6) 8%, var(--bg-2, rgba(0, 0, 0, 0.18)));
+}
+.op-inbox__bulk--card.op-inbox__bulk--running {
+  border-color: color-mix(in srgb, #38bdf8 45%, transparent);
+  background: color-mix(in srgb, #1688ff 10%, var(--bg-2, rgba(0, 0, 0, 0.18)));
+}
+.op-inbox__bulk-card-hd {
+  display: flex; align-items: center; gap: 6px; margin: 0;
+  font-size: 9px; font-weight: 760; text-transform: uppercase;
+  color: var(--accent-strong, #7dd3fc);
+}
+.op-inbox__bulk-card-hd .op-inbox__bulk-icon { color: inherit; }
+.op-inbox__bulk-slot--card .op-inbox__bulk-start-copy { gap: 3px; }
+.op-inbox__bulk-slot--card .op-inbox__bulk-start-title {
+  font-size: 11.5px; font-weight: 640; line-height: 1.3; color: var(--fg, #e7e7ea);
+}
+.op-inbox__bulk-slot--card .op-inbox__bulk-start-sub {
+  white-space: normal; font-size: 10px; line-height: 1.45; color: var(--fg-mute, #8a8a91);
+}
+.op-inbox__bulk-start--card {
+  justify-content: center; gap: 6px; min-height: 30px; padding: 0 10px;
+  border-radius: 7px; font-size: 10.5px; font-weight: 700; text-align: center;
+  box-shadow: none;
+}
+.op-inbox__bulk-start--card:hover:not(:disabled) { box-shadow: none; }
+.op-inbox__bulk--card .op-inbox__bulk-head { flex-wrap: wrap; row-gap: 2px; }
+.op-inbox__bulk--card .op-inbox__bulk-title,
+.op-inbox__bulk--card.op-inbox__bulk--review .op-inbox__bulk-title {
+  font-size: 11.5px; font-weight: 640; line-height: 1.3; white-space: normal;
+}
+.op-inbox__bulk--card .op-inbox__bulk-elapsed { flex: 1 0 100%; }
+.op-inbox__bulk-caption {
+  margin: 0; font-size: 10.5px; line-height: 1.45; color: var(--fg-mute, #8a8a91);
+  font-variant-numeric: tabular-nums;
+}
+.op-inbox__bulk--card .op-inbox__bulk-counts { gap: 9px; font-size: 9.5px; }
+.op-inbox__bulk--card .op-inbox__bulk-counts--accounting { padding-top: 0; border-top: 0; }
+.op-inbox__bulk--card .op-inbox__bulk-counts:empty { display: none; }
+.op-inbox__bulk-stop--card {
+  justify-content: center; width: 100%; min-height: 30px; font-size: 10.5px; font-weight: 700;
+  color: var(--bad, #f87171);
+  border-color: color-mix(in srgb, var(--bad, #f87171) 50%, transparent);
+}
+.op-inbox__bulk-stop--card:hover {
+  color: var(--bad, #f87171);
+  border-color: color-mix(in srgb, var(--bad, #f87171) 80%, transparent);
+}
+.op-inbox__bulk--card .op-inbox__bulk-actions { flex-direction: column; align-items: stretch; gap: 6px; }
+.op-inbox__bulk--card .op-inbox__bulk-accept-all,
+.op-inbox__bulk--card .op-inbox__bulk-continue,
+.op-inbox__bulk--card .op-inbox__bulk-ghost--wide {
+  min-height: 30px; font-size: 10.5px; border-radius: 7px;
+}
+.op-inbox__bulk--card .op-inbox__bulk-hint { font-size: 9.5px; }
+/* The settings trigger is a full-width row already; in the card it is the
+   quiet first line, not the hero. */
+.op-inbox__bulk-slot--card .op-resolver-settings__trigger,
+.op-inbox__bulk--card .op-resolver-settings__trigger { min-height: 26px; font-size: 10px; }
+
+@media (max-width: 520px) {
+  .op-inbox__bulk-start-sub { display: none; }
+  .op-inbox__bulk-counts { gap: 8px; }
+  .op-resolver-settings__grid { grid-template-columns: 1fr; }
+  .op-resolver-settings__fixed { display: none; }
+}

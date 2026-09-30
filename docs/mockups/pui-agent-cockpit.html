@@ -1,0 +1,1412 @@
+<title>pui Agent Cockpit</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  :root {
+    --bg: #F4F7F6;
+    --ink: #1A2320;
+    --muted: #5B6663;
+    --card: #FFFFFF;
+    --line: #DCE3E0;
+    --accent: #0E7C7B;
+    --accent-ink: #0A5958;
+    --chip-bg: #E7EFED;
+    /* terminal palette — committed dark, both themes */
+    --t-bg: #0F1417;
+    --t-bar: #161D21;
+    --t-fg: #C7D0D8;
+    --t-dim: #77828C;
+    --t-green: #7EE787;
+    --t-yellow: #E3B341;
+    --t-blue: #79C0FF;
+    --t-magenta: #D2A8FF;
+    --t-red: #FF7B72;
+    --t-cyan: #56D4DD;
+    --t-hl: #1C2A33;
+    --t-border: #2A343B;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0D1210;
+      --ink: #E4EAE7;
+      --muted: #93A09B;
+      --card: #151B18;
+      --line: #242D29;
+      --accent: #3FC7BF;
+      --accent-ink: #7BDCD6;
+      --chip-bg: #1B2420;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0D1210;
+    --ink: #E4EAE7;
+    --muted: #93A09B;
+    --card: #151B18;
+    --line: #242D29;
+    --accent: #3FC7BF;
+    --accent-ink: #7BDCD6;
+    --chip-bg: #1B2420;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+    font-size: 1.05rem;
+    line-height: 1.55;
+    margin: 0;
+    padding: 0 1.25rem 5rem;
+  }
+  main { max-width: 62rem; margin: 0 auto; }
+  h1, h2, h3 {
+    font-family: "Bricolage Grotesque", Georgia, serif;
+    text-wrap: balance;
+    line-height: 1.15;
+  }
+  h1 { font-size: clamp(2rem, 5vw, 3rem); font-weight: 700; margin: .4rem 0 .8rem; }
+  h2 { font-size: 1.5rem; font-weight: 700; margin: 0 0 .25rem; }
+  h3 { font-size: 1.12rem; font-weight: 700; margin: 0 0 .35rem; }
+  p { max-width: 65ch; }
+  a { color: var(--accent-ink); }
+
+  .eyebrow {
+    font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: .72rem;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    margin-top: 3rem;
+  }
+  header p.lede { font-size: 1.15rem; color: var(--muted); max-width: 58ch; }
+
+  section.opt {
+    margin-top: 3.5rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--line);
+  }
+  .optlabel {
+    display: inline-block;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: .7rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    background: var(--chip-bg);
+    border-radius: 3px;
+    padding: .15rem .5rem;
+    margin-bottom: .5rem;
+  }
+
+  /* terminal frame */
+  .term {
+    background: var(--t-bg);
+    border: 1px solid var(--t-border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 1.25rem 0 .35rem;
+  }
+  .term .bar {
+    background: var(--t-bar);
+    color: var(--t-dim);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: .72rem;
+    padding: .35rem .9rem;
+    display: flex;
+    gap: .75rem;
+    border-bottom: 1px solid var(--t-border);
+  }
+  .term .bar .dot { color: #3B4952; }
+  .term pre {
+    margin: 0;
+    padding: .85rem 1rem 1rem;
+    overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: .8rem;
+    line-height: 1.5;
+    color: var(--t-fg);
+  }
+  .cap {
+    font-size: .82rem;
+    color: var(--muted);
+    margin: 0 0 1rem;
+    font-style: italic;
+  }
+  .t-d { color: var(--t-dim); }
+  .t-g { color: var(--t-green); }
+  .t-y { color: var(--t-yellow); }
+  .t-b { color: var(--t-blue); }
+  .t-m { color: var(--t-magenta); }
+  .t-r { color: var(--t-red); }
+  .t-c { color: var(--t-cyan); }
+  .t-hl { background: var(--t-hl); }
+  .cursor { background: var(--t-fg); color: var(--t-bg); }
+  @media (prefers-reduced-motion: no-preference) {
+    .cursor { animation: blink 1.1s steps(2, start) infinite; }
+    @keyframes blink { to { visibility: hidden; } }
+  }
+
+  /* two-pane composition (zellij-style) */
+  .panes { display: grid; grid-template-columns: 1fr 22rem; gap: .6rem; margin: 1.25rem 0 .35rem; }
+  .panes .term { margin: 0; }
+  @media (max-width: 46rem) { .panes { grid-template-columns: 1fr; } }
+
+  /* annotation grid under each mockup */
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-top: 1rem; }
+  @media (max-width: 46rem) { .notes { grid-template-columns: 1fr; } }
+  .notes h3 { font-size: .78rem; font-family: "JetBrains Mono", monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .notes ul { margin: 0; padding-left: 1.1rem; }
+  .notes li { margin-bottom: .4rem; }
+  .notes li::marker { color: var(--accent); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
+  .chip {
+    font-family: "JetBrains Mono", monospace;
+    font-size: .72rem;
+    background: var(--chip-bg);
+    color: var(--ink);
+    border-radius: 999px;
+    padding: .22rem .7rem;
+  }
+  .chip b { color: var(--accent-ink); font-weight: 700; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: .92rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .tablewrap { overflow-x: auto; margin-top: 1.25rem; }
+  th, td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-family: "JetBrains Mono", monospace; font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  td.mono { font-family: "JetBrains Mono", monospace; font-size: .8rem; white-space: nowrap; }
+
+  .exists {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    gap: .75rem; margin-top: 1.5rem;
+  }
+  .exists div {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: .75rem .9rem;
+    font-size: .88rem;
+  }
+  .exists b { display: block; font-family: "JetBrains Mono", monospace; font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--accent-ink); margin-bottom: .3rem; }
+
+  .verdict {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 1.1rem 1.4rem;
+    margin-top: 1.5rem;
+  }
+  footer { margin-top: 4rem; color: var(--muted); font-size: .8rem; font-family: "JetBrains Mono", monospace; }
+
+  /* ───────── part two: the fleet ───────── */
+  .partbreak {
+    margin-top: 5.5rem;
+    padding-top: 2.5rem;
+    border-top: 3px double var(--line);
+  }
+  .partbreak .eyebrow { margin-top: 0; }
+  .partbreak h2 { font-size: clamp(1.7rem, 4vw, 2.2rem); margin-bottom: .5rem; }
+  .partbreak p.standfirst { font-size: 1.12rem; color: var(--muted); max-width: 56ch; margin: 0; }
+
+  /* a mock wider than the reading measure breaks out of it */
+  .breakout {
+    width: min(78rem, calc(100vw - 2rem));
+    margin-left: 50%;
+    transform: translateX(-50%);
+  }
+
+  .finding {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 3px solid #C4443C;
+    border-radius: 6px;
+    padding: 1.1rem 1.4rem;
+    margin-top: 1.75rem;
+  }
+  .finding h3 { color: var(--ink); margin-bottom: .5rem; }
+
+  .audit { display: grid; grid-template-columns: 1fr 1fr; gap: 1.75rem; margin-top: 1.5rem; }
+  @media (max-width: 46rem) { .audit { grid-template-columns: 1fr; } }
+  .audit h3 {
+    font-size: .74rem; font-family: "JetBrains Mono", monospace;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+    padding-bottom: .4rem; border-bottom: 1px solid var(--line); margin-bottom: .6rem;
+  }
+  .audit ul { margin: 0; padding-left: 1.1rem; font-size: .93rem; }
+  .audit li { margin-bottom: .45rem; }
+  .audit .has li::marker { color: var(--accent); }
+  .audit .lacks li::marker { color: #C4443C; }
+
+  code.k {
+    font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: .84em;
+    background: var(--chip-bg);
+    border-radius: 3px;
+    padding: .06em .34em;
+    white-space: nowrap;
+  }
+
+  /* side-by-side mocks that argue with each other */
+  .versus { display: grid; grid-template-columns: 1fr 1fr; gap: .9rem; margin: 1.25rem 0 .35rem; }
+  .versus .term { margin: 0; }
+  @media (max-width: 58rem) { .versus { grid-template-columns: 1fr; } }
+
+  .rec { display: grid; gap: .6rem; margin-top: 1.25rem; }
+  .rec div {
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: .7rem 1rem; font-size: .93rem;
+    display: grid; grid-template-columns: 9rem 1fr; gap: 1rem; align-items: baseline;
+  }
+  @media (max-width: 40rem) { .rec div { grid-template-columns: 1fr; gap: .2rem; } }
+  .rec b {
+    font-family: "JetBrains Mono", monospace; font-size: .74rem;
+    letter-spacing: .06em; text-transform: uppercase; color: var(--accent-ink);
+  }
+</style>
+
+<main>
+<header>
+  <div class="eyebrow">companion to own-tui-full-divorce-2026-08-24 · exploration, nothing committed</div>
+  <h1>pui Agent Cockpit</h1>
+  <p class="lede">We own both sides of the loop now — the agent runs operator-side against the same
+  Postgres that holds plans, work-items, locks, and coord state. So the TUI can show what the agent
+  is <em>doing</em>, not just what it's <em>saying</em>. These are the options, sketched as the
+  terminal would render them, each with its wiring.</p>
+
+  <div class="exists">
+    <div><b>already in PG</b>declared intent, claimed plan items (P-NNN), held work-items + checkpoints, locks, mode flags</div>
+    <div><b>already in pui</b>zellij cockpit, fleet / plans / wake boards, SSE + unix-socket transports, card system (HITL)</div>
+    <div><b>already in the plan</b>streaming markdown, tool-call cards, diffs, model/effort/account picker (P-019/P-020)</div>
+    <div><b>not discussed yet</b>everything on this page — the agent's <em>work context</em> as a first-class surface</div>
+  </div>
+</header>
+
+<!-- ══════════════════════ OPTION A ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Surface A · context strip</span>
+  <h2>The two-line strip</h2>
+  <p>A persistent header inside the chat pane: who this agent is, what mode it's in, and the plan
+  item + work-item it holds right now. Always visible, costs two rows, zero navigation.</p>
+  <p class="cap"><strong>Decided 2026-08-26:</strong> this content ships as the top section of the Context pane (Surface B) — no standalone strip.</p>
+
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> pui · Agent Chat · pot papercusp</div>
+    <pre>
+<span class="t-d">──</span> <span class="t-c">su-2966d7</span> · <span class="t-y">AUTO</span> · sonnet-5:high · acct <span class="t-d">gw:auto</span> <span class="t-d">──────────────────</span> <span class="t-g">⣷ streaming</span>
+ <span class="t-y">▸ P-020</span> Finish real interactive chat behaviors   <span class="t-b">WI-41759</span> <span class="t-d">wip · ckpt 4m ago</span>
+ <span class="t-d">intent:</span> closing the serial affected verdict — last gate before P-021
+<span class="t-d">──────────────────────────────────────────────────────────────────────────────</span>
+ <span class="t-d">you</span>    Can you get the diff viewer scrolling fixed too?
+ <span class="t-c">agent</span>  Yes — the diff pane's scroll offset resets on every frame; I'm
+        moving it into pane state so it survives re-render. Then I'll
+        re-run the affected suite.
+ <span class="t-d">[tool]</span> <span class="t-m">testing:run</span> <span class="t-d">files: apps/tui/src/chat/diff.rs</span>  <span class="t-g">✓ 3 passed</span>
+<span class="t-d">──────────────────────────────────────────────────────────────────────────────</span>
+ <span class="t-g">❯</span> <span class="cursor"> </span>                                       <span class="t-d">ctrl-t tasks · ctrl-p plan</span></pre>
+  </div>
+  <p class="cap">Line 1: identity + mode + model/account provenance. Line 2: claimed plan item and held work-item with checkpoint age. Line 3: declared intent, verbatim.</p>
+
+  <div class="notes">
+    <div>
+      <h3>What the user gets</h3>
+      <ul>
+        <li>Glanceable "is it on the right thing" — the claimed P-NNN with its text, not just chat.</li>
+        <li>Checkpoint age doubles as a liveness signal: a stale checkpoint on a busy agent is visible instantly.</li>
+        <li>Mode flags (AUTO / IDEATE / DRAIN) stop being invisible session state.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How it's wired</h3>
+      <ul>
+        <li>coord presence (intent, mode), plan-item claims, and work-item checkpoints are all existing PG rows with SSE sync — one subscribed query, one new Ratatui widget.</li>
+        <li>No loop or protocol change at all; render-only.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="chips"><span class="chip">effort <b>~2–3 days</b></span><span class="chip">deps <b>none — render-only</b></span><span class="chip">risk <b>low</b></span></div>
+</section>
+
+<!-- ══════════════════════ OPTION B ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Surface B · cockpit sidebar</span>
+  <h2>The context pane</h2>
+  <p>A dedicated zellij pane beside the chat: live plan burn-down for the lane this agent holds,
+  its task list, held work-items, and locks. The plans board already exists in pui — this binds it
+  to <em>the chat's agent</em> instead of showing everything.</p>
+
+  <div class="panes">
+    <div class="term">
+      <div class="bar"><span class="dot">●●●</span> Agent Chat</div>
+      <pre>
+ <span class="t-d">you</span>    Take the next item on
+        the plan.
+ <span class="t-c">agent</span>  Claiming P-021 — the
+        install path. Starting
+        with the version embed
+        in build.rs, then the
+        doctor comparison.
+ <span class="t-d">[tool]</span> <span class="t-m">work_items:claim</span> <span class="t-g">✓</span>
+ <span class="t-d">[tool]</span> <span class="t-m">capability:edit</span>
+        <span class="t-d">apps/tui/build.rs</span> <span class="t-g">✓</span>
+
+ <span class="t-g">❯</span> <span class="cursor"> </span></pre>
+    </div>
+    <div class="term">
+      <div class="bar"><span class="dot">●●●</span> Context · su-2966d7</div>
+      <pre>
+ <span class="t-d">MODE</span>   <span class="t-y">AUTO</span> · ideate off
+ <span class="t-d">MODEL</span>  sonnet-5:high <span class="t-d">gw:auto</span>
+
+ <span class="t-d">PLAN</span>   <span class="t-b">own-tui-full-divorce</span>
+  <span class="t-g">✓</span> P-017 operator identity
+  <span class="t-g">✓</span> P-018 chat skeleton
+  <span class="t-g">✓</span> P-019 chat primary
+  <span class="t-hl"><span class="t-y">▸</span> P-021 install path    </span>
+  <span class="t-d">○ P-020 blocked-by ext</span>
+  <span class="t-d">○ P-022 PTY E2E</span>
+  <span class="t-g">█████████</span><span class="t-d">░░░░░░░</span> 9/23
+
+ <span class="t-d">TASKS</span>  <span class="t-d">2/5</span>
+  <span class="t-g">✓</span> version const
+  <span class="t-y">▸</span> embed in build.rs
+  <span class="t-d">○ doctor comparison</span>
+
+ <span class="t-d">HELD</span>
+  <span class="t-b">WI-42140</span> <span class="t-d">wip · ckpt 1m</span>
+  <span class="t-r">🔒</span> <span class="t-d">apps/tui/build.rs</span></pre>
+    </div>
+  </div>
+  <p class="cap">Two real zellij panes — how pui already composes. The context pane updates as items flip todo→wip→done; the highlighted row is the item this agent has claimed.</p>
+
+  <div class="notes">
+    <div>
+      <h3>What the user gets</h3>
+      <ul>
+        <li>The whole story at once: plan progress, the agent's task list, held items, locks.</li>
+        <li>Burn-down animates for free as PG rows flip — a genuinely live view, not a report.</li>
+        <li>Room to grow: fleet siblings, blocked-by edges, cost later.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How it's wired</h3>
+      <ul>
+        <li>Refit of the existing pui plans board: filter to the chat agent's claimed lane; the pane and transports exist.</li>
+        <li>Same SSE-synced queries as the strip, plus locks.</li>
+        <li>Optional pane — collapsible; chat stays usable at narrow widths.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="chips"><span class="chip">effort <b>~1 week</b></span><span class="chip">deps <b>plans-board refit</b></span><span class="chip">risk <b>low–med (layout)</b></span></div>
+</section>
+
+<!-- ══════════════════════ OPTION C ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Surface C · inline context cards</span>
+  <h2>Work events in the transcript</h2>
+  <p>Coordination events render <em>where they happened</em> in the conversation — claims,
+  completions, lock blocks — as compact cards between messages. The transcript becomes a true
+  record of what the agent did, not only what it said.</p>
+
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> pui · Agent Chat</div>
+    <pre>
+ <span class="t-d">you</span>    Take the next item on the plan.
+ <span class="t-d">┌ <span class="t-y">claim</span> ──────────────────────────────────────────</span>
+ <span class="t-d">│</span> <span class="t-y">▸</span> claimed <span class="t-b">P-021</span> self-identifying install  <span class="t-d">plan own-tui-full-divorce</span>
+ <span class="t-d">└──</span>
+ <span class="t-c">agent</span>  Starting with the version embed in build.rs…
+ <span class="t-d">┌ <span class="t-r">lock · blocked</span> ─────────────────────────────────</span>
+ <span class="t-d">│</span> <span class="t-d">apps/tui/build.rs held by</span> <span class="t-c">su-6358</span> <span class="t-d">— "P-020 serial verdict" · queued #1</span>
+ <span class="t-d">└──</span>
+ <span class="t-c">agent</span>  build.rs is held — pivoting to the doctor comparison
+        while the lock clears.
+ <span class="t-d">┌ <span class="t-g">work-item · completed</span> ──────────────────────────</span>
+ <span class="t-d">│</span> <span class="t-g">✓</span> <span class="t-b">WI-42141</span> doctor comparison <span class="t-d">— testing:run 6 passed · 2 files</span>
+ <span class="t-d">└──</span></pre>
+  </div>
+  <p class="cap">Cards are collapsed one-liners by default; enter expands (full evidence, lock queue, checkpoint text).</p>
+
+  <div class="notes">
+    <div>
+      <h3>What the user gets</h3>
+      <ul>
+        <li>Causality: you see <em>why</em> the agent pivoted (the lock block sits right where it happened).</li>
+        <li>Completions carry their evidence inline — "done" claims become inspectable.</li>
+        <li>Scrollback is an audit trail; reconnect hydration replays it.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How it's wired</h3>
+      <ul>
+        <li>The P-020 tool-card framework is the substrate — this adds a renderer registry keyed on tool name / event kind. TUI-side mapping only.</li>
+        <li>Lock-block and claim events already flow through coord; the loop tags them into the stream as typed frames.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="chips"><span class="chip">effort <b>~3–4 days</b></span><span class="chip">deps <b>P-020 card framework</b></span><span class="chip">risk <b>low</b></span></div>
+</section>
+
+<!-- ══════════════════════ TASK LIST ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">The task list · answering the TodoWrite question</span>
+  <h2>An owned task tool, three ways</h2>
+  <p>Claude Code's todo list and Codex's plan are <em>harness tools</em> — the model calls a tool the
+  harness registers, and the harness's TUI renders it. Our loop ships none unless we build one.
+  Models are heavily post-trained to reach for it on multi-step work, so we should — the question
+  is how far to take it.</p>
+
+  <h3 style="margin-top:2rem">T1 — Session scratchpad (parity with Claude Code)</h3>
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> pinned widget · collapses with ctrl-t</div>
+    <pre>
+ <span class="t-d">TASKS</span> <span class="t-d">2/5</span> <span class="t-d">─────────────────────────────────────────────────────</span>
+  <span class="t-g">✓</span> <span class="t-d">reproduce scroll reset</span>
+  <span class="t-g">✓</span> <span class="t-d">write failing test</span>
+  <span class="t-y">▸</span> move offset into pane state
+  ○ re-run affected suite
+  ○ update work-item checkpoint</pre>
+  </div>
+  <p class="cap">One tool + state on the session row, streamed as typed frames. Ephemeral — dies with the session, exactly like Claude Code's.</p>
+
+  <h3 style="margin-top:2rem">T2 — Ledger-bridged (the thing nobody else can do)</h3>
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> same widget · bridged to the ledger</div>
+    <pre>
+ <span class="t-d">TASKS</span> <span class="t-d">2/5 ·</span> <span class="t-c">bridged</span> <span class="t-d">──────────────────────────────────────────</span>
+  <span class="t-g">✓</span> <span class="t-d">reproduce scroll reset</span>
+  <span class="t-g">✓</span> <span class="t-d">write failing test</span>            <span class="t-b">⇗ WI-42107</span>
+  <span class="t-y">▸</span> move offset into pane state    <span class="t-b">⇗ WI-41759</span> <span class="t-d">· ckpt syncs</span>
+  ○ re-run affected suite
+  ○ file follow-up: diff pane perf <span class="t-d">· shift-p → mint work-item</span></pre>
+  </div>
+  <p class="cap">Todos can be promoted to work-items (and seeded from claimed plan items). Progress on a bridged todo writes the work-item checkpoint — the scratchpad and the durable ledger stop being two worlds.</p>
+
+  <div class="notes">
+    <div>
+      <h3>T3 — no new tool (rejected, but worth naming)</h3>
+      <ul>
+        <li>Render claimed plan items + work-items as "the" task list; no ephemeral scratchpad.</li>
+        <li>Cleanest data story, but pushes models out-of-distribution — they expect a lightweight todo tool and will fight its absence with prose plans.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How it's wired (T1/T2)</h3>
+      <ul>
+        <li>One tool registered in the owned loop (ToolLoopAgent). Schema aliased per model family — todo-shaped for Anthropic models, update_plan-shaped for Codex models — so both stay in-distribution.</li>
+        <li>State on the PG session row → typed frames → widget. T2 adds handlers that write work_items / plan links.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="chips"><span class="chip">T1 effort <b>~2–3 days</b></span><span class="chip">T2 delta <b>+2–3 days</b></span><span class="chip">deps <b>owned loop (exists)</b></span><span class="chip">risk <b>low</b></span></div>
+</section>
+
+<!-- ══════════════════════ SEMANTIC CARDS ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Tool cards · generic vs semantic</span>
+  <h2>Cards that know what the tool meant</h2>
+  <p>P-020 already gives every tool call a card. Generic is honest but opaque; a semantic renderer
+  for the ~10 highest-traffic Papercusp verbs turns them into information.</p>
+
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> today — generic card</div>
+    <pre>
+ <span class="t-d">[tool]</span> <span class="t-m">work_items:complete</span> <span class="t-d">{"id":"WI-41620","completion":{"summary":"Wro…</span>
+        <span class="t-d">438 chars · enter to expand ▸</span></pre>
+  </div>
+
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> with a semantic renderer</div>
+    <pre>
+ <span class="t-d">┌ <span class="t-g">work-item · ✓ completed</span> ────────────────────────</span>
+ <span class="t-d">│</span> <span class="t-b">WI-41620</span> spec triad for corrective acceptance
+ <span class="t-d">│</span> <span class="t-d">tests</span>  testing:run · <span class="t-g">14 passed</span> · 0 failed
+ <span class="t-d">│</span> <span class="t-d">files</span>  apps/tui/src/chat/{stream,cards}.rs <span class="t-d">+2 more</span>
+ <span class="t-d">│</span> <span class="t-d">how</span>    installed-binary PTY run · streamed delta + done observed
+ <span class="t-d">└──</span></pre>
+  </div>
+  <p class="cap">Same treatment for lock blocks (holder + intent + queue position), coord:send (recipient, woken or missed), plan flips, checkpoint writes. Everything else keeps the generic card.</p>
+  <div class="chips"><span class="chip">effort <b>~2–3 days incremental</b></span><span class="chip">deps <b>P-020 cards</b></span><span class="chip">risk <b>low</b></span></div>
+</section>
+
+<!-- ══════════════════════ TASK TOOL RESEARCH ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Task tool · field research</span>
+  <h2>What the four incumbents do</h2>
+  <p>Read from source (OMP 17.3.5 bun cache, claude 2.1.246 binary, codex binary strings,
+  opencode <span style="font-family:'JetBrains Mono',monospace;font-size:.85em">dev</span> branch).
+  Base pi ships no todo list — the OMP fork added the most sophisticated one of the four.</p>
+
+  <div class="tablewrap">
+  <table>
+    <tr><th>harness</th><th>call shape</th><th>statuses</th><th>distinctive</th></tr>
+    <tr><td class="mono">Claude · TodoWrite</td><td>whole-list replace</td><td>pending · in_progress · completed</td><td><b>activeForm</b> spinner label; best-tuned trigger guidance; newer Task* family trends ledger-ward</td></tr>
+    <tr><td class="mono">Codex · update_plan</td><td>whole-list replace</td><td>pending · in_progress · completed</td><td><b>explanation</b> field narrates replans; "at most one step in_progress"</td></tr>
+    <tr><td class="mono">opencode · todowrite</td><td>whole-list replace</td><td>+ cancelled; priority hi/med/lo</td><td>state as <b>DB rows per session</b> + a change event any surface can subscribe to</td></tr>
+    <tr><td class="mono">OMP · todo</td><td><b>delta ops</b>: init · start · done · drop · block · unblock · append · rm · view</td><td>+ abandoned; <b>blocked + reason</b></td><td>named phases; <b>single in_progress enforced</b> (start demotes others); auto-reminder + continue when the agent stops with open todos; user-side /todo</td></tr>
+  </table>
+  </div>
+
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> ours — canonical ops, harness-owned state</div>
+    <pre>
+ <span class="t-d">[tool]</span> <span class="t-m">tasks·start</span> "move offset into pane state"      <span class="t-d">← demotes previous wip</span>
+ <span class="t-d">[tool]</span> <span class="t-m">tasks·block</span> "re-run affected suite" <span class="t-d">— reason: lock held by</span> <span class="t-c">su-6358</span>
+ <span class="t-d">──────────────────────────────────────────────────────────────────────</span>
+ <span class="t-d">TASKS</span> <span class="t-d">2/5 ·</span> <span class="t-c">bridged</span>   <span class="t-y">▸</span> move offset into pane state <span class="t-b">⇗ WI-41759</span>
+                        <span class="t-r">⛔</span> re-run affected suite <span class="t-d">(blocked: lock · awaits release)</span></pre>
+  </div>
+  <p class="cap">Ops are O(1) tokens per update and the harness holds canonical truth — whole-list replace is O(list) and drifts when the model retypes it. Ops are also the grammar our ledger already speaks, which is what makes the bridge natural.</p>
+
+  <div class="notes">
+    <div>
+      <h3>Borrow</h3>
+      <ul>
+        <li><strong>OMP:</strong> the op model + harness-owned state; blocked + blocker reason (maps 1:1 to locks / events:await); enforced single in-progress; the stop-with-open-todos reminder + auto-continue.</li>
+        <li><strong>Claude:</strong> activeForm — fuel for the now-working-on strip; the when-to-use guidance text near-verbatim.</li>
+        <li><strong>Codex:</strong> the explanation field → a one-line "plan changed because…" card; the minimalism bar.</li>
+        <li><strong>opencode:</strong> PG rows per session + change events — every surface hydrates from one state.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Skip / add</h3>
+      <ul>
+        <li><strong>Skip priority</strong> (opencode-only; models barely use it; the ledger has real priority).</li>
+        <li><strong>Add the bridge</strong> nobody has: promote todo → work-item, seed from the claimed plan item, sync progress into the checkpoint.</li>
+        <li><strong>Alias shims:</strong> one canonical ops store; a TodoWrite-shaped facade for Anthropic models and an update_plan-shaped one for Codex models, diffed by the harness into ops — both families in-distribution, one truth.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════ COMPARISON ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Putting it together</span>
+  <h2>Comparison &amp; a suggested composition</h2>
+
+  <div class="tablewrap">
+  <table>
+    <tr><th>option</th><th>user value</th><th>effort</th><th>depends on</th><th>notes</th></tr>
+    <tr><td class="mono">A · strip</td><td>always-on "what is it doing"</td><td class="mono">2–3 d</td><td>nothing (render-only)</td><td>pre-decision read — superseded: ships as the Context pane's top section</td></tr>
+    <tr><td class="mono">C · inline cards</td><td>causality + auditable completions</td><td class="mono">3–4 d</td><td>P-020 card framework</td><td>shares work with semantic cards</td></tr>
+    <tr><td class="mono">T2 · bridged tasks</td><td>in-distribution models + durable tasks</td><td class="mono">4–6 d</td><td>owned loop (exists)</td><td>T1 is the first half of T2 — no throwaway</td></tr>
+    <tr><td class="mono">semantic cards</td><td>tool calls become information</td><td class="mono">2–3 d</td><td>P-020 card framework</td><td>renderer registry; grows verb by verb</td></tr>
+    <tr><td class="mono">B · sidebar</td><td>whole-cockpit view, fleet-ready</td><td class="mono">~1 wk</td><td>plans-board refit</td><td>best saved for after A/C prove the data</td></tr>
+  </table>
+  </div>
+
+  <div class="verdict">
+    <h3>Chosen composition — owner, 2026-08-26</h3>
+    <p style="margin-bottom:.3rem"><strong>Context pane (B) as the single surface, absorbing the strip's content + ledger-bridged task tool (T2) + semantic cards</strong> — inline cards (C) fold into the semantic-card wave. Task↔work-item links are many-to-many with one designated <span style="font-family:'JetBrains Mono',monospace;font-size:.85em">for</span> edge carrying checkpoint sync; task blocking reuses existing primitives via typed refs (lock: / event: / wi: / plan:).</p>
+    <p style="margin-bottom:0">Registered as plan <span style="font-family:'JetBrains Mono',monospace;font-size:.85em">pui-agent-context-cockpit-2026-08-26</span> (draft, 8 items, D-001–D-003) — implementation starts after <span style="font-family:'JetBrains Mono',monospace;font-size:.85em">own-tui-full-divorce</span> Phase 6 corrective ships.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════ PART TWO ══════════════════════ -->
+<div class="partbreak">
+  <div class="eyebrow">Part two · the fleet · WI-42180</div>
+  <h2>What pui does with the fleet</h2>
+  <p class="standfirst">The Fleet tab was built in June. The fleet system it watches has been
+  rebuilt underneath it since. Here is the gap, four directions to close it, and a straight
+  answer on the kanban.</p>
+</div>
+
+<!-- ── AUDIT ── -->
+<section class="opt">
+  <span class="optlabel">First · what is actually wired</span>
+  <h2>The Fleet tab is watching a June fleet</h2>
+  <p><code class="k">apps/tui/src/fleet.rs</code> states its own provenance in line 1:
+  <code class="k">pui-fleet-status-view-2026-06-04</code>. It is 1,878 lines and it is a good
+  build — roster, dossier, plan burn-down, a curated/mirror toggle, a comms sub-view, and the
+  staged-wake board next door in <code class="k">wake_board.rs</code>. The problem is not quality.
+  It is that the fleet grew a nervous system afterwards and nobody told the TUI.</p>
+
+  <div class="audit">
+    <div class="has">
+      <h3>Wired today</h3>
+      <ul>
+        <li><code class="k">fleet:assignments</code> — 17 call sites. Claims, load, intent, queued items, per-agent.</li>
+        <li>Roster presence, grouped by fleet, with a per-fleet colour.</li>
+        <li>Plan and work-item burn-down aggregated across live plans.</li>
+        <li>The wake board: release · edit&nbsp;&amp;&nbsp;release · skip · release-all · toggle wake-mode. <em>This is the one surface that already acts.</em></li>
+        <li><code class="k">declared_unclaimed</code> — the ⚠ badge for a declared-but-unclaimed lane.</li>
+      </ul>
+    </div>
+    <div class="lacks">
+      <h3>Zero references in the entire crate</h3>
+      <ul>
+        <li><code class="k">sessionState</code> — the unified liveness verdict</li>
+        <li><code class="k">contextPressure</code> — how close a member is to losing everything it knows</li>
+        <li><code class="k">fleet:leader-brief</code> · <code class="k">fleet:invariant</code></li>
+        <li>claim specs and their revisions · <code class="k">scheduler:get_next</code></li>
+        <li><code class="k">fleet:bench</code> · <code class="k">blocked-by</code> edges</li>
+        <li>every fleet transition event — <code class="k">member-dead</code>, <code class="k">claim-released</code>, <code class="k">item-completed</code>, <code class="k">context-critical</code>, <code class="k">drained</code>, <code class="k">admission-blocked</code></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="finding">
+    <h3>The one that bites</h3>
+    <p style="margin-bottom:.4rem"><strong>pui's green dot is a heartbeat, not a verdict.</strong>
+    <code class="k">agents_online</code> is literally <code class="k">roster.filter(|r| !r.stale)</code>,
+    and the legend offers three buckets of process-keepalive age:
+    <code class="k">live &lt;1m · idle &lt;10m · stale ≥10m</code>.</p>
+    <p style="margin-bottom:0">The shared oracle behind <code class="k">coord:presence</code> answers a
+    different and much better question — <code class="k">live | parked | draining | suspect | ended |
+    recorded</code> — and a warm-dead session reads <code class="k">heartbeatFresh:true</code> with
+    <code class="k">sessionState:'ended'</code>. pui paints that agent <strong>green</strong> and counts
+    it online. That is the exact "is it working or quietly dead?" failure, rendered as reassurance.
+    Every direction below assumes this is fixed first — and it is a field swap, not a feature.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════ FLEET A ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Fleet A · a section, not a destination</span>
+  <h2>Five lines in the pane you already have</h2>
+  <p>Most of the time you are a <em>member</em>, not a leader. The fleet is then just context — the
+  same kind of thing as your mode, your plan, your held items — and it belongs in the Context pane
+  (D-001) as a section that costs five lines. No new tab, no new keymap.</p>
+
+  <div class="panes">
+    <div class="term">
+      <div class="bar"><span class="dot">●●●</span> Agent Chat</div>
+      <pre>
+ <span class="t-d">you</span>    Take the next item.
+
+ <span class="t-c">agent</span>  P-005 is blocked by
+        P-001, and su-3f19c
+        has held that lane 22
+        minutes without
+        speaking. Taking P-007
+        instead and parking on
+        the gate for P-005.
+
+ <span class="t-d">[tool]</span> <span class="t-m">scheduler:get_next</span> <span class="t-g">✓</span>
+        <span class="t-d">P-007 · spec r3</span>
+ <span class="t-d">[tool]</span> <span class="t-m">events:await</span>
+        <span class="t-d">task-engine-contract-…</span>
+
+ <span class="t-g">❯</span> <span class="cursor"> </span></pre>
+    </div>
+    <div class="term">
+      <div class="bar"><span class="dot">●●●</span> Context · su-b7567</div>
+      <pre>
+ <span class="t-d">MODE</span>   <span class="t-y">AUTO</span> · ideate off
+ <span class="t-d">MODEL</span>  gpt-5.6-sol:xhigh
+
+ <span class="t-d">FLEET</span>  <span class="t-b">pui-cockpit</span>
+  <span class="t-d">leader</span> su-2966d <span class="t-d">· you: member</span>
+  <span class="t-g">●●●●</span><span class="t-r">●</span> <span class="t-d">4 speaking · 1 ended</span>
+  <span class="t-y">⚑</span> task-engine-contract-ready
+     <span class="t-d">declared · not fired</span>
+     <span class="t-d">you are awaiting it</span>
+  <span class="t-r">⛁</span> <span class="t-d">P-001 blocks your P-005</span>
+     <span class="t-d">su-3f19c · 63% · silent 22m</span>
+
+ <span class="t-d">PLAN</span>   <span class="t-b">pui-agent-context-cockpit</span>
+  <span class="t-g">✓</span> P-006 non-task sections
+  <span class="t-hl"><span class="t-y">▸</span> P-007 semantic cards    </span>
+  <span class="t-d">○ P-005 acceptance</span> <span class="t-r">⛁</span>
+  <span class="t-g">███</span><span class="t-d">░░░░░░░░░░</span> 3/10
+
+ <span class="t-d">HELD</span>
+  <span class="t-b">WI-42181</span> <span class="t-d">wip · ckpt 3m</span>
+  <span class="t-r">🔒</span> <span class="t-d">apps/tui/src/cards.rs</span></pre>
+    </div>
+  </div>
+  <p class="cap">The fleet block sits above the plan block, because it explains it: the ⛁ on P-005
+  is the same blocker the agent just talked about. Four glyphs of roster, the gate you're parked on,
+  and the one edge that's costing you.</p>
+
+  <div class="notes">
+    <div>
+      <h3>What the user gets</h3>
+      <ul>
+        <li>Why the agent chose <em>this</em> item — the blocked edge is visible, not inferred from prose.</li>
+        <li>"Am I waiting on something that will never fire?" answered without leaving the chat.</li>
+        <li>A dead sibling shows as a red dot in the roster strip the moment the oracle says so.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How it's wired</h3>
+      <ul>
+        <li>One <code class="k">fleet:assignments</code> read (already wired) + <code class="k">sessionState</code> instead of <code class="k">stale</code>.</li>
+        <li>Gates from <code class="k">announcedGates</code>, which orient already folds in.</li>
+        <li>Blocked-by edges come from the plan the pane is already rendering.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="chips"><span class="chip">effort <b>2–3 d</b></span><span class="chip">deps <b>Context pane (P-006)</b></span><span class="chip">risk <b>low</b></span></div>
+</section>
+
+<!-- ══════════════════════ FLEET B ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Fleet B · the acting surface</span>
+  <h2>A leader cockpit, where keys do things</h2>
+  <p>Leading is a different job from working, and it is the job pui has no surface for. A leader
+  needs three answers continuously — <em>is everyone alive and actually speaking, is anything
+  violating what I declared, and what is the one thing I should press right now</em> — and today all
+  three are tool calls typed into a chat. This is the Fleet tab rebuilt around them.</p>
+
+  <div class="breakout">
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> pui — Fleet · leader</div>
+    <pre>
+ <span class="t-b">┌─ pui-cockpit ──────────────────────────────────────── plan pui-agent-context-cockpit · 3/10 ─┐</span>
+
+ <span class="t-d">MEMBER      STATE      CTX     HOLDS                 SPOKE    LANE</span>
+ <span class="t-g">●</span> su-acb7e  <span class="t-g">live</span>       41%     <span class="t-b">WI-42175</span> wip          0:08    Context pane refit      <span class="t-d">P-006</span>
+ <span class="t-g">●</span> su-3f19c  <span class="t-g">live</span>       63%     <span class="t-b">WI-42177</span> wip         <span class="t-y">22:14</span>    task engine             <span class="t-d">P-001</span>
+ <span class="t-y">◐</span> su-b7567  <span class="t-g">live</span>       <span class="t-r">94% ▓</span>   <span class="t-b">WI-42181</span> wip          0:31    semantic cards          <span class="t-d">P-007</span>
+ <span class="t-b">◑</span> su-9d0a2  <span class="t-b">parked</span>     22%     <span class="t-d">—</span>                     4:31    <span class="t-d">drained · awaiting gate</span>
+ <span class="t-r">○</span> su-c41e8  <span class="t-r">ended</span>      <span class="t-d">—</span>       <span class="t-b">WI-42179</span> <span class="t-r">ORPHANED</span>    38:12    foreign-harness tiers   <span class="t-d">P-030</span>
+
+ <span class="t-d">INVARIANTS</span>  <span class="t-g">✓</span> every open claim has a live holder      <span class="t-r">✗ VIOLATED — 1 row</span>
+             <span class="t-r">✗</span> claim spec pinned at r3                 <span class="t-r">→ moved to r5, 2 rows</span>
+ <span class="t-d">GATES</span>       <span class="t-y">⚑</span> task-engine-contract-ready <span class="t-d">· declared · 3 awaiting ·</span> <span class="t-y">NOT FIRED</span>
+ <span class="t-d">QUEUE</span>       4 claimable <span class="t-d">·</span> 0 spec-blocked <span class="t-d">·</span> admission <span class="t-g">open</span>
+
+ <span class="t-d">[b]</span> bench   <span class="t-d">[w]</span> wake   <span class="t-d">[r]</span> relaunch   <span class="t-d">[g]</span> fire gate   <span class="t-d">[s]</span> bump spec   <span class="t-d">[↵]</span> open pane</pre>
+  </div>
+  </div>
+  <p class="cap">Every column is a question a leader currently asks by hand. <span class="t-d">SPOKE</span>
+  is time since the last <em>tool call</em>, not since the last heartbeat — the difference between an
+  agent working and an agent present. The orphaned claim on the dead member is the row that matters,
+  and <code class="k">r</code> is on it.</p>
+
+  <div class="notes">
+    <div>
+      <h3>What the user gets</h3>
+      <ul>
+        <li>The three leader questions answered in one glance, continuously, with no typing.</li>
+        <li>Invariants you registered once are policed on every read — including the spec-drift case nobody catches by hand.</li>
+        <li>Steering is a keypress: bench a blocked lane, fire a gate, relaunch a corpse, bump a spec revision.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How it's wired</h3>
+      <ul>
+        <li><code class="k">fleet:leader-brief</code> is a single call that already returns every field on this screen, invariant results included.</li>
+        <li>Actions map to existing verbs — <code class="k">fleet:bench</code>, <code class="k">coord:wake</code>, <code class="k">events:emit</code>, <code class="k">capability:launch-agent</code>.</li>
+        <li>Reuses the wake board's keymap conventions so it feels like the same app.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="chips"><span class="chip">effort <b>1–1.5 wk</b></span><span class="chip">deps <b>liveness swap</b></span><span class="chip">risk <b>med — it mutates fleet state</b></span></div>
+</section>
+
+<!-- ══════════════════════ FLEET C ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Fleet C · the shape a list can't draw</span>
+  <h2>The critical path</h2>
+  <p>A fleet's real topology is a DAG, and the expensive question is never "what status is this item"
+  — it is <em>which single item is holding up the most lanes, and is anyone on it</em>. That is a
+  spatial fact. It is the one thing on this page that genuinely earns horizontal space.</p>
+
+  <div class="breakout">
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> pui — Fleet · critical path</div>
+    <pre>
+ <span class="t-d">depth 0 ─────────────────── depth 1 ─────────────── depth 2 ──────────────►</span>
+
+ <span class="t-y">▸ P-001</span> task engine        <span class="t-d">┬─</span> <span class="t-d">○ P-002</span> task↔WI links
+   <span class="t-d">su-3f19c · 63% · silent 22m</span>  <span class="t-d">├─</span> <span class="t-d">○ P-003</span> blocking prims
+   <span class="t-r">████ 4 lanes wait on this</span>   <span class="t-d">├─</span> <span class="t-d">○ P-004</span> checkpoint sync <span class="t-d">──┬─</span> <span class="t-d">○ P-005</span> acceptance
+                                <span class="t-d">└─</span> <span class="t-d">○ P-008</span> migration      <span class="t-d">  │</span>
+                                                             <span class="t-d">  │</span>
+ <span class="t-g">✓ P-006</span> non-task sections                                   <span class="t-d">  │</span>
+   <span class="t-d">su-acb7e · done 14:53</span>                                     <span class="t-d">  │</span>
+                                                             <span class="t-d">  │</span>
+ <span class="t-y">▸ P-007</span> semantic cards                                      <span class="t-d">  │</span>
+   <span class="t-d">su-b7567 ·</span> <span class="t-r">94% ▓</span>                                          <span class="t-d">  │</span>
+                                                             <span class="t-d">  │</span>
+ <span class="t-r">○ P-029</span> shared projection  <span class="t-d">──</span> <span class="t-d">○ P-030</span> foreign tiers <span class="t-d">────────┘</span>
+   <span class="t-r">⚠ UNCLAIMED — nobody is on the second-longest path</span>
+
+ <span class="t-d">[↵]</span> open the holder's pane   <span class="t-d">[a]</span> assign   <span class="t-d">[f]</span> follow critical path</pre>
+  </div>
+  </div>
+  <p class="cap">Read left to right and the schedule is obvious: P-001 is the keystone and its holder
+  has been silent for 22 minutes, while an entirely unclaimed chain quietly sets the floor on when
+  this plan can finish. Neither fact exists in any status view.</p>
+
+  <div class="notes">
+    <div>
+      <h3>What the user gets</h3>
+      <ul>
+        <li>The scheduling answer, not the bookkeeping answer: where to put the next agent.</li>
+        <li>Unclaimed chains become loud instead of invisible — the classic silent-delay source.</li>
+        <li>Makes "should I launch two more members?" a look rather than an analysis.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How it's wired</h3>
+      <ul>
+        <li>Edges already exist — plan items carry <code class="k">blocked-by</code>; this plan has 11 of them.</li>
+        <li>Depth is a topological sort done at render; no new storage.</li>
+        <li>Holder + context pressure join from the same leader-brief read as Fleet B.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="chips"><span class="chip">effort <b>3–4 d</b></span><span class="chip">deps <b>blocked-by edges (exist)</b></span><span class="chip">risk <b>low–med (layout)</b></span></div>
+</section>
+
+<!-- ══════════════════════ FLEET D ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Fleet D · stop asking, start listening</span>
+  <h2>The transition tape</h2>
+  <p>Today pui learns that a member died by re-reading the roster on a timer and noticing a dot
+  changed colour. The fleet already <em>emits</em> the moment instead — six transition events, all
+  live and awaitable now. A tape is what that looks like when you render it rather than poll it.</p>
+
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> pui — Fleet tape · pui-cockpit <span class="t-g">● live</span></div>
+    <pre>
+ <span class="t-d">14:51:07</span>  <span class="t-y">⚑</span>  <span class="t-y">gate declared</span>     task-engine-contract-ready       <span class="t-d">leader</span>
+ <span class="t-d">14:52:33</span>  <span class="t-g">+</span>  claim             su-acb7e → <span class="t-b">WI-42175</span>              <span class="t-d">spec r3</span>
+ <span class="t-d">14:53:19</span>  <span class="t-g">✓</span>  item completed    <span class="t-b">WI-42174</span> Context pane spec      <span class="t-d">+ evidence</span>
+ <span class="t-d">14:58:10</span>  <span class="t-c">⌁</span>  claim released    <span class="t-b">WI-42180</span> <span class="t-d">← session ended</span>        <span class="t-d">re-placeable</span>
+ <span class="t-d">14:58:41</span>  <span class="t-r">⚠</span>  <span class="t-r">context critical</span>  su-b7567  <span class="t-r">94%</span>                    <span class="t-d">[c] checkpoint</span>
+ <span class="t-d">15:02:55</span>  <span class="t-r">✗</span>  <span class="t-r">member dead</span>       su-c41e8  <span class="t-r">WI-42179 orphaned</span>      <span class="t-d">[r] relaunch</span>
+ <span class="t-d">15:02:55</span>  <span class="t-c">⌁</span>  claim released    <span class="t-b">WI-42179</span> <span class="t-d">← member-dead</span>          <span class="t-d">[p] re-place</span>
+
+ <span class="t-d">filter</span>  <span class="t-hl"> [!] exceptions </span> <span class="t-d">[a] all  [c] claims  [g] gates</span>          <span class="t-d">bound to</span> <span class="t-m">events:await</span></pre>
+  </div>
+  <p class="cap">Note the pairing on the last two rows: a member dies and its claim falls out in the
+  same instant. That causal pair is what a polled roster can never show you — by the next tick it is
+  just two things that are different now.</p>
+
+  <div class="notes">
+    <div>
+      <h3>What the user gets</h3>
+      <ul>
+        <li>Causality. Not "state changed at some point in the last 30s" but "this happened, then that."</li>
+        <li>Exceptions filter turns it into an alarm panel you can leave open.</li>
+        <li>The same rows can render inline in the transcript as cards — reusing Part One's card machinery for the agent's own fleet events.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How it's wired</h3>
+      <ul>
+        <li>Six existing keys: <code class="k">member-dead</code>, <code class="k">claim-released</code>, <code class="k">item-completed</code>, <code class="k">context-critical</code>, <code class="k">drained</code>, <code class="k">admission-blocked</code>.</li>
+        <li>Needs an events→pui bridge on the existing SSE transport; the events themselves need nothing.</li>
+        <li>Replaces polling rather than adding to it — a net reduction in reads.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="chips"><span class="chip">effort <b>3–4 d</b></span><span class="chip">deps <b>events bridge to pui</b></span><span class="chip">risk <b>low</b></span></div>
+</section>
+
+<!-- ══════════════════════ THE KANBAN QUESTION ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Your question · answered</span>
+  <h2>Should we borrow the kanban?</h2>
+  <p>The GUI kanban (<code class="k">PlanKanbanView.tsx</code>) is six columns keyed on item status —
+  <code class="k">todo · wip · blocked · needs-human · done · dropped</code> — on vendored Kibo UI
+  primitives, scoped to one plan, where a drag writes through <code class="k">plans.setStatus</code>.
+  It is good, and it is good <em>because</em> of the pointer. Here it is at terminal width, next to
+  the same ten items as a list.</p>
+
+  <div class="versus">
+    <div class="term">
+      <div class="bar"><span class="dot">●●●</span> kanban · 6 cols <span class="t-r">✗</span></div>
+      <pre>
+ <span class="t-d">TO DO    IN PROG  BLOCKED  NEEDS-H  DONE     DROP</span>
+ <span class="t-d">┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌────┐</span>
+ <span class="t-d">│</span>P-005 <span class="t-d">│ │</span><span class="t-y">P-001</span> <span class="t-d">│ │</span>P-002 <span class="t-d">│ │      │ │</span><span class="t-g">P-006</span> <span class="t-d">│ │    │</span>
+ <span class="t-d">│</span>accep…<span class="t-d">│ │</span>task …<span class="t-d">│ │</span>task…<span class="t-d">│ │      │ │</span>non-t…<span class="t-d">│ │    │</span>
+ <span class="t-d">├──────┤ ├──────┤ ├──────┤ │      │ ├──────┤ │    │</span>
+ <span class="t-d">│</span>P-009 <span class="t-d">│ │</span><span class="t-y">P-007</span> <span class="t-d">│ │</span>P-003 <span class="t-d">│ │      │ │</span><span class="t-g">P-010</span> <span class="t-d">│ │    │</span>
+ <span class="t-d">│</span>GUI c…<span class="t-d">│ │</span>seman…<span class="t-d">│ │</span>block…<span class="t-d">│ │      │ │</span>user-…<span class="t-d">│ │    │</span>
+ <span class="t-d">└──────┘ └──────┘ └──────┘ └──────┘ └──────┘ └────┘</span>
+   <span class="t-d">2        2        2        0        2       0</span>
+
+ <span class="t-r">titles truncated at 6 chars</span>
+ <span class="t-r">2 of 6 columns empty</span>
+ <span class="t-r">no agent · no context · no blocker</span></pre>
+    </div>
+    <div class="term">
+      <div class="bar"><span class="dot">●●●</span> the same data, listed <span class="t-g">✓</span></div>
+      <pre>
+ <span class="t-y">▸</span> P-001 <span class="t-d">wip</span>      task engine        <span class="t-d">su-3f19c</span> <span class="t-d">63%</span>  <span class="t-r">blocks 4</span>
+ <span class="t-y">▸</span> P-007 <span class="t-d">wip</span>      semantic cards     <span class="t-d">su-b7567</span> <span class="t-r">94%▓</span>
+ <span class="t-d">○</span> P-002 <span class="t-d">blocked</span>  task↔WI links      <span class="t-d">—</span>             <span class="t-d">by P-001</span>
+ <span class="t-d">○</span> P-003 <span class="t-d">blocked</span>  blocking prims     <span class="t-d">—</span>             <span class="t-d">by P-001</span>
+ <span class="t-d">○</span> P-004 <span class="t-d">blocked</span>  checkpoint sync    <span class="t-d">—</span>             <span class="t-d">by P-001</span>
+ <span class="t-d">○</span> P-005 <span class="t-d">todo</span>     acceptance         <span class="t-d">—</span>             <span class="t-d">by P-004</span>
+ <span class="t-g">✓</span> P-006 <span class="t-d">done</span>     non-task sections  <span class="t-d">su-acb7e</span>
+ <span class="t-d">○</span> P-008 <span class="t-d">blocked</span>  migration          <span class="t-d">—</span>             <span class="t-d">by P-001</span>
+ <span class="t-d">○</span> P-009 <span class="t-d">todo</span>     GUI chat parity    <span class="t-d">—</span>
+ <span class="t-g">✓</span> P-010 <span class="t-d">done</span>     user-side task ops <span class="t-d">su-acb7e</span>
+
+ <span class="t-g">full titles · holder · context · the blocking edge</span>
+ <span class="t-g">10 rows, half the width</span></pre>
+    </div>
+  </div>
+  <p class="cap">Same ten items, same plan, same moment. The left pane spends its entire width
+  encoding one short enum; the right shows that enum in eight characters and spends what it saved on
+  the three fields you'd actually go looking for.</p>
+
+  <div class="verdict">
+    <h3>Recommendation: don't port it. Keep it in the GUI.</h3>
+    <p>Four reasons, in order of how much they matter:</p>
+    <ul style="margin:.4rem 0 .6rem;padding-left:1.15rem">
+      <li><strong>The columns encode status, and status is the least interesting thing about a live fleet.</strong> It is one short enum. A list column renders it in eight characters and has room left for the holder, the context pressure, and the blocking edge — the fields you actually open the board to find.</li>
+      <li><strong>Its interaction premise is drag.</strong> That is genuinely good with a pointer. In a terminal it becomes a keystroke, and a keystroke does not need columns to land in.</li>
+      <li><strong>It is item-shaped and single-plan.</strong> There is nowhere on a kanban card to put an agent, and every interesting fleet fact is agent-shaped: who holds it, are they alive, are they about to lose their context.</li>
+      <li><strong>Width is the terminal's scarce resource</strong> — the thing a GUI has in surplus and pui does not. Six columns is the whole pane for two fields.</li>
+    </ul>
+    <p style="margin-bottom:0">There <em>is</em> one column layout that earns terminal width, and it's
+    Fleet C: put <strong>dependency depth</strong> on the horizontal axis instead of status. Then
+    left-to-right means something a list physically cannot draw. Keep columns for the DAG, not for
+    the enum.</p>
+  </div>
+
+  <p style="margin-top:1.5rem">One clarification on parity, since it's adjacent: D-004's "one source,
+  two renderers" governs the <em>context projection</em> — same data, rendered per surface. It does
+  not oblige the fleet board to be the same <em>shape</em> in both. A GUI has a pointer and unlimited
+  width; pui has keys and 120 columns. Rendering the same data differently is what that decision
+  asks for, not a violation of it.</p>
+</section>
+
+<!-- ══════════════════════ COMPOSITION ══════════════════════ -->
+<section class="opt">
+  <span class="optlabel">Putting it together</span>
+  <h2>Where each of these lives, and in what order</h2>
+
+  <p>Your open placement question — sections of the Context pane, a sibling pane, or their own
+  destination — has a clean answer once the surfaces are separated by <em>role</em> rather than by
+  subject:</p>
+
+  <div class="rec">
+    <div><b>member → section</b><span>The fleet is context while you're in one. Five lines in the Context pane (Fleet A). No new destination, no new keymap.</span></div>
+    <div><b>leader → destination</b><span>Leading is a different job that needs width and mutates state. That's the Fleet tab, rebuilt around Fleet B, with the wake board kept as-is next to it.</span></div>
+    <div><b>tape → both</b><span>Exceptions render inline in the transcript as cards (Part One's machinery); the full tape lives in the leader cockpit.</span></div>
+    <div><b>critical path → overlay</b><span>A keypress from the leader cockpit and from the Plans tab. It answers a scheduling question, not a monitoring one, so it shouldn't be always-on.</span></div>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <tr><th>direction</th><th>who it's for</th><th>why it earns the space</th><th>effort</th><th>depends on</th></tr>
+    <tr><td class="mono">liveness swap</td><td>everyone</td><td>the green dot stops lying about dead agents</td><td class="mono">~1 d</td><td>nothing</td></tr>
+    <tr><td class="mono">A · pane section</td><td>every member</td><td>fleet as context, five lines, no new surface</td><td class="mono">2–3 d</td><td>Context pane (P-006)</td></tr>
+    <tr><td class="mono">D · transition tape</td><td>everyone</td><td>causality; replaces polling rather than adding to it</td><td class="mono">3–4 d</td><td>events bridge</td></tr>
+    <tr><td class="mono">B · leader cockpit</td><td>leaders</td><td>the only surface where keys change fleet state</td><td class="mono">1–1.5 wk</td><td>liveness swap</td></tr>
+    <tr><td class="mono">C · critical path</td><td>leaders, planners</td><td>the DAG — the one thing columns are honest for</td><td class="mono">3–4 d</td><td>blocked-by edges</td></tr>
+    <tr><td class="mono">kanban port</td><td>—</td><td><strong>rejected</strong> — spends the terminal's scarcest resource on its least interesting field</td><td class="mono">—</td><td>—</td></tr>
+  </table>
+  </div>
+
+  <div class="verdict">
+    <h3>If you want one sentence</h3>
+    <p style="margin-bottom:0">Fix the liveness field first because it is a day and it stops the tab
+    lying; then build <strong>A</strong> so every member carries its fleet context for free; then
+    <strong>D</strong>, because pushed transitions make both boards live instead of polled; then
+    <strong>B</strong>, the cockpit, which is the real answer to "what makes pui unique" — it is the
+    only place in the system where you can <em>see</em> a fleet and <em>steer</em> it in the same
+    keystroke, and no GUI kanban has ever been able to do the second half.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════ PART THREE ══════════════════════ -->
+<div class="partbreak">
+  <div class="eyebrow">Part three · sessions</div>
+  <h2>Browsing and switching sessions</h2>
+  <p class="standfirst">Two different problems wearing one name — and the half that holds all
+  the history is currently not reachable from pui at all.</p>
+</div>
+
+<section class="opt">
+  <span class="optlabel">First · what switching costs you today</span>
+  <h2>A flat list you cannot search, missing everything that ended</h2>
+  <p>Today the route is: go to the Fleet tab, find the row, press Enter.
+  <code class="k">resolve_agent_route</code> then does the right thing and tells you in advance
+  which — <code class="k">⏎ pane</code> · <code class="k">⏎ window</code> ·
+  <code class="k">⏎ resume</code> · <code class="k">⏎ menu</code>. That routing is genuinely
+  good and nothing below changes it. The problem is everything that has to happen before it.</p>
+
+  <div class="audit">
+    <div class="has">
+      <h3>Already built (and underused)</h3>
+      <ul>
+        <li>Four-way Enter routing with the destination shown <em>before</em> the keypress.</li>
+        <li>A typed command palette — <code class="k">parse_palette_command</code>: layouts, crews, theme, pickup-plan-item.</li>
+        <li><strong>Crews and layouts</strong> — saved, named, restorable pane sets. Already the right primitive for "put me back in that whole arrangement", and not currently pointed at session switching.</li>
+        <li>Roster grouped by fleet, colour-coded, stable-sorted by heartbeat recency.</li>
+      </ul>
+    </div>
+    <div class="lacks">
+      <h3>Missing</h3>
+      <ul>
+        <li><strong>Any search.</strong> <code class="k">visible_roster()</code> filters on exactly one thing — <code class="k">plan_filter</code> — then sorts. No text match, no state facet, no fleet facet, no recency.</li>
+        <li><strong>Any MRU.</strong> No notion of where you just were, so bouncing between two sessions is two full navigations every time.</li>
+        <li><strong>Every ended session.</strong> Zero references to <code class="k">sessions:search</code> or <code class="k">sessions:read</code> anywhere in the crate.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="finding">
+    <h3>"All sessions" currently cannot mean all sessions</h3>
+    <p style="margin-bottom:.4rem">The roster is <strong>presence-primary</strong>: a row exists
+    because a session is heartbeating. An ended session has no presence row, so it is not in the
+    list to be found. Only ones that happen to carry an <code class="k">adv_session_id</code>
+    launch record surface at all, as <code class="k">⏎ resume</code>.</p>
+    <p style="margin-bottom:0">Scale makes that lopsided. A representative moment from this
+    workspace: <strong>324 agents in scope — 79 live, 100 parked, 543 ended, 35 recorded.</strong>
+    So the surface you can browse is an unsearchable flat list of ~179 rows, and the ~578 sessions
+    holding the actual history are invisible — even though every one of their transcripts is
+    indexed and owner-scoped across carry-respawn chains, one <code class="k">sessions:search</code>
+    away. That is the gap worth closing.</p>
+  </div>
+</section>
+
+<!-- ── S1 ── -->
+<section class="opt">
+  <span class="optlabel">Sessions A · the one that pays for itself</span>
+  <h2>A switcher overlay on one keystroke</h2>
+  <p>Switching is muscle memory, not exploration: you want the session you are thinking of, from
+  wherever you are, without navigating. One key opens a fuzzy filter over <em>every</em> session —
+  live, parked, and ended — ranked by recency crossed with match quality. Enter hands off to the
+  existing four-way routing untouched.</p>
+
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> ctrl-o · anywhere in pui</div>
+    <pre>
+ <span class="t-b">┌─ switch to… ─────────────────────────────────────────────────────────┐</span>
+ <span class="t-b">│</span> <span class="t-g">❯</span> task eng<span class="cursor"> </span>                                     <span class="t-d">7 of 324 match</span>  <span class="t-b">│</span>
+ <span class="t-b">├──────────────────────────────────────────────────────────────────────┤</span>
+ <span class="t-hl"><span class="t-b">│</span> <span class="t-g">●</span> su-f6563  <span class="t-g">live</span>    <span class="t-y">task eng</span>ine · P-001        pui-cockpit    <span class="t-d">8s</span>  <span class="t-b">│</span></span>
+ <span class="t-b">│</span> <span class="t-y">◐</span> su-b7567  <span class="t-g">live</span>    <span class="t-y">task</span> ops user-side · P-010  pui-cockpit   <span class="t-d">12m</span>  <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-b">◑</span> su-9d0a2  <span class="t-b">parked</span>  drained · awaiting gate    pui-cockpit    <span class="t-d">4m</span>  <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-r">○</span> su-3ae5e  <span class="t-r">ended</span>   P-020 chat behaviors      own-tui        <span class="t-d">8h</span>  <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-r">○</span> su-b1fa0  <span class="t-r">ended</span>   <span class="t-y">task</span> ledger bridge spike    own-tui        <span class="t-d">2d</span>  <span class="t-b">│</span>
+ <span class="t-b">└──────────────────────────────────────────────────────────────────────┘</span>
+   <span class="t-d">⏎ attach/resume · ⇥ cycle MRU · ^f fleet · ^s state · ^t search transcripts</span></pre>
+  </div>
+  <p class="cap">The ended rows are the point. They are matched from the session index, not the
+  roster, and Enter on one routes to resume — the same route the Fleet tab already computes.</p>
+
+  <div class="notes">
+    <div>
+      <h3>What the user gets</h3>
+      <ul>
+        <li>Zero navigation: the switcher is available from the chat, the fleet board, anywhere.</li>
+        <li><code class="k">⇥</code> alone cycles most-recently-used, which covers the common case of bouncing between two or three sessions without typing at all.</li>
+        <li>Dead sessions become first-class destinations rather than things you remember existing.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How it's wired</h3>
+      <ul>
+        <li>Live/parked rows: the roster pui already holds, plus the D-008 sessionState swap so the dots mean something.</li>
+        <li>Ended rows: <code class="k">sessions:search</code>, owner-scoped, which needs no new storage.</li>
+        <li>Enter reuses <code class="k">resolve_agent_route</code> verbatim — no new routing logic, and the <code class="k">⏎ pane/window/resume/menu</code> contract is preserved.</li>
+        <li>MRU is a bounded ring in app state; the palette that parses typed commands already exists to hang it off.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="chips"><span class="chip">effort <b>3–4 d</b></span><span class="chip">deps <b>sessionState swap for the dots</b></span><span class="chip">risk <b>low</b></span></div>
+</section>
+
+<!-- ── S2 ── -->
+<section class="opt">
+  <span class="optlabel">Sessions B · the exploratory half</span>
+  <h2>A session browser that includes the dead</h2>
+  <p>Browsing is the other problem: you don't know the name, you know the shape — "the codex one
+  that touched the migration yesterday and died." That wants facets and a preview, which is a
+  destination, not an overlay.</p>
+
+  <div class="breakout">
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> pui — Sessions</div>
+    <pre>
+ <span class="t-d">STATE</span> <span class="t-hl"> all </span> live <span class="t-d">79</span> · parked <span class="t-d">100</span> · ended <span class="t-d">543</span> · recorded <span class="t-d">35</span>    <span class="t-d">FLEET</span> <span class="t-hl"> any </span>   <span class="t-d">AGENT</span> <span class="t-hl"> any </span>   <span class="t-d">WHEN</span> <span class="t-hl"> 7d </span>
+
+ <span class="t-d">  SESSION     STATE    AGENT   LANE                        WHEN     ┊ PREVIEW</span>
+ <span class="t-g">●</span> su-f6563    <span class="t-g">live</span>     codex   task engine · P-001         <span class="t-d">8s</span>       <span class="t-d">┊</span> <span class="t-d">[tool]</span> <span class="t-m">capability:edit</span>
+ <span class="t-y">◐</span> su-b7567    <span class="t-g">live</span>     codex   user-side task ops · P-010  <span class="t-d">12m</span>      <span class="t-d">┊</span>   <span class="t-d">session-tasks.ts</span> <span class="t-g">✓</span>
+ <span class="t-b">◑</span> su-9d0a2    <span class="t-b">parked</span>   codex   awaiting gate               <span class="t-d">4m</span>       <span class="t-d">┊</span> <span class="t-c">agent</span> Migration 981 is
+ <span class="t-hl"><span class="t-r">○</span> su-3ae5e    <span class="t-r">ended</span>    claude  P-020 chat behaviors        <span class="t-d">8h</span>       <span class="t-d">┊</span>   armed; publishing the  </span>
+ <span class="t-r">○</span> su-b1fa0    <span class="t-r">ended</span>    claude  task ledger bridge spike    <span class="t-d">2d</span>       <span class="t-d">┊</span>   contract gate to the
+ <span class="t-d">○</span> su-de924    <span class="t-d">recorded</span> codex   serializer duty             <span class="t-d">3d</span>       <span class="t-d">┊</span>   leader now.
+                                                                  <span class="t-d">┊</span>
+ <span class="t-d">757 sessions · 6 shown · filtered by: when≤7d</span>                        <span class="t-d">┊</span> <span class="t-d">^t full transcript</span>
+
+ <span class="t-d">[⏎]</span> attach / resume   <span class="t-d">[^t]</span> read transcript   <span class="t-d">[^k]</span> save selection as crew   <span class="t-d">[/]</span> search text</pre>
+  </div>
+  </div>
+  <p class="cap">The preview column is the difference between recognising a session and guessing at
+  it: the tail of the transcript, live for a running session and read from the index for a dead
+  one. <code class="k">/</code> searches transcript <em>text</em>, which is how you find the session
+  whose name you never knew.</p>
+
+  <div class="notes">
+    <div>
+      <h3>What the user gets</h3>
+      <ul>
+        <li>The ~578 ended and recorded sessions stop being a blind spot and become the archive they already are.</li>
+        <li>Faceting by state answers the question you actually have — "what is running right now" vs "what happened yesterday" — instead of one undifferentiated list.</li>
+        <li>Full-text across transcripts finds work by what was said in it, not by an agent id nobody remembers.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How it's wired</h3>
+      <ul>
+        <li><code class="k">sessions:search</code> for the ended/recorded tiers and for <code class="k">/</code>; the roster for the live tier; one merged, state-tagged list.</li>
+        <li><code class="k">sessions:read</code> for the preview tail and <code class="k">^t</code>.</li>
+        <li><code class="k">^k</code> hands the selection to the crew machinery that already exists — see below.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="chips"><span class="chip">effort <b>~1 wk</b></span><span class="chip">deps <b>Sessions A (shares the merged model)</b></span><span class="chip">risk <b>low–med</b></span></div>
+</section>
+
+<!-- ── S3 ── -->
+<section class="opt">
+  <span class="optlabel">Sessions C · already built, pointed the wrong way</span>
+  <h2>Crews are the multi-session switch you already have</h2>
+  <p>The palette already parses <code class="k">save-crew</code>, <code class="k">restore-crew</code>,
+  <code class="k">save-layout</code>, <code class="k">restore-layout</code> — named, restorable sets
+  of panes. That is precisely "switch me to a whole working context", and it is currently framed as
+  a workspace-layout feature rather than a session-switching one. Reframing costs almost nothing.</p>
+
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> palette · <span class="t-d">:</span>restore-crew</div>
+    <pre>
+ <span class="t-d">:</span>restore-crew <span class="t-y">cockpit-fleet</span>
+ <span class="t-d">─────────────────────────────────────────────────────────────</span>
+ <span class="t-g">✓</span> su-f6563  <span class="t-g">live</span>    <span class="t-d">→ focused existing pane</span>
+ <span class="t-g">✓</span> su-b7567  <span class="t-g">live</span>    <span class="t-d">→ focused existing pane</span>
+ <span class="t-y">↻</span> su-9d0a2  <span class="t-b">parked</span>  <span class="t-d">→ woken, pane opened</span>
+ <span class="t-r">○</span> su-c41e8  <span class="t-r">ended</span>   <span class="t-d">→</span> <span class="t-y">resume? [y/N]</span> <span class="t-d">(WI-42179 was orphaned)</span>
+ <span class="t-d">─────────────────────────────────────────────────────────────</span>
+ <span class="t-d">4 members · 3 restored · 1 needs a decision</span></pre>
+  </div>
+  <p class="cap">A crew restore is the honest place to surface that a member died: you asked for
+  four panes and got three, so it asks rather than silently giving you a smaller workspace.</p>
+  <div class="chips"><span class="chip">effort <b>1–2 d</b></span><span class="chip">deps <b>crews (exist)</b></span><span class="chip">risk <b>low</b></span></div>
+</section>
+
+<!-- ── VERDICT ── -->
+<section class="opt">
+  <span class="optlabel">Sessions · recommendation</span>
+  <h2>Switching and browsing are two features, not one</h2>
+
+  <div class="rec">
+    <div><b>switching</b><span>Latency and muscle memory. One keystroke, fuzzy match, MRU on <code class="k">⇥</code>. An overlay, never a destination — if you have to navigate to it, it has already failed at its job.</span></div>
+    <div><b>browsing</b><span>Recognition and recall. Facets, a transcript preview, full-text. A destination, because it is exploratory and needs the width.</span></div>
+    <div><b>restoring</b><span>Whole working contexts, which is crews — already built, currently framed as a layout feature rather than a switching one.</span></div>
+  </div>
+
+  <div class="verdict">
+    <h3>Build Sessions A first, and make it include the dead from day one</h3>
+    <p style="margin-bottom:.4rem">The overlay is 3–4 days and removes the most-repeated
+    interaction cost in the app. But the part that actually changes what pui <em>is</em> is the
+    ended-session tier: every transcript is already indexed and owner-scoped, and pui currently
+    references none of it. Today "browse all sessions" can only show you the ~23% that happen to
+    be breathing.</p>
+    <p style="margin-bottom:0">One dependency worth naming: the state dots are only worth
+    rendering once <strong>P-024</strong> (the liveness swap) lands — otherwise the switcher
+    inherits the same lie the Fleet tab tells, and now tells it in the one surface you look at
+    most. Sequence it after P-024, and share the merged session model between A and B so the
+    browser is mostly a second renderer over the same list.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════ PART FOUR ══════════════════════ -->
+<div class="partbreak">
+  <div class="eyebrow">Part four · the work</div>
+  <h2>Seeing the work, and putting agents on it</h2>
+  <p class="standfirst">pui has a good plans board, has never heard of goals, and cannot
+  launch a fleet at all. Three surfaces close that.</p>
+</div>
+
+<section class="opt">
+  <span class="optlabel">First · the shape of the gap</span>
+  <h2>One level missing at the top, and the launcher missing at the bottom</h2>
+  <p>The hierarchy is <strong>goals → plans → work items</strong>. pui covers the middle well and
+  the ends not at all.</p>
+
+  <div class="audit">
+    <div class="has">
+      <h3>Genuinely good already</h3>
+      <ul>
+        <li><code class="k">plans_board.rs</code> — master/detail over every plan: status, a "● N working" agent badge, done/total, sorted active→ready→draft→shipped.</li>
+        <li>Its right pane already shows a plan's work items with <strong>who holds each one, their claim liveness, and their declared intent</strong> — most of what a work-item view needs.</li>
+        <li>The palette can hand a plan item to an agent already running (<code class="k">PickupPlanItem</code>).</li>
+      </ul>
+    </div>
+    <div class="lacks">
+      <h3>Absent</h3>
+      <ul>
+        <li><strong>Goals — entirely.</strong> Zero references to <code class="k">goals</code> anywhere in the crate. The level that says <em>why</em> a plan exists is not modelled.</li>
+        <li><strong>Fleet launching — entirely.</strong> Zero hits for <code class="k">launch-on-plan</code>, <code class="k">fleet:create</code>, <code class="k">launch_agent</code>, <code class="k">LaunchSpec</code>. You can launch one session from the Fleet tab; you cannot put a fleet on a plan.</li>
+        <li>Cross-plan work-item search. Items are reachable only by first selecting their plan.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="finding">
+    <h3>Do not build a work-item list</h3>
+    <p style="margin-bottom:.4rem">This workspace currently holds <strong>39,995 work items</strong>.
+    Of those: <strong>24 todo, 4 in flight, 49 needing a human, 355 blocked, 3 stuck.</strong></p>
+    <p style="margin-bottom:0">So the set worth looking at is around <strong>0.2%</strong> of the
+    rows, and any surface that opens on "all work items" has buried its own answer by design. The
+    useful primitive is not a list, it is a <em>frontier</em>: what is actionable now, what is in
+    flight, what is waiting on you. Everything else is an archive you query, not a list you scroll.</p>
+  </div>
+</section>
+
+<!-- ── W1 ── -->
+<section class="opt">
+  <span class="optlabel">Work A · the missing level</span>
+  <h2>Goals → plans → work, as one spine</h2>
+  <p>Three linked columns, drilling left to right. The left column is the one that does not exist
+  today, and it is what makes a plan legible: you can see the plan is 3/15 without knowing whether
+  that plan still matters.</p>
+
+  <div class="breakout">
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> pui — Work</div>
+    <pre>
+ <span class="t-d">GOALS ─────────────────┬─ PLANS ───────────────────────────┬─ ITEMS ─────────────────────────</span>
+ <span class="t-hl"><span class="t-y">▸</span> Own the agent loop   <span class="t-d">│</span> <span class="t-hl"><span class="t-y">▸</span> pui-agent-context-cockpit</span>       <span class="t-d">│</span> <span class="t-g">●</span> P-001 task engine     <span class="t-d">su-f6563</span>  </span>
+   <span class="t-d">3 plans · 61%</span> <span class="t-g">██████</span><span class="t-d">░░░░</span> <span class="t-d">│</span>   <span class="t-g">active</span> <span class="t-d">· 3/15 ·</span> <span class="t-g">●5 working</span>       <span class="t-d">│</span>   <span class="t-y">⚑</span> <span class="t-d">gate fired · 4 lanes freed</span>
+                        <span class="t-d">│</span>                                   <span class="t-d">│</span> <span class="t-r">○</span> P-024 liveness swap   <span class="t-r">unclaimed</span>
+ <span class="t-d">  Ship pui 1.0</span>         <span class="t-d">│</span>   own-tui-full-divorce            <span class="t-d">│</span>   <span class="t-d">ready · gates 4 fleet surfaces</span>
+   <span class="t-d">5 plans · 34%</span> <span class="t-g">███</span><span class="t-d">░░░░░░░</span> <span class="t-d">│</span>   <span class="t-g">active</span> <span class="t-d">· 18/30 ·</span> <span class="t-g">●2 working</span>      <span class="t-d">│</span> <span class="t-g">●</span> P-006 Context pane    <span class="t-d">su-acb7e</span>
+                        <span class="t-d">│</span>                                   <span class="t-d">│</span> <span class="t-d">○ P-002 alias shims     blocked</span>
+ <span class="t-d">  Fleet autonomy</span>       <span class="t-d">│</span>   stable-candidate-gate           <span class="t-d">│</span> <span class="t-d">○ P-005 acceptance      blocked</span>
+   <span class="t-d">2 plans · 88%</span> <span class="t-g">█████████</span><span class="t-d">░</span> <span class="t-d">│</span>   <span class="t-g">active</span> <span class="t-d">· 9/11 ·</span> <span class="t-g">●1</span>              <span class="t-d">│</span> <span class="t-d">─────────────────────────────</span>
+                        <span class="t-d">│</span>                                   <span class="t-d">│</span> <span class="t-d">ready width</span> <span class="t-g">8</span> <span class="t-d">· depth 2 · ●5</span>
+
+ <span class="t-d">[⏎]</span> drill   <span class="t-d">[L]</span> launch agents here   <span class="t-d">[c]</span> critical path   <span class="t-d">[/]</span> search across all plans</pre>
+  </div>
+  </div>
+  <p class="cap">Each column is a scope for the actions on the bottom row, which is the point of the
+  layout: <code class="k">L</code> on a goal launches across its plans, on a plan launches onto that
+  plan, on an item assigns that one item.</p>
+  <div class="chips"><span class="chip">effort <b>4–5 d</b></span><span class="chip">deps <b>goals:* read path (new to pui)</b></span><span class="chip">risk <b>low</b></span></div>
+</section>
+
+<!-- ── W2 ── -->
+<section class="opt">
+  <span class="optlabel">Work B · the anti-list</span>
+  <h2>The frontier, not the corpus</h2>
+  <p>What you want from "show me the work items" is almost never the items. It is: what could be
+  picked up right now, what is moving, and what is stuck waiting on me. Those three answers are
+  about thirty rows out of forty thousand.</p>
+
+  <div class="term">
+    <div class="bar"><span class="dot">●●●</span> pui — Work · frontier</div>
+    <pre>
+ <span class="t-d">39,995 items.</span> <span class="t-g">28 you can act on.</span>
+
+ <span class="t-g">READY NOW</span> <span class="t-d">— unblocked, unclaimed</span>                                          <span class="t-g">8</span>
+  <span class="t-b">P-024</span>  liveness swap             <span class="t-d">cockpit</span>      <span class="t-y">gates 4 lanes</span>   <span class="t-d">[L] launch</span>
+  <span class="t-b">P-009</span>  GUI chat parity           <span class="t-d">cockpit</span>      <span class="t-d">—</span>
+  <span class="t-b">P-010</span>  user-side task ops        <span class="t-d">cockpit</span>      <span class="t-d">—</span>
+ <span class="t-g">IN FLIGHT</span>                                                                 <span class="t-g">4</span>
+  <span class="t-b">P-001</span>  task engine               <span class="t-d">su-f6563 · 63% ·</span> <span class="t-g">spoke 8s</span>
+  <span class="t-b">P-007</span>  semantic cards            <span class="t-d">su-b7567 ·</span> <span class="t-r">94% ▓</span> <span class="t-d">·</span> <span class="t-y">spoke 12m</span>
+ <span class="t-y">NEEDS YOU</span>                                                                <span class="t-y">49</span>
+  <span class="t-b">EI-2154</span> single-primary watchdog flap        <span class="t-d">filed 19:25</span>
+ <span class="t-r">STUCK</span> <span class="t-d">— claimed but not progressing</span>                                     <span class="t-r">3</span>
+
+ <span class="t-d">blocked 355 </span><span class="t-d">[b]</span><span class="t-d"> · everything else 39,539 </span><span class="t-d">[a]</span><span class="t-d"> · </span><span class="t-d">[/]</span><span class="t-d"> search the archive</span></pre>
+  </div>
+  <p class="cap">The counts stay visible so nothing is hidden — but the 39,539 sit behind a
+  keystroke, because they are an archive to query, not a list to scroll. "Stuck" is its own bucket
+  precisely because a claimed-but-silent item is invisible in every status view.</p>
+  <div class="chips"><span class="chip">effort <b>3–4 d</b></span><span class="chip">deps <b>P-024 for the liveness in "stuck"</b></span><span class="chip">risk <b>low</b></span></div>
+</section>
+
+<!-- ── W3 ── -->
+<section class="opt">
+  <span class="optlabel">Work C · the one pui cannot do at all</span>
+  <h2>Launch a fleet from the thing you're looking at</h2>
+  <p>Today launching a fleet onto a plan happens by typing tool calls at an agent. It should be
+  <code class="k">L</code> on the plan you are already looking at — and the launcher should tell
+  you the one thing that is easy to get wrong.</p>
+
+  <div class="versus">
+    <div class="term">
+      <div class="bar"><span class="dot">●●●</span> L · sized correctly</div>
+      <pre>
+ <span class="t-b">┌─ launch on: pui-agent-context-cockpit ──┐</span>
+ <span class="t-b">│</span> <span class="t-d">ready width</span>  <span class="t-g">8</span> <span class="t-d">unblocked & unclaimed</span>  <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-d">agents</span>       <span class="t-hl"> 5 </span> <span class="t-g">✓ 5 of 8 — good fit</span>     <span class="t-b">│</span>
+ <span class="t-b">│</span>                                         <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-d">agent</span>  codex <span class="t-d">▾</span>   <span class="t-d">model</span> gpt-5.6-sol <span class="t-d">▾</span>  <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-d">acct</span>   default <span class="t-d">▾</span> <span class="t-d">carry</span> warm <span class="t-d">▾</span>        <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-d">where</span>  <span class="t-g">●</span> desktop  <span class="t-d">○ headless</span>        <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-d">spec</span>   plan = this plan   <span class="t-d">[edit]</span>     <span class="t-b">│</span>
+ <span class="t-b">├─────────────────────────────────────────┤</span>
+ <span class="t-b">│</span> <span class="t-g">admits 8 · excludes 0 · you lead</span>        <span class="t-b">│</span>
+ <span class="t-b">└─────────────────────────────────────────┘</span></pre>
+    </div>
+    <div class="term">
+      <div class="bar"><span class="dot">●●●</span> L · caught before spawning</div>
+      <pre>
+ <span class="t-b">┌─ launch on: stable-candidate-gate ──────┐</span>
+ <span class="t-b">│</span> <span class="t-d">ready width</span>  <span class="t-y">2</span> <span class="t-d">unblocked & unclaimed</span>  <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-d">agents</span>       <span class="t-hl"> 10 </span> <span class="t-r">⚠ 8 will idle</span>       <span class="t-b">│</span>
+ <span class="t-b">│</span>                                         <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-r">10 agents against 2 executable items.</span>   <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-d">The DAG is depth-5 here — most items</span>    <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-d">unblock one at a time.</span>                  <span class="t-b">│</span>
+ <span class="t-b">│</span>                                         <span class="t-b">│</span>
+ <span class="t-b">│</span> <span class="t-d">suggested</span> <span class="t-g">2</span>  <span class="t-d">·</span> <span class="t-d">[c] see critical path</span>    <span class="t-b">│</span>
+ <span class="t-b">├─────────────────────────────────────────┤</span>
+ <span class="t-b">│</span> <span class="t-y">launch 10 anyway</span> <span class="t-d">·</span> <span class="t-g">use 2</span> <span class="t-d">· cancel</span>        <span class="t-b">│</span>
+ <span class="t-b">└─────────────────────────────────────────┘</span></pre>
+    </div>
+  </div>
+  <p class="cap">The right-hand case is the one worth building for, and it is not hypothetical — it
+  happened during this very session: five members were launched against an executable frontier of
+  four items, and the mismatch only surfaced afterwards as a leader-brief alert. The launcher knows
+  the ready width before it spawns anything; it should say so while the number is still editable.</p>
+
+  <div class="notes">
+    <div>
+      <h3>What the user gets</h3>
+      <ul>
+        <li>Fleet launching stops being a thing only an agent can do for you.</li>
+        <li>The account / model / carry choices are shown as defaults you can see, instead of defaults you have to know to ask about.</li>
+        <li>Sizing is checked against the DAG <em>before</em> the irreversible action, which is the only moment it is cheap.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How it's wired</h3>
+      <ul>
+        <li><code class="k">fleet:launch-on-plan { name, plan, count, agent, model, account, carry, headless }</code> — the whole form is that call's arguments.</li>
+        <li>Ready width and depth come from the same blocked-by topology as the critical-path surface.</li>
+        <li>The spec preview is <code class="k">scheduler:preview_spec_delta</code>, which reports admits/excludes without writing anything.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="chips"><span class="chip">effort <b>4–5 d</b></span><span class="chip">deps <b>none blocking</b></span><span class="chip">risk <b>med — it spawns real agents</b></span></div>
+</section>
+
+<div class="verdict" style="max-width:62rem;margin:2.5rem auto 0">
+  <h3>Across parts two, three and four, one theme</h3>
+  <p style="margin-bottom:.4rem">Every gap on this page is the same gap in a different costume:
+  <strong>pui shows state and cannot act on it.</strong> It renders the roster but cannot bench a
+  member; it renders plans but cannot staff one; it renders live sessions but cannot reach the dead
+  ones; it renders a green dot that is not checking the thing it appears to check.</p>
+  <p style="margin-bottom:0">So the ordering that falls out is not by surface, it is by leverage:
+  fix the liveness field (<strong>P-024</strong>, a day) because three surfaces render it; then the
+  switcher, because it is the most repeated interaction in the app; then the launcher, because it
+  is the only thing here that pui genuinely <em>cannot do at all</em>; then the leader cockpit and
+  the boards, which are the payoff once the first three make them honest.</p>
+</div>
+
+<footer>
+  source: ~/.papercusp/scratch/pui-agent-cockpit.html · part one refs: own-tui-full-divorce-2026-08-24 (D-029 psu unchanged; P-019/P-020 chat surface) · WI-42131 · part two refs: WI-42180 · audit from apps/tui/src/fleet.rs, wake_board.rs, models.rs, apps/operator/app/admin/plans/PlanKanbanView.tsx
+</footer>
+</main>

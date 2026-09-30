@@ -1,0 +1,17 @@
+{
+  "$comment": "Self-contained — pure protocol + seam interfaces + portable (fs/in-memory) backends; zero runtime deps, so this lib is borrowable standalone. The PG backends live in the host adapter (@papercusp/coordination).",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "examples/**/*"]
+}

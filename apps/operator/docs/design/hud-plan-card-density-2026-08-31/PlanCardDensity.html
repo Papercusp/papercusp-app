@@ -1,0 +1,1323 @@
+<title>Plan Card Density</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+/* ═══ page chrome tokens — light is the base set, both dark states re-declare ═══ */
+:root {
+  --ground:      #eef1f6;
+  --panel:       #ffffff;
+  --panel-sunk:  #e4e9f0;
+  --rule:        #ccd6e2;
+  --rule-soft:   #e0e6ee;
+  --ink:         #0c1a26;
+  --ink-2:       #3d5568;
+  --ink-mute:    #64798d;
+  --accent:      #0369a1;
+  --accent-soft: rgba(3, 105, 161, 0.10);
+  --saved:       #047857;
+  --saved-soft:  rgba(4, 120, 87, 0.11);
+  --spent:       #b45309;
+  --spent-soft:  rgba(180, 83, 9, 0.11);
+  --shadow:      0 1px 2px rgba(12, 26, 38, 0.06), 0 8px 24px -12px rgba(12, 26, 38, 0.18);
+
+  --sans: "Archivo", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:      #080e16;
+    --panel:       #0e1622;
+    --panel-sunk:  #0a1119;
+    --rule:        #1e2c3c;
+    --rule-soft:   #16202c;
+    --ink:         #dbe9f4;
+    --ink-2:       #9db3c6;
+    --ink-mute:    #7288a0;
+    --accent:      #38bdf8;
+    --accent-soft: rgba(56, 189, 248, 0.13);
+    --saved:       #34d399;
+    --saved-soft:  rgba(52, 211, 153, 0.13);
+    --spent:       #fbbf24;
+    --spent-soft:  rgba(251, 191, 36, 0.13);
+    --shadow:      0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.6);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ground:      #080e16;
+  --panel:       #0e1622;
+  --panel-sunk:  #0a1119;
+  --rule:        #1e2c3c;
+  --rule-soft:   #16202c;
+  --ink:         #dbe9f4;
+  --ink-2:       #9db3c6;
+  --ink-mute:    #7288a0;
+  --accent:      #38bdf8;
+  --accent-soft: rgba(56, 189, 248, 0.13);
+  --saved:       #34d399;
+  --saved-soft:  rgba(52, 211, 153, 0.13);
+  --spent:       #fbbf24;
+  --spent-soft:  rgba(251, 191, 36, 0.13);
+  --shadow:      0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.6);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 40px 22px 88px;
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+}
+
+/* ── masthead ─────────────────────────────────────────────────────────── */
+.mast { display: flex; flex-direction: column; gap: 14px; }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(28px, 4.4vw, 42px);
+  font-weight: 700;
+  line-height: 1.08;
+  letter-spacing: -0.021em;
+  text-wrap: balance;
+}
+
+.dek {
+  margin: 0;
+  max-width: 62ch;
+  font-size: 16px;
+  color: var(--ink-2);
+}
+
+.ask {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 15px 17px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 6px 6px 0;
+  max-width: 74ch;
+}
+.ask p { margin: 0; font-size: 14.5px; color: var(--ink); }
+.ask .who {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+
+/* ── shared section furniture ─────────────────────────────────────────── */
+.sect { display: flex; flex-direction: column; gap: 18px; }
+
+.sect-h { display: flex; flex-direction: column; gap: 5px; }
+
+h2 {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.012em;
+}
+
+.sect-h p { margin: 0; max-width: 68ch; color: var(--ink-2); font-size: 14.5px; }
+
+code, .mono { font-family: var(--mono); font-size: 0.88em; }
+
+code {
+  background: var(--panel-sunk);
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+  padding: 0.5px 4px;
+  color: var(--ink);
+}
+
+/* ── controls ─────────────────────────────────────────────────────────── */
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.ctl-label {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin-right: 2px;
+}
+
+.seg { display: flex; gap: 0; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+
+.seg button {
+  appearance: none;
+  border: 0;
+  border-right: 1px solid var(--rule);
+  background: var(--panel);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 6px 11px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.seg button:last-child { border-right: 0; }
+.seg button:hover { background: var(--panel-sunk); color: var(--ink); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--panel); }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ── the hero: one column, two densities ──────────────────────────────── */
+/* The stages are pinned to the width the real grid gives a column (~250px of
+   card), so the density comparison is at true scale rather than stretched. */
+.duel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 22px;
+  align-items: flex-start;
+}
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  width: 300px;
+  flex: 0 0 auto;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+
+.duel-read {
+  flex: 1 1 250px;
+  min-width: 236px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 2px;
+}
+
+.duel-read h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.008em;
+}
+
+.duel-read p { margin: 0; font-size: 14px; color: var(--ink-2); }
+
+.duel-read .big {
+  font-family: var(--mono);
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: var(--saved);
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-h { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+
+.stage-name { font-size: 15px; font-weight: 650; letter-spacing: -0.008em; }
+
+.stage-fit {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 1.5px 7px;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+.stage-fit--now { color: var(--spent); background: var(--spent-soft); }
+.stage-fit--new { color: var(--saved); background: var(--saved-soft); }
+
+.stage-note { font-size: 13px; color: var(--ink-mute); margin: 0; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   THE APP SURFACE.
+   Everything under .app is transcribed from the live product:
+   apps/operator/app/adv/hud/hud.css + HudEntityColumns.tsx.
+   Deliberately single-theme — this IS the product's dark surface, so it
+   paints its own ground and never inherits the page's.
+   ═══════════════════════════════════════════════════════════════════════ */
+.app {
+  /* verbatim from apps/operator/app/_semantic.css */
+  --bg: #07101d;
+  --bg-2: rgba(255, 255, 255, 0.045);
+  --bg-3: rgba(255, 255, 255, 0.075);
+  --fg: #e7f7ff;
+  --fg-dim: #b9d4e8;
+  --fg-mute: #7f9bb4;
+  --border: rgba(125, 211, 252, 0.15);
+  --border-strong: rgba(125, 211, 252, 0.32);
+  --a: #38bdf8;
+  --good: #34d399;
+  --warn: #fbbf24;
+  --bad: #fb7185;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  border-radius: 6px;
+  padding: 9px;
+  color-scheme: dark;
+}
+
+/* one kanban column, at the width the real grid gives it */
+.hud__col { display: flex; flex-direction: column; min-width: 0; }
+
+.hud__col-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: 4px 4px 0 0;
+  background: var(--bg-2);
+  font-size: 11px;
+  font-weight: 760;
+  color: var(--fg-mute);
+}
+.hud__col-h .n { margin-left: auto; color: var(--fg); font-variant-numeric: tabular-nums; }
+
+.hud__col-b {
+  border: 1px solid var(--border);
+  border-radius: 0 0 4px 4px;
+  background: var(--bg-2);
+  padding: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+
+/* the clipped viewport that makes the density difference visible */
+.hud__col-b--clip { position: relative; }
+.hud__col-b--clip::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 46px;
+  background: linear-gradient(to bottom, rgba(7, 16, 29, 0), rgba(7, 16, 29, 0.94));
+  pointer-events: none;
+}
+
+/* ── the card, exactly as shipped ─────────────────────────────────────── */
+.hud__card {
+  display: block;
+  position: relative;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  text-align: left;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.hud__card--needs-you { border-color: rgba(251, 191, 36, 0.45); }
+.hud__card--blocked   { border-color: rgba(251, 113, 133, 0.35); }
+
+.hud__card-row { display: flex; gap: 7px; }
+
+.hud__rail {
+  width: 3px;
+  border-radius: 2px;
+  flex: none;
+  align-self: stretch;
+  background: var(--border-strong);
+}
+
+.hud__card-b { min-width: 0; flex: 1 1 auto; }
+
+.hud__card-h { display: flex; align-items: center; gap: 6px; }
+
+.hud__handle {
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud__reason {
+  display: -webkit-box;
+  font-size: 10.5px;
+  color: var(--fg-mute);
+  margin-top: 4px;
+  line-height: 1.45;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.hud__entity-why {
+  display: block;
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--fg-mute);
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hud__entity-why--who { color: var(--fg-dim); }
+
+.hud__plan {
+  display: block;
+  font-size: 10px;
+  color: var(--fg-mute);
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.85;
+}
+
+.hud__chips { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+
+.hud__chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 9.5px;
+  line-height: 1.6;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  color: var(--fg-mute);
+  white-space: nowrap;
+}
+.hud__chip--good { color: var(--good); border-color: rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.1); }
+.hud__chip--warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.1); }
+.hud__chip--bad  { color: var(--bad);  border-color: rgba(251, 113, 133, 0.4); background: rgba(251, 113, 133, 0.1); }
+
+.hud__cardmeta { display: flex; align-items: center; gap: 8px; margin-top: 6px; min-width: 0; }
+
+.hud__mt {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.hud__mt--hot { color: var(--good); }
+
+.hud__avs { display: flex; align-items: center; margin-left: auto; min-width: 0; }
+
+.hud__av {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: #051827;
+  border: 2px solid var(--bg);
+  margin-left: -5px;
+  flex: 0 0 auto;
+}
+.hud__av:first-child { margin-left: 0; }
+.hud__av--c0 { background: #7dd3fc; }
+.hud__av--c1 { background: #a78bfa; }
+.hud__av--c2 { background: #f9a8d4; }
+.hud__av--c3 { background: #fbbf24; }
+.hud__av--c4 { background: #34d399; }
+.hud__av--c5 { background: #fda4af; }
+.hud__av--gone { opacity: 0.45; }
+.hud__av--more { background: var(--bg-3); color: var(--fg-dim); }
+
+.hud__liven {
+  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--good);
+  border: 1px solid rgba(52, 211, 153, 0.5);
+  background: rgba(52, 211, 153, 0.14);
+  flex: 0 0 auto;
+}
+.hud__dotg { width: 4px; height: 4px; border-radius: 999px; background: var(--good); }
+
+.hud__track {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 2px;
+  background: rgba(127, 155, 180, 0.14);
+}
+.hud__track-fill { display: block; height: 100%; background: rgba(56, 189, 248, 0.7); }
+
+.hud__dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--fg-mute); }
+.hud__dot--working   { background: var(--good); box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.16); }
+.hud__dot--needs-you { background: var(--warn); box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.18); }
+.hud__dot--blocked   { background: var(--bad);  box-shadow: 0 0 0 3px rgba(251, 113, 133, 0.15); }
+.hud__dot--ready     { background: var(--fg-mute); }
+.hud__dot--done      { background: var(--border-strong); }
+
+/* ═══ NEW: the proposed pieces. Every rule below is an addition, and each
+       one is named in the "what changes" ledger at the foot of the page. ═══ */
+
+/* the right-hand rail that the meta floats into */
+.hud__cardright {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+/* the stack's own auto-margin is what pushes it right inside .hud__cardmeta;
+   inside the rail it must not add a second push */
+.hud__cardright .hud__avs { margin-left: 0; }
+.hud__cardright .hud__liven { margin-left: 0; }
+
+/* the title, promoted to the first line and carrying the card's identity */
+.hud__cardtitle {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg);
+  line-height: 1.35;
+  min-width: 0;
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* the "now" line when it carries its own right-hand rail (variant C) */
+.hud__nowrow { display: flex; align-items: baseline; gap: 7px; margin-top: 3px; min-width: 0; }
+.hud__nowrow .hud__entity-why { margin-top: 0; flex: 1 1 auto; min-width: 0; }
+.hud__nowrow .hud__cardright { margin-left: auto; }
+
+/* a count that used to be a chip, reduced to a dot + number */
+.hud__pip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.hud__pip::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.hud__pip--warn { color: var(--warn); }
+.hud__pip--bad  { color: var(--bad); }
+
+/* variant-scoped tweaks */
+.v-a .hud__reason { -webkit-line-clamp: 1; line-clamp: 1; }
+.v-a .hud__card-h .hud__handle { flex: 1 1 auto; }
+.v-b .hud__entity-why, .v-c .hud__entity-why, .v-d .hud__entity-why { margin-top: 3px; }
+.v-d .hud__card--ready .hud__entity-why,
+.v-d .hud__card--done  .hud__entity-why { display: none; }
+
+/* ── specimen stack ───────────────────────────────────────────────────── */
+.specimens { display: flex; flex-direction: column; gap: 20px; }
+
+.spec {
+  display: grid;
+  grid-template-columns: 278px 1fr;
+  gap: 22px;
+  align-items: start;
+  padding: 18px;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.spec--pick { border-color: var(--accent); }
+
+@media (max-width: 760px) {
+  .spec { grid-template-columns: 1fr; }
+}
+
+.spec-canvas { display: flex; flex-direction: column; gap: 9px; }
+
+.spec-body { display: flex; flex-direction: column; gap: 13px; min-width: 0; }
+
+.spec-title { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+
+.spec-key {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.spec-name { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
+
+.tag {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+.spec-lede { margin: 0; font-size: 14.5px; color: var(--ink-2); max-width: 60ch; }
+
+/* the kept / dropped / moved ledger — a real three-way split, not decoration */
+.ledger {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.ledger-col { background: var(--panel); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+
+.ledger-h {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.ledger-h--keep { color: var(--saved); }
+.ledger-h--drop { color: var(--spent); }
+.ledger-h--move { color: var(--accent); }
+
+.ledger ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.ledger li { font-size: 12.5px; line-height: 1.45; color: var(--ink-2); }
+.ledger li .mono { color: var(--ink); }
+
+.readout { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 7px 11px;
+  border-radius: 6px;
+  background: var(--panel-sunk);
+  border: 1px solid var(--rule-soft);
+  min-width: 92px;
+}
+.stat-v {
+  font-family: var(--mono);
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  color: var(--ink);
+}
+.stat-v--saved { color: var(--saved); }
+.stat-v--spent { color: var(--spent); }
+.stat-k {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+
+.tradeoff {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  padding: 9px 12px;
+  border-left: 2px solid var(--rule);
+  background: var(--panel-sunk);
+  border-radius: 0 5px 5px 0;
+}
+.tradeoff b { color: var(--ink); font-weight: 600; }
+
+/* ── narrow-column stress test ────────────────────────────────────────── */
+.stress {
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.stress-cell { display: flex; flex-direction: column; gap: 7px; flex: 0 0 auto; }
+.stress-cap {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+
+/* ── the change ledger table ──────────────────────────────────────────── */
+.tablewrap {
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+table { border-collapse: collapse; width: 100%; min-width: 620px; }
+
+th, td {
+  text-align: left;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rule-soft);
+  font-size: 13px;
+  vertical-align: top;
+}
+th {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  background: var(--panel-sunk);
+  border-bottom-color: var(--rule);
+}
+tbody tr:last-child td { border-bottom: 0; }
+td .mono { color: var(--ink); }
+td.act { white-space: nowrap; font-family: var(--mono); font-size: 11.5px; font-weight: 600; }
+.act--del { color: var(--spent); }
+.act--mov { color: var(--accent); }
+.act--new { color: var(--saved); }
+.act--keep { color: var(--ink-mute); }
+
+footer {
+  border-top: 1px solid var(--rule);
+  padding-top: 18px;
+  font-size: 13px;
+  color: var(--ink-mute);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+footer .mono { color: var(--ink-2); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <div class="eyebrow">HUD → Plans · card density</div>
+    <h1>Two lines is the whole card</h1>
+    <p class="dek">
+      The Plans board card currently spends six lines saying what fits in two. Four proposals
+      below, each rendered with real plan content at the width the real grid hands a column, and
+      measured in your browser rather than estimated.
+    </p>
+    <div class="ask">
+      <div class="who">The ask, verbatim</div>
+      <p>
+        “We just need to show the title and the now item — the top 2 lines. There is a 3rd line
+        that isn't useful. The icons are all on additional lines when they should just float on
+        the right side of the first line.”
+      </p>
+    </div>
+  </header>
+
+  <!-- ══ THE THESIS ══════════════════════════════════════════════════════ -->
+  <section class="sect">
+    <div class="sect-h">
+      <h2>The same column, twice</h2>
+      <p>
+        One <span class="mono">Working</span> column, real plans, real width, clipped to the same
+        520&nbsp;px of screen. The count is what actually fits without scrolling.
+      </p>
+    </div>
+
+    <div class="controls">
+      <span class="ctl-label">Content</span>
+      <div class="seg" role="group" aria-label="Card content stress">
+        <button type="button" data-stress="typical" aria-pressed="true">Typical</button>
+        <button type="button" data-stress="worst" aria-pressed="false">Worst case</button>
+      </div>
+      <span class="ctl-label" style="margin-left:8px">Compare against</span>
+      <div class="seg" role="group" aria-label="Variant shown in the duel">
+        <button type="button" data-duel="a" aria-pressed="false">A · Collapse</button>
+        <button type="button" data-duel="b" aria-pressed="true">B · Title-led</button>
+        <button type="button" data-duel="c" aria-pressed="false">C · Split rails</button>
+        <button type="button" data-duel="d" aria-pressed="false">D · Column-aware</button>
+      </div>
+    </div>
+
+    <div class="duel">
+      <div class="stage">
+        <div class="stage-h">
+          <span class="stage-name">Today</span>
+          <span class="stage-fit stage-fit--now" id="fit-current">— cards</span>
+        </div>
+        <div class="app">
+          <div class="hud__col">
+            <div class="hud__col-h">Working <span class="n">9</span></div>
+            <div class="hud__col-b hud__col-b--clip" id="col-current" style="height:520px"></div>
+          </div>
+        </div>
+        <p class="stage-note">Six lines per card: ref, title, now, harness, chips, meta.</p>
+      </div>
+
+      <div class="stage">
+        <div class="stage-h">
+          <span class="stage-name" id="duel-name">B · Title-led</span>
+          <span class="stage-fit stage-fit--new" id="fit-new">— cards</span>
+        </div>
+        <div class="app">
+          <div class="hud__col">
+            <div class="hud__col-h">Working <span class="n">9</span></div>
+            <div class="hud__col-b hud__col-b--clip" id="col-new" style="height:520px"></div>
+          </div>
+        </div>
+        <p class="stage-note" id="duel-note">Two lines per card: title with the meta floated right, then the now item.</p>
+      </div>
+
+      <div class="duel-read">
+        <div>
+          <div class="big" id="duel-gain">—</div>
+          <div class="stat-k" style="margin-top:4px">more plans in the same screen</div>
+        </div>
+        <h3>Where the height was going</h3>
+        <p>
+          Three of the six rows restate something the card, its column, or the 2&nbsp;px track
+          already says: the slug is the title in kebab-case, the harness reads
+          <span class="mono">papercusp</span> on every card, and
+          <span class="mono">n/m items</span> is the track drawn in words.
+        </p>
+        <p id="duel-why">Removing them is not a trade. The trade is the rail.</p>
+        <p>
+          Both columns are pinned to <span class="mono">300px</span>, which is roughly what
+          <span class="mono">minmax(190px, 1fr)</span> resolves to on a wide window. Heights are
+          measured live, so the counts change when you switch to worst-case content.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ SPECIMENS ═══════════════════════════════════════════════════════ -->
+  <section class="sect">
+    <div class="sect-h">
+      <h2>The four proposals</h2>
+      <p>
+        Each specimen is one live card at true column width. Heights are measured in your browser
+        on render, not asserted.
+      </p>
+    </div>
+    <div class="specimens" id="specimens"></div>
+  </section>
+
+  <!-- ══ STRESS ══════════════════════════════════════════════════════════ -->
+  <section class="sect">
+    <div class="sect-h">
+      <h2>At the narrowest the grid ever goes</h2>
+      <p>
+        <code>.hud__cols</code> is <code>repeat(5, minmax(190px, 1fr))</code>. Subtract the column
+        border and padding, then the card's own border, padding, rail and gap, and the text has
+        <strong>146&nbsp;px</strong> to live in. That is why each variant's rail carries
+        <em>one</em> signal plus the exception pips rather than the whole meta strip relocated —
+        and it is the real argument between B and C. Watch C here: at the floor its avatar stack
+        runs into the card edge, which is the price of spending the rail on presence.
+      </p>
+    </div>
+    <div class="stress" id="stress"></div>
+  </section>
+
+  <!-- ══ WHAT CHANGES ════════════════════════════════════════════════════ -->
+  <section class="sect">
+    <div class="sect-h">
+      <h2>What changes, for the recommended B</h2>
+      <p>
+        Two files. No data-layer change — every value on the compact card is already on
+        <code>HudEntityCard</code>.
+      </p>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Element</th><th>Carries</th><th>Action</th><th>Why</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="mono">.hud__card-h</span></td>
+            <td>dot + plan slug</td>
+            <td class="act act--mov">rebuild</td>
+            <td>Becomes dot + title + right rail. The slug moves to the <span class="mono">title</span> attribute — it is the title in kebab-case plus a date, so the card was printing its name twice.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">.hud__reason</span></td>
+            <td>plan title, 2-line clamp</td>
+            <td class="act act--mov">promote</td>
+            <td>Retired for plan cards in favour of <span class="mono">.hud__cardtitle</span> on line 1: <span class="mono">11.5px/600</span>, full <span class="mono">--fg</span>, single line. Session cards keep <span class="mono">.hud__reason</span> untouched.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">.hud__entity-why</span></td>
+            <td>who, else next action</td>
+            <td class="act act--keep">keep</td>
+            <td>This is the “now item”. Unchanged — it is already a single clamped line.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">.hud__plan</span></td>
+            <td><span class="mono">card.context</span> = harness slug</td>
+            <td class="act act--del">delete</td>
+            <td>The unuseful third line. It reads <span class="mono">papercusp</span> on every card in a single-harness workspace, so it distinguishes nothing.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">.hud__chips</span></td>
+            <td>wip / blocked / todo / needs-you / archived</td>
+            <td class="act act--del">triage</td>
+            <td><span class="mono">wip</span> and <span class="mono">todo</span> restate the progress track and the column the card is sitting in. Only the two exception counts survive, as <span class="mono">.hud__pip</span> dots in the right rail.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">.hud__cardmeta</span></td>
+            <td>✎ ⚒ · n/m items · avatars · live pill</td>
+            <td class="act act--mov">float</td>
+            <td>⚒ and the live pill move into <span class="mono">.hud__cardright</span> on line 1. <span class="mono">n/m items</span> goes — the 2px track already draws it. ✎ and the avatar stack go too: measured at 244px, a full strip is 128px and leaves the title 69px. B spends the rail on activity; pick C instead if the stack matters more than the ages.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">.hud__track</span></td>
+            <td>settled / total</td>
+            <td class="act act--keep">keep</td>
+            <td>Absolutely positioned, costs zero height, and is now the only place progress is stated.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">.hud__cardright</span></td>
+            <td>—</td>
+            <td class="act act--new">add</td>
+            <td>The right rail: <span class="mono">margin-left:auto</span>, <span class="mono">flex:0 0 auto</span>, so the title takes the remaining width and ellipsizes into it.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <div>Specimens transcribed from <span class="mono">apps/operator/app/adv/hud/hud.css</span> and <span class="mono">HudEntityColumns.tsx</span> · plan content is live workspace data, 2026-08-31.</div>
+    <div>Tracked as <span class="mono">WI-1713930</span> · source <span class="mono">apps/operator/docs/design/hud-plan-card-density-2026-08-31/PlanCardDensity.html</span></div>
+  </footer>
+
+</div>
+
+<script>
+/* ─────────────────────────────────────────────────────────────────────────
+   Real plans from the workspace (harness_shared.harness_plans, 2026-08-31).
+   `now` is the card's `reason` — planCardMeta's who-line where agents have
+   declared an intent, otherwise the plan's own next action.
+   ───────────────────────────────────────────────────────────────────────── */
+const PLANS = [
+  {
+    slug: 'restore-papercusp-main-green-2026-08-20',
+    title: 'Restore Papercusp main green and harden the SSE compiler boundary',
+    now: 'su-60f: P-002 SSE boundary regression test · su-9cf: gate triage',
+    col: 'working', edited: '2h', worked: '9m', hot: true, done: 6, total: 14,
+    avs: [{ i: '60', c: 0, live: true }, { i: '9c', c: 4, live: true }, { i: '76', c: 1, live: false }],
+    more: 1, live: 2, needsYou: 0, blocked: 1,
+    chips: [{ l: '2 wip', t: 'good' }, { l: '1 blocked', t: 'bad' }, { l: '5 todo', t: '' }]
+  },
+  {
+    slug: 'phone-app-2026-08-30',
+    title: 'Phone app v1 — self-hosted call rails, papercusp agent on the line',
+    now: 'su-9cf: P-004 speech-to-speech under 1500ms',
+    col: 'working', edited: '40m', worked: '3m', hot: true, done: 9, total: 31,
+    avs: [{ i: '9c', c: 4, live: true }, { i: 'a1', c: 2, live: null }],
+    more: 0, live: 1, needsYou: 0, blocked: 0,
+    chips: [{ l: '3 wip', t: 'good' }, { l: '19 todo', t: '' }]
+  },
+  {
+    slug: 'hud-session-display-names-2026-08-31',
+    title: "HUD session cards show the terminal title's information, plus manual names",
+    now: 'P-001 — allocate + write the agent_display_names migration',
+    col: 'working', edited: '12m', worked: '4m', hot: true, done: 1, total: 8,
+    avs: [{ i: '7e', c: 5, live: true }],
+    more: 0, live: 1, needsYou: 0, blocked: 0,
+    chips: [{ l: '1 wip', t: 'good' }, { l: '7 todo', t: '' }]
+  },
+  {
+    slug: 'unified-web-portal-2026-08-29',
+    title: 'Unified web UI — the app.papercusp.com portal across BYOC workspaces',
+    now: 'su-60f: P-006 shared DTCG token pack into the portal shell',
+    col: 'working', edited: '3h', worked: '22m', hot: true, done: 7, total: 23,
+    avs: [{ i: '60', c: 0, live: true }, { i: 'd4', c: 3, live: null }],
+    more: 0, live: 1, needsYou: 0, blocked: 0,
+    chips: [{ l: '2 wip', t: 'good' }, { l: '14 todo', t: '' }]
+  },
+  {
+    slug: 'test-suite-recovery-2026-08-27',
+    title: 'Restore canonical test-suite startup and green end-to-end verdict',
+    now: 'Acceptance REJECTED — address the independent scorecard, then re-grade',
+    col: 'needs-you', edited: '5h', worked: '1h', hot: false, done: 12, total: 15,
+    avs: [{ i: '3b', c: 2, live: false }],
+    more: 0, live: 0, needsYou: 1, blocked: 0,
+    chips: [{ l: '1 needs you', t: 'warn' }, { l: '2 todo', t: '' }]
+  },
+  {
+    slug: 'byoc-cloud-workspaces-gcp-aws-azure-2026-08-22',
+    title: 'BYOC cloud workspaces — local provisioning, GCP first, AWS/Azure parity',
+    now: 'D-209 — the GCP credential wall is closed; re-route to AWS first',
+    col: 'blocked', edited: '1d', worked: '6h', hot: false, done: 18, total: 44,
+    avs: [{ i: 'c7', c: 1, live: false }, { i: '2f', c: 5, live: false }, { i: '88', c: 3, live: null }],
+    more: 0, live: 0, needsYou: 1, blocked: 2,
+    chips: [{ l: '2 blocked', t: 'bad' }, { l: '1 needs you', t: 'warn' }, { l: '23 todo', t: '' }]
+  },
+  {
+    slug: 'ship-main-greening-plans-2026-08-29',
+    title: 'Ship the eight main-greening plans',
+    now: '6 of 8 shipped — two remain, both gate-blocked',
+    col: 'working', edited: '6h', worked: '2h', hot: false, done: 6, total: 8,
+    avs: [{ i: '41', c: 0, live: true }],
+    more: 0, live: 1, needsYou: 0, blocked: 2,
+    chips: [{ l: '2 blocked', t: 'bad' }]
+  },
+  {
+    slug: 'pui-tui-ship-drive-2026-08-30',
+    title: 'Drive every remaining PUI/TUI plan to shipped',
+    now: '5 of 7 shipped — the last two are gate-blocked on the frozen candidate',
+    col: 'ready', edited: '8h', worked: '2d', hot: false, done: 5, total: 7,
+    avs: [{ i: 'b9', c: 3, live: false }],
+    more: 0, live: 0, needsYou: 0, blocked: 2,
+    chips: [{ l: '2 blocked', t: 'bad' }]
+  },
+  {
+    slug: 'nonblocking-test-materializer-2026-08-28',
+    title: 'Non-blocking test and materializer admission',
+    now: 'Baseline captured — write the admission-governor seam',
+    col: 'ready', edited: '11h', worked: '4h', hot: false, done: 0, total: 9,
+    avs: [], more: 0, live: 0, needsYou: 0, blocked: 0,
+    chips: [{ l: '9 todo', t: '' }]
+  }
+];
+
+/* The worst case the card must survive: longest real title, a full avatar
+   stack with overflow, every chip, and a two-agent who-line. */
+const WORST = {
+  title: 'Shared-hive p2p to public release: the remaining non-git, non-coordination lanes (datastore, presence, federation)',
+  now: 'su-9cf6931: P-008 remains fail-closed pending the lexical source rebuild · su-60fb3ea: D-014 re-verification',
+  avs: [{ i: '9c', c: 4, live: true }, { i: '60', c: 0, live: true }, { i: '76', c: 1, live: null }, { i: '2f', c: 5, live: false }],
+  more: 3, live: 2, needsYou: 2, blocked: 3,
+  chips: [{ l: '2 needs you', t: 'warn' }, { l: '3 blocked', t: 'bad' }, { l: '4 wip', t: 'good' }, { l: '31 todo', t: '' }, { l: 'archived', t: '' }]
+};
+
+let stress = 'typical';
+let duel = 'b';
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function shape(p) {
+  if (stress !== 'worst') return p;
+  return { ...p, title: WORST.title, now: WORST.now, avs: WORST.avs, more: WORST.more, live: WORST.live, needsYou: WORST.needsYou, blocked: WORST.blocked, chips: WORST.chips };
+}
+
+/* ── fragments ─────────────────────────────────────────────────────────────
+   THE RAIL BUDGET. Measured at 244px of card: a full meta strip (pips + ⚒ +
+   avatars + live pill) is 128px, which leaves the title 69px — about eight
+   characters. So the stack and the pill are separate fragments, and each
+   variant spends the rail on one thing rather than all of them.
+   ───────────────────────────────────────────────────────────────────────── */
+const discs = (p, cap) => {
+  const shown = p.avs.slice(0, cap);
+  const cut = p.more + Math.max(0, p.avs.length - shown.length);
+  return shown.map((a) => `<span class="hud__av hud__av--c${a.c}${a.live === false ? ' hud__av--gone' : ''}" title="su-${esc(a.i)}">${esc(a.i)}</span>`).join('')
+    + (cut > 0 ? `<span class="hud__av hud__av--more">+${cut}</span>` : '');
+};
+
+const livePill = (p) =>
+  p.live > 0 ? `<span class="hud__liven" title="${p.live} agent(s) live on this plan right now"><span class="hud__dotg"></span>${p.live}</span>` : '';
+
+/* stack alone — for a rail that spends its budget on presence */
+const avatars = (p, cap) => (p.avs.length ? `<span class="hud__avs">${discs(p, cap)}</span>` : '');
+
+/* stack + pill fused, exactly as the shipped meta row renders them */
+const avatarsToday = (p) =>
+  (p.avs.length || p.live) ? `<span class="hud__avs">${discs(p, 4)}${livePill(p)}</span>` : '';
+
+const pips = (p) =>
+  (p.needsYou > 0 ? `<span class="hud__pip hud__pip--warn" title="${p.needsYou} item(s) need a human decision">${p.needsYou}</span>` : '') +
+  (p.blocked > 0 ? `<span class="hud__pip hud__pip--bad" title="${p.blocked} item(s) blocked">${p.blocked}</span>` : '');
+
+const worked = (p) => `<span class="hud__mt${p.hot ? ' hud__mt--hot' : ''}" title="⚒ Last work-item activity">⚒ ${esc(p.worked)}</span>`;
+const edited = (p) => `<span class="hud__mt" title="✎ Last plan edit">✎ ${esc(p.edited)}</span>`;
+const track = (p) => p.total ? `<span class="hud__track"><span class="hud__track-fill" style="width:${Math.round(100 * p.done / p.total)}%"></span></span>` : '';
+const nowLine = (p) => `<span class="hud__entity-why hud__entity-why--who" title="${esc(p.now)}">${esc(p.now)}</span>`;
+
+function shell(p, inner) {
+  return `<div class="hud__card hud__card--${p.col}">`
+    + '<span class="hud__card-row"><span class="hud__rail"></span><span class="hud__card-b">'
+    + inner + '</span></span>' + track(p) + '</div>';
+}
+
+/* ── the five renderings ───────────────────────────────────────────────── */
+function card(plan, variant) {
+  const p = shape(plan);
+  const dot = `<span class="hud__dot hud__dot--${p.col}"></span>`;
+
+  if (variant === 'current') {
+    return shell(p,
+      `<span class="hud__card-h">${dot}<span class="hud__handle">${esc(p.slug)}</span></span>`
+      + `<span class="hud__reason">${esc(p.title)}</span>`
+      + nowLine(p)
+      + '<span class="hud__plan">papercusp</span>'
+      + `<span class="hud__chips">${p.chips.map((c) => `<span class="hud__chip${c.t ? ' hud__chip--' + c.t : ''}">${esc(c.l)}</span>`).join('')}</span>`
+      + `<span class="hud__cardmeta">${edited(p)}${worked(p)}`
+      + (p.total ? `<span class="hud__mt">${p.done}/${p.total} items</span>` : '')
+      + `${avatarsToday(p)}</span>`);
+  }
+
+  if (variant === 'a') {
+    // Slug keeps its own line. Rail spends its budget on ACTIVITY, because the
+    // slug still has to be readable and a stack would leave it ~70px.
+    return shell(p,
+      `<span class="hud__card-h">${dot}<span class="hud__handle">${esc(p.slug)}</span>`
+      + `<span class="hud__cardright">${pips(p)}${worked(p)}${livePill(p)}</span></span>`
+      + `<span class="hud__reason" title="${esc(p.title)}">${esc(p.title)}</span>`
+      + nowLine(p));
+  }
+
+  if (variant === 'b') {
+    // ACTIVITY RAIL — ⚒ + live pill: "is anything happening on this plan?"
+    return shell(p,
+      `<span class="hud__card-h">${dot}<span class="hud__cardtitle" title="${esc(p.slug)}">${esc(p.title)}</span>`
+      + `<span class="hud__cardright">${pips(p)}${worked(p)}${livePill(p)}</span></span>`
+      + nowLine(p));
+  }
+
+  if (variant === 'c') {
+    // PRESENCE RAIL — the avatar stack: "who is on this plan?"
+    // ✎/⚒ move to the now line's own rail, which is why C keeps more meta.
+    return shell(p,
+      `<span class="hud__card-h">${dot}<span class="hud__cardtitle" title="${esc(p.slug)}">${esc(p.title)}</span>`
+      + `<span class="hud__cardright">${pips(p)}${avatars(p, 3)}${livePill(p)}</span></span>`
+      + `<span class="hud__nowrow">${nowLine(p)}<span class="hud__cardright">${edited(p)}${worked(p)}</span></span>`);
+  }
+
+  // d — B's card, with the now line suppressed in the settled columns
+  return shell(p,
+    `<span class="hud__card-h">${dot}<span class="hud__cardtitle" title="${esc(p.slug)}">${esc(p.title)}</span>`
+    + `<span class="hud__cardright">${pips(p)}${worked(p)}${livePill(p)}</span></span>`
+    + nowLine(p));
+}
+
+function column(el, variant, plans) {
+  el.className = 'hud__col-b hud__col-b--clip v-' + variant;
+  el.innerHTML = plans.map((p) => card(p, variant)).join('');
+}
+
+/* How many cards render FULLY inside the clipped column.
+   The limit is the content-box bottom: the border-box bottom less the 7px
+   bottom padding and the 1px border, not clientHeight from the top. */
+function fits(el) {
+  const limit = el.getBoundingClientRect().bottom - 8;
+  let n = 0;
+  for (const c of el.children) if (c.getBoundingClientRect().bottom <= limit + 0.5) n++;
+  return n;
+}
+
+/* ── specimen definitions ──────────────────────────────────────────────── */
+const SPECS = [
+  {
+    key: 'Today', id: 'current', name: 'What ships now', pick: false,
+    lede: 'Six stacked lines. Three of them repeat something the card, the column, or the progress track already says.',
+    keep: ['plan title', 'the now item', 'progress track'],
+    drop: [],
+    move: [],
+    tradeoff: 'The slug and the title are the same string twice — <b>hud-session-display-names-2026-08-31</b> against <b>“HUD session cards show the terminal title\'s information”</b>. The harness line reads <b>papercusp</b> on every card. <b>4/17 items</b> restates the track drawn 2px below it.'
+  },
+  {
+    key: 'A', id: 'a', name: 'Collapse', pick: false,
+    lede: 'The literal ask with the smallest possible diff: keep all three text rows, float the meta up onto the slug line, delete the rest.',
+    keep: ['slug on line 1', 'title (own row, full width)', 'now item', 'track'],
+    drop: ['<span class="mono">.hud__plan</span> harness line', 'chips row', '✎ edit age', 'avatar stack', '<span class="mono">n/m items</span> text'],
+    move: ['⚒ + live pill → right of line 1', 'blocked / needs-you → pips'],
+    tradeoff: 'The only variant that keeps the slug visible, and the only one where the title still gets a full-width row of its own. You pay for that with a third line — and with the avatar stack, which will not fit beside a slug this long at any column width the grid produces.'
+  },
+  {
+    key: 'B', id: 'b', name: 'Activity rail', pick: true,
+    lede: 'The title becomes line 1 and the rail beside it answers one question — is anything happening here? The now item is line 2. Exactly the two lines asked for.',
+    keep: ['title (promoted, full <span class="mono">--fg</span>)', 'now item', 'track'],
+    drop: ['slug row → <span class="mono">title</span> attribute', 'harness line', 'chips row', '✎ edit age', 'avatar stack', '<span class="mono">n/m items</span> text'],
+    move: ['⚒ + live pill → right of the title', 'blocked / needs-you → pips'],
+    tradeoff: 'The title reads as the card\'s name instead of as muted secondary text, which is what makes losing the slug row cost nothing. <b>The avatar stack is the sacrifice.</b> ⚒ plus the live pill answers “is this moving” in 62px; the stack needs another 40px and would take it straight out of the title.'
+  },
+  {
+    key: 'C', id: 'c', name: 'Presence rail', pick: false,
+    lede: 'Same two lines and near-identical height, but the rail is spent on who is on the plan instead of when it last moved. The timestamps get their own short rail on line 2.',
+    keep: ['title', 'now item', 'track', '<em>both</em> ✎ and ⚒', 'the avatar stack'],
+    drop: ['slug row', 'harness line', 'chips row', '<span class="mono">n/m items</span> text'],
+    move: ['avatars + live → right of the title', '✎ + ⚒ → right of the now item'],
+    tradeoff: 'Keeps the most meta of any variant, because two short rails carry what one long rail cannot. Two prices: the title is squeezed harder than in B, and the now item — the line you asked to keep — now shares its row and ellipsizes sooner.'
+  },
+  {
+    key: 'D', id: 'd', name: 'Column-aware', pick: false,
+    // Two samples so the rule is visible: a Working card keeps both lines, the
+    // Ready card below it collapses. The measured stat is the collapsed one.
+    samples: [0, 7], measure: 1, statKey: 'ready · done',
+    lede: 'Not a rival — a rule that stacks on B or C. A plan in Ready or Done has no “now”, so it does not pay for the line.',
+    keep: ['two lines in Needs-you / Working / Blocked'],
+    drop: ['the now line in Ready and Done'],
+    move: ['nothing — same markup, one CSS rule'],
+    tradeoff: 'The two columns holding the most cards are usually the ones with the least to say. One rule — <b>.hud__card--ready .hud__entity-why { display:none }</b> — halves them again. Worth taking only once B or C is chosen.'
+  }
+];
+
+/* Markup only — every number is a placeholder that renderAll() backfills
+   AFTER layout, because the heights have to be measured, not predicted. */
+function specimenHTML(s) {
+  const isBase = s.id === 'current';
+  const cols = [];
+  if (s.keep.length) cols.push(`<div class="ledger-col"><div class="ledger-h ledger-h--keep">Kept</div><ul>${s.keep.map((x) => `<li>${x}</li>`).join('')}</ul></div>`);
+  if (s.drop.length) cols.push(`<div class="ledger-col"><div class="ledger-h ledger-h--drop">Dropped</div><ul>${s.drop.map((x) => `<li>${x}</li>`).join('')}</ul></div>`);
+  if (s.move.length) cols.push(`<div class="ledger-col"><div class="ledger-h ledger-h--move">Moved</div><ul>${s.move.map((x) => `<li>${x}</li>`).join('')}</ul></div>`);
+
+  return `<div class="spec${s.pick ? ' spec--pick' : ''}">
+    <div class="spec-canvas">
+      <div class="app"><div class="hud__col"><div class="hud__col-b v-${s.id}" data-spec="${s.id}"></div></div></div>
+    </div>
+    <div class="spec-body">
+      <div class="spec-title">
+        <span class="spec-key">${s.key}</span>
+        <span class="spec-name">${s.name}</span>
+        ${s.pick ? '<span class="tag">Recommended</span>' : ''}
+      </div>
+      <p class="spec-lede">${s.lede}</p>
+      <div class="readout">
+        <div class="stat"><span class="stat-v${isBase ? ' stat-v--spent' : ' stat-v--saved'}" data-h="${s.id}">—</span><span class="stat-k">${s.statKey || 'card height'}</span></div>
+        ${isBase ? '' : `<div class="stat"><span class="stat-v stat-v--saved" data-d="${s.id}">—</span><span class="stat-k">shorter</span></div>`}
+        <div class="stat"><span class="stat-v" data-f="${s.id}">—</span><span class="stat-k">per 520px</span></div>
+        <div class="stat"><span class="stat-v" data-l="${s.id}">—</span><span class="stat-k">text lines</span></div>
+        <div class="stat"><span class="stat-v" data-t="${s.id}">—</span><span class="stat-k">line 1 text</span></div>
+      </div>
+      <div class="ledger">${cols.join('')}</div>
+      <p class="tradeoff">${s.tradeoff}</p>
+    </div>
+  </div>`;
+}
+
+const LINES = { current: '6', a: '3', b: '2', c: '2', d: '2 → 1' };
+
+/* Cards that fit a 520px column body: content box is 520 − 2 border − 14
+   padding = 504, and n cards carry n−1 six-pixel gaps. */
+const perColumn = (h) => Math.floor(510 / (h + 6));
+
+function renderAll() {
+  // ── hero ──────────────────────────────────────────────────────────────
+  const cur = document.getElementById('col-current');
+  const nw = document.getElementById('col-new');
+  column(cur, 'current', PLANS);
+  column(nw, duel, PLANS);
+  const nowFits = fits(cur);
+  const newFits = fits(nw);
+  document.getElementById('fit-current').textContent = nowFits + ' cards visible';
+  document.getElementById('fit-new').textContent = newFits + ' cards visible';
+  document.getElementById('duel-gain').textContent =
+    nowFits > 0 ? '×' + (newFits / nowFits).toFixed(1) : '—';
+  const spec = SPECS.find((s) => s.id === duel);
+  document.getElementById('duel-name').textContent = spec.key + ' · ' + spec.name;
+  document.getElementById('duel-note').textContent = spec.lede;
+
+  // ── specimens: markup, then layout, then measured backfill ────────────
+  const host = document.getElementById('specimens');
+  host.innerHTML = SPECS.map(specimenHTML).join('');
+  for (const s of SPECS) {
+    const samples = s.samples || [0];
+    host.querySelector(`[data-spec="${s.id}"]`).innerHTML =
+      samples.map((i) => card(PLANS[i], s.id)).join('');
+  }
+  const heights = {};
+  for (const s of SPECS) {
+    const cards = host.querySelectorAll(`[data-spec="${s.id}"] .hud__card`);
+    heights[s.id] = Math.round(cards[s.measure || 0].getBoundingClientRect().height);
+  }
+  const base = heights.current;
+  for (const s of SPECS) {
+    const h = heights[s.id];
+    host.querySelector(`[data-h="${s.id}"]`).textContent = h + 'px';
+    const d = host.querySelector(`[data-d="${s.id}"]`);
+    if (d) d.textContent = '−' + Math.round(100 * (base - h) / base) + '%';
+    host.querySelector(`[data-f="${s.id}"]`).textContent = perColumn(h);
+    host.querySelector(`[data-l="${s.id}"]`).textContent = LINES[s.id];
+    // How much width the card's NAME actually gets — the number that decides
+    // whether a rail on line 1 is affordable. Measured, not budgeted.
+    const scope = host.querySelector(`[data-spec="${s.id}"]`);
+    const name = scope.querySelector('.hud__cardtitle') || scope.querySelector('.hud__handle');
+    host.querySelector(`[data-t="${s.id}"]`).textContent = Math.round(name.getBoundingClientRect().width) + 'px';
+  }
+
+  // narrow-column stress
+  const stressHost = document.getElementById('stress');
+  stressHost.innerHTML = SPECS.map((s) => `
+    <div class="stress-cell">
+      <div class="stress-cap">${s.key} · ${s.name}</div>
+      <div class="app" style="width:208px"><div class="hud__col"><div class="hud__col-b v-${s.id}" data-narrow="${s.id}"></div></div></div>
+    </div>`).join('');
+  // 208px of .app = 190px of column = the grid's minmax() floor, exactly.
+  // A blocked card and a ready card: the two that stress the rail hardest.
+  for (const s of SPECS) {
+    stressHost.querySelector(`[data-narrow="${s.id}"]`).innerHTML =
+      card(PLANS[5], s.id) + card(PLANS[7], s.id);
+  }
+}
+
+for (const b of document.querySelectorAll('[data-stress]')) {
+  b.addEventListener('click', () => {
+    stress = b.dataset.stress;
+    for (const o of document.querySelectorAll('[data-stress]')) o.setAttribute('aria-pressed', String(o === b));
+    renderAll();
+  });
+}
+for (const b of document.querySelectorAll('[data-duel]')) {
+  b.addEventListener('click', () => {
+    duel = b.dataset.duel;
+    for (const o of document.querySelectorAll('[data-duel]')) o.setAttribute('aria-pressed', String(o === b));
+    renderAll();
+  });
+}
+
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(renderAll);
+renderAll();
+</script>

@@ -1,0 +1,10 @@
+{
+  "ref": "plan-class-feature-ship",
+  "id": "plan-class-feature-ship",
+  "title": "Plan class: feature ship (shared acceptance invariants)",
+  "description": "Class rubric for feature-shipping plans' acceptance rubrics (6 criteria, pass/partial/fail/unknown): committed outcomes met, tests ship with the feature, flag defaults ON, live through the gate, docs updated, and the independent grader spot-checks the implementer's audit citations. Referenced via classRef so per-plan criteria stay short.",
+  "category": "plan-acceptance",
+  "scope": "rubric",
+  "version": "0.2.0",
+  "source": "first-party"
+}

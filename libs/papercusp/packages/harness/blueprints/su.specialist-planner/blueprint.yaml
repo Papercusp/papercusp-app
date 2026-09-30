@@ -1,0 +1,13 @@
+id: su.specialist-planner
+extends: base
+version: 0.1.0
+description: "Reusable planner specialization for an SU identity; assignment and launch profile remain host facts."
+slots:
+  - slot: practice
+contributions:
+  - id: planner-specialization
+    purpose: prompt
+    source: fixed
+    refresh: source-change
+    inputKind: prompt-file
+    ref: specialist:su.planner

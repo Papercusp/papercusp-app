@@ -1,0 +1,19 @@
+{
+  "name": "@papercusp/tauri-release-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Provider-agnostic Tauri desktop build+release orchestration: a pure core (version bump, channel/tag resolution, latest.json updater-manifest generation, artifact classification) plus a per-target driver registry (Linux-local, Mac/Windows over an SSH frame) selected by an open target discriminator, with the app-specific sidecar build injected via a buildSidecar() seam and all side effects behind Exec/Fs/Log ports. Zero domain coupling, zero runtime deps; the host wires real ports + an app release.config.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

@@ -1,0 +1,22 @@
+.dot {
+  --liveness-dot-size: 8px;
+  display: inline-block;
+  width: var(--liveness-dot-size, 8px);
+  height: var(--liveness-dot-size, 8px);
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--fg-mute);
+}
+
+.dot[data-liveness='live'] {
+  background: var(--good);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--good), transparent 80%);
+}
+
+.dot[data-liveness='idle'] {
+  background: var(--warn);
+}
+
+.dot[data-liveness='stale'] {
+  background: var(--fg-mute);
+}

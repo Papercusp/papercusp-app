@@ -1,0 +1,35 @@
+{
+  "name": "@papercupai/starlight",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "Embed the harness docs as a dashboard tab. Successor to @papercupai/fumadocs — same iframe-tab hookup; the embedded viewer reads <projectPath>/docs/ for the active harness.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "capabilities": [
+    "ui:dashboard-tab"
+  ],
+  "dashboardTabs": [
+    {
+      "id": "starlight",
+      "label": "Docs",
+      "icon": "BookOpen",
+      "iframeUrlConfigKey": "docsUrl",
+      "replaces": [
+        "docs",
+        "fumadocs"
+      ]
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "docsUrl": {
+        "type": "string",
+        "default": "http://localhost:3055/project-docs",
+        "description": "Base URL of the per-harness docs viewer embedded in the tab. The viewer reads ?harness=<slug> and renders that harness's docs/ folder — identical per-harness behaviour to @papercupai/fumadocs."
+      }
+    }
+  },
+  "icon": "BookOpen"
+}

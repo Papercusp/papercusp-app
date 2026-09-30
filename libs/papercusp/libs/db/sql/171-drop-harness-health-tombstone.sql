@@ -1,0 +1,22 @@
+-- 171-drop-harness-health-tombstone.sql
+--
+-- Brief 57 / spec-md-ui-deprecation-cleanup-2026-05-30 P-007 — the LAST
+-- tombstone removal for the retired SPEC.md / validation-contract.md
+-- file-presence health subsystem.
+--
+-- `harness_shared.harness_health` was a PG mirror of two file-presence
+-- booleans (spec_present = SPEC.md exists, contract_present =
+-- validation-contract.md exists) plus last_check_ms. Both source files are
+-- retired (plans replaced SPEC.md/validation-contract.md as the
+-- scope/acceptance surface — plans-central-harness-ux-2026-05-26 D-004/D-005),
+-- so the columns are tombstones. The table has had NO writer for several
+-- rounds, and its only reader — the `harnessHealth.byHarness` sync query
+-- feeding HealthBadge's file-presence row — was removed in P-006. The live
+-- `/api/harness/:slug/health` endpoint computes its checks from the
+-- filesystem and never touched this table.
+--
+-- Drop the whole dead table rather than leaving a (harness_slug,
+-- last_check_ms, workspace_id) husk — a husk would just be a new tombstone.
+-- Idempotent: safe to re-run; embedded-pg applies it on boot.
+
+DROP TABLE IF EXISTS harness_shared.harness_health;

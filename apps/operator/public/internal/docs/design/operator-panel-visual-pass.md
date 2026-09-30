@@ -1,0 +1,470 @@
+# Operator panel — visual polish pass
+URL: /internal/docs/design/operator-panel-visual-pass
+
+Detailed list of element-level visual improvements after the structural redesign. Round-3 issues that survived plus new fine-grained observations.
+
+:::caution\[Surface superseded — the card-feed operator panel became a chat thread]
+This polish pass targets `apps/operator/app/_components/OperatorPanel.tsx`
+(cited in *How I gathered this*) — the card-feed panel with its HUD
+telemetry strip, reactor orb, target-bracket card ornaments, scanline
+sweeps, Pending/Accepted/Ignored/Scans tab strip, and "Operator MCP
+v0.1.0" footer. **`OperatorPanel.tsx` still exists but is orphaned —
+no live component imports it.** The file is present at
+`apps/operator/app/_components/OperatorPanel.tsx` (still committed,
+still receiving the occasional edit), but a repo-wide grep for
+`OperatorPanel` finds only its own file and tests — nothing mounts it.
+The operator surface is now `OperatorChat` (a wrapper around the shared
+`ChatConversation`, `apps/operator/app/_components/OperatorChat.tsx`),
+mounted via `OperatorChatSidebar` in `ChromeShell.tsx`, where
+suggestions render inline and pending cards surface in a
+`PendingCardsBar`. The `operator-reactor` / `operator-hud-*` /
+`operator-entry__*` / `pc-operator-auto-feed` markup is still emitted by
+the (unmounted) `OperatorPanel.tsx` and its matching CSS still lingers in
+`globals.css`, but since nothing renders that component the element-level
+selectors below describe a dead DOM. Keep them only as historical design
+intent.
+:::
+
+After the structural redesign, the panel's information architecture is
+solid. This memo is a focused **visual polish pass** — element-level
+glitches, alignment / spacing / typography / color inconsistencies the
+designer can knock out as a series of small fixes.
+
+Not architecture, not new features. Just things that look off.
+
+Captured from `/tmp/op-panel-r3.png` (idle) and
+`/tmp/op-panel-r3-loaded.png` (scanning), plus DOM + computed-style
+inspection over multiple sessions, plus
+`apps/operator/app/globals.css` (5,000+ lines of operator-panel
+styling).
+
+Grouped by area. Each item is small enough to ship as one CSS PR.
+
+***
+
+# Header chrome (top of panel)
+
+## H1. The HUD telemetry strip prints state three times
+
+```
+operator mesh   0 pending   0 transit   0 alerts
+state:synthesis pulse  pending:00  transit:00  alerts:00  hud:cinematic branch
+state:synthesis pulse  pending:00  transit:00  alerts:00  hud:cinematic branch
+synthesis  O-27  Operator  thinking
+```
+
+Three identical lines (the second is rendered twice via a duplicated
+marquee). This was P1 in round 3 and is the highest-noise visual
+issue. Pick **one** small status line and own it; delete the other two.
+
+## H2. HUD vocabulary doesn't match tabs
+
+`pending / transit / alerts` (HUD strip, legacy 4-bucket). Tabs read
+`Pending / Accepted / Ignored` (post-collapse 3-state). Two
+vocabularies, same data. Replace `transit` and `alerts` with the new
+labels — or kill the strip per H1.
+
+## H3. `synthesis O-27` is mystery diagnostic content
+
+Top-right of the HUD strip reads e.g. `synthesis · O-27`. `O-27` is
+likely an internal session counter. Not user-facing info. Either
+hide entirely or label it (`Session #27`).
+
+## H4. "Operator" + "thinking" stacked weight
+
+The Operator title block has the word "Operator" in a heavyweight
+font + the state ("thinking" / "scanning" / "idle") in a thinner
+weight directly below. The two pieces are visually identical in
+spacing, leading the eye to read them as one phrase: *"Operator
+thinking"*. Either tighten visual relationship (state as a
+right-aligned chip beside the title) or invert the weight (state
+heavier than the proper noun).
+
+## H5. The reactor orb ::before pseudo + scan-beam overlap
+
+The `.operator-reactor-shell` has multiple overlapping animated
+layers (orb + ring rotation + scan-beam). On certain frames the
+scan-beam crosses the orb at the wrong z-order, briefly clipping
+through the orb's glow. Either pin z-index per layer or simplify to
+2 layers.
+
+## H6. Header buttons (`Scan / Pause / Settings / Close`) lack visual hierarchy
+
+All four buttons in the header right-side toolbar share the same
+treatment. But "Close" is destructive (closes the panel),
+"Settings" is non-destructive navigation, "Scan" is a positive
+action, "Pause" is a state toggle. Three different intents, one
+visual language.
+
+**Fix:** primary tint on `Scan` (it's the most common action), ghost
+on `Settings`, amber when paused (Pause toggle reflects state),
+muted-gray for `Close`. Keep similar widths but differ on color.
+
+## H7. The Pause button's icon-vs-text spacing
+
+`⏸ Pause` has 0 spacing between glyph and word — looks like one
+typographic unit. Add at least 4-6px gap. Same for `↻ Scan`,
+`▶ Resume`.
+
+***
+
+# Tab strip (Pending / Accepted / Ignored / Scans)
+
+## T1. Counts in the tabs aren't aligned with labels
+
+The tab labels render as `Pending0`, `Accepted0`, `Ignored0`,
+`Scans` — the count is butted to the label without a separator. CSS
+gap: 0 for the count. Either add a small visual gap (`6px`) or treat
+the count as a chip with its own background (`Pending [0]`).
+
+## T2. Inactive tabs are too dim
+
+Inactive tab labels are at very low contrast against the panel
+background. WCAG-borderline. Bump contrast on inactive labels.
+
+## T3. The active tab's underline doesn't sit flush with the divider
+
+There's a horizontal hairline below the tab strip + an underline on
+the active tab. They're slightly offset (1-2px), creating a stepped
+effect when scrolled into view.
+
+## T4. "Scans" is the only text-only tab — others have counts
+
+`Pending / Accepted / Ignored / Scans` — the first three have
+counts, Scans does not. Either hide the count for Scans (current —
+inconsistent) or add it (`Scans 3`).
+
+***
+
+# Card entry list (the suggestion feed)
+
+## C1. The 4 corner brackets on every card
+
+Each card has TL/TR/BL/BR target-bracket overlays
+(`.operator-hud-bracket`). Heavy ornament. On a list of 6 cards,
+that's 24 brackets stacking visual weight. Brackets emphasize
+"focus target" but every card is equally targeted, so they encode
+nothing.
+
+**Fix:** keep brackets on the *active / focused* card only. Or
+delete entirely and use just a left-edge tier rail.
+
+## C2. The scanline sweep on every card
+
+`.operator-entry__scanline` sweeps horizontally across each card.
+On a busy list it creates \~6 simultaneous animations. Distracting,
+especially with the panel-level scan beam already animating.
+
+**Fix:** scanline only on cards in the `pending` state where the
+operator wants to draw eye. Done states stay still.
+
+## C3. Card row has 4+ content rows but inconsistent vertical rhythm
+
+A typical card stack: rail glyph + meta strip (tier · status ·
+harness) + title row (action glyph + heading) + body paragraph +
+optional details summary + action buttons. 6 rows of mixed leading
+(tight / loose / tight). The eye has no consistent scan rhythm.
+
+**Fix:** baseline-grid the card content. Set vertical spacing to a
+4px or 6px multiple. Each row's `margin-bottom` becomes one of two
+values: tight (4px) for related-content; loose (12px) for
+section-separation.
+
+## C4. The action glyph next to the title (✉ / ↗ / ℹ)
+
+I called this out in round 1. Glyph is now beside the title in a
+small accent. Still adds a signal that's redundant with the action
+button at the bottom (`Accept` already implies "send"). Drop or
+move to be invisible-by-default with an info-on-hover.
+
+## C5. Title weight + body weight collide
+
+Title is 16px bold. Body paragraph is 14px regular. The size
+delta is small (16→14 = \~13%) but the weight delta is high (700→400
+\= \~75%). On dark themes, very large weight deltas shimmer when the
+eye sweeps. Tighten to 600 weight on title (instead of 700).
+
+## C6. The directive-body details disclosure summary
+
+The `<summary>Directive body</summary>` is a default-styled HTML
+element. No expand glyph (▸ / ▾) to indicate disclosure. Custom
+chevron with rotation on `[open]` would help.
+
+## C7. Tier color rail intensity
+
+Tier color (red / amber / green) on the left edge is a 1-2px line
+at full saturation. On a dark background that 1px reads as a faint
+glow rather than a defined edge. Bump to 3-4px and make it more
+opaque.
+
+## C8. Auto-fire cards' countdown chip placement
+
+`Auto-accepting in 23s` chip sits inline with the title row, where
+it gets squeezed between the meta strip and the title. Move to
+its own row above the title — auto-fire is the most consequential
+state of a pending card and should anchor the top of the card.
+
+## C9. "Failed attempt" warning chip wraps awkwardly
+
+When a card has a failure chip (*"⚠ Last attempt failed: HTTP
+500…"*), it lives in the state column and wraps to two lines on
+narrow widths, breaking row alignment with adjacent cards.
+
+**Fix:** truncate to a single line with ellipsis + tooltip with
+full reason. Or move the chip below the card to its own row.
+
+## C10. Star (☆) checkbox affordance is unclear
+
+Star icons are used for select-for-bulk. But star → "favorite" is
+the universal connotation. Users will star expecting "favorite"
+behavior; instead it's a multi-select checkbox.
+
+**Fix:** use an actual checkbox (☐ / ☑) for multi-select. Reserve
+the star for an actual "favorite" feature if you ever add it.
+
+***
+
+# Status badges & state chips
+
+## S1. The "✓ accepted" / "ignored" state text styling
+
+Once a card is in a terminal state (Accepted or Ignored), the
+state text appears in muted gray, but the card itself doesn't dim
+much. Visual signal "this is done" is weak.
+
+**Fix:** when a card is terminal, dim the title + body to \~50%
+opacity. The card is in the "history" tab anyway; user is reading
+it as past info.
+
+## S2. Status pill colors compete with tier colors
+
+Status uses sky-blue accents. Tier uses red/amber/green. On a card
+with both, the eye flits between the two color scales. If both are
+needed, ensure they don't sit adjacent.
+
+## S3. The reactor core's "thinking" pulse vs "acting" pulse
+
+Both states animate the orb similarly. Hard to distinguish "I'm
+reading" from "I'm doing something irreversible." Either add a
+secondary glyph during `acting` (e.g., a tiny ↑ overlay) or change
+animation tempo (acting = faster pulse).
+
+***
+
+# Filter row + search
+
+## F1. The harness filter combobox styling differs from the search
+
+The search input has a `⌕` icon prefix + clear `×`. The harness
+combobox is a plain dropdown — different background, different
+padding, different border radius. Both are filters; should look
+like siblings.
+
+## F2. Active-filter indication is missing
+
+When a non-default harness is selected (e.g., "sheets"), there's no
+visual indicator at the panel level that "you're filtered." The
+combobox shows the value but the user landing here from another
+session might not realize the list is filtered.
+
+**Fix:** tint the combobox background when selection ≠ "All
+harnesses". Subtle but unmistakable (sky-blue tint at 10% opacity).
+
+## F3. Search input clear button (×) sits very close to the placeholder
+
+When typing into the search, the `×` clear button on the right is
+\~4px from the typed text. Looks crowded. Add 8-10px right padding
+on the input + position the × inside that padding.
+
+## F4. The harness combobox dropdown options are tightly stacked
+
+Options like `barchart-landing`, `barchart-lp-1777678442` get
+truncated mid-slug. Either widen the dropdown or wrap the long
+slugs onto two lines.
+
+***
+
+# Sidebars (left rail + right rail)
+
+## R1. Delegates section header weight
+
+The left-rail Delegates section has `Delegates 0 open` as the
+header. Treatment matches the body, no separation. Use a small
+all-caps eyebrow above (`DELEGATES`) + a count chip on the right.
+
+## R2. "Activity · waiting · 0" right rail still mystifying
+
+(Round 3 P3 — still not addressed.) `Activity` with `waiting · 0`
+makes no sense out of context. Rename or drop.
+
+## R3. The rail dividers are 1px hairlines at low opacity
+
+Almost invisible on dark theme. Either bump opacity to 8-12% or
+remove (use whitespace as the divider).
+
+## R4. Stream sidebar empty state hardcoded "(no stream yet)"
+
+Lowercase parens. Doesn't match the polished delegate empty-state
+voice. Should read *"No live output. Start a scan to see operator
+reasoning here."*
+
+***
+
+# Auto-accepted feed (the new popdown)
+
+## A1. The compact-row text-overflow ellipsis only kicks in at narrow widths
+
+The `.pc-operator-auto-feed__title-cell` has `text-overflow: ellipsis`,
+but the popdown is `min-width: 280px / max-width: 360px`. Long
+titles like *"Run validator for F-HOME-001 (home page sheet
+listing) — currently stuck at validating"* truncate AT the title
+column edge but the row's grid template gives the title only 1fr.
+Widen the popdown to \~480px max for longer titles.
+
+## A2. Tier dot 6×6 is barely visible on dark theme
+
+Six pixels is small. The dot fades into the row's background
+luminosity. Bump to 8×8 with a 1px outline for better edge
+definition.
+
+## A3. The popdown's drop shadow is noticeably stronger than other surfaces
+
+`box-shadow: 0 12px 28px rgba(0,0,0,0.5)` — much stronger than
+adjacent surfaces' shadows. Looks "popped out" too aggressively.
+Match the surrounding shadow scale.
+
+## A4. The auto-feed appears below the count bubbles
+
+When both render, the auto-feed sits below the count bubbles, but
+both occupy the same horizontal anchor. On wide layouts they
+overlap with the workspace-switcher chip (`Default ▾`).
+Test at narrow viewports to confirm.
+
+***
+
+# Footer
+
+## V1. Version number `Operator MCP v0.1.0` still leaks
+
+(Round 3 P4.) Drop or move to tooltip.
+
+## V2. Footer separator `•` is muted dot
+
+Reasonable. But the keyboard shortcut text (`Cmd/Ctrl+K then O`) is
+the same weight as everything else — no emphasis on the
+shortcut. Use `<kbd>` styling on the shortcut keys to make them
+visually distinguishable as keys (small inset bubble).
+
+***
+
+# Empty states / first-run
+
+## E1. "Pending 0 / Accepted 0 / Ignored 0" with no message
+
+The user sees four zero-counts and can't tell if the operator hasn't
+scanned, has scanned but found nothing, or is paused.
+
+**Fix:** explicit empty-state copy in the feed area. Per round 3 N3
+— pick the right copy from real state.
+
+## E2. The first-run intro is still a single paragraph
+
+Round 1's §10. Power users dismiss; new users get a wall. Same
+status quo. Suggested 3-step coachmark sequence is in the prior
+memo.
+
+***
+
+# Color tokens
+
+## CT1. The operator panel uses \~7 different blues
+
+I count: `--operator-arc`, sky-400, sky-300, cyan accent in the
+status pill, navy panel bg, and a couple of hex literals (`#67e8f9`
+in the mission orb, `#7dd3fc` in row borders). They should
+collapse to 2-3 tokens used consistently.
+
+## CT2. Custom-budget input hover/focus tone differs from other inputs
+
+The new `.operator-budget-custom__row:focus-within` border tints to
+the operator-arc CSS var, but the search input's focus tint uses a
+different accent. Pick one focus token.
+
+***
+
+# Animation
+
+## AN1. Multiple infinite GSAP loops (2-3) running while panel is open
+
+`.operator-hud-ring--mid` rotates -360°/12s, `--inner` 360°/7s,
+`.operator-hud-scan-beam` slides every 1.85s. Three concurrent
+infinite tweens. Per the project's animation guidelines (memory
+note `feedback_gsap_infinite_loops_perf.md`) these create rAF
+storms. Move to CSS `@keyframes` or pause them when iconState is
+idle.
+
+## AN2. The scanline animations restart on every state change
+
+When the panel transitions idle → scanning → thinking → idle, each
+scanline restarts from frame 0. Visual "twitch." Either use pure
+CSS animations with consistent duration OR ensure GSAP ticks
+keep-state across iconState changes.
+
+## AN3. Reactor orb scale doesn't easeOut at the end of a scan
+
+When scanning ends, the orb snaps to its idle scale. Easing helps
+the eye anchor where the scan completed.
+
+***
+
+# A11y leftovers
+
+## AA1. Operator panel still missing some ARIA labels
+
+(Some tabs / sections lack `aria-labelledby`.) Won't enumerate
+specifics — needs an a11y audit pass with axe or similar tool. Worth
+adding to your design QA checklist.
+
+## AA2. The `<summary>` for "Directive body" has no accessible affordance
+
+Native disclosure widget but visually doesn't read as one (see C6).
+Screen readers handle it; sighted users miss the cue.
+
+***
+
+# Top-priority list
+
+If the designer ships **three** visual fixes this iteration:
+
+1. **H1 — Kill or collapse the duplicated HUD telemetry strip.** Highest signal-to-noise removal.
+2. **C1 + C2 — Scope corner brackets and scanline sweep to ONLY the active card.** Removes \~24 ornamental animations on a typical card list.
+3. **E1 — Explicit empty-state copy** when the feed is empty (it's silent today).
+
+If they can ship **six**:
+
+4. **H6 — Visual hierarchy on header buttons** (Scan vs Pause vs Settings vs Close).
+5. **C7 — Tier color rail thicker + more opaque.**
+6. **C10 — Multi-select stars → checkboxes.**
+
+Cheap polish round (each \<30 min):
+
+7. T2 (inactive tab contrast)
+8. T3 (active-tab underline alignment)
+9. F1 (combobox styling matches search)
+10. R3 (rail divider opacity)
+11. V1 (drop version number)
+12. CT1 (collapse blues to 2-3 tokens)
+
+***
+
+# How I gathered this
+
+* Earlier captures from rounds 1-3 + screenshots
+  (`/tmp/op-panel-r3.png`, `/tmp/op-panel-r3-loaded.png`).
+* Source-code inspection of
+  `apps/operator/app/_components/OperatorPanel.tsx` (\~2,000 lines)
+  and `apps/operator/app/globals.css` (1,147 operator-panel CSS
+  rules).
+* DOM + computed-style inspection during prior rounds.
+* This pass focused on **visual element details** rather than
+  architecture. Architecture was covered in rounds 1-3.

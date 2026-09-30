@@ -1,0 +1,60 @@
+# N≥3 substrate peers — announce admission is per-connection; distribute swarm keys and joinPeer for a full mesh
+URL: /internal/docs/agent-insights/hyperswarm-n3-full-mesh-admission
+
+Signed announces ride per-connection channels (no gossip), so admitting a peer's log REQUIRES a direct hyperswarm connection to it. Concurrent topic joins race the DHT announce and stall pairwise connections for minutes. Fix — collect each peer's swarm noise key at ready and have every peer joinPeer() the others explicitly.
+
+## Symptom
+
+A 3-peer substrate rig (each peer `bootHarnessSubstrate` over Hyperswarm — local
+testnet or the public DHT) stalls waiting for full-mesh admission: peer 0 admits
+all three logs, but peers 1 and 2 sit at `admitted.size === 2` (own + peer 0)
+indefinitely — 90s+ gates time out. Steering/data appended by peer 1 never
+reaches peer 2.
+
+Hit live by `swarm-full-loop.integration.test.ts` (shared-pot-loop-e2e P-008):
+`runFullLoop: Swarm(s) 1,2 never reached full mesh`.
+
+## Why
+
+Two facts compound:
+
+1. **Signed announces ride PER-CONNECTION channels, not gossip.** Each peer
+   sends its signed announce on the `papercusp/announce` Protomux channel
+   (`swarm.ts` `ANNOUNCE_PROTOCOL`) of *every direct connection* it has — there
+   is no relay/forwarding. A peer admits another peer's log **only** if it has a
+   *direct* hyperswarm connection to it.
+2. **Hyperswarm's DHT does not guarantee a full mesh.** With N≥3 peers joining
+   the same topic concurrently, the DHT announce/lookup rounds race: peer 0 may
+   connect to both 1 and 2 while 1 and 2 never discover each other (each sits at
+   `admitted.size === 2`). The pairwise gap can persist for minutes on
+   hyperswarm's retry-timer backoff ladder (1s → 5s → 15s → 10min).
+
+So topic discovery alone is not enough for deterministic N≥3 admission.
+
+## Fix — distribute swarm keys + `joinPeer` an explicit mesh
+
+A peer's **`swarmKey`** is its hyperswarm noise pubkey
+(`swarm.keyPair.publicKey`). The full-loop driver makes the mesh deterministic
+instead of leaving it to the DHT:
+
+1. Each agent emits its `swarmKey` in its `ready` event
+   (`p2p-perf-tier3/loop-agent.ts`).
+2. Once every peer is ready, the parent collects all `swarmKey`s and broadcasts
+   a `peers <hex,…>` line to all agents (`p2p-perf-tier3/run-full-loop.ts`,
+   "Deterministic mesh").
+3. Each agent `joinPeer(Buffer.from(hex,'hex'))`s every key but its own
+   (`loop-agent.ts` `peers` handler). `joinPeer` marks the peer **EXPLICIT** and
+   re-enqueues it with priority, so hyperswarm dials it directly rather than
+   waiting out the discovery ladder. A bad key is swallowed — topic discovery
+   stays the fallback.
+
+The result is identical on a local testnet and the public DHT. The same
+`joinPeer`-every-pair trick is the deterministic reconnect driver in
+`swarm-chaos.test.ts` `forceReconnectAll` after an abrupt disconnect.
+
+## Smell test
+
+If an N≥3 substrate rig stalls with some peers at `admitted.size < N` while
+peer 0 is fully meshed (`runFullLoop: Swarm(s) … never reached full mesh`,
+run-full-loop.ts), it is the per-connection-announce + DHT-race gap — distribute
+swarm keys and `joinPeer` explicitly; don't just bump the gate timeout.

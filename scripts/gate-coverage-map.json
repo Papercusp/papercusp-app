@@ -1,0 +1,1879 @@
+{
+  "schemaVersion": 1,
+  "source": "apps/operator/lib/release/green-checkpoint.ts",
+  "sourceSha256": "d0866063802cd4401a8f41f4b9beb555456ac8c51e37e1b7c5a9f1f42b32ba21",
+  "typecheckInvocations": [
+    "lint:tsc",
+    "lint:tsc:operator",
+    "lint:tsc:orchestrator",
+    "lint:tsc:papercusp-libs",
+    "lint:tsc:scripts",
+    "lint:tsc:workspaces"
+  ],
+  "typecheckScopePatterns": [
+    "apps/**",
+    "apps/operator/**",
+    "libs/**",
+    "libs/papercusp/**",
+    "libs/papercusp/packages/orchestrator/**",
+    "packages/**",
+    "packages/operator-core/**",
+    "scripts/**"
+  ],
+  "diffScopePatterns": [
+    "apps/**",
+    "libs/generic/**",
+    "packages/**",
+    "packages/operator-core/**",
+    "scripts/**"
+  ],
+  "coverageMap": {
+    "apps/operator": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "apps/operator-docs": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "apps/operator-public": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "apps/operator-vite": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "apps/papercusp-docs": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "apps/papercusp-publish": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "apps/the-swarm-site": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/agent-chat": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": true
+    },
+    "libs/flags": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/generic/activity-bridge": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/agent-roster": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/artifact-registry": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/audio-dsp": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/bench-metrics": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/cache": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/card-stack": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/chat-protocol": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/control-mutation": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/debounce-coalesce": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/dependency-order": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/deployment-driver": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/desktop-ipc": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/dock-workbench": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/embedded-pg-discovery": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/eval-battery": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/event-reaction": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/facets": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/failure-detector": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/fanout-resolver": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/git-graph": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/gui-readiness": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/image-blankness": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/ipc-endpoint-server": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/ipc-framing": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/kokoro-tts": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/lexicon": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/linkable-edges": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/locks-core": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/memory": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/model-pricing": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/module-singleton": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/overlap-clusters": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/p2p-voice": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/papergrid": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/papergrid/bloom-grid": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/papergrid/grid": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/papergrid/grid-core": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/papergrid/kv-persist": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/papergrid/kv-persist-indexeddb": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/plan-parser": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/plugin-loader": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/pot-app-seam": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/projection-index": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/prospect-contract": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/pubsub-substrate": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/ranked-selection": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/rate-limit": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/release-profile": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/rerank": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/resource-profile": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/result-encoding": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/resumable-download": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/rrf": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/rules": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/scheduled-registry": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/search": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/search-core": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/seed-bundle": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/sequence-patterns": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/sse": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/step-program": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/structured-concurrency": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/sync": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/tauri-release-kit": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/tauri-verify": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/template-kit": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "libs/generic/token-kit": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/tooldef": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/tooldef-http": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/generic/ui-primitives": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": true
+    },
+    "libs/host-platform": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/marketplace-public-ui": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/papercusp": {
+      "typechecked": false,
+      "diff_visible": false,
+      "is_submodule": true
+    },
+    "libs/papercusp-db": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": true
+    },
+    "libs/papercusp-publish-auth": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/papercusp-shared": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": true
+    },
+    "libs/papercusp/libs/db": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/papercusp/packages/blueprint-distribution": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/papercusp/packages/cli": {
+      "typechecked": false,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/papercusp/packages/embedded-postgres-server": {
+      "typechecked": false,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/papercusp/packages/harness": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/papercusp/packages/locks": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/papercusp/packages/orchestrator": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/papercusp/plugins/gitnexus-bridge": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": false
+    },
+    "libs/test-config": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": true
+    },
+    "libs/testing-shell": {
+      "typechecked": true,
+      "diff_visible": false,
+      "is_submodule": true
+    },
+    "packages/agent-mcp": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "packages/backup": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "packages/coordination": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "packages/docs-engine": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "packages/omp-plugin": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "packages/operator-core": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "packages/operator-ui": {
+      "typechecked": true,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "packages/plugin-loader": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "packages/plugin-sdk": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "packages/plugin-wit": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "packages/tooldef-mcp": {
+      "typechecked": false,
+      "diff_visible": true,
+      "is_submodule": false
+    },
+    "papercusp-desktop": {
+      "typechecked": false,
+      "diff_visible": false,
+      "is_submodule": true
+    }
+  },
+  "entries": [
+    {
+      "path": "apps/operator",
+      "name": "@papercusp/web",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "apps/operator-docs",
+      "name": "@papercupai/operator-docs",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "apps/operator-public",
+      "name": "@papercusp/cupboard-worker",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "apps/operator-vite",
+      "name": "@papercusp/operator-vite",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "apps/papercusp-docs",
+      "name": "@papercupai/papercusp-docs",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "apps/papercusp-publish",
+      "name": "@papercusp/publish-worker",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "apps/the-swarm-site",
+      "name": "@papercusp/the-swarm-site",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/agent-chat",
+      "name": "@papercusp/agent-chat",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/flags",
+      "name": "@papercusp/flags",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/generic/activity-bridge",
+      "name": "@papercusp/activity-bridge",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/agent-roster",
+      "name": "@papercusp/agent-roster",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/artifact-registry",
+      "name": "@papercusp/artifact-registry",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/audio-dsp",
+      "name": "@papercusp/audio-dsp",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/bench-metrics",
+      "name": "@papercusp/bench-metrics",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/cache",
+      "name": "@papercusp/cache",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/card-stack",
+      "name": "@papercusp/card-stack",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/chat-protocol",
+      "name": "@papercusp/chat-protocol",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/control-mutation",
+      "name": "@papercusp/control-mutation",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/debounce-coalesce",
+      "name": "@papercusp/debounce-coalesce",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/dependency-order",
+      "name": "@papercusp/dependency-order",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/deployment-driver",
+      "name": "@papercusp/deployment-driver",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/desktop-ipc",
+      "name": "@papercusp/desktop-ipc",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/dock-workbench",
+      "name": "@papercusp/dock-workbench",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/embedded-pg-discovery",
+      "name": "@papercusp/embedded-pg-discovery",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/eval-battery",
+      "name": "@papercusp/eval-battery",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/event-reaction",
+      "name": "@papercusp/event-reaction",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/facets",
+      "name": "@papercusp/facets",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/failure-detector",
+      "name": "@papercusp/failure-detector",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/fanout-resolver",
+      "name": "@papercusp/fanout-resolver",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/git-graph",
+      "name": "@papercusp/git-graph",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": true,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/gui-readiness",
+      "name": "@papercusp/gui-readiness",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/image-blankness",
+      "name": "@papercusp/image-blankness",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/ipc-endpoint-server",
+      "name": "@papercusp/ipc-endpoint-server",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/ipc-framing",
+      "name": "@papercusp/ipc-framing",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/kokoro-tts",
+      "name": "@papercusp/kokoro-tts",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/lexicon",
+      "name": "@papercusp/lexicon",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/linkable-edges",
+      "name": "@papercusp/linkable-edges",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/locks-core",
+      "name": "@papercusp/locks-core",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/memory",
+      "name": "@papercusp/memory",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/model-pricing",
+      "name": "@papercusp/model-pricing",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/module-singleton",
+      "name": "@papercusp/module-singleton",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/overlap-clusters",
+      "name": "@papercusp/overlap-clusters",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/p2p-voice",
+      "name": "@papercusp/p2p-voice",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/papergrid",
+      "name": null,
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": true,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/papergrid/bloom-grid",
+      "name": "@papercusp/bloom-grid",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/papergrid/grid",
+      "name": "@papercusp/grid",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/papergrid/grid-core",
+      "name": "@papercusp/grid-core",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/papergrid/kv-persist",
+      "name": "@papercusp/kv-persist",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/papergrid/kv-persist-indexeddb",
+      "name": "@papercusp/kv-persist-indexeddb",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/plan-parser",
+      "name": "@papercusp/plan-parser",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/plugin-loader",
+      "name": "@papercusp/plugin-loader-core",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/pot-app-seam",
+      "name": "@papercusp/pot-app-seam",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/projection-index",
+      "name": "@papercusp/projection-index",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/prospect-contract",
+      "name": "@oddsmith/prospect-contract",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/pubsub-substrate",
+      "name": "@papercusp/pubsub-substrate",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/ranked-selection",
+      "name": "@papercusp/ranked-selection",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/rate-limit",
+      "name": "@papercusp/rate-limit",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/release-profile",
+      "name": "@papercusp/release-profile",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/rerank",
+      "name": "@papercusp/rerank",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/resource-profile",
+      "name": "@papercusp/resource-profile",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/result-encoding",
+      "name": "@papercusp/result-encoding",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/resumable-download",
+      "name": "@papercusp/resumable-download",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/rrf",
+      "name": "@papercusp/rrf",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/rules",
+      "name": "@papercusp/rules",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/scheduled-registry",
+      "name": "@papercusp/scheduled-registry",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/search",
+      "name": "@papercusp/search",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/search-core",
+      "name": "@papercusp/search-core",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/seed-bundle",
+      "name": "@papercusp/seed-bundle",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/sequence-patterns",
+      "name": "@papercusp/sequence-patterns",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/sse",
+      "name": "@papercusp/sse",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/step-program",
+      "name": "@papercusp/step-program",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/structured-concurrency",
+      "name": "@papercusp/structured-concurrency",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/sync",
+      "name": "@papercusp/sync",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/tauri-release-kit",
+      "name": "@papercusp/tauri-release-kit",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/tauri-verify",
+      "name": "@papercusp/tauri-verify",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/template-kit",
+      "name": "@papercusp/template-kit",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/token-kit",
+      "name": "@papercusp/token-kit",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": true,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/tooldef",
+      "name": "@papercusp/tooldef",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/tooldef-http",
+      "name": "@papercusp/tooldef-http",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/generic/ui-primitives",
+      "name": "@papercusp/ui-primitives",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "libs/host-platform",
+      "name": "@papercusp/host-platform",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/marketplace-public-ui",
+      "name": "@papercup/marketplace-public-ui",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp",
+      "name": null,
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": true,
+      "typechecked": false,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp-db",
+      "name": "@papercusp/papercusp-db",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp-publish-auth",
+      "name": "@papercusp/publish-auth",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp-shared",
+      "name": "@papercusp/papercusp-shared",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp/libs/db",
+      "name": "@papercusp/db-org",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp/packages/blueprint-distribution",
+      "name": "@papercusp/blueprint-distribution",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp/packages/cli",
+      "name": "@papercusp/cli",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp/packages/embedded-postgres-server",
+      "name": "@papercusp/embedded-postgres-server",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp/packages/harness",
+      "name": "@papercusp/harness",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp/packages/locks",
+      "name": "@papercusp/locks",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp/packages/orchestrator",
+      "name": "@papercusp/orchestrator",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/papercusp/plugins/gitnexus-bridge",
+      "name": "@papercupai/gitnexus-bridge",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/test-config",
+      "name": "@papercusp/test-config",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "libs/testing-shell",
+      "name": "@papercusp/testing-shell",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": true,
+      "typechecked": true,
+      "diff_visible": false
+    },
+    {
+      "path": "packages/agent-mcp",
+      "name": "@papercusp/agent-mcp",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "packages/backup",
+      "name": "@papercusp/backup",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "packages/coordination",
+      "name": "@papercusp/coordination",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "packages/docs-engine",
+      "name": "@papercusp/docs-engine",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "packages/omp-plugin",
+      "name": "@papercusp/omp",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "packages/operator-core",
+      "name": "@papercusp/operator-core",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "packages/operator-ui",
+      "name": "@papercusp/operator-ui",
+      "manifestReadable": true,
+      "hasTypecheckScript": true,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": true,
+      "diff_visible": true
+    },
+    {
+      "path": "packages/plugin-loader",
+      "name": "@papercusp/plugin-loader",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "packages/plugin-sdk",
+      "name": "@papercusp/plugin-sdk",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "packages/plugin-wit",
+      "name": "@papercusp/plugin-wit",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "packages/tooldef-mcp",
+      "name": "@papercusp/tooldef-mcp",
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": true,
+      "is_submodule": false,
+      "typechecked": false,
+      "diff_visible": true
+    },
+    {
+      "path": "papercusp-desktop",
+      "name": null,
+      "manifestReadable": true,
+      "hasTypecheckScript": false,
+      "hasTsconfig": false,
+      "is_submodule": true,
+      "typechecked": false,
+      "diff_visible": false
+    }
+  ],
+  "summary": {
+    "workspaces": 105,
+    "submodules": 38,
+    "entries": 108,
+    "typechecked": 88,
+    "diffVisible": 89,
+    "uncovered": 35,
+    "zeroCoverage": 4
+  },
+  "uncovered": [
+    {
+      "path": "apps/operator-docs",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "apps/papercusp-docs",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "apps/the-swarm-site",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "libs/agent-chat",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/flags",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/generic/audio-dsp",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "libs/generic/git-graph",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "libs/generic/p2p-voice",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "libs/generic/papergrid",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "libs/generic/pot-app-seam",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "libs/generic/token-kit",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "libs/host-platform",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/marketplace-public-ui",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp",
+      "missing": [
+        "typecheck",
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp-db",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp-publish-auth",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp-shared",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp/libs/db",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp/packages/blueprint-distribution",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp/packages/cli",
+      "missing": [
+        "typecheck",
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp/packages/embedded-postgres-server",
+      "missing": [
+        "typecheck",
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp/packages/harness",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp/packages/locks",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp/packages/orchestrator",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/papercusp/plugins/gitnexus-bridge",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/test-config",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "libs/testing-shell",
+      "missing": [
+        "diff"
+      ]
+    },
+    {
+      "path": "packages/backup",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "packages/coordination",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "packages/docs-engine",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "packages/plugin-loader",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "packages/plugin-sdk",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "packages/plugin-wit",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "packages/tooldef-mcp",
+      "missing": [
+        "typecheck"
+      ]
+    },
+    {
+      "path": "papercusp-desktop",
+      "missing": [
+        "typecheck",
+        "diff"
+      ]
+    }
+  ]
+}

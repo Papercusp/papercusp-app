@@ -1,0 +1,173 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/social-tiktok",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "TikTok platform trigger pack: Watches a creator's public videos for new uploads. Records each one and publishes nothing — TikTok exposes no comment surface to read or answer.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": {
+    "mode": "exact"
+  },
+  "capabilities": [],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "tiktokToken"
+    ],
+    "properties": {
+      "tiktokOpenId": {
+        "type": "string",
+        "title": "TikTok open id",
+        "shareable": true,
+        "description": "The TikTok account to watch, as its `open_id`. Non-secret, so it travels with a share."
+      },
+      "tiktokToken": {
+        "type": "string",
+        "title": "TikTok access token",
+        "secret": true,
+        "shareable": false,
+        "snapshotPolicy": "strip",
+        "description": "A TikTok user access token carrying the `user.info.basic` and `video.list` scopes. Deliberately NOT an OAuth-connect field: no registered provider's allowed scopes cover TikTok's, so declaring one would fail at consent time rather than at build time."
+      }
+    }
+  },
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "escalationGuidance": {
+          "type": "string",
+          "title": "What needs a human",
+          "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said.",
+          "maxLength": 1000
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 12,
+      "windowSeconds": 300
+    },
+    "targets": [
+      {
+        "id": "record-tiktok-event",
+        "kind": "plan",
+        "path": "plan.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "trigger"
+          ],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": [
+                "key",
+                "source",
+                "event",
+                "sourceId",
+                "externalId",
+                "dedupeKey",
+                "payload"
+              ],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "pattern": "^ext:tiktok:post$"
+                },
+                "source": {
+                  "type": "string",
+                  "const": "tiktok"
+                },
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "post"
+                  ]
+                },
+                "sourceId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "externalId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dedupeKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "payload": {
+                  "type": "object",
+                  "datatype": "social-post",
+                  "additionalProperties": true,
+                  "required": [
+                    "id",
+                    "text"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "replyToId": {
+                      "type": "string"
+                    },
+                    "occurredAt": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "escalationGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said."
+            }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "tiktok-post",
+        "source": {
+          "kind": "external",
+          "sourceKind": "tiktok"
+        },
+        "target": "record-tiktok-event",
+        "eventPattern": "ext:tiktok:post",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      }
+    ],
+    "edges": []
+  },
+  "icon": "Video"
+}

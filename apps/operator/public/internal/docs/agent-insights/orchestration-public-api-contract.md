@@ -1,0 +1,299 @@
+# Orchestration public API contract
+URL: /internal/docs/agent-insights/orchestration-public-api-contract
+
+Normative P-003 contract for orchestrate:search, orchestrate:inspect, and orchestrate:run: server-default routing, typed bindings, capability preflight, timeout/cancellation, capture, diagnostics, and compatibility.
+
+# Scope
+
+This is the normative P-003 contract for the model-facing orchestration suite. It is governed by plan decisions D-012, D-013, D-015, D-016, D-017, D-018, and D-020.
+
+The suite is a façade over shipped Papercusp surfaces:
+
+* `code:run` remains the primary server scripting engine.
+* `recipes:search`, `recipes:get`, and `recipes:run` remain the store, discovery, inspection, and replay rail.
+* Declared command, PTY, background-task, and media needs are satisfied by the server-side `capability:*` family.
+* Codex `functions.exec` and other native client engines are compatibility doors only. The orchestrator never routes to them.
+* The Phase-1 output envelope is owned by P-006/P-007/P-008 and is adopted here rather than re-specified.
+
+No client backend and no cross-boundary hybrid DAG exist on the declared `host:same` topology.
+
+# Public surface
+
+## `orchestrate:search`
+
+Read-only discovery of reusable orchestration. It delegates to the existing recipe search engine and returns runnable continuations rather than copying recipe authority into a new format.
+
+Input:
+
+```ts
+{
+  query: string;                  // 1..500 characters
+  limit?: number;                 // 1..20, default 5
+  context?: {
+    fleet?: string;
+    plan?: string;
+    harness?: string;
+    items?: string[];
+    resources?: string[];
+  };
+}
+```
+
+Output:
+
+```ts
+{
+  ok: true;
+  query: string;
+  matches: Array<{
+    id: string;
+    title: string;
+    description: string;
+    score: number;
+    toolsUsed: string[];
+    requirements: CapabilityRequirement[];
+    bindings?: BindingSchema;
+    run: { recipe: RecipeSelector }; // exact revision/authority continuation
+  }>;
+}
+```
+
+Context is a narrowing hint, never an authority grant. The implementation derives workspace, fleet, harness, plan-item claims, work-item ownership, and resource locks from the current caller and filters entity-bound recipes exactly as `recipes:search` does today.
+
+## `orchestrate:inspect`
+
+Side-effect-free normalization and preflight. It accepts exactly one source and never executes nested tools.
+
+```ts
+type InspectInput = {
+  script?: ScriptSource;
+  recipe?: RecipeSelector;
+  bindings?: BindingSet;
+  execution?: ExecutionPolicy;
+  capture?: CapturePolicy;
+  timeoutSec?: number;
+};
+```
+
+Exactly one of `script` or `recipe` is required. Both or neither produce `ambiguous_source` with `phase:"preflight"` and `executed:false`.
+
+Inspection returns the normalized source, current recipe revision/authority when applicable, typed binding validation, statically derived tool calls, required capabilities, current capability availability, replayability classification, effective timeout, capture policy, and diagnostics. A successful inspection is advisory freshness, not a reusable authorization token: `orchestrate:run` repeats every preflight against current caller and current catalog state.
+
+## `orchestrate:run`
+
+Executes one normalized source through the server engine.
+
+```ts
+type RunInput = {
+  script?: ScriptSource;
+  recipe?: RecipeSelector;
+  bindings?: BindingSet;
+  execution?: ExecutionPolicy;
+  capture?: CapturePolicy;
+  timeoutSec?: number;
+};
+
+type ScriptSource = {
+  source: string;                 // same 20,000-character ceiling as code:run
+  bindingSchema?: BindingSchema;
+  requires?: CapabilityRequirement[];
+  title?: string;
+  description?: string;
+};
+
+type RecipeSelector = {
+  id: string;
+  revision?: string;              // fail closed when stale
+  authority?: RecipeAuthority;    // current recipes:* proof shape
+};
+
+type ExecutionPolicy = {
+  mode?: "server" | "auto";       // default server; auto is a deprecated alias
+  lifecycle?: "foreground" | "background"; // default foreground
+};
+
+type CapturePolicy = {
+  mode?: "auto" | "never";        // default auto for fresh scripts
+  title?: string;
+  description?: string;
+  tags?: string[];
+};
+```
+
+The top-level `script|recipe` XOR is deliberate. A caller may not supply a recipe and an overriding script in the same request. To adapt a recipe, inspect it and submit a new script in a later request so provenance and capture remain honest.
+
+# Typed bindings
+
+Bindings are data, not string substitution and not an execution graph.
+
+```ts
+type BindingSchema = {
+  version: 1;
+  properties: Record<string, {
+    type: "string" | "number" | "integer" | "boolean" | "json" | "secret-ref" | "resource-ref";
+    required?: boolean;
+    description?: string;
+  }>;
+  additionalProperties: false;
+};
+
+type BindingSet = {
+  values: Record<string, JsonValue | { secretRef: string } | { resourceRef: string; revision?: string }>;
+};
+```
+
+A fresh script with non-empty bindings must declare `bindingSchema`. A saved recipe uses the schema stored with its current revision. Before any nested dispatch, the runtime rejects missing required keys, extra keys, type mismatches, inline values for `secret-ref`, unresolved references, and stale recipe/schema revisions.
+
+The runtime injects a deeply frozen `inputs` object beside `tools`; it never rewrites the script source. Secret bindings resolve only at the authorized tool boundary and are never placed into `inputs`, summaries, logs, captures, or recipe rows. P-005 owns the stable-versus-ephemeral reference rules; this API exposes the discriminants without pre-judging replayability.
+
+# Routing and capability preflight
+
+Routing is intentionally simple:
+
+1. Normalize `execution.mode`. Missing and `server` use the server engine. Legacy `auto` normalizes to `server` and returns a deprecation notice.
+2. Resolve the script or recipe and validate its current schema/revision/authority.
+3. Derive statically visible tool requirements and merge them with the source's explicit `requires`.
+4. Resolve every requirement against the current caller's live role, capability envelope, topology manifest, and service availability.
+5. If any requirement is undeclared, denied, unavailable, or topologically invalid, fail before execution with a typed diagnostic.
+6. Only after preflight succeeds, run through `code:run` / the saved-recipe replay path.
+
+There is no speculative fallback and no mid-run backend switch after side effects. `execution.mode:"client"` is not accepted. Legacy callers receive `execution_mode_unavailable`, `executed:false`, and guidance to use server mode or call their native compatibility door directly while it remains enabled.
+
+Capability escapes are still server execution. A script that needs a shell, PTY, background task, or media emitter declares that capability; it does not select a backend. The manifest defined by P-004 carries the `host:same` premise so a future remote-client topology fails closed and reopens D-012 explicitly.
+
+Background lifecycle is admitted only when the source declares the durable task capability and the task-manager-backed implementation is available. Until that parity lands, `lifecycle:"background"` fails in preflight; it must never start foreground work and discover the mismatch later.
+
+# Timeout and cancellation
+
+`timeoutSec` is an integer request in the supported range. The result reports both `requestedTimeoutSec` and `effectiveTimeoutSec`; any foreground transport clamp is explicit. Default is 30 seconds.
+
+Foreground runs bind the request `AbortSignal` and the effective deadline before the first nested dispatch. Cancellation stops the worker and propagates to cancellable nested calls. A write already dispatched may have landed, so cancellation never implies rollback. Results preserve the existing `writeAttempts`, `rejectedMutations`, `uncertainMutations`, `childFailures`, and `notDispatchedWrites` truth surfaces.
+
+There is no new public cancel verb in P-003. Durable background cancellation continues through the existing task-manager/capability control surface until a later plan explicitly adds an orchestration lifecycle verb. An implementation must not imply that closing a model turn cancels a durable task.
+
+# Capture policy
+
+For a fresh script, `auto` preserves current `code:run` behavior: a successful, non-dry execution is captured best-effort into the existing recipe store and similar recipes are returned as advisory data. `never` suppresses capture. A recipe run records reuse and never creates a second recipe merely because it was replayed.
+
+Capture metadata is not authority. A recipe stores no author privilege, no resolved secret, and no ephemeral caller handle. Capture failure under `auto` does not retroactively change execution truth. P-005 defines which bindings make a capture non-replayable or ineligible.
+
+# Typed diagnostics
+
+Every rejection before the first nested dispatch returns:
+
+```ts
+{
+  ok: false;
+  phase: "preflight";
+  executed: false;
+  error: {
+    code:
+      | "ambiguous_source"
+      | "source_missing"
+      | "script_invalid"
+      | "recipe_not_found"
+      | "recipe_schema_stale"
+      | "recipe_authority_required"
+      | "recipe_authority_stale"
+      | "recipe_authority_mismatch"
+      | "binding_schema_required"
+      | "binding_invalid"
+      | "capability_undeclared"
+      | "capability_denied"
+      | "capability_unavailable"
+      | "topology_premise_failed"
+      | "execution_mode_unavailable"
+      | "lifecycle_unavailable"
+      | "timeout_invalid";
+    message: string;
+    path?: string;
+    requirement?: CapabilityRequirement;
+    replacement?: unknown;
+  };
+}
+```
+
+Runtime failures use `phase:"execution"` and preserve existing honest write dispositions. A diagnostic that occurs after a nested dispatch may not claim `executed:false`.
+
+# Compatibility
+
+* `code:run` remains callable and maps to `orchestrate:run { script:{ source, title, description }, execution:{ mode:"server", lifecycle:"foreground" }, capture:{ mode:"auto" }, timeoutSec }`.
+* `recipes:search/get/run` remain callable. The façade delegates to them and preserves their exact recipe revision and authority proofs.
+* Direct MCP verbs remain compatibility doors per D-008/P-021; this spec does not remove them.
+* Native client code/shell tools remain direct compatibility doors until D-016/D-017 parity, steering, telemetry, and break-glass gates are green. The orchestrator never invokes them.
+* Existing `dryRun:true` is represented as a script binding-free foreground inspection plus the current write-preview execution contract during compatibility. A future public `preview` field may only be added if it preserves current read-exec/write-skip semantics.
+
+# Examples
+
+Fresh server script:
+
+```json
+{
+  "script": {
+    "source": "const rows = await tools.workItems.list({ state: inputs.state }); return { count: rows.results.length };",
+    "bindingSchema": {
+      "version": 1,
+      "properties": { "state": { "type": "string", "required": true } },
+      "additionalProperties": false
+    },
+    "requires": [{ "capability": "tools:work_items:list" }]
+  },
+  "bindings": { "values": { "state": "open" } },
+  "execution": { "mode": "server", "lifecycle": "foreground" },
+  "capture": { "mode": "auto", "title": "count open work items" },
+  "timeoutSec": 20
+}
+```
+
+Saved recipe replay:
+
+```json
+{
+  "recipe": {
+    "id": "triage-stale-work-items",
+    "revision": "sha256:…",
+    "authority": { "version": 1, "revision": "…", "context": { "harness": "papercusp" } }
+  },
+  "bindings": { "values": { "ageDays": 30 } },
+  "capture": { "mode": "never" }
+}
+```
+
+Declared server capability escape:
+
+```json
+{
+  "script": {
+    "source": "const job = await tools.capability.bash({ command: inputs.command, run_in_background: true }); return { taskId: job.task_id };",
+    "bindingSchema": {
+      "version": 1,
+      "properties": { "command": { "type": "string", "required": true } },
+      "additionalProperties": false
+    },
+    "requires": [
+      { "capability": "execution:shell" },
+      { "capability": "execution:background-task" },
+      { "capability": "topology:host:same" }
+    ]
+  },
+  "bindings": { "values": { "command": "npm run test:file -- path/to/test.ts" } },
+  "execution": { "mode": "server", "lifecycle": "foreground" }
+}
+```
+
+A request containing both `script` and `recipe`, a legacy `mode:"client"`, or an unavailable PTY/media requirement returns a preflight diagnostic with `executed:false`; it never starts the first leg and fails over after writes.
+
+# Acceptance criteria
+
+P-003 is satisfied when implementation tests prove:
+
+1. exact-one source validation;
+2. typed binding validation before dispatch;
+3. recipe revision/authority revalidation under the current caller;
+4. server-default routing with no client dispatch path;
+5. capability/topology failure before side effects;
+6. explicit requested/effective timeout and request-signal cancellation;
+7. capture policy mapping to the existing recipe rail;
+8. truthful execution diagnostics and existing uncertain-write surfaces;
+9. compatibility mappings for `code:run` and `recipes:*`;
+10. no duplicate recipe store, search index, authorization model, or client adapter.

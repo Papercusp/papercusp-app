@@ -1,0 +1,143 @@
+-- 1077-resource-governor-work-item-receipt-retirement.sql
+--
+-- resource-governor-admission-ledger-2026-09-01 P-005 / D-005 / D-007.
+--
+-- PARKED CONTRACT MIGRATION. Keep this file suffixed .sql.DRAFT until every
+-- admission writer plane is running the ledger-only P-005a release, migration
+-- 1076 is applied, markLegacyWritersRetired() has serialized the retirement
+-- marker, and a fresh census reports zero non-terminal legacy receipts.
+--
+-- The migration is deliberately self-defending if it is armed too early. It
+-- takes the same table lock as markLegacyWritersRetired(), proves every
+-- governed workspace has crossed the explicit retirement edge, refuses any
+-- non-terminal or unknown legacy state, and rejects rows whose creation clock
+-- is later than the retirement marker. Only then does it delete the terminal
+-- telemetry rows and retire the work-item-specific indexes and insert guard.
+--
+-- FORWARD-COMPAT: The currently deployed P-005a release single-writes the admission ledger, treats zero legacy work-item rows as a valid empty compatibility set, and does not require the two legacy indexes or temporary insert trigger after every governed workspace carries the serialized retired-writer marker.
+
+DO $migration$
+DECLARE
+  unretired_workspaces text;
+  legacy_without_ledger text;
+  unsafe_legacy_count bigint;
+  post_retirement_count bigint;
+  deleted_count bigint;
+BEGIN
+  -- Serialize the complete proof and deletion against both a concurrent legacy
+  -- INSERT and markLegacyWritersRetired(), which takes this same lock mode.
+  LOCK TABLE harness_shared.work_items IN SHARE ROW EXCLUSIVE MODE;
+
+  WITH governed_workspaces AS (
+    SELECT DISTINCT workspace_id
+      FROM harness_shared.resource_governor_admissions
+    UNION
+    SELECT DISTINCT workspace_id
+      FROM harness_shared.work_items
+     WHERE jsonb_exists(COALESCE(payload, '{}'::jsonb), 'resource_governor')
+  )
+  SELECT string_agg(workspace_id, ', ' ORDER BY workspace_id)
+    INTO unretired_workspaces
+    FROM governed_workspaces AS governed
+   WHERE NOT EXISTS (
+     SELECT 1
+       FROM harness_shared.operator_settings AS setting
+      WHERE setting.key = 'resource_governor_admission_legacy_writers_retired:' || governed.workspace_id
+        AND setting.workspace_id = governed.workspace_id
+        AND setting.value = '1'
+   );
+
+  IF unretired_workspaces IS NOT NULL THEN
+    RAISE EXCEPTION
+      '1077: refusing resource-governor work-item retirement; governed workspace(s) lack the serialized retired-writer marker: %',
+      unretired_workspaces;
+  END IF;
+
+  WITH legacy_workspaces AS (
+    SELECT DISTINCT workspace_id
+      FROM harness_shared.work_items
+     WHERE jsonb_exists(COALESCE(payload, '{}'::jsonb), 'resource_governor')
+  )
+  SELECT string_agg(workspace_id, ', ' ORDER BY workspace_id)
+    INTO legacy_without_ledger
+    FROM legacy_workspaces AS legacy
+   WHERE NOT EXISTS (
+     SELECT 1
+       FROM harness_shared.resource_governor_admissions AS admission
+      WHERE admission.workspace_id = legacy.workspace_id
+   )
+      OR NOT EXISTS (
+     SELECT 1
+       FROM harness_shared.operator_settings AS setting
+      WHERE setting.key = 'resource_governor_admission_ledger_cutover:' || legacy.workspace_id
+        AND setting.workspace_id = legacy.workspace_id
+        AND setting.value = '1'
+   );
+
+  IF legacy_without_ledger IS NOT NULL THEN
+    RAISE EXCEPTION
+      '1077: refusing resource-governor work-item retirement; legacy workspace(s) lack a positive ledger/cutover control: %',
+      legacy_without_ledger;
+  END IF;
+
+  SELECT count(*)
+    INTO unsafe_legacy_count
+    FROM harness_shared.work_items
+   WHERE jsonb_exists(COALESCE(payload, '{}'::jsonb), 'resource_governor')
+     AND (
+       jsonb_typeof(payload->'resource_governor') IS DISTINCT FROM 'object'
+       OR payload->'resource_governor'->>'schemaVersion' IS DISTINCT FROM '1'
+       OR COALESCE(payload->'resource_governor'->>'state', '') NOT IN (
+         'completed', 'cancelled', 'superseded', 'expired'
+       )
+     );
+
+  IF unsafe_legacy_count <> 0 THEN
+    RAISE EXCEPTION
+      '1077: refusing resource-governor work-item retirement; % non-terminal, malformed, or unknown-state legacy receipt(s) remain',
+      unsafe_legacy_count;
+  END IF;
+
+  SELECT count(*)
+    INTO post_retirement_count
+    FROM harness_shared.work_items AS item
+    JOIN harness_shared.operator_settings AS setting
+      ON setting.key = 'resource_governor_admission_legacy_writers_retired:' || item.workspace_id
+     AND setting.workspace_id = item.workspace_id
+     AND setting.value = '1'
+   WHERE jsonb_exists(COALESCE(item.payload, '{}'::jsonb), 'resource_governor')
+     AND (
+       item.created_ts IS NULL
+       OR setting.updated_at IS NULL
+       OR item.created_ts > setting.updated_at
+     );
+
+  IF post_retirement_count <> 0 THEN
+    RAISE EXCEPTION
+      '1077: refusing resource-governor work-item retirement; % legacy receipt(s) were created after (or cannot be ordered against) the retired-writer marker',
+      post_retirement_count;
+  END IF;
+
+  DELETE FROM harness_shared.work_items
+   WHERE jsonb_exists(COALESCE(payload, '{}'::jsonb), 'resource_governor');
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+
+  IF EXISTS (
+    SELECT 1
+      FROM harness_shared.work_items
+     WHERE jsonb_exists(COALESCE(payload, '{}'::jsonb), 'resource_governor')
+  ) THEN
+    RAISE EXCEPTION
+      '1077: resource-governor work-item retirement deleted % row(s) but the zero-row postcondition failed',
+      deleted_count;
+  END IF;
+END
+$migration$;
+
+DROP TRIGGER IF EXISTS reject_post_cutover_governor_work_item_trg
+  ON harness_shared.work_items;
+DROP FUNCTION IF EXISTS harness_shared.reject_post_cutover_governor_work_item();
+
+DROP INDEX IF EXISTS harness_shared.work_items_resource_governor_identity_uq;
+DROP INDEX IF EXISTS harness_shared.work_items_resource_governor_queue_idx;
+

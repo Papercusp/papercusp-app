@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-project-history",
+  "id": "papercusp-project-history",
+  "title": "Papercusp Official: Project History",
+  "description": "Aspect template: generate a versioned History artifact from a project's Papercusp plan/work-item ledgers and Git, then serve it through a thin app adapter.",
+  "category": "data",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

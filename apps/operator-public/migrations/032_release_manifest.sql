@@ -1,0 +1,25 @@
+-- 032_release_manifest.sql
+--
+-- Carry the FULL signed release manifest, not just its pins.
+--
+-- Migration 018 added the immutable release pins (release_version,
+-- release_content_hash, release_manifest_digest, release_signature). Those are
+-- enough to detect a tampered CLOSURE (the content-hash pin), but not enough to
+-- verify the publisher SIGNATURE at install time: the signature is computed over
+-- a 12-field canonical-JSON manifest (listingManifestSigningBytes), and neither
+-- the digest nor the signature alone lets an installer reconstruct those bytes.
+-- license / publisher / reviewStatus are publisher-supplied and are NOT derivable
+-- from a clone of the repo, so a partial reconstruction at install time would hash
+-- different bytes and fail every valid signature.
+--
+-- Without this column the publisher signs a manifest, publish-listing sends it,
+-- and the storefront DROPS it — so the verifier added in blueprint-release.ts
+-- (identities-v1-2026-08-30 D-073/D-074) is unreachable on the production install
+-- path, which is the exact defect D-071 recorded.
+--
+-- Nullable and additive: a pre-existing row simply has no manifest, and an install
+-- with no manifest proceeds UNSIGNED but still pin-protected by the existing
+-- release_content_hash refusal. Migration 031 already rebuilt `harnesses`, so this
+-- is a plain additive ALTER in the style of 018.
+
+ALTER TABLE harnesses ADD COLUMN release_manifest TEXT;  -- canonical JSON, CupboardReleaseManifest

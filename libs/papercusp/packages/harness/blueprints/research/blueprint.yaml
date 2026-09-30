@@ -1,0 +1,99 @@
+# The `research` blueprint — harness-blueprint-orchestration-2026-06-03 P-017 / D-016.
+#
+# The non-coding proof slice: SAME engine (deriveNext + the durable pipeline),
+# DIFFERENT shape (a research work-item, a research vocabulary, research roles).
+# Honors anti-over-decomposition (D-010): the DEFAULT is a single `researcher`;
+# `searcher`/`verifier` are reactive-overlay roles the director dispatches only
+# when needed. `requiresRepo:false` — a repo-less harness (PG/file-canonical).
+#
+# Overflow → sub-research-harness (recursion, layers 3+4) is the opt-in heavier
+# variant (D-010: research inline by default; the sub-harness only on overflow),
+# left disabled here so the minimal blueprint is as cheap as the maximal.
+#
+# Work-item storage: a research task rides the existing work_items table. The
+# roles read/write it via the same FEATURE_ID mechanism the coding pipeline uses
+# — that reuse is the point: only the blueprint (spine + roles) differs.
+#
+# Kind: `task` (WI-2874, 2026-07-05). The old feature-family `research-task` kind
+# was MERGED INTO the issue-family `task` — research is non-code work, which is
+# what `task` now means — so this blueprint's output rides the `task` kind. (The
+# live deep-analysis lane, sentinel-deep-delegate, likewise mints `task`.)
+id: research
+extends: base
+version: 0.1.0
+# Cupboard-publishable (identities-v1 P-014 clause 2 / D-043). The publish route
+# parses THIS file with `parseYaml` and never merges `extends`, so the marker has
+# to sit on the concrete blueprint — a `base` declaration would never be seen.
+# Without it the fail-closed gate (publish-blueprint-visibility.ts) reads
+# 'internal' and 422s, which is what made the non-engineering identity
+# unpublishable while `papercusp-engineer` was publishable.
+visibility: public
+description: >-
+  A minimal research harness: a research-director drives a single researcher per
+  research task, with searcher/verifier as reactive helpers. Repo-less.
+
+workItem:
+  kind: task
+  idPrefix: R
+
+# The autoloop dispatch policy (autoloop-pot-operator-rebuild-2026-06-05 D-005):
+# research runs ONE task pipeline at a time — depth over fan-out (consistent
+# with anti-over-decomposition D-010). Per-install config overrides.
+dispatch:
+  concurrency: 1
+
+spine:
+  decider: research-director
+  maxTurns: 30
+  default:
+    to: idle
+  edges:
+    DONE: { to: done }
+    ESCALATE: { to: escalate, reasonFrom: arg }
+    IDLE: { to: idle }
+    # The default work step: research the task.
+    NEXT_RESEARCHER: { to: role, role: researcher, extras: ["FEATURE_ID={feature}"] }
+    # Reactive helpers (dispatched only when the director judges them useful).
+    NEXT_SEARCHER: { to: role, role: searcher, extras: ["FEATURE_ID={feature}"] }
+    NEXT_VERIFIER: { to: role, role: verifier, extras: ["FEATURE_ID={feature}"] }
+
+# Research plans inline within the director's loop (no plans→features import).
+planner:
+  kind: inline
+
+roles:
+  - { id: research-director, description: "Per-task research orchestrator; emits the next verb." }
+  - { id: researcher, description: "Does the research for one task; produces findings." }
+  - { id: searcher, reactive: true, description: "Reactive: gathers/searches sources for the researcher." }
+  - { id: verifier, reactive: true, description: "Reactive: verifies the researcher's claims." }
+
+# Reactive overlay (layer 3): searcher can run before the researcher (gather),
+# verifier after (check). Declared; the director controls actual dispatch.
+reactive:
+  - role: searcher
+    when: { beforeRole: researcher }
+    preempt: false
+  - role: verifier
+    when: { afterRole: researcher }
+    preempt: false
+
+# Gym trace = the work-item output + transcript (the D-015 seam), NOT a git diff —
+# a repo-less harness has no diff to collect.
+gym:
+  collectTrace: work-item-output
+  signals: []
+
+knobs:
+  harnessKind: research
+  requiresRepo: false
+
+# Dependencies (official-blueprints-cupboard-publish D-002): derived from the
+# research role personas (scripts/derive-blueprint-deps.mjs). Research roles
+# gather via their client-native web/fetch tools; their agent-tool surface is
+# the work-item + plan readback (findings ride the work-item).
+dependencies:
+  tools:
+    - features:get
+    - plans:items
+    - work_items:list
+  plugins: []

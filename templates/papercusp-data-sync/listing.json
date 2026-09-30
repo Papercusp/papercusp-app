@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-data-sync",
+  "id": "papercusp-data-sync",
+  "title": "Papercusp Official: Data Sync (Live UI State)",
+  "description": "Aspect template: live UI state sync — client transports + an SSE server leg + event-maintained projections, so every pane reflects writes in real time without polling. Compose into any papercusp app with a web UI. Docs: /internal/docs on your install.",
+  "category": "data",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

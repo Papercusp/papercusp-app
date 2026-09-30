@@ -1,0 +1,113 @@
+{
+  "kind": "plugin",
+  "name": "@papercupai/orchestrator-spawn",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Phase 9 spawn primitive — lets agents launch other agents as a tool call. spawn → poll → cancel; tracks parent_spawn_id lineage in tool_invocations for the Intel panel's spawn-tree view.",
+  "capabilities": [
+    "tools:orchestrator:spawn:worker",
+    "tools:orchestrator:spawn:validator",
+    "tools:orchestrator:spawn:scoper",
+    "tools:orchestrator:spawn:reviewer",
+    "tools:orchestrator:spawn:debugger",
+    "tools:orchestrator:spawn:architect",
+    "tools:orchestrator:spawn:documenter",
+    "tools:orchestrator:spawn:curator"
+  ],
+  "tools": [
+    {
+      "name": "spawn",
+      "description": "Launch a child agent of the given role with feature/chunk/run context inherited from the caller. Returns immediately with a spawnId; use orchestrator.poll to check status. Allowlist-gated: architect can spawn worker/validator/scoper/reviewer/debugger; operator can spawn anyone; debugger→validator; scoper→validator/reviewer; reviewer→architect; worker/validator/documenter/curator cannot spawn. Caps: depth ≤ 3, ≤ 5 children per parent, ≤ 10 concurrent total.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "role": { "type": "string", "description": "Child agent role." },
+          "featureId": { "type": "string", "description": "Optional feature ID for the child's spawn context." },
+          "chunkId": { "type": "string", "description": "Optional chunk ID. Required when role='worker'." },
+          "extras": { "type": "array", "items": { "type": "string" }, "description": "Extra ENV=val args to pass to the child agent process." }
+        },
+        "required": ["role"]
+      },
+      "capabilities": ["tools:orchestrator:spawn:worker"],
+      "roles": ["architect", "operator", "scoper", "debugger", "reviewer"],
+      "rolesQuota": {
+        "architect": { "perRun": 30 },
+        "operator": { "perRun": 60 },
+        "scoper": { "perRun": 10 },
+        "debugger": { "perRun": 10 },
+        "reviewer": { "perRun": 10 }
+      },
+      "timeoutSec": 10,
+      "expose": {
+        "mcp": { "name": "orchestrator.spawn" },
+        "http": { "path": "/api/plugins/orchestrator/spawn" }
+      },
+      "guidance": {
+        "when": "Operator delegating work to another agent (worker for a chunk, validator for a plan check, scoper to break down a feature, reviewer to look at a diff). For OPERATOR specifically: prefer the `<spawn role=\"...\" />` tag in your turn output — it routes through the same dispatch and you don't need an MCP roundtrip. The tool form is for non-operator roles.",
+        "notWhen": "For asking the user a question, use `chat:ask_choice`. For tracking intent without execution, use `tasks:create`. spawn = execute, not plan.",
+        "chaining": "Returns a spawnId immediately. Use `orchestrator.poll` to check status; `orchestrator.cancel` to stop a running spawn."
+      }
+    },
+    {
+      "name": "poll",
+      "description": "Read the current state of a spawn launched via orchestrator.spawn. Returns { spawnId, status, role, startedAtMs, finishedAtMs?, lastInvocation?, error?, exitCode?, durationMs? }. status is one of running|done|failed|cancelled.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "spawnId": { "type": "string" } },
+        "required": ["spawnId"]
+      },
+      "capabilities": [],
+      "roles": ["architect", "operator", "scoper", "debugger", "reviewer", "worker", "validator", "documenter", "curator"],
+      "timeoutSec": 5,
+      "expose": {
+        "mcp": { "name": "orchestrator.poll" },
+        "http": { "path": "/api/plugins/orchestrator/poll" }
+      },
+      "guidance": {
+        "when": "Check the status of a spawn you launched. Returns running/done/failed/cancelled + exit code + duration.",
+        "notWhen": "For listing ALL active spawns you started, use `orchestrator.list_active`. Don't poll in a tight loop — spawns take seconds to minutes; once a turn is plenty."
+      }
+    },
+    {
+      "name": "list_active",
+      "description": "List spawns the caller initiated that are currently running. Pass scope='all' to also include this host's other-parent spawns; default scope='mine' filters to spawns whose parentSpawnId matches the caller's ctx.spawnId.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "scope": { "type": "string", "enum": ["mine", "all"], "description": "Filter scope. Default 'mine'." }
+        }
+      },
+      "capabilities": [],
+      "roles": ["architect", "operator", "scoper", "debugger", "reviewer", "worker", "validator", "documenter", "curator"],
+      "timeoutSec": 5,
+      "expose": {
+        "mcp": { "name": "orchestrator.list_active" },
+        "http": { "path": "/api/plugins/orchestrator/list_active" }
+      },
+      "guidance": {
+        "when": "User asks \"what agents are running?\", \"what did I spawn?\", or you need to enumerate in-flight delegates before deciding whether to spawn more (concurrency cap is 10).",
+        "notWhen": "For a single spawn's status, use `orchestrator.poll` with the spawnId."
+      }
+    },
+    {
+      "name": "cancel",
+      "description": "Send SIGTERM to a running spawn (then SIGKILL after 2s). Same allowlist gating as spawn — if you can spawn the role, you can cancel a running instance of it. No-op for non-running spawns; returns the post-cancel state.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "spawnId": { "type": "string" } },
+        "required": ["spawnId"]
+      },
+      "capabilities": ["tools:orchestrator:spawn:worker"],
+      "roles": ["architect", "operator", "scoper", "debugger", "reviewer"],
+      "timeoutSec": 5,
+      "expose": {
+        "mcp": { "name": "orchestrator.cancel" },
+        "http": { "path": "/api/plugins/orchestrator/cancel" }
+      },
+      "guidance": {
+        "when": "User asks to stop a running spawn (\"kill the worker\", \"abort that scoper\"). Sends SIGTERM, then SIGKILL after 2s.",
+        "notWhen": "For done/failed spawns, this is a no-op — just call `orchestrator.poll` to confirm state."
+      }
+    }
+  ]
+}

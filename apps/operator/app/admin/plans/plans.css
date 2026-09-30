@@ -1,0 +1,5331 @@
+/* Plans admin tab — two-pane shell (rail + detail).
+ * Palette follows the active semantic theme: deep surfaces with token-driven accents. */
+
+.pc-plans {
+  --pc-plans-bg: color-mix(in srgb, var(--bg-deeper), transparent 0%);
+  --pc-plans-surface: color-mix(in srgb, var(--bg), transparent 22%);
+  --pc-plans-surface-strong: color-mix(in srgb, var(--bg-popover), transparent 4%);
+  --pc-plans-border: color-mix(in srgb, var(--accent-strong), transparent 86%);
+  --pc-plans-border-strong: color-mix(in srgb, var(--accent-strong), transparent 66%);
+  --pc-plans-fg: var(--fg-dim);
+  --pc-plans-fg-strong: var(--fg);
+  --pc-plans-fg-muted: color-mix(in srgb, var(--accent-soft), transparent 42%);
+  --pc-plans-accent: var(--accent);
+
+  display: grid;
+  grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  color: var(--pc-plans-fg);
+  background:
+    radial-gradient(circle at 20% 0%, color-mix(in srgb, var(--accent), transparent 92%), transparent 32%),
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-deep), transparent 6%), var(--pc-plans-bg));
+}
+
+/* ── Rail ───────────────────────────────────────────────────────── */
+.pc-plans__rail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--pc-plans-border);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg), transparent 12%), color-mix(in srgb, var(--bg-deeper), transparent 22%));
+}
+
+.pc-plans__rail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: stretch;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 88%);
+}
+
+.pc-plans__new-plan {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in oklab, var(--accent, #38bdf8), transparent 48%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--accent, #38bdf8), transparent 78%);
+  color: var(--fg, #e7f7ff);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.pc-plans__new-plan:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--accent, #38bdf8), transparent 64%);
+  border-color: color-mix(in oklab, var(--accent, #38bdf8), transparent 30%);
+}
+
+.pc-plans__new-plan:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Plans — switch the main pane to the plan browser (between New plan and Inbox).
+   Green accent, distinct from New plan (blue). */
+.pc-plans__plans-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  /* Unselected = quiet (faint accent); the active rule below is a strong,
+     hover-independent fill so the selection never "fades" when the cursor
+     leaves. */
+  border: 1px solid color-mix(in oklab, #22c55e, transparent 64%);
+  border-radius: 8px;
+  background: color-mix(in oklab, #22c55e, transparent 90%);
+  color: var(--fg, #e7f7ff);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  position: relative;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.pc-plans__plans-btn:hover { background: color-mix(in oklab, #22c55e, transparent 72%); }
+
+/* Inbox — entry to the items view (right of Plans); same size as New plan.
+   Red accent. */
+.pc-plans__queue-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in oklab, #f87171, transparent 64%);
+  border-radius: 8px;
+  background: color-mix(in oklab, #f87171, transparent 90%);
+  color: var(--fg, #e7f7ff);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  position: relative;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.pc-plans__queue-btn:hover {
+  background: color-mix(in oklab, #f87171, transparent 74%);
+  border-color: color-mix(in oklab, #f87171, transparent 44%);
+}
+
+/* Sessions — the live agent roster (3rd view, right of Inbox). Pink accent,
+   kept from the retired standalone Sessions tab. */
+.pc-plans__sessions-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in oklab, #f472b6, transparent 64%);
+  border-radius: 8px;
+  background: color-mix(in oklab, #f472b6, transparent 90%);
+  color: var(--fg, #e7f7ff);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  position: relative;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.pc-plans__sessions-btn:hover {
+  background: color-mix(in oklab, #f472b6, transparent 74%);
+  border-color: color-mix(in oklab, #f472b6, transparent 44%);
+}
+.pc-plans__queue-btn-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.28);
+  color: #fecaca;
+  font-size: 11px;
+  line-height: 17px;
+  text-align: center;
+}
+
+/* Inbox page (main pane) — the item filters moved off the rail into a
+   horizontal chip bar above the item lists. */
+.pc-queue {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.pc-queue__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 88%);
+  /* Sticky atop the shell's scrolling list column (like the Sessions header). */
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  background: color-mix(in oklab, var(--bg), transparent 8%);
+  backdrop-filter: blur(8px);
+}
+/* Same accent treatment as the Draft/Ready/Running/… bucket tabs (driven
+   by --pc-view-accent from the chip's pc-plans__view--<id> class), but kept
+   as an oval pill rather than the bucket cards. */
+.pc-queue__filter {
+  --pc-view-accent: var(--pc-plans-accent, #38bdf8);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  /* Unselected = quiet: a faint accent so the active facet (full fill + ring
+     + ✓) clearly stands out against the rest. */
+  border: 1px solid color-mix(in oklab, var(--pc-view-accent), transparent 72%);
+  background: color-mix(in oklab, var(--pc-view-accent), transparent 93%);
+  color: var(--fg-dim, #b9d4e8);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms, border-color 120ms, color 120ms;
+}
+.pc-queue__filter:hover {
+  background: color-mix(in oklab, var(--pc-view-accent), transparent 80%);
+  border-color: color-mix(in oklab, var(--pc-view-accent), transparent 30%);
+  color: var(--fg, #e7f7ff);
+}
+.pc-queue__filter.is-active {
+  background: color-mix(in oklab, var(--pc-view-accent), transparent 46%);
+  border-color: var(--pc-view-accent);
+  color: var(--fg, #e7f7ff);
+  font-weight: 800;
+  /* Loud "selected" treatment: full-accent border + a 2px accent ring so an
+     active facet reads at a glance even on a busy inbox. (The ✓ badge is the
+     shared .is-active::after rule below.) */
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--pc-view-accent), transparent 55%);
+}
+.pc-queue__filter-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.28);
+  font-size: 11px;
+  line-height: 17px;
+  text-align: center;
+}
+
+/* ── Queue Filter (redesign): ONE collapsed "Filter" trigger replaces the
+   always-on tier bar + 11-chip row. The chips inside reuse .pc-queue__filter. ── */
+.pc-queue__filterbar {
+  padding: 8px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 90%);
+  background: color-mix(in oklab, var(--bg), transparent 4%);
+}
+.pc-queue__filterhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pc-queue__filtertoggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--fg-dim, #b9d4e8);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 120ms, border-color 120ms, color 120ms;
+}
+.pc-queue__filtertoggle:hover {
+  border-color: color-mix(in oklab, var(--accent), transparent 40%);
+  color: var(--fg, #e7f7ff);
+}
+.pc-queue__filteractive {
+  min-width: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #06121f;
+  font-size: 11px;
+  line-height: 17px;
+  text-align: center;
+}
+.pc-queue__filterchev {
+  color: var(--fg-mute);
+  transition: transform 140ms ease;
+}
+.pc-queue__filterbar[data-state='open'] .pc-queue__filterchev {
+  transform: rotate(180deg);
+}
+.pc-queue__tierchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 50%);
+  background: color-mix(in oklab, var(--accent), transparent 80%);
+  color: var(--fg, #e7f7ff);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.pc-queue__tierchip:hover {
+  background: color-mix(in oklab, var(--accent), transparent 68%);
+}
+.pc-queue__filterpanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 4px;
+  overflow: hidden;
+}
+.pc-queue__filterpanel[data-state='open'] {
+  animation: pc-queue-filter-open 140ms ease;
+}
+@keyframes pc-queue-filter-open {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.pc-queue__filtergroup {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.pc-queue__filterlabel {
+  flex: 0 0 auto;
+  margin-right: 4px;
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+/* ── Inbox tier bar (inbox-tiering-and-message-agent D-006): Decisions ▸
+   Handled ▸ Alerts ▸ Activity. Mirrors the facet pills, one accent per tier;
+   only Decisions reads "loud". ── */
+.pc-queue__tiers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 14px 4px;
+}
+.pc-queue__tier {
+  --pc-view-accent: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--pc-view-accent), transparent 72%);
+  background: color-mix(in oklab, var(--pc-view-accent), transparent 93%);
+  color: var(--fg-dim, #b9d4e8);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms, border-color 120ms, color 120ms;
+}
+.pc-queue__tier--decision { --pc-view-accent: #f87171; }
+.pc-queue__tier--handled  { --pc-view-accent: #34d399; }
+.pc-queue__tier--alert    { --pc-view-accent: #fbbf24; }
+.pc-queue__tier--activity { --pc-view-accent: #64748b; }
+.pc-queue__tier--all      { --pc-view-accent: var(--accent); }
+.pc-queue__tier:hover {
+  background: color-mix(in oklab, var(--pc-view-accent), transparent 80%);
+  border-color: color-mix(in oklab, var(--pc-view-accent), transparent 30%);
+  color: var(--fg, #e7f7ff);
+}
+.pc-queue__tier.is-active {
+  background: color-mix(in oklab, var(--pc-view-accent), transparent 46%);
+  border-color: var(--pc-view-accent);
+  color: var(--fg, #e7f7ff);
+  font-weight: 800;
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--pc-view-accent), transparent 55%);
+}
+.pc-queue__tier-count {
+  min-width: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.28);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* Per-item tier badge (rows + detail toolbar). */
+.pc-tier {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: capitalize;
+  border: 1px solid transparent;
+}
+.pc-tier--decision { background: rgba(248, 113, 113, 0.18); color: #fecaca; border-color: rgba(248, 113, 113, 0.4); }
+.pc-tier--handled  { background: rgba(52, 211, 153, 0.16);  color: #a7f3d0; border-color: rgba(52, 211, 153, 0.4); }
+.pc-tier--alert    { background: rgba(251, 191, 36, 0.16);  color: #fde68a; border-color: rgba(251, 191, 36, 0.4); }
+.pc-tier--activity { background: rgba(100, 116, 139, 0.16); color: #cbd5e1; border-color: rgba(100, 116, 139, 0.35); }
+
+/* ── Queue authorizer-split redesign (queue-authorization-redesign P-004/P-005) ── */
+/* Top-of-queue one-line explainer. */
+.pc-queue__intro {
+  margin: 2px 14px 10px;
+  font-size: 12px;
+  color: var(--fg-mute);
+  line-height: 1.5;
+}
+.pc-queue__window {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 14px 10px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 30%, transparent);
+  border-radius: 8px;
+  color: var(--fg-mute);
+  background: color-mix(in srgb, var(--accent, #38bdf8) 7%, transparent);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.pc-queue__window-button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 48%, transparent);
+  border-radius: 7px;
+  color: var(--accent, #38bdf8);
+  background: color-mix(in srgb, var(--accent, #38bdf8) 12%, transparent);
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.pc-queue__window-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+/* Per-authorizer-bucket sub-header hint. */
+.pc-queue__section-hint {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--fg-mute);
+}
+/* Header row wrapping the collapsible trigger + the "let the Queen handle these" link. */
+.pc-queue__section-head { display: flex; align-items: center; gap: 8px; }
+.pc-queue__section-head .pc-items__plan-head { flex: 1 1 auto; }
+.pc-queue__queen-link {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--accent, #38bdf8);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.pc-queue__queen-link:hover { text-decoration: underline; }
+/* The per-card "why it's here" line (stacked under the title). */
+.pc-items__text--stacked { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+.pc-queue__title { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-queue__why {
+  display: block;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--fg-mute);
+  white-space: normal;
+}
+/* Autonomy category badge (mirrors .pc-kind; --protected for owner-only categories). */
+.pc-category {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: rgba(100, 116, 139, 0.16);
+  color: #cbd5e1;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.pc-category--protected {
+  background: rgba(248, 113, 113, 0.16);
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+/* ── B1 segmented Pending|Queen's-log tab + summary strip (P-006) ── */
+.pc-queue__masthead {
+  display: grid;
+  gap: 8px;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 90%);
+  background: color-mix(in oklab, var(--bg), transparent 4%);
+}
+.pc-queue__masthead .pc-queue__summary,
+.pc-queue__masthead .pc-queue__tabs {
+  margin: 0;
+}
+.pc-queue__tabs {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 2px;
+  margin: 0 14px 8px;
+  padding: 2px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 84%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg-2), transparent 8%);
+}
+.pc-queue__tab {
+  min-height: 25px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg-mute);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 120ms, border-color 120ms, color 120ms;
+}
+.pc-queue__tab:hover {
+  border-color: color-mix(in oklab, var(--accent), transparent 64%);
+  color: var(--fg, #e7f7ff);
+}
+.pc-queue__tab.is-active {
+  background: color-mix(in oklab, var(--accent), transparent 18%);
+  color: #06121f;
+  border-color: color-mix(in oklab, var(--accent), transparent 12%);
+}
+.pc-queue__layer-toggle { margin-top: 2px; }
+.pc-queue__queenlog { padding: 0 4px; }
+.pc-queue__summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 14px 8px;
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+.pc-queue__summary-you { color: #fecaca; font-weight: 600; }
+.pc-queue__summary-queen { color: var(--accent, #38bdf8); font-weight: 600; }
+.pc-queue__summary-sep { opacity: 0.5; }
+
+/* ── Category filter facet (P-007) ── */
+.pc-queue__catfacet { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 14px 8px; align-items: center; }
+.pc-queue__catchip { cursor: pointer; opacity: 0.6; }
+.pc-queue__catchip.is-active { opacity: 1; outline: 1px solid var(--accent, #38bdf8); }
+.pc-queue__catclear {
+  background: none;
+  border: none;
+  color: var(--fg-mute);
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0 4px;
+}
+
+/* Operator-triage audit line ("Handled by operator" — what + why). */
+.pc-items__triage-audit {
+  margin: 4px 14px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(52, 211, 153, 0.08);
+  border: 1px solid rgba(52, 211, 153, 0.22);
+  font-size: 12px;
+  color: #cbd5e1;
+}
+.pc-items__triage-state { font-weight: 700; color: #a7f3d0; text-transform: capitalize; }
+.pc-items__triage-by { color: var(--fg-dim, #94a3b8); }
+
+/* "Message owner" inline compose + thread. */
+.pc-msgowner {
+  margin: 10px 14px 4px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklab, var(--accent-strong, #38bdf8), transparent 80%);
+  background: color-mix(in oklab, var(--bg, #0b1220), transparent 4%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pc-msgowner__head { display: flex; align-items: center; justify-content: space-between; }
+.pc-msgowner__label { font-size: 12px; font-weight: 700; color: var(--fg, #e7f7ff); }
+.pc-msgowner__scope { color: var(--fg-dim, #94a3b8); font-weight: 500; }
+.pc-msgowner__input {
+  width: 100%;
+  resize: vertical;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--fg, #e7f7ff);
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 13px;
+}
+.pc-msgowner__actions { display: flex; justify-content: flex-end; gap: 8px; }
+.pc-msgowner__posts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; }
+.pc-msgowner__post { display: flex; flex-direction: column; gap: 1px; padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, 0.03); }
+.pc-msgowner__author { font-size: 11px; font-weight: 700; color: #93c5fd; }
+.pc-msgowner__body { font-size: 13px; color: var(--fg, #e7f7ff); white-space: pre-wrap; }
+.pc-btn {
+  padding: 6px 13px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--fg, #e7f7ff);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pc-btn:disabled { opacity: 0.5; cursor: default; }
+.pc-btn--primary { background: color-mix(in oklab, var(--accent), transparent 60%); border-color: var(--accent); }
+.pc-btn--ghost { background: transparent; }
+
+/* Active view (Plans / Inbox header buttons) — brighter ring in the
+   button's own accent. Stays lit while that view is selected (even with a
+   plan open). */
+.pc-plans__plans-btn.is-active {
+  background: color-mix(in oklab, #22c55e, transparent 52%);
+  border-color: #22c55e;
+  box-shadow: 0 0 0 2px color-mix(in oklab, #22c55e, transparent 58%);
+}
+.pc-plans__queue-btn.is-active {
+  background: color-mix(in oklab, #f87171, transparent 52%);
+  border-color: #f87171;
+  box-shadow: 0 0 0 2px color-mix(in oklab, #f87171, transparent 58%);
+}
+.pc-plans__sessions-btn.is-active {
+  background: color-mix(in oklab, #f472b6, transparent 52%);
+  border-color: #f472b6;
+  box-shadow: 0 0 0 2px color-mix(in oklab, #f472b6, transparent 58%);
+}
+
+/* Create dock: Conversations-style compact view rail. The shared PlansClient
+   keeps its existing horizontal controls; these selectors are deliberately
+   scoped to create:filter so this remains a visual-only change to Create. */
+.pc-adv-create__dock {
+  position: absolute;
+  inset: 0 0 0 64px;
+  min-width: 0;
+}
+
+.pc-create-plans-sidebar__view-rail {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 64px;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-right: 1px solid var(--pc-plans-border);
+  background: color-mix(in srgb, var(--bg-deeper), transparent 24%);
+}
+
+.pc-create-plans-sidebar__browser {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.pc-create-plans-sidebar__new-plan.pc-plans__new-plan {
+  --pc-create-view-accent: var(--accent);
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 40px;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  gap: 0;
+  overflow: hidden;
+  padding: 5px;
+  border-radius: 8px;
+}
+
+.pc-create-plans-sidebar__new-plan-label {
+  display: none;
+}
+
+.pc-create-plans-sidebar__view-btn.pc-plans__plans-btn {
+  --pc-create-view-accent: #22c55e;
+}
+
+.pc-create-plans-sidebar__view-btn.pc-plans__queue-btn {
+  --pc-create-view-accent: #f87171;
+}
+
+.pc-create-plans-sidebar__view-btn.pc-plans__sessions-btn {
+  --pc-create-view-accent: #f472b6;
+}
+
+.pc-create-plans-sidebar__view-btn.pc-plans__plans-btn,
+.pc-create-plans-sidebar__view-btn.pc-plans__queue-btn,
+.pc-create-plans-sidebar__view-btn.pc-plans__sessions-btn {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 40px;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  gap: 0;
+  overflow: hidden;
+  padding: 5px;
+  border: 1px solid color-mix(in srgb, var(--pc-plans-border), transparent 28%);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-2, rgba(255, 255, 255, 0.045)), transparent 36%);
+  color: var(--pc-plans-fg);
+  box-shadow: none;
+  transition: none;
+}
+
+.pc-create-plans-sidebar__view-icon {
+  display: inline-flex;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid color-mix(in oklab, var(--pc-create-view-accent), transparent 72%);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--pc-create-view-accent), transparent 86%);
+  color: var(--pc-create-view-accent);
+}
+
+.pc-create-plans-sidebar__view-btn.pc-plans__plans-btn:hover,
+.pc-create-plans-sidebar__view-btn.pc-plans__queue-btn:hover,
+.pc-create-plans-sidebar__view-btn.pc-plans__sessions-btn:hover {
+  border-color: color-mix(in oklab, var(--pc-create-view-accent), transparent 58%);
+  background: color-mix(in oklab, var(--pc-create-view-accent), transparent 90%);
+  color: var(--pc-plans-fg-strong);
+}
+
+.pc-create-plans-sidebar__view-btn.pc-plans__plans-btn.is-active,
+.pc-create-plans-sidebar__view-btn.pc-plans__queue-btn.is-active,
+.pc-create-plans-sidebar__view-btn.pc-plans__sessions-btn.is-active {
+  border-color: color-mix(in oklab, var(--pc-create-view-accent), transparent 44%);
+  background: color-mix(in oklab, var(--pc-create-view-accent), transparent 84%);
+  color: var(--pc-plans-fg-strong);
+  box-shadow: none;
+}
+
+.pc-create-plans-sidebar__view-btn.is-active::before {
+  content: '';
+  position: absolute;
+  inset: 7px auto 7px 0;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+  background: var(--pc-create-view-accent);
+}
+
+.pc-create-plans-sidebar__view-btn.pc-plans__plans-btn.is-active::after,
+.pc-create-plans-sidebar__view-btn.pc-plans__queue-btn.is-active::after,
+.pc-create-plans-sidebar__view-btn.pc-plans__sessions-btn.is-active::after {
+  content: none;
+}
+
+.pc-create-plans-sidebar__view-btn.is-active .pc-create-plans-sidebar__view-icon {
+  border-color: color-mix(in oklab, var(--pc-create-view-accent), transparent 48%);
+  background: color-mix(in oklab, var(--pc-create-view-accent), transparent 72%);
+}
+
+.pc-create-plans-sidebar__view-btn:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--pc-create-view-accent), white 24%);
+  outline-offset: 2px;
+}
+
+/* ── Shared "selected ✓" badge ───────────────────────────────────────────
+   A single, high-visibility checkmark on the RIGHT of every active filter
+   button — inbox facets, quick date chips, quick toggles, and the Plans /
+   Inbox switch. A near-white chip with a bold dark ✓ pops on any accent fill.
+   (Bucket tabs are narrow column cards, so they use the corner variant
+   below.) */
+.pc-queue__filter.is-active::after,
+.pc-filter-chip.is-on::after,
+.pc-filter-toggle.is-on::after,
+.pc-plans__plans-btn.is-active::after,
+.pc-plans__queue-btn.is-active::after,
+.pc-plans__sessions-btn.is-active::after {
+  content: "✓";
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  background: #eefcff;
+  color: var(--bg-popover);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.45);
+}
+
+/* Bucket tabs (Draft/Ready/Running/…) are flex rows [label · count]. The active
+   ✓ sits in a reserved right gutter, ABSOLUTELY positioned (out of flow) so it
+   never overlaps the count AND never grows/reflows the card — it just fills the
+   empty space to the right of the count. `.pc-plans__view` is position:relative. */
+.pc-plans__view.is-active { padding-right: 26px; }
+.pc-plans__view.is-active::after {
+  content: "✓";
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  background: #eefcff;
+  color: var(--bg-popover);
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* Plan browser (Plans view) — a flat list of plans in the main pane. */
+.pc-plan-browse {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+}
+.pc-plan-browse__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+}
+.pc-plan-browse__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--fg, #e7f7ff);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms, border-color 120ms;
+}
+.pc-plan-browse__row:hover {
+  background: color-mix(in srgb, var(--accent-strong), transparent 88%);
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 70%);
+}
+.pc-plan-browse__title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-plan-browse__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* In-app chat modal (PlanChatModal) — hosts the standalone ChatPanel; give
+   it a sized box so the transcript scrolls and the composer stays put. */
+.pc-plan-chat-modal {
+  width: min(840px, 94vw);
+  max-width: 94vw;
+}
+.pc-plan-chat-modal__panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: min(70vh, 640px);
+}
+
+.pc-plans__overview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 88%);
+}
+
+.pc-plans__harness-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 92%);
+}
+
+.pc-plans__harness-filter-label {
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--fg, #e7f7ff), transparent 38%);
+}
+
+.pc-plans__harness-filter-select {
+  flex: 1;
+  padding: 4px 6px;
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  color: var(--fg, #e7f7ff);
+  border: 1px solid color-mix(in oklab, var(--accent, #38bdf8), transparent 62%);
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.pc-plans__overview-kicker,
+.pc-filters__kicker {
+  font-size: 10px;
+  font-weight: 760;
+  line-height: 1;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent-soft), transparent 38%);
+}
+
+.pc-plans__overview-kicker {
+  flex: 1;
+}
+
+.pc-plans__overview-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.pc-plans__overview-main strong {
+  font-size: 21px;
+  font-weight: 780;
+  line-height: 1;
+  color: var(--pc-plans-fg-strong);
+}
+
+.pc-plans__overview-main span {
+  color: color-mix(in srgb, var(--fg), transparent 22%);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.pc-plans__overview-sub {
+  align-self: center;
+  color: var(--pc-plans-fg-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.pc-plans__overview-grid {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pc-plans__metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 88%);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.pc-plans__metric strong {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--pc-plans-fg-strong);
+}
+
+.pc-plans__metric span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--accent-soft), transparent 42%);
+  font-size: 10px;
+}
+
+.pc-plans__metric--bad { border-color: rgba(248, 113, 113, 0.22); }
+.pc-plans__metric--warn { border-color: rgba(250, 204, 21, 0.22); }
+
+/* Left-rail groups: a labeled "Plans" group (plan view + filters) and a
+   labeled "Items" group (cross-plan item views), so it's clear which
+   buttons act on plans vs items. */
+.pc-plans__group {
+  display: flex;
+  flex-direction: column;
+}
+
+.pc-plans__group-label {
+  padding: 12px 10px 6px;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  color: var(--pc-plans-fg-strong, var(--fg));
+  cursor: help;
+}
+
+.pc-plans__views {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 6px;
+  padding: 8px 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 90%);
+}
+
+.pc-plans__view {
+  --pc-view-accent: var(--pc-plans-accent);
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 36px;
+  padding: 7px 8px;
+  /* Unselected = quiet: a faint accent border + a FLAT accent wash (no
+     gradient — owner ask 2026-06-23). Selected (.is-active) is a much
+     stronger flat fill + bright border + a ✓ badge, so the two states
+     stay very distinguishable. */
+  border: 1px solid color-mix(in oklab, var(--pc-view-accent), transparent 68%);
+  border-radius: 11px;
+  background: color-mix(in oklab, var(--pc-view-accent), transparent 93%);
+  color: var(--fg-dim, #b9d4e8);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 120ms,
+    border-color 120ms,
+    color 120ms;
+}
+
+.pc-plans__views .pc-plans__view {
+  min-height: 50px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-align: center;
+}
+
+.pc-plans__view--inbox { --pc-view-accent: #fbbf24; }
+.pc-plans__view--actionable { --pc-view-accent: #34d399; }
+.pc-plans__view--triage { --pc-view-accent: #a78bfa; }
+
+/* Item-status filter views (PlansClient) — distinct accents like the
+   inbox/actionable/triage set above. */
+.pc-plans__view--needs-human { --pc-view-accent: #fbbf24; }
+.pc-plans__view--todo { --pc-view-accent: var(--accent); }
+.pc-plans__view--blocked { --pc-view-accent: #f87171; }
+/* The per-kind "Other" facets — match the kind-badge palette. */
+.pc-plans__view--coord-escalation { --pc-view-accent: #fbbf24; }
+.pc-plans__view--coord-message { --pc-view-accent: var(--accent); }
+.pc-plans__view--smoke-fail { --pc-view-accent: #f87171; }
+.pc-plans__view--plan-review { --pc-view-accent: #a78bfa; }
+
+.pc-plans__view:hover {
+  color: var(--fg, #e7f7ff);
+  background: color-mix(in oklab, var(--pc-view-accent), transparent 82%);
+  border-color: color-mix(in oklab, var(--pc-view-accent), transparent 32%);
+}
+
+.pc-plans__view:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--pc-view-accent), transparent 24%);
+  outline-offset: 2px;
+}
+
+.pc-plans__view.is-active {
+  color: var(--fg, #e7f7ff);
+  background: color-mix(in oklab, var(--pc-view-accent), transparent 66%);
+  border-color: color-mix(in oklab, var(--pc-view-accent), transparent 18%);
+}
+
+.pc-plans__view-copy {
+  display: contents;
+}
+
+.pc-plans__view-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.pc-plans__view-count {
+  min-width: 22px;
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: color-mix(in srgb, var(--fg), transparent 6%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  font-weight: 780;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.pc-plans__view.is-active .pc-plans__view-count {
+  background: color-mix(in oklab, var(--pc-view-accent), transparent 82%);
+  border-color: color-mix(in oklab, var(--pc-view-accent), transparent 64%);
+  color: var(--fg);
+}
+
+/* ── Lifecycle bucket tabs (Draft / Ready / Running / Shipped / Rejected) ──
+   Sits directly under PlanFilters. Reuses the .pc-plans__view button look;
+   only the container differs (5 columns, tighter). */
+.pc-plan-buckets {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 5px;
+  padding: 8px 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 90%);
+}
+
+.pc-plan-bucket {
+  min-height: 46px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 6px 4px;
+  text-align: center;
+}
+
+.pc-plan-bucket--draft { --pc-view-accent: var(--accent); }
+.pc-plan-bucket--ready { --pc-view-accent: #34d399; }
+.pc-plan-bucket--running { --pc-view-accent: #fbbf24; }
+.pc-plan-bucket--shipped { --pc-view-accent: #22c55e; }
+.pc-plan-bucket--rejected { --pc-view-accent: #fb7185; }
+
+.pc-plans__search {
+  display: grid;
+  gap: 5px;
+  padding: 7px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 90%);
+}
+
+.pc-plans__search-input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 82%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-deeper), transparent 15%);
+  color: #eaf4fb;
+  font-size: 11.5px;
+}
+
+.pc-plans__search-input::placeholder { color: color-mix(in srgb, var(--accent-soft), transparent 60%); }
+
+.pc-plans__search-input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent), transparent 50%);
+  outline-offset: 1px;
+}
+
+.pc-plans__search-hint {
+  color: color-mix(in srgb, var(--accent-soft), transparent 58%);
+  font-size: 10px;
+}
+
+.pc-plans__list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+/* ── Filters (P-103) ──────────────────────────────────────────────── */
+.pc-filters {
+  display: grid;
+  gap: 6px;
+  padding: 7px 8px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 90%);
+}
+
+.pc-filters__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pc-filters__kicker-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pc-filters__active-count {
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 78%);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent), transparent 90%);
+  color: #a5f3fc;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.pc-filters__head p {
+  margin: 4px 0 0;
+  color: color-mix(in srgb, var(--accent-soft), transparent 48%);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.pc-filters__clear {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  border-radius: 999px;
+  background: rgba(248, 113, 113, 0.08);
+  color: #fecaca;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.pc-filters__clear:hover {
+  background: rgba(248, 113, 113, 0.16);
+  color: #fee2e2;
+}
+
+.pc-filters__primary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(78px, 0.55fr);
+  gap: 5px;
+}
+
+.pc-filters__primary.has-owner {
+  grid-template-columns: minmax(0, 1.25fr) minmax(76px, 0.62fr) minmax(76px, 0.62fr);
+}
+
+.pc-filters__select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 82%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-deeper), transparent 15%);
+  color: #eaf4fb;
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.pc-filters__select:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent), transparent 50%);
+  outline-offset: 1px;
+}
+
+.pc-filters__quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.pc-filter-chip,
+.pc-filter-toggle {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 83%);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01)),
+    color-mix(in srgb, var(--bg-deeper), transparent 66%);
+  color: color-mix(in srgb, var(--fg), transparent 24%);
+  font-size: 10.5px;
+  font-weight: 680;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 100ms,
+    border-color 100ms,
+    box-shadow 100ms,
+    color 100ms,
+    transform 100ms;
+}
+
+.pc-filter-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pc-filter-toggle::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-strong), transparent 72%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-strong), transparent 88%);
+}
+
+.pc-filter-chip:hover,
+.pc-filter-toggle:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 64%);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015)),
+    color-mix(in srgb, var(--bg-popover), transparent 28%);
+}
+
+.pc-filter-chip:focus-visible,
+.pc-filter-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent), transparent 50%);
+  outline-offset: 2px;
+}
+
+.pc-filter-chip:active,
+.pc-filter-toggle:active {
+  transform: translateY(1px);
+}
+
+.pc-filter-chip.is-on,
+.pc-filter-toggle.is-on {
+  color: var(--fg);
+  background:
+    radial-gradient(circle at 18% 0%, color-mix(in srgb, var(--accent), transparent 72%), transparent 60%),
+    color-mix(in srgb, var(--accent), transparent 86%);
+  border-color: color-mix(in srgb, var(--accent), transparent 50%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 0 1px color-mix(in srgb, var(--accent), transparent 92%);
+}
+
+.pc-filter-toggle.is-on::before {
+  background: var(--accent-strong);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--accent), transparent 84%),
+    0 0 14px color-mix(in srgb, var(--accent), transparent 62%);
+}
+
+.pc-filters__active {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pc-filters__token {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 68%);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent), transparent 88%);
+  color: var(--fg);
+  font-size: 10px;
+  cursor: pointer;
+  transition: background-color 100ms, border-color 100ms, color 100ms;
+}
+
+.pc-filters__token:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 56%);
+}
+
+.pc-filters__token strong {
+  color: color-mix(in srgb, var(--fg), transparent 28%);
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* ── Plan rail rows ─────────────────────────────────────────────── */
+.pc-plan-rail__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+/* "Show all N plans" — revealed when the rail caps its render (perf: D-001). */
+.pc-plan-rail__show-all {
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 10px;
+  border: 1px dashed color-mix(in srgb, var(--accent-strong), transparent 78%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg), transparent 60%);
+  color: color-mix(in srgb, var(--fg), transparent 26%);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 100ms, border-color 100ms, color 100ms;
+}
+.pc-plan-rail__show-all:hover {
+  color: var(--fg, #e7f7ff);
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 50%);
+  background: color-mix(in srgb, var(--accent), transparent 88%);
+}
+.pc-plan-rail__show-all span {
+  color: color-mix(in srgb, var(--fg-mute, #7f9bb4), transparent 0%);
+  font-weight: 500;
+}
+
+.pc-plan-rail__item {
+  position: relative;
+}
+
+.pc-plan-row {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  padding: 9px 10px 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 92%);
+  border-left-width: 4px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg), transparent 48%);
+  color: color-mix(in srgb, var(--fg), transparent 12%);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 100ms, border-color 100ms, transform 100ms;
+}
+
+.pc-plan-row:hover {
+  background: color-mix(in srgb, var(--bg-popover), transparent 14%);
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 76%);
+}
+
+.pc-plan-row.is-active {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-raised), transparent 4%), color-mix(in srgb, var(--bg-1), transparent 2%));
+  /* Loud "selected/filtering" treatment: accent border + a 2px accent ring.
+     (The status-colored left border is preserved by the more-specific
+     .pc-plan-rail__item--<status> rules below.) */
+  border-color: color-mix(in oklab, var(--accent, #38bdf8), transparent 25%);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent, #38bdf8), transparent 42%);
+}
+.pc-plan-row.is-active .pc-plan-row__title {
+  color: var(--fg);
+}
+/* Trailing checkmark (right of the title) marks the plan as an active filter,
+   matching the filter buttons while staying on the active theme accent. */
+.pc-plan-row.is-active .pc-plan-row__title::after {
+  content: " ✓";
+  color: var(--accent-soft);
+  font-weight: 900;
+}
+
+.pc-plan-rail__item--active .pc-plan-row { border-left-color: rgba(34, 197, 94, 0.72); }
+.pc-plan-rail__item--draft .pc-plan-row { border-left-color: rgba(148, 163, 184, 0.62); }
+.pc-plan-rail__item--blocked .pc-plan-row { border-left-color: rgba(248, 113, 113, 0.82); }
+.pc-plan-rail__item--shipped .pc-plan-row { border-left-color: color-mix(in srgb, var(--accent), transparent 28%); }
+.pc-plan-rail__item--superseded .pc-plan-row { border-left-color: rgba(168, 162, 158, 0.62); }
+.pc-plan-rail__item--unknown .pc-plan-row { border-left-color: rgba(255, 255, 255, 0.20); }
+.pc-plan-rail__item--started { background: color-mix(in oklab, rgba(34,197,94,0.06), transparent); }
+
+/* Drag-to-reorder handle (P-045). The handle — a plain draggable <span>, NOT
+   the row <button> — is the drag source: an interactive button as the drag
+   source swallows the gesture (the original "started plans aren't draggable"
+   bug). The reorder uses native HTML5 drag-and-drop, which DOES work in the
+   desktop's WebKitGTK webview (same as dockview + PlanDetail) — the key is that
+   onDragStart calls dataTransfer.setData (see PlanRail.tsx); without it WebKit
+   silently aborts the drag. `touch-action: none` keeps a touch-drag from
+   scrolling the rail. The handle overlays the row's left strip;
+   .has-drag-handle reserves padding so the title doesn't sit under it. */
+.pc-plan-row__drag-handle {
+  position: absolute;
+  left: 4px; /* clear the 4px status left-border */
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  cursor: grab;
+  color: rgba(148, 163, 184, 0.5);
+  font-size: 12px;
+  line-height: 1;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.pc-plan-row__drag-handle:hover { color: color-mix(in srgb, var(--fg), transparent 5%); }
+.pc-plan-row__drag-handle:active { cursor: grabbing; }
+.pc-plan-row.has-drag-handle { padding-left: 24px; }
+/* While a drag is live, suppress text selection across the whole
+   rail so dragging over row labels doesn't select them. */
+.pc-plan-rail__rows.is-reordering { user-select: none; -webkit-user-select: none; }
+.pc-plan-rail__rows.is-reordering .pc-plan-row__drag-handle { cursor: grabbing; }
+.pc-plan-rail__item.is-dragging { opacity: 0.45; }
+.pc-plan-rail__item.is-drag-over .pc-plan-row { box-shadow: inset 0 2px 0 var(--accent, #38bdf8); }
+
+.pc-plan-row__start-btn {
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(34, 197, 94, 0.85);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+.pc-plan-row__start-btn:hover { background: rgba(34, 197, 94, 0.12); color: rgb(34, 197, 94); }
+.pc-plan-row__start-btn:disabled { opacity: 0.5; cursor: default; }
+.pc-plan-row__start-btn.is-started {
+  border-color: rgba(148, 163, 184, 0.35);
+  color: rgba(148, 163, 184, 0.85);
+}
+.pc-plan-row__start-btn.is-started:hover { background: rgba(148, 163, 184, 0.1); color: rgb(148, 163, 184); }
+
+.pc-plan-row__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pc-plan-row__title {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.28;
+  color: var(--fg);
+  /* Full title, no cut-off — wrap instead of ellipsis (the pills moved
+     to the meta line, so the title owns the first line). */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.pc-plan-row__meta-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pc-plan-row__updated {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--accent-soft), transparent 15%);
+}
+
+/* ── Progress bar (P-023) ────────────────────────────────────────── */
+.pc-plan-row__progress {
+  display: flex;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  margin: 3px 0 2px;
+}
+.pc-progress__done      { background: rgba(34, 197, 94, 0.75); }
+.pc-progress__active    { background: color-mix(in srgb, var(--accent), transparent 35%); }
+.pc-progress__remaining { background: rgba(255, 255, 255, 0.1); }
+
+.pc-plan-row__counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  font-size: 10px;
+}
+
+.pc-plan-row__next {
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+  min-width: 0;
+  color: color-mix(in srgb, var(--accent-soft), transparent 22%);
+  font-size: 11px;
+  line-height: 1.32;
+}
+
+.pc-plan-row__next-label {
+  flex-shrink: 0;
+  color: color-mix(in srgb, var(--accent), transparent 26%);
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.pc-plan-row__next-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Plan-status pills ───────────────────────────────────────────── */
+.pc-pill {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.pc-pill--draft       { background: rgba(148, 163, 184, 0.22); color: #e2e8f0; }
+.pc-pill--ready       { background: rgba(45, 212, 191, 0.2);  color: #99f6e4; }
+.pc-pill--active      { background: rgba(34, 197, 94, 0.22);  color: #bbf7d0; }
+.pc-pill--blocked     { background: rgba(248, 113, 113, 0.22); color: #fecaca; }
+.pc-pill--shipped     { background: color-mix(in srgb, var(--accent), transparent 82%); color: var(--accent-soft); }
+.pc-pill--superseded  { background: rgba(168, 162, 158, 0.2); color: #d6d3d1; }
+.pc-pill--unknown     { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.55); }
+/* Draft-plan source tags — parity with ProposalsPanel's source pill. */
+.pc-pill--source-you    { background: rgba(167, 139, 250, 0.22); color: #ddd6fe; }
+.pc-pill--source-scoper { background: color-mix(in srgb, var(--accent), transparent 82%);  color: var(--accent-soft); }
+.pc-pill--harness       { background: color-mix(in srgb, var(--accent-strong), transparent 88%); color: var(--accent-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pc-pill--trigger       { background: color-mix(in srgb, #f59e0b, transparent 84%); color: #fde68a; }
+/* Lifecycle-bucket pills for the item-list group headers — same hues as the
+   Draft/Ready/Running/… bucket tabs so "ready"/"running" read consistently. */
+.pc-pill--bucket-draft    { background: color-mix(in srgb, var(--accent), transparent 82%);  color: var(--accent-soft); }
+.pc-pill--bucket-ready    { background: rgba(52, 211, 153, 0.20);  color: #a7f3d0; }
+.pc-pill--bucket-running  { background: rgba(251, 191, 36, 0.20);  color: #fde68a; }
+.pc-pill--bucket-shipped  { background: rgba(34, 197, 94, 0.20);   color: #bbf7d0; }
+.pc-pill--bucket-rejected { background: rgba(251, 113, 133, 0.20); color: #fecdd3; }
+
+/* ── Item-count chips ────────────────────────────────────────────── */
+.pc-count {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.04);
+  color: color-mix(in srgb, var(--fg), transparent 28%);
+}
+.pc-count--wip          { background: color-mix(in srgb, var(--accent), transparent 84%);  color: var(--accent-soft); }
+.pc-count--needs-human  { background: rgba(250, 204, 21, 0.18);  color: #fef3c7; }
+.pc-count--blocked      { background: rgba(248, 113, 113, 0.18); color: #fecaca; }
+.pc-count--needs-decision { background: color-mix(in srgb, var(--accent), transparent 82%); color: var(--accent-soft); }
+.pc-count--todo         { background: rgba(148, 163, 184, 0.18); color: #e2e8f0; }
+.pc-count--done         { background: rgba(34, 197, 94, 0.14);   color: #bbf7d0; }
+.pc-count--dropped      { background: rgba(168, 162, 158, 0.15); color: #d6d3d1; }
+.pc-count--unknown      { background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.55); }
+
+/* Importance badge — a 4th axis, orthogonal to the status pill. Only
+   rendered for non-normal items (normal is the default, kept quiet to
+   avoid badge fatigue). urgent = interrupt now / pick up first. */
+.pc-imp {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  line-height: 16px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.pc-imp--urgent { background: rgba(244, 63, 94, 0.24);  color: #fecdd3; font-weight: 600; }
+.pc-imp--high   { background: rgba(250, 204, 21, 0.18); color: #fef3c7; }
+.pc-imp--low    { background: rgba(148, 163, 184, 0.14); color: #cbd5e1; }
+
+/* Kind badge — the AttentionItem kind for "Other" rows (escalation,
+   message, smoke, review). Distinguishes non-plan-item surfaces. */
+.pc-kind {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  line-height: 16px;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.05);
+  color: color-mix(in srgb, var(--fg), transparent 30%);
+}
+.pc-kind--coord-escalation { background: rgba(250, 204, 21, 0.16); color: #fde68a; }
+.pc-kind--coord-message    { background: color-mix(in oklab, var(--accent, #38bdf8), transparent 82%); color: var(--accent-soft); }
+.pc-kind--smoke-fail       { background: rgba(248, 113, 113, 0.18); color: #fecaca; }
+.pc-kind--plan-review      { background: rgba(167, 139, 250, 0.18); color: #ddd6fe; }
+
+/* Non-interactive group head for the Other list (a div, not a Collapsible
+   trigger) — drop the button affordances. */
+.pc-items__plan-head--static { cursor: default; }
+.pc-items__plan-head--static:hover { background: transparent; }
+
+.pc-plans__placeholder--error {
+  display: grid;
+  gap: 6px;
+}
+.pc-plans__placeholder--error code {
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: rgba(248, 113, 113, 0.12);
+  color: #fecaca;
+  font-size: 10.5px;
+  word-break: break-word;
+}
+.pc-plans__retry {
+  align-self: start;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 76%);
+  border-radius: 999px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fg), transparent 15%);
+  font-size: 11px;
+  cursor: pointer;
+}
+.pc-plans__retry:hover { color: var(--fg); border-color: color-mix(in srgb, var(--accent-strong), transparent 60%); }
+
+/* ── Main ───────────────────────────────────────────────────────── */
+.pc-plans__main {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-1), transparent 62%), color-mix(in srgb, var(--bg-deeper), transparent 80%));
+}
+
+.pc-plans__detail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.pc-plans__detail-head {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 20px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg), transparent 2%), color-mix(in srgb, var(--bg), transparent 8%));
+  backdrop-filter: blur(12px);
+}
+
+.pc-plans__detail-title {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.pc-plans__detail-kicker {
+  color: var(--fg-dim);
+  font-size: 10px;
+  font-weight: 760;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.pc-plans__detail-head h2 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 20px;
+  font-weight: 760;
+  line-height: 1.1;
+  color: var(--fg);
+}
+
+/* PlanEditor host — fills the detail pane so the editor sizes itself. */
+.pc-plan-editor {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Vditor's dark theme leaves plan frontmatter and source-edit text with
+   low-contrast blue/gray glyphs. Force the plan editor's editing panes to use
+   plain high-contrast text; read-mode markdown previews stay untouched. */
+.pc-plan-editor .pc-md-editor-host.vditor--dark {
+  --textarea-text-color: #f8fbff !important;
+  --second-color: rgba(226, 242, 255, 0.78) !important;
+  --ir-title-color: #f8fbff !important;
+  --ir-heading-color: #f8fbff !important;
+  --ir-bi-color: #f8fbff !important;
+  --ir-link-color: #f8fbff !important;
+  --ir-bracket-color: #f8fbff !important;
+  --ir-paren-color: #f8fbff !important;
+  color: #f8fbff !important;
+  caret-color: #f8fbff;
+}
+
+.pc-plan-editor .pc-md-editor-host.vditor--dark :is(
+  .vditor-sv,
+  .vditor-sv *,
+  .vditor-ir pre.vditor-reset,
+  .vditor-ir pre.vditor-reset *,
+  .vditor-preview .vditor-yml-front-matter,
+  .vditor-preview .vditor-yml-front-matter *,
+  .vditor-ir__marker--pre,
+  .vditor-ir__marker--pre *,
+  .vditor-ir__node[data-type="yaml-front-matter"],
+  .vditor-ir__node[data-type="yaml-front-matter"] *
+) {
+  color: #f8fbff !important;
+  -webkit-text-fill-color: #f8fbff !important;
+  text-shadow: none !important;
+}
+
+.pc-plan-editor .vditor-ir__node[data-type="yaml-front-matter"] {
+  display: block;
+  margin: 8px 0 18px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 76%);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-deeper), transparent 6%) !important;
+}
+
+.pc-plan-editor .pc-md-editor-host.vditor--dark :is(
+  .vditor-sv,
+  .vditor-sv *,
+  .vditor-ir pre.vditor-reset,
+  .vditor-ir pre.vditor-reset *,
+  .vditor-preview .vditor-yml-front-matter,
+  .vditor-preview .vditor-yml-front-matter *,
+  .vditor-ir__node[data-type="yaml-front-matter"],
+  .vditor-ir__node[data-type="yaml-front-matter"] *
+)::selection {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  background: rgba(14, 116, 144, 0.62) !important;
+}
+
+.pc-plans__back {
+  flex-shrink: 0;
+  padding: 6px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 82%);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: color-mix(in srgb, var(--fg), transparent 16%);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.pc-plans__back:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 68%);
+  background: color-mix(in srgb, var(--bg-popover), transparent 18%);
+}
+
+.pc-plans__detail-slug {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+/* ── Top-level tab strip (plan-agent-launch P-020) ────────────────── */
+.pc-plans__tabs {
+  display: flex;
+  gap: 6px;
+  margin: 6px 18px 8px;
+  padding: 6px;
+  border: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-1), transparent 36%);
+}
+
+.pc-plans__tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-dim, #b9d4e8);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 680;
+  padding: 6px 11px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color 80ms ease, background-color 80ms ease, border-color 80ms ease;
+}
+
+.pc-plans__tab:hover {
+  color: var(--fg, #e7f7ff);
+  border-color: var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+}
+
+.pc-plans__tab:focus-visible {
+  outline: 1px solid var(--accent, #38bdf8);
+  outline-offset: -1px;
+}
+
+.pc-plans__tab.is-active {
+  color: var(--fg, #e7f7ff);
+  border-color: color-mix(in oklab, var(--accent), transparent 52%);
+  background: color-mix(in oklab, var(--accent), transparent 84%);
+}
+
+.pc-plans__tab-hint {
+  color: rgba(252, 165, 165, 0.85);
+  font-size: 10.5px;
+}
+
+/* ── Now hero strip (P-107) ──────────────────────────────────────── */
+.pc-now-hero {
+  display: grid;
+  gap: 8px;
+  margin: 12px 18px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 78%);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-raised), transparent 22%), color-mix(in srgb, var(--bg-1), transparent 34%));
+}
+
+.pc-now-hero__kicker {
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.pc-now-hero__row {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.pc-now-hero__label {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.pc-now-hero__row p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--fg);
+}
+
+.pc-plans__legacy-banner {
+  margin: 0 18px 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(250, 204, 21, 0.32);
+  border-radius: 8px;
+  background: rgba(250, 204, 21, 0.08);
+  color: #fef3c7;
+  font-size: 11.5px;
+}
+
+/* ── Cross-plan item aggregations (P-108) ─────────────────────────── */
+.pc-items__head {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.85fr) minmax(220px, 0.45fr);
+  gap: 10px;
+  align-items: stretch;
+}
+
+.pc-items__head-copy,
+.pc-items__summary-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at top left, color-mix(in oklab, var(--pc-items-accent), transparent 88%), transparent 28%),
+    linear-gradient(180deg, color-mix(in oklab, var(--bg-2), white 3%), color-mix(in oklab, var(--bg), transparent 5%));
+}
+
+.pc-items__head-copy {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 12px 14px;
+}
+
+.pc-items__kicker {
+  color: var(--pc-items-accent);
+  font-size: 10px;
+  font-weight: 760;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.pc-items__head h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 740;
+  line-height: 1.05;
+  color: var(--fg);
+}
+
+.pc-items__head p {
+  margin: 0;
+  max-width: 52ch;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--fg-mute);
+}
+
+.pc-items__summary-card {
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  padding: 12px 14px;
+}
+
+.pc-items__summary-card strong {
+  color: var(--fg);
+  font-size: 16px;
+  line-height: 1.1;
+}
+
+.pc-items__summary-card span {
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+
+.pc-items__summary-note {
+  color: color-mix(in oklab, var(--pc-items-accent), white 34%) !important;
+}
+
+.pc-items__empty {
+  margin: 0;
+  padding: 28px 20px;
+  border: 1px dashed var(--border);
+  border-radius: 16px;
+  background: color-mix(in oklab, var(--bg-2), white 2%);
+  color: var(--fg-mute);
+  font-size: 13px;
+}
+
+.pc-items__groups,
+.pc-items__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pc-items__groups {
+  display: grid;
+  gap: 10px;
+}
+
+.pc-items__listpane {
+  /* The list column drives every .pc-items__* accent (section labels, plan
+     headers, selected-row highlight). Lives here — on the rendered list
+     container — now that the old .pc-items wrapper that used to define it is
+     gone (Plans + Inbox both render through the shared TwoPaneShell). */
+  --pc-items-accent: var(--accent);
+  min-width: 0;
+  padding: 12px 14px 28px;
+}
+
+/* Inbox/Plans left-column wrapper inside the shared shell. */
+.pc-queue__list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Inbox unified left column: the Other + item lists render as stacked
+   sections (each just its groups) feeding the one shared sticky preview. */
+.pc-items__section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.pc-items__section + .pc-items__section {
+  margin-top: 18px;
+}
+.pc-items__section-label {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 760;
+  line-height: 1;
+  text-transform: uppercase;
+  color: var(--pc-items-accent);
+}
+
+/* Detail content for Inbox/Plans, now FLUSH like the Sessions dossier: the
+   shared shell's .pc-twopane__detail column owns the surface (left border +
+   gradient + full-height internal scroll), so this is just a transparent flex
+   column. Its toolbar / actions / body keep their own styling untouched. */
+.pc-items__detail {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.pc-items__detail-empty {
+  padding: 18px;
+  color: var(--fg-mute);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.pc-items__detail-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--bg-2), white 2%);
+}
+
+.pc-items__view-full {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 11px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 48%);
+  background: color-mix(in oklab, var(--accent), var(--bg) 72%);
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.pc-items__view-full:hover {
+  border-color: color-mix(in oklab, var(--accent), transparent 28%);
+  background: color-mix(in oklab, var(--accent), var(--bg) 60%);
+}
+.pc-items__view-full:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--accent), transparent 28%);
+  outline-offset: 2px;
+}
+
+/* #4: inbox item actions live in the detail toolbar (next to "View full plan"),
+   not inside the card — right-aligned compact buttons mirroring the card option
+   styles (primary=resolve, danger=drop, nav=quiet for Answer/Chat). */
+.pc-items__detail-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.pc-items__action {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 11px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 55%);
+  background: color-mix(in oklab, var(--accent), transparent 86%);
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+.pc-items__action:hover { background: color-mix(in oklab, var(--accent), transparent 76%); }
+.pc-items__action:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--accent), transparent 28%);
+  outline-offset: 2px;
+}
+.pc-items__action:disabled { opacity: 0.5; cursor: default; }
+.pc-items__action--primary {
+  border-color: color-mix(in oklab, #22c55e, transparent 45%);
+  background: color-mix(in oklab, #22c55e, transparent 80%);
+}
+.pc-items__action--primary:hover { background: color-mix(in oklab, #22c55e, transparent 68%); }
+.pc-items__action--danger {
+  border-color: color-mix(in oklab, #f87171, transparent 45%);
+  background: color-mix(in oklab, #f87171, transparent 82%);
+}
+.pc-items__action--danger:hover { background: color-mix(in oklab, #f87171, transparent 70%); }
+.pc-items__action--nav {
+  border-color: color-mix(in oklab, var(--accent-strong), transparent 78%);
+  background: transparent;
+  color: var(--fg-dim, #b9d4e8);
+  font-weight: 500;
+}
+.pc-items__action--nav:hover {
+  color: var(--fg, #e7f7ff);
+  background: color-mix(in oklab, var(--accent-strong), transparent 90%);
+}
+.pc-items__action-done {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--good, #22c55e);
+  white-space: nowrap;
+}
+
+.pc-items__detail-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  scrollbar-width: thin;
+}
+
+/* Inline agent chat (PlanChat) — opened from a card's 💬 Chat option, lives
+   inside the detail pane beneath the card (inbox-cards-unification D-006).
+   Bounded height so the ChatPanel (height:100%) renders its own scrolling
+   transcript instead of collapsing. */
+.pc-plan-chat-inline {
+  margin-top: 12px;
+  height: 360px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0a0a0a;
+}
+.pc-plan-chat-inline > .chat-panel {
+  flex: 1;
+  min-height: 0;
+}
+.pc-plan-chat-inline__note {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+}
+
+/* Group is a plain wrapper (head card + rows below), matching the
+   Sessions tab's group / group-content structure. */
+.pc-items__group {
+  display: grid;
+  gap: 7px;
+}
+
+.pc-items__group-content {
+  display: grid;
+  gap: 7px;
+  padding-top: 7px;
+}
+
+.pc-items__group-chevron {
+  flex: 0 0 auto;
+  color: var(--fg-mute);
+  transition: transform 140ms ease, color 120ms ease;
+}
+.pc-items__plan-head[data-state="open"] .pc-items__group-chevron {
+  transform: rotate(90deg);
+  color: var(--pc-items-accent);
+}
+
+.pc-items__plan-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--bg-2), white 1%);
+  color: var(--fg-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.pc-items__plan-head:hover,
+.pc-items__plan-head:focus-visible {
+  color: var(--fg);
+  background: var(--bg-3);
+  border-color: var(--border-strong);
+}
+
+.pc-items__plan-head:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--pc-items-accent), transparent 28%);
+  outline-offset: 2px;
+}
+
+.pc-items__plan-copy {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.pc-items__plan-name {
+  /* Show the full plan title — wrap instead of clipping with an ellipsis
+     (task: titles must not be cut off). Sans font, not the head's mono
+     (the head was monospace back when it showed a raw slug). */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+  font-family: var(--font-sans, system-ui, -apple-system, 'Segoe UI', sans-serif);
+  font-size: 12.5px;
+  font-weight: 760;
+  color: var(--fg);
+}
+
+.pc-items__plan-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pc-items__plan-count {
+  flex-shrink: 0;
+  padding: 2px 9px;
+  border: 1px solid color-mix(in oklab, var(--pc-items-accent), transparent 56%);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--pc-items-accent), transparent 86%);
+  color: var(--pc-items-accent);
+  font-size: 10.5px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.pc-items__rows {
+  display: grid;
+  gap: 7px;
+}
+
+.pc-items__row-wrap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid color-mix(in oklab, var(--border), transparent 25%);
+  border-radius: 13px;
+  background: color-mix(in oklab, var(--bg), white 2%);
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.pc-items__row-wrap:hover,
+.pc-items__row-wrap:focus-within {
+  border-color: var(--border-strong);
+  background: color-mix(in oklab, var(--bg-3), var(--bg) 72%);
+}
+
+/* Selected row — its plan is open in the read-only detail pane. */
+.pc-items__row-wrap.is-selected {
+  border-color: color-mix(in oklab, var(--pc-items-accent), transparent 40%);
+  background: color-mix(in oklab, var(--pc-items-accent), transparent 90%);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--pc-items-accent), transparent 68%) inset;
+}
+
+.pc-items__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  text-align: left;
+  cursor: pointer;
+}
+
+.pc-items__row:focus-visible {
+  outline: none;
+}
+
+/* Free-form text sits first (flex:1); the id + status + importance pills
+   group together and float to the right of the row. */
+.pc-items__rowmeta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.pc-items__id {
+  flex-shrink: 0;
+  min-width: 58px;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--bg-2), white 2%);
+  color: var(--fg-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.pc-items__text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--fg);
+  /* Clamp to a 2-line title preview — item text is one logical line in
+     the markdown but can be a long paragraph (e.g. a multi-step task);
+     without this it renders as a full blob instead of a card title.
+     Full text is available via the row's title= tooltip. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+/* ── Cross-plan search results (P-104) ────────────────────────────── */
+.pc-search {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  padding: 18px 24px 32px;
+}
+
+.pc-search__head {
+  display: grid;
+  gap: 4px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  margin-bottom: 10px;
+}
+
+.pc-search__head h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 760;
+  color: var(--fg);
+}
+
+.pc-search__head p {
+  margin: 0;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 35%);
+}
+
+.pc-search__head code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent), transparent 88%);
+  color: var(--accent-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.pc-search__scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
+.pc-search__empty {
+  margin: 0;
+  padding: 24px 0;
+  color: color-mix(in srgb, var(--accent-soft), transparent 45%);
+  font-size: 13px;
+}
+
+.pc-search__hits {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.pc-search__hit {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg), transparent 35%);
+  color: color-mix(in srgb, var(--fg), transparent 14%);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 100ms, border-color 100ms;
+}
+
+.pc-search__hit:hover {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bg-raised), transparent 4%), color-mix(in srgb, var(--bg-1), transparent 2%));
+  border-color: color-mix(in srgb, var(--accent), transparent 62%);
+}
+
+.pc-search__hit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pc-search__hit-slug {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--accent-soft);
+}
+
+.pc-search__hit-score {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 50%);
+}
+
+.pc-search__matches {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.pc-search__match {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.pc-search__match-scope {
+  flex-shrink: 0;
+  min-width: 60px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.05);
+  color: color-mix(in srgb, var(--accent-soft), transparent 30%);
+  text-align: center;
+}
+.pc-search__match-scope--title     { background: color-mix(in srgb, var(--accent), transparent 82%); color: var(--accent-soft); }
+.pc-search__match-scope--now       { background: rgba(34, 197, 94, 0.18);  color: #bbf7d0; }
+.pc-search__match-scope--items     { background: color-mix(in srgb, var(--accent), transparent 84%); color: var(--accent-soft); }
+.pc-search__match-scope--decisions { background: rgba(250, 204, 21, 0.18); color: #fef3c7; }
+.pc-search__match-scope--prose     { background: rgba(148, 163, 184, 0.18); color: #e2e8f0; }
+
+.pc-search__match-snippet {
+  color: rgba(230, 244, 251, 0.85);
+  word-break: break-word;
+}
+
+.pc-search__more {
+  padding-left: 68px;
+  font-size: 10.5px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 55%);
+}
+
+/* ── Placeholders / empty states (Phase 0 scaffold) ─────────────── */
+.pc-plans__placeholder {
+  margin: 0;
+  padding: 16px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 45%);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.pc-plans__placeholder code,
+.pc-plans__empty code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent), transparent 90%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+  color: var(--accent-soft);
+}
+
+.pc-plans__empty {
+  margin: auto;
+  max-width: 520px;
+  padding: 44px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-raised), transparent 42%), color-mix(in srgb, var(--bg), transparent 38%));
+  text-align: left;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.pc-plans__empty-kicker {
+  display: inline-block;
+  margin-bottom: 10px;
+  color: color-mix(in srgb, var(--accent), transparent 26%);
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.pc-plans__empty h2 {
+  margin: 0 0 10px;
+  font-size: 24px;
+  font-weight: 780;
+  color: var(--fg);
+}
+
+.pc-plans__empty p {
+  margin: 0;
+  color: color-mix(in srgb, var(--fg), transparent 26%);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.pc-plans__empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.pc-plans__empty-actions span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  color: color-mix(in srgb, var(--accent-soft), transparent 28%);
+  font-size: 11px;
+}
+
+.pc-plans__empty-actions kbd {
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 82%);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bg-deeper), transparent 18%);
+  color: #eaf4fb;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  text-align: center;
+}
+
+/* ── Edit-mode toggle + save bar (P-301) ──────────────────────────── */
+.pc-plans__detail-spacer { flex: 1; }
+
+.pc-plans__editbtn {
+  min-height: 30px;
+  padding: 6px 12px;
+  border: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  border-radius: 8px;
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  color: var(--fg-dim, #b9d4e8);
+  font-size: 11.5px;
+  font-weight: 720;
+  cursor: pointer;
+  transition: background-color 100ms, border-color 100ms, color 100ms;
+}
+.pc-plans__editbtn:hover:not(:disabled) {
+  background: var(--bg-3, rgba(255, 255, 255, 0.075));
+  border-color: var(--border-strong, color-mix(in srgb, var(--accent-strong), transparent 68%));
+  color: var(--fg, #e7f7ff);
+}
+.pc-plans__editbtn:disabled { opacity: 0.45; cursor: not-allowed; }
+.pc-plans__editbtn.is-on {
+  background: color-mix(in oklab, var(--accent), transparent 82%);
+  border-color: color-mix(in oklab, var(--accent), transparent 46%);
+  color: var(--fg, #e7f7ff);
+}
+
+.pc-editbar {
+  display: grid;
+  gap: 6px;
+  margin: 0 18px 8px;
+  padding: 8px;
+  border: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-1), transparent 34%);
+}
+.pc-editbar__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pc-editbar__hint {
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 28%);
+}
+.pc-editbar__spacer { flex: 1; }
+.pc-editbar__btn {
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  border-radius: 8px;
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  color: var(--fg-dim, #b9d4e8);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 100ms, border-color 100ms, color 100ms;
+}
+.pc-editbar__btn:hover:not(:disabled) {
+  background: var(--bg-3, rgba(255, 255, 255, 0.075));
+  border-color: var(--border-strong, color-mix(in srgb, var(--accent-strong), transparent 68%));
+  color: var(--fg, #e7f7ff);
+}
+.pc-editbar__btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.pc-editbar__btn--primary {
+  background: color-mix(in oklab, var(--accent), transparent 82%);
+  border-color: color-mix(in oklab, var(--accent), transparent 46%);
+  color: var(--fg, #e7f7ff);
+}
+.pc-editbar__error {
+  margin: 0;
+  padding: 6px 9px;
+  border: 1px solid rgba(248, 113, 113, 0.34);
+  border-radius: 6px;
+  background: rgba(248, 113, 113, 0.10);
+  color: #fecaca;
+  font-size: 11px;
+  word-break: break-word;
+}
+
+/* P-025 — "what changed & why" rationale input inside the EditBar. */
+.pc-editbar__row--rationale {
+  margin-top: 6px;
+}
+
+.pc-editbar__rationale {
+  flex: 1;
+  background: color-mix(in srgb, var(--bg), transparent 30%);
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 82%);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 11.5px;
+}
+
+.pc-editbar__rationale:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-soft), transparent 45%);
+  outline-offset: 1px;
+}
+
+.pc-editbar__rationale::placeholder {
+  color: color-mix(in srgb, var(--accent-soft), transparent 55%);
+  font-style: italic;
+}
+
+.pc-plan-editor-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin: 0 18px 8px;
+}
+
+.pc-plan-editor-tools__btn {
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  border-radius: 8px;
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  color: var(--fg-dim, #b9d4e8);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 100ms, border-color 100ms, color 100ms;
+}
+
+.pc-plan-editor-tools__btn:hover {
+  background: var(--bg-3, rgba(255, 255, 255, 0.075));
+  border-color: var(--border-strong, color-mix(in srgb, var(--accent-strong), transparent 68%));
+  color: var(--fg, #e7f7ff);
+}
+
+.pc-plan-editor-tools__btn[aria-pressed="true"] {
+  background: color-mix(in oklab, var(--accent), transparent 84%);
+  border-color: color-mix(in oklab, var(--accent), transparent 52%);
+  color: var(--fg, #e7f7ff);
+}
+
+/* ── Conflict (stale CAS) modal (P-301) ───────────────────────────── */
+.pc-conflict {
+  width: min(720px, 94vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(250, 204, 21, 0.42);
+  border-radius: 12px;
+  background: #0f1a14;
+  color: #eaf4fb;
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.pc-conflict__body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.pc-conflict__head {
+  padding: 16px 20px 8px;
+}
+.pc-conflict__head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #fef3c7;
+}
+.pc-conflict__head p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: rgba(254, 243, 199, 0.8);
+}
+.pc-conflict__label {
+  padding: 8px 20px 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent-soft), transparent 40%);
+}
+.pc-conflict__current {
+  margin: 0 20px;
+  padding: 10px 12px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-deeper), transparent 15%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pc-conflict__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px 16px;
+}
+.pc-conflict__btn {
+  padding: 6px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 76%);
+  border-radius: 999px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fg), transparent 8%);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pc-conflict__btn:hover { border-color: color-mix(in srgb, var(--accent), transparent 58%); color: var(--fg); }
+.pc-conflict__btn--primary {
+  background: linear-gradient(180deg, rgba(250, 204, 21, 0.22), rgba(250, 204, 21, 0.10));
+  border-color: rgba(250, 204, 21, 0.5);
+  color: #fff7d6;
+}
+
+/* ── Legacy-plan triage screen (P-302) ────────────────────────────── */
+.pc-triage {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  padding: 18px 24px 32px;
+}
+.pc-triage__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  margin-bottom: 14px;
+}
+.pc-triage__head-copy { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.pc-triage__head h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 760;
+  color: var(--fg);
+}
+.pc-triage__head p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: color-mix(in srgb, var(--accent-soft), transparent 35%);
+}
+.pc-triage__head code {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent), transparent 88%);
+  color: var(--accent-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.pc-triage__submit {
+  flex-shrink: 0;
+  padding: 7px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 50%);
+  border-radius: 999px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent), transparent 76%), color-mix(in srgb, var(--accent), transparent 88%));
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.pc-triage__submit:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.pc-triage__empty {
+  margin: 0;
+  padding: 24px 0;
+  color: color-mix(in srgb, var(--accent-soft), transparent 45%);
+  font-size: 13px;
+}
+
+.pc-triage__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+.pc-triage__table th {
+  text-align: left;
+  padding: 6px 8px;
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent-soft), transparent 45%);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+}
+.pc-triage__table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 93%);
+  vertical-align: middle;
+}
+.pc-triage__table tr.is-done { opacity: 0.6; }
+.pc-triage__col-check { width: 28px; text-align: center; }
+
+.pc-triage__checkbox {
+  width: 15px;
+  height: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 72%);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg-deeper), transparent 15%);
+  color: #eaf4fb;
+  cursor: pointer;
+}
+.pc-triage__checkbox[data-disabled] { opacity: 0.5; cursor: not-allowed; }
+
+.pc-triage__slug {
+  border: none;
+  background: transparent;
+  color: var(--accent-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+.pc-triage__slug:hover { color: #cbf3fb; text-decoration: underline; }
+
+.pc-triage__input {
+  width: 100%;
+  padding: 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 82%);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bg-deeper), transparent 15%);
+  color: #eaf4fb;
+  font-size: 11.5px;
+  font-family: inherit;
+}
+.pc-triage__input--date {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  width: 110px;
+}
+.pc-triage__input:focus-visible,
+.pc-triage__select:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent), transparent 50%);
+  outline-offset: 1px;
+}
+.pc-triage__input:disabled { opacity: 0.5; }
+
+.pc-triage__select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 118px;
+  padding: 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 82%);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bg-deeper), transparent 15%);
+  color: #eaf4fb;
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.pc-triage__select[data-disabled] { opacity: 0.5; cursor: not-allowed; }
+
+.pc-triage__result { white-space: nowrap; }
+.pc-triage__result--pending { color: color-mix(in srgb, var(--accent-soft), transparent 65%); }
+.pc-triage__result--ok { color: #8de3a2; font-weight: 650; }
+.pc-triage__result--err {
+  color: #fecaca;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+}
+
+/* ── Plan actions strip (P-204) ───────────────────────────────────── */
+.pc-plan-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 18px 8px;
+  padding: 7px;
+  border: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-1), transparent 38%);
+}
+
+.pc-plan-actions__btn {
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, color-mix(in srgb, var(--accent-strong), transparent 85%));
+  border-radius: 8px;
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  color: var(--fg-dim, #b9d4e8);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 100ms, border-color 100ms, color 100ms;
+}
+.pc-plan-actions__btn:hover {
+  background: var(--bg-3, rgba(255, 255, 255, 0.075));
+  border-color: var(--border-strong, color-mix(in srgb, var(--accent-strong), transparent 68%));
+  color: var(--fg, #e7f7ff);
+}
+.pc-plan-actions__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.pc-plan-actions__btn--start {
+  border-color: color-mix(in oklab, var(--good, #4ade80), transparent 58%);
+  background: color-mix(in oklab, var(--good, #4ade80), transparent 92%);
+  color: color-mix(in oklab, var(--good, #4ade80), var(--fg, #e7f7ff) 32%);
+}
+.pc-plan-actions__btn--start:hover {
+  background: color-mix(in oklab, var(--good, #4ade80), transparent 84%);
+  border-color: color-mix(in oklab, var(--good, #4ade80), transparent 38%);
+  color: var(--fg, #e7f7ff);
+}
+.pc-plan-actions__btn--started {
+  border-color: color-mix(in oklab, var(--warn, #fbbf24), transparent 58%);
+  background: color-mix(in oklab, var(--warn, #fbbf24), transparent 92%);
+  color: color-mix(in oklab, var(--warn, #fbbf24), var(--fg, #e7f7ff) 28%);
+}
+.pc-plan-actions__btn--started:hover {
+  background: color-mix(in oklab, var(--warn, #fbbf24), transparent 84%);
+  border-color: color-mix(in oklab, var(--warn, #fbbf24), transparent 38%);
+  color: var(--fg, #e7f7ff);
+}
+.pc-plan-actions__btn--reject {
+  border-color: color-mix(in oklab, var(--bad, #f87171), transparent 62%);
+  background: color-mix(in oklab, var(--bad, #f87171), transparent 94%);
+  color: color-mix(in oklab, var(--bad, #f87171), var(--fg, #e7f7ff) 38%);
+}
+.pc-plan-actions__btn--reject:hover {
+  background: color-mix(in oklab, var(--bad, #f87171), transparent 86%);
+  border-color: color-mix(in oklab, var(--bad, #f87171), transparent 42%);
+  color: var(--fg, #e7f7ff);
+}
+.pc-plan-actions__btn--approve {
+  border-color: color-mix(in oklab, var(--good, #4ade80), transparent 48%);
+  background: color-mix(in oklab, var(--good, #4ade80), transparent 88%);
+  color: color-mix(in oklab, var(--good, #4ade80), var(--fg, #e7f7ff) 24%);
+}
+.pc-plan-actions__btn--approve:hover {
+  background: color-mix(in oklab, var(--good, #4ade80), transparent 80%);
+  border-color: color-mix(in oklab, var(--good, #4ade80), transparent 30%);
+  color: var(--fg, #e7f7ff);
+}
+.pc-plan-actions__btn--demote {
+  border-color: color-mix(in srgb, var(--fg-mute, #7f9bb4), transparent 62%);
+  color: var(--fg-dim, #b9d4e8);
+}
+.pc-plan-actions__btn--demote:hover {
+  background: var(--bg-3, rgba(255, 255, 255, 0.075));
+  border-color: color-mix(in srgb, var(--fg-mute, #7f9bb4), transparent 40%);
+  color: var(--fg, #e7f7ff);
+}
+
+/* ── Plan-action composer dialogs (P-204) ─────────────────────────── */
+.pc-plan-dialog {
+  width: min(560px, 92vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 68%);
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--bg-popover), var(--bg-1));
+  color: #eaf4fb;
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.pc-plan-dialog__form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pc-plan-dialog__head {
+  padding: 16px 20px 6px;
+}
+.pc-plan-dialog__head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--fg);
+}
+.pc-plan-dialog__head p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 30%);
+}
+.pc-plan-dialog__head code {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent), transparent 86%);
+  color: var(--accent-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+}
+
+.pc-plan-dialog__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 20px;
+}
+.pc-plan-dialog__field > span {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent-soft), transparent 30%);
+}
+.pc-plan-dialog__field em.pc-plan-dialog__opt {
+  font-style: italic;
+  font-weight: 500;
+  text-transform: none;
+  color: color-mix(in srgb, var(--accent-soft), transparent 58%);
+  margin-left: 4px;
+}
+.pc-plan-dialog__field input,
+.pc-plan-dialog__field textarea {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 80%);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-deeper), transparent 15%);
+  color: #eaf4fb;
+  font-size: 12.5px;
+  font-family: inherit;
+  resize: vertical;
+}
+.pc-plan-dialog__field textarea {
+  min-height: 60px;
+  line-height: 1.5;
+}
+.pc-plan-dialog__field input:focus-visible,
+.pc-plan-dialog__field textarea:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent), transparent 50%);
+  outline-offset: 1px;
+  border-color: color-mix(in srgb, var(--accent), transparent 50%);
+}
+
+.pc-plan-dialog__hint {
+  margin-top: 2px;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 35%);
+}
+.pc-plan-dialog__hint--warn { color: #fed7aa; }
+
+.pc-plan-dialog__foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 20px 16px;
+  border-top: 1px solid color-mix(in srgb, var(--accent-strong), transparent 88%);
+  margin-top: 4px;
+}
+
+.pc-plan-dialog__error {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(248, 113, 113, 0.32);
+  border-radius: 6px;
+  background: rgba(248, 113, 113, 0.10);
+  color: #fecaca;
+  font-size: 11.5px;
+  word-break: break-word;
+}
+
+.pc-plan-dialog__buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.pc-plan-dialog__btn {
+  padding: 6px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 78%);
+  border-radius: 999px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fg), transparent 8%);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pc-plan-dialog__btn:hover { border-color: color-mix(in srgb, var(--accent), transparent 58%); color: var(--fg); }
+.pc-plan-dialog__btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.pc-plan-dialog__btn--primary {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent), transparent 78%), color-mix(in srgb, var(--accent), transparent 90%));
+  border-color: color-mix(in srgb, var(--accent), transparent 50%);
+  color: var(--fg);
+}
+.pc-plan-dialog__btn--primary:hover {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent), transparent 68%), color-mix(in srgb, var(--accent), transparent 84%));
+}
+
+/* ── Git history strip + diff modal (P-303) ───────────────────────── */
+/* Revisions panel — plan-agent-launch P-017. Successor to the git
+ * history strip; backed by `plan_revisions` (the conversation-linked
+ * spine, D-003). Each row has a head line (seq / author / when / stat)
+ * plus the inline rationale below it. */
+.pc-revisions-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 18px 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg), transparent 40%);
+  color: color-mix(in srgb, var(--fg), transparent 14%);
+  font-size: 11.5px;
+}
+.pc-revisions-panel--loading,
+.pc-revisions-panel--empty {
+  color: color-mix(in srgb, var(--accent-soft), transparent 50%);
+  font-style: italic;
+}
+.pc-revisions-panel--error {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.32);
+  background: rgba(248, 113, 113, 0.08);
+}
+
+.pc-revisions-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pc-revisions-panel__kicker {
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent-strong), transparent 22%);
+}
+
+.pc-revisions-panel__count {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 35%);
+}
+
+.pc-revisions-panel__toggle,
+.pc-revisions-panel__retry {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 78%);
+  border-radius: 999px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fg), transparent 15%);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.pc-revisions-panel__toggle:hover,
+.pc-revisions-panel__retry:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--accent), transparent 58%);
+}
+
+.pc-revisions-panel__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.pc-revision-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+}
+.pc-revision-row:hover {
+  background: color-mix(in srgb, var(--bg-popover), transparent 40%);
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 82%);
+}
+
+.pc-revision-row__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 11px;
+}
+
+/* P-018: the head is a button so a row click opens the diff modal —
+ * strip the native chrome and keep the row visually identical, but
+ * give it a hover/focus affordance to make the click target obvious. */
+.pc-revision-row__head--button {
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background-color 80ms ease;
+}
+
+.pc-revision-row__head--button:hover {
+  background: color-mix(in srgb, var(--accent-soft), transparent 94%);
+}
+
+.pc-revision-row__head--button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-soft), transparent 40%);
+  outline-offset: 1px;
+}
+
+.pc-revision-row__seq {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--accent-soft);
+  min-width: 40px;
+}
+
+.pc-revision-row__author {
+  color: color-mix(in srgb, var(--fg), transparent 25%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 12em;
+}
+.pc-revision-row[data-author-kind='human'] .pc-revision-row__author {
+  color: color-mix(in srgb, var(--accent-soft), transparent 15%);
+}
+
+.pc-revision-row__when {
+  color: color-mix(in srgb, var(--accent-soft), transparent 50%);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+.pc-revision-row__stat {
+  display: inline-flex;
+  gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.pc-revision-row__stat--add {
+  color: #6ee7b7;
+}
+.pc-revision-row__stat--del {
+  color: #fca5a5;
+}
+
+.pc-revision-row__rationale {
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--fg), transparent 12%);
+  line-height: 1.45;
+  /* keep dense — rationale is one or two sentences; wrap naturally. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding-left: 48px; /* align under #seq column */
+}
+
+.pc-revision-row__rationale--muted {
+  color: color-mix(in srgb, var(--accent-soft), transparent 55%);
+  font-style: italic;
+}
+
+.pc-revision-row[data-session-kind='git_backfill'] .pc-revision-row__seq {
+  color: color-mix(in srgb, var(--accent-soft), transparent 45%);
+}
+
+/* P-019: per-revision conversation drill-down footer. A button if the
+ * revision has a recorded session (`session_id` + `plan_run`), a small
+ * tag otherwise — `direct edit`, `from git history`, etc. */
+.pc-revision-row__convo {
+  padding-left: 48px;
+  margin-top: 4px;
+  font-size: 10.5px;
+}
+
+.pc-revision-row__convo-btn {
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 75%);
+  color: color-mix(in srgb, var(--fg), transparent 15%);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: background-color 80ms ease, border-color 80ms ease;
+}
+
+.pc-revision-row__convo-btn:hover {
+  background: color-mix(in srgb, var(--accent-soft), transparent 92%);
+  border-color: color-mix(in srgb, var(--accent-soft), transparent 45%);
+}
+
+.pc-revision-row__convo-btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-soft), transparent 40%);
+  outline-offset: 1px;
+}
+
+.pc-revision-row__convo-tag {
+  color: color-mix(in srgb, var(--accent-soft), transparent 55%);
+  font-style: italic;
+  font-size: 10.5px;
+}
+
+.pc-rev-convo {
+  width: min(820px, 96vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-popover);
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 82%);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.pc-rev-convo__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-soft), transparent 85%);
+}
+
+.pc-rev-convo__head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.pc-rev-convo__close {
+  background: none;
+  border: none;
+  color: color-mix(in srgb, var(--fg), transparent 30%);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pc-rev-convo__controls {
+  padding: 8px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-soft), transparent 90%);
+}
+
+.pc-rev-convo__query {
+  width: 100%;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--bg), transparent 30%);
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 80%);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.pc-rev-convo__error,
+.pc-rev-convo__empty,
+.pc-rev-convo__loading {
+  padding: 14px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--fg), transparent 30%);
+}
+
+.pc-rev-convo__error {
+  color: #fca5a5;
+}
+
+.pc-rev-convo__turns {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.pc-rev-convo-turn {
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-soft), transparent 93%);
+}
+
+.pc-rev-convo-turn[data-role='user'] {
+  background: color-mix(in srgb, var(--accent-soft), transparent 97%);
+}
+
+.pc-rev-convo-turn__head {
+  display: flex;
+  gap: 10px;
+  font-size: 10.5px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 35%);
+  margin-bottom: 4px;
+}
+
+.pc-rev-convo-turn__role {
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--accent-soft);
+}
+
+.pc-rev-convo-turn__content {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--fg), transparent 8%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.pc-rev-convo__more {
+  margin: 10px auto;
+  padding: 4px 14px;
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 65%);
+  color: var(--accent-soft);
+  border-radius: 999px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.pc-rev-convo__more:hover {
+  background: color-mix(in srgb, var(--accent-soft), transparent 92%);
+}
+
+.pc-git-diff {
+  width: min(900px, 96vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 68%);
+  border-radius: 12px;
+  background: var(--bg-1);
+  color: #eaf4fb;
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.pc-git-diff__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 88%);
+}
+.pc-git-diff__head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+.pc-git-diff__head code {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent), transparent 86%);
+  color: var(--accent-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  margin-left: 6px;
+}
+.pc-git-diff__close {
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 82%);
+  border-radius: 999px;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  color: #eaf4fb;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.pc-git-diff__close:hover { background: rgba(255, 255, 255, 0.06); }
+
+.pc-git-diff__loading,
+.pc-git-diff__error {
+  padding: 16px 18px;
+  font-size: 12px;
+}
+.pc-git-diff__error { color: #fecaca; }
+
+.pc-git-diff__body {
+  margin: 0;
+  padding: 14px 16px 18px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+  background: linear-gradient(180deg, var(--bg-1) 0%, var(--bg-1) 100%);
+}
+
+.pc-git-diff__parse-warning,
+.pc-git-diff__empty,
+.pc-git-diff__raw {
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 86%);
+  border-radius: 12px;
+  background: var(--bg-1);
+  color: #d7e6f3;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.pc-git-diff__parse-warning {
+  color: #fcd34d;
+  background: rgba(120, 53, 15, 0.22);
+  border-color: rgba(251, 191, 36, 0.22);
+}
+
+.pc-git-diff__raw {
+  overflow: auto;
+  white-space: pre;
+}
+
+.pc-git-diff-file {
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 88%);
+  border-radius: 12px;
+  background: var(--bg-popover);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+}
+
+.pc-git-diff-file__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 90%);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-popover), transparent 8%), color-mix(in srgb, var(--bg-1), transparent 12%)),
+    var(--bg-1);
+}
+
+.pc-git-diff-file__path {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.pc-git-diff-file__path code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #d9e8f4;
+}
+
+.pc-git-diff-file__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.pc-git-diff-file__type,
+.pc-git-diff-file__stat {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.pc-git-diff-file__type {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: color-mix(in srgb, var(--bg-popover), transparent 10%);
+  color: #d9e8f4;
+}
+
+.pc-git-diff-file__type--modify { border-color: color-mix(in srgb, var(--accent-strong), transparent 76%); color: var(--accent-soft); }
+.pc-git-diff-file__type--add { border-color: rgba(74, 222, 128, 0.24); color: #bbf7d0; }
+.pc-git-diff-file__type--delete { border-color: rgba(248, 113, 113, 0.24); color: #fecaca; }
+.pc-git-diff-file__type--rename,
+.pc-git-diff-file__type--copy { border-color: rgba(251, 191, 36, 0.22); color: #fde68a; }
+
+.pc-git-diff-file__stat {
+  border: 1px solid transparent;
+}
+
+.pc-git-diff-file__stat--add {
+  background: rgba(22, 101, 52, 0.28);
+  color: #bbf7d0;
+}
+
+.pc-git-diff-file__stat--del {
+  background: rgba(127, 29, 29, 0.28);
+  color: #fecaca;
+}
+
+.pc-git-diff-file__table {
+  overflow: auto;
+  background: var(--bg);
+  --diff-background-color: transparent;
+  --diff-text-color: #d9e8f4;
+  --diff-font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --diff-selection-background-color: color-mix(in srgb, var(--accent-strong), transparent 74%);
+  --diff-selection-text-color: #f8fbff;
+  --diff-gutter-insert-background-color: rgba(20, 83, 45, 0.50);
+  --diff-gutter-insert-text-color: #bbf7d0;
+  --diff-gutter-delete-background-color: rgba(127, 29, 29, 0.50);
+  --diff-gutter-delete-text-color: #fecaca;
+  --diff-gutter-selected-background-color: rgba(30, 41, 59, 0.94);
+  --diff-gutter-selected-text-color: #f8fbff;
+  --diff-code-insert-background-color: rgba(20, 83, 45, 0.24);
+  --diff-code-insert-text-color: #dff7e7;
+  --diff-code-delete-background-color: rgba(127, 29, 29, 0.24);
+  --diff-code-delete-text-color: #fee2e2;
+  --diff-code-insert-edit-background-color: rgba(74, 222, 128, 0.24);
+  --diff-code-insert-edit-text-color: #f0fdf4;
+  --diff-code-delete-edit-background-color: rgba(248, 113, 113, 0.24);
+  --diff-code-delete-edit-text-color: #fff1f2;
+  --diff-code-selected-background-color: rgba(30, 41, 59, 0.94);
+  --diff-code-selected-text-color: #f8fbff;
+  --diff-omit-gutter-line-color: color-mix(in srgb, var(--accent-strong), transparent 54%);
+}
+
+.pc-git-diff-table {
+  min-width: 100%;
+}
+
+.pc-git-diff-hunk + .pc-git-diff-hunk {
+  border-top: 1px solid color-mix(in srgb, var(--accent-strong), transparent 92%);
+}
+
+.pc-git-diff-line {
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.pc-git-diff-gutter {
+  min-width: 5ch;
+  padding: 0 10px 0 8px;
+  color: #7f95ab;
+}
+
+.pc-git-diff-code {
+  padding: 0 14px 0 12px;
+  white-space: pre;
+  word-break: normal;
+  word-wrap: normal;
+  overflow-wrap: normal;
+}
+
+/* ── Lint banner (P-206) ──────────────────────────────────────────── */
+.pc-lint-banner {
+  margin: 0 18px 8px;
+  padding: 8px 12px;
+  border: 1px solid;
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.pc-lint-banner--error {
+  border-color: rgba(248, 113, 113, 0.42);
+  background: rgba(248, 113, 113, 0.10);
+  color: #fecaca;
+}
+.pc-lint-banner--warn {
+  border-color: rgba(250, 204, 21, 0.40);
+  background: rgba(250, 204, 21, 0.08);
+  color: #fef3c7;
+}
+
+.pc-lint-banner__head {
+  margin-bottom: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.pc-lint-banner__findings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.pc-lint-banner__finding {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.pc-lint-banner__finding:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.10);
+}
+
+.pc-lint-banner__code {
+  flex-shrink: 0;
+  min-width: 140px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  opacity: 0.85;
+}
+
+.pc-lint-banner__msg {
+  flex: 1;
+  word-break: break-word;
+}
+
+/* ── Lock-state banner (P-205) ────────────────────────────────────── */
+.pc-lock-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 18px 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(250, 204, 21, 0.4);
+  border-radius: 8px;
+  background: rgba(250, 204, 21, 0.10);
+  color: #fef3c7;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.pc-lock-banner__icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.pc-lock-banner__copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.pc-lock-banner__copy strong { color: #fff7d6; }
+.pc-lock-banner__copy code {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(250, 204, 21, 0.18);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #fff7d6;
+}
+.pc-lock-banner__copy em {
+  font-style: italic;
+  color: #ffeead;
+}
+
+.pc-lock-banner__ttl {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: rgba(254, 243, 199, 0.7);
+}
+
+/* ── Jump-to-item typeahead (P-109) ───────────────────────────────── */
+.pc-plan-editor-scope {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* Match the 18px horizontal gutter every other strip in the detail column
+     (tabs / now-hero / jump / editbar / plan-actions / editor-tools) uses, so
+     the vditor block doesn't bleed flush against the page edge. The bottom
+     inset gives the editor breathing room before the scroll end. */
+  padding: 0 18px 18px;
+}
+
+/* Read mode (D-007): when PlanDetail lives inside a `.pc-plans__main` scroller
+   (the /admin two-pane, the Create dock's main view, and PlanPopupModal — whose
+   body carries both `pc-plans__main` + `plan-popup__body`), the markdown preview
+   must lay out at its NATURAL height and let that ancestor own the overflow.
+   Otherwise the `flex:1` chain (scope → editor → preview) pins the preview to the
+   ~130px of pane height left over after the header/actions/tabs/now-hero strips,
+   and the preview's own `overflow:auto` then shows a single-screen SLIVER of a
+   multi-screen plan with dead space below — the "plan is cut off" bug (verified
+   live in the popup: preview clientHeight 129 vs scrollHeight 9375).
+   Scoped to `.pc-plans__main` on purpose: PlanEditorPanel (the create:plan-editor
+   dock panel) mounts PlanDetail WITHOUT that scroller and depends on the preview
+   scrolling internally, so it must keep the pinned behavior. Edit mode is
+   untouched either way — it renders `.pc-md-editor-host`, not `.pc-md-preview`,
+   so the `:has()` guards never match it. */
+.pc-plans__main .pc-plan-editor-scope:has(.pc-md-preview),
+.pc-plans__main .pc-plan-editor:has(.pc-md-preview) {
+  flex: 0 0 auto;
+}
+/* The rule above releases the HEIGHT, and it does so on the two COLUMN flex
+   containers — which is the only axis `flex` controls there. This element is
+   different, and the difference is the whole bug (WI-39422): the preview's
+   parent is `.pc-plan-document__body`, a ROW flex container (it lays the
+   outline panel beside the preview), so `flex` HERE sizes WIDTH. `flex: 0 0
+   auto` therefore pinned the preview to its max-content width — measured live
+   in PlanPopupModal at 26,057px inside a 1,036px column — and plan text ran
+   past the popup's right edge. Only `flex-basis`/`shrink` are corrected below;
+   `overflow: visible` stays, because THAT is what hands vertical scrolling to
+   the `.pc-plans__main` ancestor per D-007 above.
+   `min-width: 0` defeats the flex item's automatic minimum size, without which
+   one long unbreakable token (an absolute path, an EI- id, a sha) re-inflates
+   the column and the bug returns in a subtler form.
+   Net effect: restores exactly what PlanDocumentView declares for
+   `.pc-plan-document__preview` (`flex: 1 1 auto; min-width: 0`), which this
+   higher-specificity selector had been overriding by accident. */
+.pc-plans__main .pc-plan-editor .pc-md-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: visible;
+}
+
+.pc-jump {
+  position: relative;
+  margin: 0 18px 8px;
+}
+
+.pc-jump__input {
+  width: 100%;
+  padding: 7px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 82%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-deeper), transparent 15%);
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.pc-jump__input::placeholder { color: var(--fg-dim); opacity: 1; }
+
+.pc-jump__input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent), transparent 50%);
+  outline-offset: 1px;
+  border-color: color-mix(in srgb, var(--accent), transparent 50%);
+}
+
+.pc-jump__input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pc-jump__hits {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 68%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg), transparent 2%);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55);
+  display: grid;
+  gap: 2px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.pc-jump__hit {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 5px;
+  color: color-mix(in srgb, var(--fg), transparent 14%);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pc-jump__hit.is-active,
+.pc-jump__hit:hover {
+  background: color-mix(in srgb, var(--bg-raised), transparent 4%);
+  color: var(--fg);
+}
+
+.pc-jump__id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  min-width: 52px;
+  color: var(--accent-soft);
+}
+.pc-jump__id--decision { color: #fef3c7; }
+
+.pc-jump__hint {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--accent-soft), transparent 25%);
+}
+
+/* ── PlanEditor read-mode decorations (P-106) ─────────────────────── */
+
+/* Status-token pills — inline `todo` etc. rendered as code. P-202
+   extends the scope to vditor's IR pane so edit-mode status pills
+   look identical to read-mode. */
+.pc-md-preview code.pc-plan-status,
+.pc-plan-editor code.pc-plan-status,
+.vditor-ir code.pc-plan-status {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.05);
+  color: color-mix(in srgb, var(--fg), transparent 20%);
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 82%);
+  cursor: pointer;
+}
+.pc-md-preview code.pc-plan-status:hover,
+.pc-plan-editor code.pc-plan-status:hover,
+.vditor-ir code.pc-plan-status:hover {
+  filter: brightness(1.15);
+}
+.pc-plan-status--todo        { background: rgba(148, 163, 184, 0.18) !important; color: #e2e8f0 !important; border-color: rgba(148, 163, 184, 0.35) !important; }
+.pc-plan-status--wip         { background: color-mix(in srgb, var(--accent), transparent 82%) !important;  color: var(--accent-soft) !important; border-color: color-mix(in srgb, var(--accent), transparent 58%) !important; }
+.pc-plan-status--blocked     { background: rgba(248, 113, 113, 0.20) !important; color: #fecaca !important; border-color: rgba(248, 113, 113, 0.42) !important; }
+.pc-plan-status--needs-human { background: rgba(250, 204, 21, 0.18) !important;  color: #fef3c7 !important; border-color: rgba(250, 204, 21, 0.42) !important; }
+.pc-plan-status--done        { background: rgba(34, 197, 94, 0.18) !important;   color: #bbf7d0 !important; border-color: rgba(34, 197, 94, 0.42) !important; }
+.pc-plan-status--dropped     { background: rgba(168, 162, 158, 0.16) !important; color: #d6d3d1 !important; border-color: rgba(168, 162, 158, 0.36) !important; }
+
+/* Effective-status badge — appears when effective ≠ stored. */
+.pc-plan-badge {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 600;
+  vertical-align: middle;
+  text-transform: lowercase;
+  border: 1px dashed currentColor;
+  opacity: 0.9;
+  cursor: help;
+}
+.pc-plan-badge--blocked     { color: #fecaca; }
+.pc-plan-badge--todo        { color: #e2e8f0; }
+.pc-plan-badge--wip         { color: var(--accent-soft); }
+.pc-plan-badge--needs-human { color: #fef3c7; }
+.pc-plan-badge--done        { color: #bbf7d0; }
+.pc-plan-badge--dropped     { color: #d6d3d1; }
+
+/* P-NNN / D-NNN cross-references inside prose. */
+.pc-md-preview a.pc-plan-ref,
+.pc-plan-editor a.pc-plan-ref {
+  color: #7bb8ff;
+  background: rgba(123, 184, 255, 0.10);
+  padding: 0 4px;
+  border-radius: 3px;
+  text-decoration: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.pc-md-preview a.pc-plan-ref:hover,
+.pc-plan-editor a.pc-plan-ref:hover {
+  background: rgba(123, 184, 255, 0.22);
+  color: #cfe5ff;
+  text-decoration: none;
+}
+
+/* Transient highlight after clicking a reference. */
+.pc-plan-highlight {
+  animation: pc-plan-pulse 1.5s ease-out;
+  border-radius: 4px;
+}
+@keyframes pc-plan-pulse {
+  0%   { background-color: rgba(250, 204, 21, 0.42); }
+  100% { background-color: transparent; }
+}
+
+/* ── P-203 Status-flip popover ───────────────────────────────────── */
+.pc-plan-status-popover {
+  min-width: 220px;
+
+  background: color-mix(in srgb, var(--bg), transparent 2%);
+  border: 1px solid color-mix(in srgb, var(--accent-strong), transparent 72%);
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  color: var(--fg);
+  font-size: 12px;
+  animation: pc-popover-in 120ms ease-out;
+}
+@keyframes pc-popover-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.pc-plan-status-popover__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-strong), transparent 88%);
+  margin-bottom: 6px;
+}
+.pc-plan-status-popover__kicker {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 14%);
+}
+.pc-plan-status-popover__current {
+  flex: 1;
+  text-align: right;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 40%);
+}
+.pc-plan-status-popover__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pc-plan-status-popover__btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 100ms, border-color 100ms;
+}
+.pc-plan-status-popover__btn:hover,
+.pc-plan-status-popover__btn:focus-visible {
+  background: color-mix(in srgb, var(--accent-strong), transparent 92%);
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 78%);
+  outline: none;
+}
+.pc-plan-status-popover__btn.is-current {
+  background: color-mix(in srgb, var(--accent-strong), transparent 94%);
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 82%);
+  cursor: default;
+}
+.pc-plan-status-popover__btn[disabled] {
+  opacity: 0.55;
+  cursor: progress;
+}
+.pc-plan-status-popover__hint {
+  margin-left: auto;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 40%);
+}
+.pc-plan-status-popover__err {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: rgba(248, 113, 113, 0.12);
+  border: 1px solid rgba(248, 113, 113, 0.32);
+  color: #fecaca;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (max-width: 980px) {
+  .pc-plans {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .pc-plans__rail {
+    border-right: none;
+    border-bottom: 1px solid var(--pc-plans-border);
+    max-height: 58vh;
+  }
+
+  .pc-plans__overview-grid {
+    grid-template-columns: repeat(3, minmax(80px, 1fr));
+  }
+
+  .pc-plans__views {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pc-plans__main {
+    min-height: 520px;
+  }
+}
+
+@media (max-width: 640px) {
+  .pc-plans__overview,
+  .pc-plans__search,
+  .pc-filters,
+  .pc-plans__list {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .pc-plans__views {
+    grid-template-columns: 1fr;
+  }
+
+  .pc-plans__overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pc-plans__detail-head,
+  .pc-triage__head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pc-items__head {
+    grid-template-columns: 1fr;
+  }
+
+  .pc-plans__detail-spacer {
+    display: none;
+  }
+
+  .pc-plans__empty {
+    margin: 20px;
+    padding: 28px;
+  }
+
+  .pc-items__detail {
+    position: static;
+    max-height: none;
+  }
+
+  .pc-items__row-wrap {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Agents panel (plan-agent-launch P-021) ───────────────────────── */
+
+.pc-agents-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 12px 18px 20px;
+}
+
+.pc-agents-panel__error,
+.pc-agents-panel__empty {
+  padding: 14px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--fg), transparent 30%);
+}
+
+.pc-agents-panel__error {
+  color: #fca5a5;
+}
+
+.pc-agents-panel__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 2px 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-soft), transparent 90%);
+}
+
+.pc-agents-panel__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-soft);
+  text-transform: uppercase;
+}
+
+.pc-agents-panel__count {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 45%);
+}
+
+.pc-agents-panel__launch {
+  margin-left: auto;
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 65%);
+  color: var(--accent-soft);
+  padding: 3px 12px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 80ms ease, border-color 80ms ease;
+}
+
+.pc-agents-panel__launch:hover:not([disabled]) {
+  background: color-mix(in srgb, var(--accent-soft), transparent 92%);
+}
+
+.pc-agents-panel__launch[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pc-agents-panel__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Origin card */
+
+.pc-agents-origin {
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 78%);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent-soft), transparent 96%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pc-agents-origin--error {
+  border-color: rgba(252, 165, 165, 0.45);
+  color: #fca5a5;
+}
+
+.pc-agents-origin--empty {
+  color: color-mix(in srgb, var(--fg), transparent 45%);
+  font-style: italic;
+}
+
+.pc-agents-origin__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.pc-agents-origin__kicker {
+  color: var(--accent-soft);
+  text-transform: uppercase;
+  font-size: 10.5px;
+}
+
+.pc-agents-origin__author {
+  font-weight: 500;
+  color: var(--fg-dim);
+}
+
+.pc-agents-origin__when {
+  color: color-mix(in srgb, var(--accent-soft), transparent 45%);
+  margin-left: auto;
+  font-size: 10.5px;
+}
+
+.pc-agents-origin__rationale {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--fg), transparent 8%);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.pc-agents-origin__foot {
+  display: flex;
+  font-size: 10.5px;
+}
+
+.pc-agents-origin__convo {
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 75%);
+  color: color-mix(in srgb, var(--fg), transparent 15%);
+  padding: 1px 10px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: background-color 80ms ease, border-color 80ms ease;
+}
+
+.pc-agents-origin__convo:hover {
+  background: color-mix(in srgb, var(--accent-soft), transparent 92%);
+  border-color: color-mix(in srgb, var(--accent-soft), transparent 45%);
+}
+
+.pc-agents-origin__tag {
+  color: color-mix(in srgb, var(--accent-soft), transparent 50%);
+  font-style: italic;
+}
+
+/* Past-run rows */
+
+.pc-agent-row {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 88%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg), transparent 45%);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pc-agent-row__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.pc-agent-row__title {
+  font-weight: 500;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.pc-agent-row__status {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+.pc-agent-row__status--running  { color: var(--accent-strong); }
+.pc-agent-row__status--idle     { color: color-mix(in srgb, var(--accent-soft), transparent 30%); }
+.pc-agent-row__status--done     { color: #86efac; }
+.pc-agent-row__status--archived { color: color-mix(in srgb, var(--accent-soft), transparent 60%); }
+.pc-agent-row__status--failed   { color: #fca5a5; }
+
+.pc-agent-row__stale {
+  color: #fbbf24;
+  font-size: 10.5px;
+  font-style: italic;
+}
+
+.pc-agent-row__meta {
+  display: flex;
+  gap: 6px;
+  font-size: 10.5px;
+  color: color-mix(in srgb, var(--accent-soft), transparent 45%);
+}
+
+.pc-agent-row__note {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--fg), transparent 22%);
+  white-space: pre-wrap;
+}
+
+/* Launch compose (P-022) */
+
+.pc-agents-panel__launch.is-open {
+  background: color-mix(in srgb, var(--accent-soft), transparent 82%);
+}
+
+.pc-agents-compose {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 80%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent-soft), transparent 96%);
+}
+
+.pc-agents-compose__note {
+  width: 100%;
+  min-height: 60px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--bg), transparent 30%);
+  color: var(--fg-dim);
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 82%);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.pc-agents-compose__note:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-soft), transparent 45%);
+  outline-offset: 1px;
+}
+
+.pc-agents-compose__error {
+  color: #fca5a5;
+  font-size: 11.5px;
+}
+
+.pc-agents-compose__row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.pc-agents-compose__cancel,
+.pc-agents-compose__submit {
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 65%);
+  color: var(--accent-soft);
+  padding: 4px 14px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background-color 80ms ease, border-color 80ms ease;
+}
+
+.pc-agents-compose__cancel:hover:not([disabled]),
+.pc-agents-compose__submit:hover:not([disabled]) {
+  background: color-mix(in srgb, var(--accent-soft), transparent 90%);
+}
+
+.pc-agents-compose__submit {
+  color: var(--bg-popover);
+  background: var(--accent-soft);
+  border-color: var(--accent-soft);
+}
+
+.pc-agents-compose__submit:hover:not([disabled]) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.pc-agents-compose__cancel[disabled],
+.pc-agents-compose__submit[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* P-023 — clickable past-run rows + run-detail panel */
+
+.pc-agent-row--clickable {
+  cursor: pointer;
+  transition: background-color 80ms ease, border-color 80ms ease;
+}
+
+.pc-agent-row--clickable:hover {
+  background: color-mix(in srgb, var(--accent-soft), transparent 94%);
+  border-color: color-mix(in srgb, var(--accent-soft), transparent 75%);
+}
+
+.pc-agent-row--clickable:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-soft), transparent 45%);
+  outline-offset: 1px;
+}
+
+.pc-run-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pc-run-detail__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 2px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-soft), transparent 88%);
+  font-size: 12px;
+}
+
+.pc-run-detail__back {
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 75%);
+  color: color-mix(in srgb, var(--fg), transparent 15%);
+  padding: 2px 10px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.pc-run-detail__back:hover {
+  background: color-mix(in srgb, var(--accent-soft), transparent 92%);
+}
+
+.pc-run-detail__title {
+  font-weight: 500;
+  color: var(--fg-dim);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.pc-run-detail__plan-title {
+  font-weight: 600;
+  color: #f0f7ff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 480px;
+}
+.pc-run-detail__run-id {
+  font-weight: 400;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--fg), transparent 40%);
+}
+
+.pc-run-detail__console {
+  margin-left: auto;
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 65%);
+  color: var(--accent-soft);
+  padding: 3px 12px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.pc-run-detail__console:hover:not([disabled]) {
+  background: color-mix(in srgb, var(--accent-soft), transparent 92%);
+}
+
+.pc-run-detail__console[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pc-run-detail__controls {
+  padding-bottom: 4px;
+}
+
+.pc-trigger-trace {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border, rgba(125, 211, 252, 0.15));
+  border-radius: 8px;
+  background: var(--bg-1, #0b1220);
+  color: var(--fg, #e7f7ff);
+}
+.pc-trigger-trace__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pc-trigger-trace__head h3,
+.pc-trigger-trace__head p { margin: 0; }
+.pc-trigger-trace__head h3 { font-size: 13px; }
+.pc-trigger-trace__head p,
+.pc-trigger-trace__kicker { color: var(--fg-mute, #7f9bb4); font-size: 11px; }
+.pc-trigger-trace__disposition {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid var(--border-strong, rgba(125, 211, 252, 0.32));
+  border-radius: 999px;
+  color: var(--good, #34d399);
+  font-size: 11px;
+}
+.pc-trigger-trace__disposition[data-disposition="failed"] { color: var(--bad, #f87171); }
+.pc-trigger-trace__disposition[data-disposition="dropped"] { color: var(--warn, #fbbf24); }
+.pc-trigger-trace__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 7px 16px;
+  margin: 0;
+}
+.pc-trigger-trace__facts div { min-width: 0; }
+.pc-trigger-trace__facts dt { color: var(--fg-mute, #7f9bb4); font-size: 10px; text-transform: uppercase; }
+.pc-trigger-trace__facts dd { margin: 2px 0 0; color: var(--fg-dim, #b9d4e8); font-size: 11px; overflow-wrap: anywhere; }
+.pc-trigger-trace__facts a,
+.pc-trigger-trace__outcomes a { color: var(--accent, #38bdf8); }
+.pc-trigger-trace__timeline {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pc-trigger-trace__timeline li {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid var(--border, rgba(125, 211, 252, 0.15));
+  border-radius: 6px;
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+}
+.pc-trigger-trace__timeline li[data-status="failed"],
+.pc-trigger-trace__timeline li[data-status="dropped"] { border-color: var(--warn-border, rgba(251, 191, 36, 0.35)); }
+.pc-trigger-trace__timeline span { color: var(--fg-mute, #7f9bb4); font-size: 9px; text-transform: uppercase; }
+.pc-trigger-trace__timeline strong { color: var(--fg-dim, #b9d4e8); font-size: 10px; font-weight: 550; }
+.pc-trigger-trace__timeline time { color: var(--fg-mute, #7f9bb4); font-size: 9px; }
+.pc-trigger-trace__payload summary { color: var(--fg-dim, #b9d4e8); cursor: pointer; font-size: 11px; }
+.pc-trigger-trace__payload pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 7px 0 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg-deep, #050d18);
+  color: var(--fg-dim, #b9d4e8);
+  font-size: 10px;
+  white-space: pre-wrap;
+}
+.pc-trigger-trace__outcomes { display: flex; align-items: center; gap: 10px; font-size: 11px; }
+.pc-trigger-trace__outcomes > span:first-child { color: var(--fg-mute, #7f9bb4); }
+
+@media (max-width: 900px) {
+  .pc-trigger-trace__timeline { grid-template-columns: 1fr; }
+}
+
+.pc-run-detail__error,
+.pc-run-detail__empty {
+  padding: 10px;
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--fg), transparent 30%);
+}
+
+.pc-run-detail__error {
+  color: #fca5a5;
+}
+
+.pc-run-detail__compose {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-soft), transparent 80%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent-soft), transparent 96%);
+  margin-top: 8px;
+}
+
+.pc-plan-fm {
+  /* 18px horizontal gutter to align with the now-hero / jump strips above and
+     the vditor block below — otherwise this metadata card is the lone element
+     that bleeds full-width to the page edge. */
+  margin: 8px 18px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--pc-plans-border);
+  border-radius: 10px;
+  background: var(--pc-plans-surface);
+}
+.pc-plan-fm__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 4px 18px;
+  margin: 0;
+}
+.pc-plan-fm__row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.pc-plan-fm__key {
+  margin: 0;
+  flex: 0 0 auto;
+  color: var(--pc-plans-fg-muted);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+.pc-plan-fm__val {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--pc-plans-fg-strong);
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+/* ── Cross-user assign / @-mention (shared-hive-collaboration P-008) ───────── */
+.pc-assign__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--pc-plans-fg-muted);
+  background: color-mix(in oklab, var(--bg), transparent 8%);
+  border: 1px solid var(--pc-plans-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.pc-assign__trigger:hover {
+  color: var(--fg, #e7f7ff);
+  border-color: color-mix(in oklab, var(--accent, #38bdf8), transparent 40%);
+}
+.pc-assign__trigger.is-compact {
+  padding: 2px;
+  border-color: transparent;
+  background: transparent;
+}
+/* Per-item assign sits at the row's right edge, revealed on hover/focus. */
+.pc-items__row-wrap {
+  position: relative;
+}
+.pc-items__row-actions {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.pc-items__row-wrap:hover .pc-items__row-actions,
+.pc-items__row-wrap:focus-within .pc-items__row-actions {
+  opacity: 1;
+}
+
+.pc-assign__panel {
+  width: 320px;
+  max-width: 80vw;
+  padding: 10px;
+  background: var(--pc-plans-surface-strong);
+  border: 1px solid var(--pc-plans-border);
+  border-radius: 10px;
+}
+.pc-assign {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pc-assign__head {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--pc-plans-fg-strong);
+}
+.pc-assign__filter,
+.pc-assign__note {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: var(--fg, #e7f7ff);
+  background: color-mix(in oklab, var(--bg), transparent 6%);
+  border: 1px solid var(--pc-plans-border);
+  border-radius: 6px;
+}
+.pc-assign__note {
+  resize: vertical;
+  min-height: 38px;
+}
+.pc-assign__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pc-assign__empty {
+  padding: 8px;
+  font-size: 12px;
+  color: var(--pc-plans-fg-muted);
+  text-align: center;
+}
+.pc-assign__member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 13px;
+  color: var(--pc-plans-fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+.pc-assign__member:hover {
+  background: color-mix(in oklab, var(--accent, #38bdf8), transparent 86%);
+}
+.pc-assign__member.is-selected {
+  background: color-mix(in oklab, var(--accent, #38bdf8), transparent 78%);
+  border-color: color-mix(in oklab, var(--accent, #38bdf8), transparent 40%);
+}
+.pc-assign__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.pc-assign__label {
+  flex: 0 0 auto;
+  font-weight: 550;
+}
+.pc-assign__intent {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--pc-plans-fg-muted);
+  font-size: 11px;
+}
+/* Offline member (P-016): a muted "offline" chip + a dimmed dot, so the picker
+   reads online-vs-offline at a glance (an offline pick parks until they return). */
+.pc-assign__offline {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--pc-plans-fg-muted);
+  background: color-mix(in oklab, var(--pc-plans-fg-muted, #94a3b8), transparent 86%);
+}
+.pc-assign__member.is-offline .pc-assign__dot {
+  opacity: 0.5;
+}
+.pc-assign__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.pc-assign__cancel,
+.pc-assign__confirm {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.pc-assign__cancel {
+  color: var(--pc-plans-fg-muted);
+  background: transparent;
+  border: 1px solid var(--pc-plans-border);
+}
+.pc-assign__confirm {
+  color: var(--bg-deeper, #06121a);
+  background: var(--accent);
+  border: 1px solid transparent;
+}
+.pc-assign__confirm:disabled,
+.pc-assign__cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Detail-card actions read as BUTTONS (owner ask 2026-07-16) ──────────────
+   In the item detail pane (left-sidebar Inbox + /adv Queue detail) the
+   AskChoiceCard options (Resolve / Discuss / named escalation choices) sat
+   full-width on a near-transparent ground and read like the info pills beside
+   them. Scoped to .pc-items__detail so chat surfaces keep their flat list
+   look. Frost tokens per the design-system baseline (bare buttons never
+   inherit a themed look). */
+.pc-items__detail .ask-choice-options {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pc-items__detail .ask-choice-option {
+  width: auto;
+  padding: 7px 13px;
+  border-radius: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  font-weight: 600;
+}
+.pc-items__detail .ask-choice-option:hover:not([data-disabled='true']) {
+  background: rgb(from var(--accent-strong) r g b / 0.14);
+  border-color: rgb(from var(--accent-strong) r g b / 0.45);
+  transform: translateY(-1px);
+}
+.pc-items__detail .ask-choice-option[data-style='primary'] {
+  background: rgb(from var(--accent) r g b / 0.16);
+  border-color: rgb(from var(--accent) r g b / 0.45);
+}
+.pc-items__detail .ask-choice-option[data-style='danger'] {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.38);
+}
+/* Single-select: drop the sparkles glyph — it reads as list-item decoration,
+   not a button. Multi-select keeps its checkbox square (role=checkbox). */
+.pc-items__detail .ask-choice-option:not([role='checkbox']) .ask-choice-option-icon {
+  display: none;
+}
+
+/* ── Plan inputs panel (plan-structured-inputs-2026-08-01 P-013) ─────────────
+   Renders only for a plan that declares an input schema, so it is absent from
+   most plans. Design-system tokens throughout — the danger/success rgba pairs
+   are the same literals the ask-choice rules above already use for the same
+   semantics, kept consistent rather than introducing a third shade. */
+.pc-plan-inputs {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+}
+.pc-plan-inputs__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0;
+  color: var(--fg-dim);
+}
+.pc-plan-inputs__badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.pc-plan-inputs__badge--ready {
+  background: rgba(74, 222, 128, 0.14);
+  border: 1px solid rgba(74, 222, 128, 0.4);
+  color: var(--fg);
+}
+.pc-plan-inputs__badge--blocked {
+  background: rgba(248, 113, 113, 0.12);
+  border: 1px solid rgba(248, 113, 113, 0.38);
+  color: var(--fg);
+}
+.pc-plan-inputs__refusal {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg);
+}
+.pc-plan-inputs__note {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+}
+.pc-plan-inputs__issues {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.pc-plan-inputs__fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pc-plan-inputs__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pc-plan-inputs__field--missing {
+  padding-left: 8px;
+  border-left: 2px solid rgba(248, 113, 113, 0.55);
+}
+.pc-plan-inputs__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.pc-plan-inputs__req {
+  margin-left: 3px;
+  color: rgb(248, 113, 113);
+}
+.pc-plan-inputs__desc {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--fg-dim);
+}
+.pc-plan-inputs__missing-tag {
+  font-size: 11px;
+  color: rgb(248, 113, 113);
+}
+.pc-plan-inputs__fields input[type='text'],
+.pc-plan-inputs__fields input[type='number'],
+.pc-plan-inputs__fields select,
+.pc-plan-inputs__fields textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-1);
+  color: var(--fg);
+  font-size: 12.5px;
+  font-family: inherit;
+}
+.pc-plan-inputs__fields textarea {
+  resize: vertical;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.pc-plan-inputs__fields input[type='checkbox'] {
+  align-self: flex-start;
+}
+.pc-plan-inputs__save {
+  margin-top: 12px;
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgb(from var(--accent) r g b / 0.16);
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.pc-plan-inputs__save:hover:not(:disabled) {
+  background: rgb(from var(--accent) r g b / 0.26);
+}
+.pc-plan-inputs__save:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ── Unified per-plan triggers tab (external-triggers P-017) ─────── */
+.pc-plan-triggers {
+  display: grid;
+  gap: 18px;
+  padding: 18px 0 28px;
+}
+.pc-plan-triggers__head,
+.pc-plan-triggers__group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.pc-plan-triggers__head h3,
+.pc-plan-triggers__group-head h4 {
+  margin: 0;
+}
+.pc-plan-triggers__head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.pc-plan-triggers__group {
+  display: grid;
+  gap: 9px;
+}
+.pc-plan-triggers__group + .pc-plan-triggers__group {
+  padding-top: 15px;
+  border-top: 1px solid var(--border);
+}
+.pc-plan-triggers__empty,
+.pc-plan-triggers__state {
+  padding: 18px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.pc-plan-triggers__state--error {
+  color: rgb(248, 113, 113);
+}
+.pc-plan-triggers__state button {
+  margin-left: 10px;
+}
+.pc-plan-dialog__field select,
+.pc-plan-dialog__field input[type='datetime-local'] {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-1);
+  color: var(--fg);
+}
+.pc-plan-manual-start {
+  width: min(720px, calc(100vw - 32px));
+}
+.pc-plan-manual-start .pc-plan-inputs {
+  margin: 0;
+}
+@media (max-width: 680px) {
+  .pc-plan-triggers__head,
+  .pc-plan-triggers__group-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+/* --- P-027: social platform constraints inside the trigger composer -------- */
+
+.pc-plan-dialog__note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: -2px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.pc-plan-dialog__note strong {
+  color: var(--fg);
+}
+
+/* An owner-side wall or an unverified write path: the binding can be attached,
+   but it cannot succeed yet. Distinct from an error — nothing has failed. */
+.pc-plan-dialog__warn {
+  color: var(--warn);
+}
+
+.pc-requirements { margin-top: 18px; overflow-wrap: anywhere; }
+.pc-requirements__flow { display: flex; flex-wrap: wrap; gap: 8px 24px; padding-left: 24px; }
+.pc-requirement { margin-block: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); }
+.pc-requirement > summary { padding: 12px; cursor: pointer; color: var(--fg); }
+.pc-requirement summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pc-requirement__state { display: inline-block; margin-left: 12px; color: var(--fg-dim); }
+.pc-requirement__body { padding: 0 14px 14px; }
+.pc-requirement__sections { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 20px; }
+.pc-requirement__sections > section { min-width: 0; }
+.pc-requirement h4 { margin: 16px 0 8px; color: var(--fg); }
+.pc-requirement p { margin-block: 8px; }
+.pc-requirement__prose, .pc-requirement pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.pc-requirement pre { max-height: 280px; overflow: auto; padding: 10px; background: var(--bg-deeper); }
+.pc-requirement dt { font-weight: 600; margin-top: 8px; }
+.pc-requirement dd { margin: 2px 0 0; }
+.pc-requirement__history { padding-left: 20px; }
+.pc-requirement__history > li { padding-block: 8px; border-bottom: 1px solid var(--border); }
+
+/* plan-item-provenance P-005 — per-item provenance chips + "What you asked for". */
+.pc-plan-prov { margin-block: 8px; }
+.pc-plan-prov__items,
+.pc-plan-prov__requests { list-style: none; margin: 4px 0; padding: 0; }
+.pc-plan-prov__items > li,
+.pc-plan-prov__requests > li { padding-block: 3px; }
+.pc-plan-prov__chip {
+  font-size: 0.8em;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-deeper);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.pc-plan-prov__chip--owner,
+.pc-plan-prov__chip--covered { border-color: var(--accent); color: var(--accent-strong); background: var(--accent-soft); }
+.pc-plan-prov__chip--unresolved,
+.pc-plan-prov__chip--rejected,
+.pc-plan-prov__chip--open { border-color: var(--warn); color: var(--warn); }
+.pc-plan-prov__quotes { margin: 4px 0 6px 16px; }
+.pc-plan-prov__quote { margin: 4px 0; padding: 4px 8px; border-left: 2px solid var(--border); }
+.pc-plan-prov__quote.is-owner { border-left-color: var(--accent); }
+.pc-plan-prov__excerpt { white-space: pre-wrap; color: var(--fg); }

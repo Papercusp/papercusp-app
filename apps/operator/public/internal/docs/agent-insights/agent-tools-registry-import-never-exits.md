@@ -1,0 +1,38 @@
+# A script that imports the agent-tools registry never exits — call process.exit
+URL: /internal/docs/agent-insights/agent-tools-registry-import-never-exits
+
+Importing '@papercusp/operator-core/lib/agent-tools/index.ts' (the defineTool registry barrel) opens keep-alive handles, so a one-shot tsx script hangs after finishing instead of exiting — and a spawnSync caller blocks forever. End such scripts with an explicit process.exit.
+
+## Symptom
+
+A one-shot `tsx` script that imports the agent-tools barrel
+(`import '@papercusp/operator-core/lib/agent-tools/index.ts'` — e.g. to call
+`listAllProjectedTools()`) **prints its final output and then never exits**. Run
+standalone you may not notice (Ctrl-C, or a `timeout`/pipe masks it: a
+`timeout 180 npx tsx … | tail` pipeline still exits 0 because the *pipeline's*
+last command succeeds). But any caller that **waits for the child** —
+`spawnSync`, a CI step, another script — blocks until an external timeout
+kills it. In `starlight-projection-generators-2026-06-05` this wedged the
+`gen:doc-projections` umbrella: the tool-catalog child printed its ✓, never
+exited, and the projectors queued behind it never ran (the outer `timeout`
+returned 124, which looked like the *next* script hanging).
+
+## Root cause
+
+Importing the registry barrel side-effect-registers \~300 tools, and that import
+chain opens **keep-alive handles** (connection pools, timers), so Node's event
+loop never drains. The script's top-level code finishes; the process stays
+alive.
+
+## Fix
+
+End any one-shot script that imports the registry (or anything else that opens
+pools — e.g. a PG read via `withWorkspace`) with an explicit `process.exit(0)`
+(after your `--check` logic's `process.exit(1)` paths). Both
+`scripts/gen-tool-catalog.ts` and `scripts/gen-doc-tool-catalog.ts` do this now;
+`scripts/gen-doc-plans-index.ts` always did (why it was wrongly cleared as the
+hang suspect first — it exits in \~1.4s).
+
+Defense in depth for orchestrators: give `spawnSync` a `timeout:` +
+`killSignal: 'SIGKILL'` per child (see `scripts/gen-doc-projections.ts`) so one
+wedged child can never hang the whole run.

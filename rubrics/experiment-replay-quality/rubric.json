@@ -1,0 +1,33 @@
+{
+  "rubricId": "experiment-replay-quality",
+  "title": "Experiment replay quality",
+  "characteristic": "experiment-replay",
+  "description": "Grades completed offline replay experiment results against the frozen replay judge dimensions so experiment outcomes become trendable scorecards.",
+  "methodRef": null,
+  "ratingScale": ["healthy", "degraded", "broken", "unknown"],
+  "criteria": [
+    {
+      "key": "d1",
+      "title": "Outcome quality",
+      "model": "The selected replay continuation achieves the task intent with correct, complete, verifiable work.",
+      "method": "Read the experiment result's replay D1 mean for the selected arm and compare it to the baseline context.",
+      "driftMarkers": "Selected-arm D1 is low, no selected arm has scored cells, or replay repeatedly selects arms that do not complete the task."
+    },
+    {
+      "key": "d2",
+      "title": "Process quality",
+      "model": "The selected replay continuation uses efficient, well-sequenced steps without thrash, redundancy, or destructive actions.",
+      "method": "Read the experiment result's replay D2 mean for the selected arm and inspect the score evidence.",
+      "driftMarkers": "Selected-arm D2 falls despite outcome gains, indicating the experiment is rewarding process debt."
+    },
+    {
+      "key": "d3",
+      "title": "Divergence value",
+      "model": "Where the selected continuation departs from the historical continuation, the departure helps rather than harms the task.",
+      "method": "Read the experiment result's replay D3 mean for the selected arm and the divergence signal summary.",
+      "driftMarkers": "Selected-arm D3 is low or unknown, especially when the experiment still chooses a winner."
+    }
+  ],
+  "version": "0.1.0",
+  "source": "first-party"
+}

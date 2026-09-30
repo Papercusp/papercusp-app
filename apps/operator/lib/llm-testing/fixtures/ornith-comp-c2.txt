@@ -1,0 +1,15 @@
+ornith COMPREHENSION-test fixture C2 — throwaway, safe to overwrite between runs.
+
+BUG: lastIndex(arr) must return the index of the LAST element of a non-empty
+array, but it returns the wrong number. Read it, understand the difference
+between an array's LENGTH and its last valid INDEX, and fix it so the
+expectations below pass. Change ONLY the one thing that is wrong.
+
+function lastIndex(arr) {
+  return arr.length;
+}
+
+EXPECTED after fix:
+  lastIndex([10, 20, 30]) === 2
+  lastIndex(["a"])        === 0
+  lastIndex([4, 4, 4, 4]) === 3

@@ -1,0 +1,19 @@
+{
+  "name": "@papercusp/fanout-resolver",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A generic, pure generative fan-out core. Resolve a fan-out spec (inline items / file-glob / SQL query — runners injected; or a `deferred` set produced later by an upstream producer) to a deduped, trimmed, capped item list, then expand a list into N deterministic-id children. Zero I/O, zero domain coupling — glob/SQL runners are injected; over-cap fan-out and resolver failures throw (FanoutCapError / FanoutResolverError) rather than silently truncating or yielding zero.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

@@ -1,0 +1,43 @@
+# dist-repo-huddle — DISTRIBUTED per-repo huddle coordination (benchmark-coordination-topologies).
+#
+# N peer workers self-claim from a shared queue (no Queen), but agents working tasks in the SAME repo
+# form an ad-hoc HUDDLE: they share repo-understanding + coordinate edits + peer-review within the
+# repo group. This is the OVERLAP case where peer coordination should pay off most (SWE-bench has
+# multiple tasks per repo). team:per-repo groups coordination by repo. Tests whether scoping
+# coordination to genuinely-overlapping work beats a flat global broadcast.
+id: dist-repo-huddle
+extends: base
+version: 0.1.0
+description: >-
+  Distributed per-repo huddle: N peer workers self-claim (no Queen); same-repo agents form a group
+  that shares repo-understanding + peer-reviews within the repo — coordination scoped to overlap.
+
+workItem:
+  kind: feature
+  idPrefix: W
+
+dispatch:
+  concurrency: 4
+
+spine:
+  # Priority order so same-repo tasks tend to cluster in flight (maximize huddle overlap).
+  claimModel: self-claim-priority
+  maxTurns: 200
+
+dependencies:
+  tools: []
+  packs: []
+  plugins: []
+  blueprints: []
+
+coordination:
+  broadcast: topic     # per-repo topic (the huddle channel); team:per-repo scopes it
+  review: peer         # peer-review WITHIN the repo huddle
+  sharedState: both
+  team: per-repo       # group coordination by repo — the overlap that makes comms worth it
+
+roles:
+  - id: worker
+    description: >-
+      A peer worker: self-claims a task, joins the huddle for its repo (shares repo-understanding with
+      same-repo peers, coordinates edits, peer-reviews within the group), and solves the task.

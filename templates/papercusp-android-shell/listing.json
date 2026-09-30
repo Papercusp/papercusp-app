@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-android-shell",
+  "id": "papercusp-android-shell",
+  "title": "Papercusp Official: Android Shell",
+  "description": "Aspect template: the Compose/Gradle/cargo-ndk chassis, Android-native acceptance, security, package, and release contract used by the official Android app root.",
+  "category": "shell",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

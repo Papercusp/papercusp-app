@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Papercusp Server — macOS LaunchDaemon (WI-475896).
+
+  This is the macOS counterpart of src-tauri/systemd/papercusp-server.service.
+
+  WHY A DAEMON AND NOT AN AGENT. The Server role previously auto-started only
+  through tauri_plugin_autostart's MacosLauncher::LaunchAgent. A LaunchAgent is
+  loaded into launchd's `gui/<uid>` domain, which exists only while a human is
+  logged in at the console. On a logged-out or freshly-rebooted Mac /dev/console
+  is owned by root, `launchctl` refuses the gui/501 domain, and the peer simply
+  never starts — which is how a two-machine federation link went silent on
+  2026-08-28 with no error anywhere. A LaunchDaemon is loaded from the `system`
+  domain at boot, needs no login of any kind, and is the only launchd domain
+  that actually delivers "the peer is up whenever the machine is up".
+
+  Keep the LaunchAgent for ordinary desktop users who want the Server to follow
+  their login session. This daemon is for the headless/always-on case.
+
+  TEMPLATE. Two values cannot be baked in because they are properties of the
+  installing machine, not of the package. install-launchdaemon.sh substitutes:
+    __PAPERCUSP_SERVICE_USER__  the account that owns the Papercusp state tree
+    __PAPERCUSP_SERVICE_HOME__  that account's home directory
+
+  HOME is set explicitly and deliberately. A LaunchDaemon starts with a minimal
+  environment, and `UserName` alone does NOT populate HOME — launchd leaves it
+  unset or pointing at /var/root. Every workspace path the sidecar resolves
+  hangs off HOME, so omitting it silently relocates the entire state tree.
+
+  NOT AT PARITY WITH THE SYSTEMD UNIT: systemd's StateDirectory=papercusp/controller
+  (mode 0700) has no launchd equivalent, so the controller state directory is
+  created by workspaces::shared_data_dir() at runtime instead of by the service
+  manager. See WI-475896 for whether the workspace-host controller resolver needs
+  a macOS-side deployment-contract input.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.papercusp.server</string>
+
+    <!-- Mirrors ExecStart=/usr/bin/papercusp-server --headless-service.
+         The flag is honoured on macOS only since 2026-08-28; before that the
+         headless branch in main.rs was #[cfg(target_os = "linux")] and this
+         invocation would have fallen through into a GUI launch and stalled. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/Papercusp Server.app/Contents/MacOS/papercusp-server</string>
+        <string>--headless-service</string>
+    </array>
+
+    <!-- Mirrors Environment="PAPERCUSP_SIDECAR_DIR=/usr/lib/Papercusp Server/sidecar".
+         The resource root is a packaging fact the installed binary cannot derive
+         from its own executable path. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PAPERCUSP_SIDECAR_DIR</key>
+        <string>/Applications/Papercusp Server.app/Contents/Resources/sidecar</string>
+        <key>HOME</key>
+        <string>__PAPERCUSP_SERVICE_HOME__</string>
+    </dict>
+
+    <!-- The shipped sidecar resolves prompt-assembly inputs relative to the
+         process CWD and fatals when started from anywhere else. launchd defaults
+         CWD to "/", so without this key the daemon boots its embedded Postgres
+         and then dies during prompt assembly. See EI-21708848218896947. -->
+    <key>WorkingDirectory</key>
+    <string>/Applications/Papercusp Server.app/Contents/Resources/sidecar</string>
+
+    <key>UserName</key>
+    <string>__PAPERCUSP_SERVICE_USER__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Mirrors Restart=on-failure: restart on a non-zero exit, but honour a
+         clean exit. run_headless_service() exits non-zero on every real failure
+         path, and stays resident while a discovered healthy operator survives. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Mirrors RestartSec=5s. -->
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <!-- Background QoS: this is a service, not a user-interactive app, and it
+         must not be pre-empted as if it were idle-only work. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- No StandardOutPath/StandardErrorPath on purpose. A root-created log file
+         is not writable by UserName, which silently loses exactly the FATAL
+         lines you need. launchd routes both streams to the unified log:
+           log show --predicate 'process == "papercusp-server"' --last 1h
+         The sidecar's own rotated logs remain at
+           $HOME/.papercusp/logs/serve.log  (WI-1707). -->
+</dict>
+</plist>

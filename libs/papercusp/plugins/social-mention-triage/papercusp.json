@@ -1,0 +1,112 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/social-mention-triage",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Starter trigger pack: an inbound social mention launches a plan that drafts a reply for review and never publishes it.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": { "mode": "exact" },
+  "capabilities": [],
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replyGuidance": {
+          "type": "string",
+          "title": "Draft guidance",
+          "default": "Concise, specific to the mention, and in the owner's own voice.",
+          "maxLength": 1000
+        },
+        "escalationGuidance": {
+          "type": "string",
+          "title": "What needs a human",
+          "default": "Flag anything hostile, legal, financial, or that would commit the owner to something they have not said.",
+          "maxLength": 1000
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 12,
+      "windowSeconds": 300
+    },
+    "targets": [
+      {
+        "id": "draft-mention-reply",
+        "kind": "plan",
+        "path": "plan.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trigger"],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey", "payload"],
+              "properties": {
+                "key": { "type": "string", "pattern": "^ext:(bluesky|mastodon):mention$" },
+                "source": { "type": "string", "enum": ["bluesky", "mastodon"] },
+                "event": { "const": "mention" },
+                "sourceId": { "type": "string", "minLength": 1 },
+                "externalId": { "type": "string", "minLength": 1 },
+                "dedupeKey": { "type": "string", "minLength": 1 },
+                "payload": {
+                  "type": "object",
+                  "datatype": "social-post",
+                  "additionalProperties": true,
+                  "required": ["id", "text"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "text": { "type": "string" },
+                    "author": { "type": "string" },
+                    "url": { "type": "string" },
+                    "replyToId": { "type": "string" },
+                    "occurredAt": { "type": "string" }
+                  }
+                }
+              }
+            },
+            "replyGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "Concise, specific to the mention, and in the owner's own voice."
+            },
+            "escalationGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "Flag anything hostile, legal, financial, or that would commit the owner to something they have not said."
+            }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "bluesky-mention-to-draft",
+        "source": { "kind": "external", "sourceKind": "bluesky" },
+        "target": "draft-mention-reply",
+        "eventPattern": "ext:bluesky:mention",
+        "filter": {
+          "all": [{ "id": { "exists": true } }, { "text": { "exists": true } }]
+        },
+        "mapping": { "mode": "payload-context" }
+      },
+      {
+        "id": "mastodon-mention-to-draft",
+        "source": { "kind": "external", "sourceKind": "mastodon" },
+        "target": "draft-mention-reply",
+        "eventPattern": "ext:mastodon:mention",
+        "filter": {
+          "all": [{ "id": { "exists": true } }, { "text": { "exists": true } }]
+        },
+        "mapping": { "mode": "payload-context" }
+      }
+    ],
+    "edges": []
+  },
+  "icon": "AtSign"
+}

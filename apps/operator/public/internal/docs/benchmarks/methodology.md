@@ -1,0 +1,463 @@
+# Methodology — the controlled comparison
+URL: /internal/docs/benchmarks/methodology
+
+
+
+import { Aside } from '@astrojs/starlight/components';
+
+This describes the protocol, not results. Every quantitative claim is a
+`TBD-after-pilot` placeholder until the pilots run (`P-009` for the L1 per-task
+floor; `P-032` for the L2–L4 pot-backlog layer). The fleet-layer instruments are now
+grounded in the pot-instrument feasibility spike (**D-011**, the fleet-layer analog
+of the L1 grader spike D-008). **Any cited third-party number (the MAST baseline, any
+prior-art figure) MUST be re-confirmed verbatim against its source at publication
+time** — an unsourced quantitative claim in an impartiality doc is a credibility risk
+(D-011 §4). Nothing is published before owner sign-off (`P-017`).
+
+This is the long-form companion to the [overview](/internal/docs/benchmarks/). It
+specifies what is held constant, the measurement layers, the arms and baselines, the
+cost model, contamination handling, the grader interface, the locked run-result
+schema, and how the whole thing maps onto Papercusp machinery. The operational re-run
+steps are in the reproducer README (`benchmarks/README.md`).
+
+## What we benchmark: the Pot, not the per-task harness
+
+Per the **D-010 reframe**, the subject under test is the **Pot** — the **Mug**
+(autonomous placement, ranking, eviction, and warm-inject) operating over a **cup
+fleet** that shares the coordination substrate (`coord:*`, `locks:*`,
+`work_items:*`, `messages:*`). The per-task `coding` pipeline is a conventional
+multi-role spine and is *not* the differentiator; the Pot's autonomous
+orchestration over a whole backlog is.
+
+The per-task build wave is **not wasted** — it is the **L1 competence floor** and
+the **atomic unit the fleet places**. Everything the field already agrees on for
+single-task agent evaluation (`Agent = Model + Harness`, hold the model constant,
+vary the system) holds at L1; the Pot layers add the fleet dimension on top.
+
+> Holding the model constant, the **Pot** drains a real backlog of public tasks
+> faster, cheaper-per-task, with more value captured under a fixed budget, and with
+> fewer coordination failures than the **same fleet with the Mug ablated** — and
+> its per-task floor matches or beats the provider's native harness.
+
+## The five measurement layers
+
+| Layer                       | What it measures                                                                        | Headline comparison                                              | Instruments                                                                                                |
+| --------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **L1 competence floor**     | Per-task resolve rate (pass\@1)                                                         | Papercusp spine vs native harness / ablation / best-of-N         | SWE-bench Pro, Terminal-Bench (external graders)                                                           |
+| **L2 throughput**           | Wall-clock speedup, tasks/$, backlog-drain time, autonomy (% done with zero human gate) | **Pot vs Mug-ablated fleet**                                     | Whole benchmark as a backlog; speedup is *our own measured* number (no public throughput benchmark exists) |
+| **L3 value-capture**        | $ captured under a **fixed budget**                                                     | **Pot vs Mug-ablated fleet**                                     | SWE-Lancer ($-weighted, built-in grading); UpBench *not currently runnable* (P-029)                        |
+| **L4 coordination-quality** | Duplication / coordination-breakdown / misalignment rates                               | Pot vs the published MAS baseline **and** vs other orchestrators | MAST failure taxonomy over rollout + coordination traces                                                   |
+| **L5 long-horizon**         | Multi-step sequencing under one backlog                                                 | Pot vs Mug-ablated fleet                                         | RoadmapBench, SWE-EVO                                                                                      |
+
+L2–L4 are the differentiated claims; **L4 (coordination quality) is the most
+differentiated *and* most impartial** Pot claim — see [below](#l4-coordination-quality-the-mast-taxonomy).
+The exact metric names, MAST scoring rubric, and value-capture mechanics are owned by
+`P-025` (throughput), `P-026` (MAST), and `P-027` (value-capture); the instrument
+feasibility (licenses, grading, integration cost) is settled by `P-029` / **D-011**
+(`apps/operator/docs/pot-instrument-feasibility-2026-06-15.md`).
+
+**Grading-tier principle (D-011 §5):** *automated-graded sets carry the headline;
+judge/rubric-graded sets are diagnostics.* SWE-bench Pro / Terminal-Bench / SWE-Lancer
+(automated, external) carry L1/L3 headlines; the MAST LLM-judge (L4) and MARBLE
+milestone-KPIs are coordination-quality diagnostics, reported alongside but never *as*
+the headline pass/fail.
+
+## The arms
+
+The arm an entity plays is carried verbatim on every run-result row. **Both the L1 and
+the fleet-layer arm vocabularies are now locked** in `@papercusp/bench-metrics`: the L1
+vocab on the per-task `TaskRunResult`, the fleet vocab (`pot` · `mug-ablated` ·
+`native-serial` · `openhands-async` · `crewai` · `langgraph`) on the `FleetRunSummary`.
+
+### L1 per-task arms (locked vocab)
+
+* **`papercusp`** — the full coding-factory spine (scoper → architect → worker →
+  validator → reviewer → documenter → curator) run as a throwaway harness. This is the
+  `external-bench` blueprint, which **`extends: coding-factory` and overrides nothing**
+  (D-009) — so a fairness auditor confirms *"the benchmark arm is the shipped
+  product"* by diffing `external-bench` against `coding-factory` (the shipped default
+  coding-factory spine). Note: after the generic-pot refactor
+  (`domain-generic-pot-architecture-2026-06-18`), `coding` is a generic mug-decider
+  pot parent (`extends: base`) and the classic per-feature-director spine now lives in
+  `coding-factory` — so `coding-factory`, not `coding`, is the parent that diff must
+  compare against.
+* **`baseline-a-ablation`** — the spine collapsed to a single worker (`coding-solo`,
+  which `extends: single-agent`): identical tools / model / infra / budget, the
+  **only** difference being orchestration OFF vs ON. Both arms are spun by **one
+  shared `instantiateBenchHarness` port**, differing **only by `blueprintId`** — so
+  any L1 delta is attributable to coordination itself.
+* **`baseline-b-native`** — the same model in its **own provider harness** (Claude in
+  Claude Code), elicited to its best (the standalone native runner, *not* the
+  single-worker primitive — it spawns the `claude` CLI's own agent loop). Under the
+  reframe this is the **L1 / serial-backlog floor**, not the headline.
+* **`baseline-c-bestofn`** — a single agent sampled N times with a test-verifier at a
+  matched token budget; proves the per-task tokens are justified. The verifier is
+  **visible-only by construction**: it receives a `VisibleTask` with `graderMeta`
+  stripped, so it literally cannot read `FAIL_TO_PASS` / the test patch / the grader —
+  it gates on repo-native existing tests + a repro authored from the problem statement.
+  This keeps best-of-N from peeking at the held-out grader.
+
+### Fleet-layer arms (locked vocab)
+
+Each emits one `FleetRunSummary` per backlog run (`runId`, `suite`, `arm`, `tasks`,
+`resolved`, `wallClockMs`, `costUsd`, `tokensTotal`, `tasksZeroHumanGate`,
+`peakConcurrency?`); the per-task atomic unit stays the locked `TaskRunResult`.
+
+* **`pot`** (treatment) — a **fleet driver** hands the *whole task SET* to a Pot as a
+  backlog; the Mug places/ranks/evicts and cups run the per-task L1 unit. Bound at the
+  pilot via `setBenchHarnessDriver`, exactly like every other arm.
+* **`mug-ablated`** (the **NEW HEADLINE baseline**, P-023) — the *same* cup fleet and
+  the *same* per-task unit, but with a **naive FIFO / round-robin scheduler** in place of
+  the Mug's intelligent placement. The delta between the `pot` arm and this baseline
+  **is the Mug's value**, measured apples-to-apples inside our own system. This
+  supersedes the headline half of D-002.
+* **`native-serial`** (P-024) — one Claude Code session draining the whole backlog; the
+  serial-throughput floor and the **speedup denominator** (`buildHiveReport` computes
+  every arm's `speedupVsSerial` against it).
+* **`openhands-async` · `crewai` · `langgraph`** (P-028) — competitor orchestrators over
+  the same backlog + external grader; the *"vs other multi-agent systems"* comparison,
+  especially for the L4 coordination claim.
+
+## Fairness protocol — what is held constant
+
+Every arm in a comparison gets an **identical environment**; only the harness /
+orchestrator changes. Held constant across **every** arm:
+
+* **Model** — exact model id + reasoning-effort + temperature + max-tokens.
+  (Exception: `baseline-b-native` runs at **Claude Code's native sampling** — the
+  `claude-code` backend deliberately ignores our temperature/max-tokens, because
+  *native = native* is the whole point of the strawman-proof baseline. It is
+  turn/wall-clock-capped and post-hoc-normalized instead of token-capped.)
+* **Base tool capabilities** — read / edit / bash / test-exec / search.
+* **Web access** — on or off, the *same* for all arms.
+* **Task instances** — the exact same public task set and splits.
+* **External grader** — the *same* `OfficialGrader` instance + pinned `graderVersion`
+  grades all arms for a given task/seed.
+* **Infra-failure retry policy** — identical (an image-pull failure is not a task
+  failure; see `grader_error`/`generation_status` below).
+* **Automation level** — no human gate for any arm (autonomy itself is *measured* at
+  L2, not differentially granted).
+
+**Vary only the harness / orchestrator.** At L1 the variable is the spine; at L2–L5
+the variable is the Mug.
+
+There is **no off-the-shelf public fleet-throughput benchmark**. So impartiality at
+L2–L5 rests on four legs: public **tasks**, the benchmark's **external grader** (or
+SWE-Lancer's automated E2E $ grading), the **Mug-ablation baseline** (an
+apples-to-apples control *inside our own system* — same fleet, same workers, same
+substrate, only the scheduler differs), and **pre-registration**. The Mug-ablation
+delta is the honest, un-spinnable measure of what the Mug adds.
+
+## The L1 baselines — run all three
+
+At the competence floor, three baselines each close a hole a skeptic would otherwise
+walk through:
+
+* **A (ablation)** proves the architecture is the cause (orchestration is the only
+  variable).
+* **B (native harness)** proves the floor matches/beats the best real single-agent
+  alternative — and is immune to *"you nerfed the baseline"* because it is the
+  provider's own shipped agent, elicited to best.
+* **C (best-of-N)** proves the per-task tokens are justified at matched budget.
+
+Elicit each baseline's *best* performance — recommended config, full tool access,
+chain-of-thought, retries — and fix "spurious" failures rather than scoring them. The
+tell: **if a baseline fails even easy tasks, the elicitation is broken, not the
+baseline.** Never hand a baseline a worse setup than we'd give ourselves. This applies
+equally to the Mug-ablated fleet and the competitor orchestrators (P-028) — run them
+to *their* best.
+
+## Cost model — the load-bearing control
+
+A multi-agent system (and a whole fleet even more so) spends more tokens. *"We win"*
+must never secretly mean *"we spent 7×."*
+
+* **L1 — iso-budget + cost/accuracy Pareto.** Cap every arm at the same generation
+  budget; plot the cost-vs-resolved frontier with **all coordination overhead counted
+  inside our own cost number**; match against best-of-N.
+* **L2 — tasks/$ and $/task** across the whole backlog drain, Pot vs Mug-ablated
+  fleet.
+* **L3 — value captured under a FIXED budget** — the Mug must turn a budget into
+  more graded $ of completed work than the naive scheduler.
+* **The accounting rule everywhere:** `tokens_total` is the **sum over every agent and
+  role** — every Mug decision, every cup, every hand-off, every coordination message
+  (and for best-of-N, all N candidates + the verifier). Under-counting coordination
+  overhead is the single easiest way to fake a win, so the suite counts it all and
+  reports *"net of all coordination overhead, better per dollar."* `cost_usd` is
+  **derived** from raw tokens at emit time via `priceRun()` against a pinned
+  `price_table_version`; tokens are canonical, dollars are re-derivable.
+
+### Statistics
+
+* **pass\@1 averaged over ≥3 seeds with confidence intervals** — these benchmarks are
+  noisy; a single sample is not a result.
+* **The *same* pass\@k protocol on every arm** — never our-pass\@5 vs their-pass\@1.
+* A run is **scoreable** only if `generation_status='completed'` **and**
+  `grader_status ∈ {passed, failed}` (so `resolved` is non-null). Infra rows
+  (generation error/timeout/budget-exhausted, or grader error/timeout) set
+  `resolved = NULL`, are **excluded from accuracy**, and are reported as separate
+  counts — METR says retry first, never score an infra failure as a genuine fail.
+
+## L2 throughput & L3 value-capture
+
+**L2 — throughput.** Hand the *whole* benchmark to the Pot as a backlog and measure
+wall-clock speedup, tasks/$, backlog-drain time, and autonomy (% completed with zero
+human gate) against the Mug-ablated fleet and the native serial floor (`P-024`).
+There is **no public fleet-throughput benchmark**, so the **speedup is our own measured
+number** — impartiality comes from public tasks + the external grader + the
+Mug-ablation control + pre-registration, never from a borrowed throughput score. The
+closest published analog is **OpenHands async / CAID** (arXiv 2603.21489 — dependency-aware
+concurrent branch-and-merge, the nearest prior art to a Mug+fleet); cite it for the
+*architecture*, **not** as a speedup source — it (and the OpenHands async-SWE blog)
+report **accuracy** gains, not throughput multipliers (D-011 §4). It also notes returns
+diminish once agent count exceeds the number of parallelizable subtasks — a result our
+own throughput curve should expect to reproduce.
+
+**L3 — value-capture.** Under a **fixed budget**, measure the dollar value of completed
+work the Mug's placement captures versus the naive scheduler. The runnable instrument
+is **SWE-Lancer** (arXiv 2502.12115 — $1M of real freelance SWE tasks, public,
+**automated end-to-end test grading**), which reuses the L1 M1 diff→grader path
+directly (`P-027`). **UpBench** (arXiv 2511.12306) is proprietary to Upwork and
+**human-graded per submission** — not programmatically re-runnable — so it is cited as
+economic-framing motivation only, never run (D-011 §1).
+
+## L4 coordination-quality (the MAST taxonomy)
+
+The most differentiated and most impartial Pot claim — because *someone else* defined
+what counts as a coordination failure. The **MAST failure taxonomy** (arXiv 2503.13657,
+NeurIPS 2025; built from 1,600+ annotated traces across 7 MAS frameworks) defines
+**14 failure modes in 3 categories**: (i) **system-design**, (ii) **inter-agent
+misalignment**, (iii) **task verification**. The paper's headline finding — multi-agent
+systems fail a large fraction of the time in production, with substantial
+token/role-duplication and inter-agent-misalignment rates — is the third-party baseline
+we report against.
+
+1. **License — re-implement, don't run their code.** The MAST repo has **no declared
+   license**. Citing the published numbers + methodology is fair use; **running their
+   LLM-judge notebook or redistributing derived results is not clean.** So we
+   **re-implement the published 14-mode / 3-category rubric through our own LLM-judge**
+   — this sidesteps the license entirely *and* keeps the metric impartial (the taxonomy
+   is fully published).
+2. **Verify the figures verbatim.** The exact baseline percentages (MAS-failure rate,
+   duplication, misalignment) must be re-confirmed against arXiv 2503.13657v2 at
+   publication time — **never paraphrased loosely** in an impartiality doc.
+3. **Trace schema is a cross-brief dependency.** `P-010`'s rollout/coordination-event
+   capture must emit our fleet events (locks, `work_items` dedup / redundancy-judge,
+   durable hand-offs, misalignment) in a **MAST-convertible shape**; `P-026` scores
+   them.
+
+The metric has **two legs** (`scoreMast({ arm, tasks, trace, verdicts }) → MastReport`,
+locked in `@papercusp/bench-metrics`):
+
+* **Objective substrate-signal rates — no judge at all.** From the raw `CoordEvent`
+  trace, `substrateSignalRates()` counts *mechanical* failure signals the substrate
+  emits directly: `duplicate_completion`, `orphaned_claim`, `stranded_item`,
+  `lost_handoff`, `claim_conflict`, `superseded_work`, `rework`. These are the most
+  impartial coordination numbers we have — they involve no model judgment, just counts
+  of events the fleet already records.
+* **The LLM-judge per-category rates** — our re-implementation of the 14-mode rubric
+  emits `MastVerdict[]` (`{ mode, failed, taskId? }`) scored into `MastReport.byCategory`
+  (the 3 categories).
+
+We report both against three references: (1) the **published MAS baseline** —
+`MastReport.masBaselineBand` carries the `[0.41, 0.86]` reference band (third-party
+numbers, impartial by construction — re-confirm verbatim before publishing); (2) the
+**Mug-ablated fleet** (our own naive scheduler); (3) **other orchestrators** (P-028 —
+`openhands-async` / `crewai` / `langgraph`; with MultiAgentBench/MARBLE, MIT-licensed,
+cited for its topology framing — the Mug as a *learned* scheduler vs MARBLE's fixed
+star/chain/tree/graph topologies).
+
+The Papercusp substrate is built to suppress exactly these failure modes — `locks`
+(no duplicate edits), `work_items` dedup / redundancy-judge (no duplicate work),
+durable hand-offs (no dropped context) — so this layer measures the substrate's
+designed-for benefit directly. As a **judge/signal-graded** metric it is a
+coordination-quality *diagnostic*, reported alongside the automated-graded headlines,
+never as one.
+
+## Contamination handling
+
+The 2026 lesson (D-006): **SWE-bench Verified is effectively retired** — OpenAI
+stopped reporting it on 2026-02-23 after an audit found **59.4% of the hardest
+problems had flawed/unsolvable tests**, and every frontier model shows contamination
+(models at \~80% on Verified drop to \~23% on contamination-resistant Pro). Verified is a
+legacy footnote only; same for HumanEval/MBPP (saturated) and LiveCodeBench
+(contamination-free but *model*-level, not harness-level).
+
+Defenses, in order of strength:
+
+* **Contamination-resistant headline sets** — SWE-bench Pro and Terminal-Bench 2.0.
+* **Fresh / live sets** (the strongest lever) — SWE-rebench (\~21k auto-mined
+  *post-cutoff* issues) and SWE-bench-Live (weekly auto-updating).
+* **Pre-registration** — each run config is committed to git **before** the run
+  (see [pre-registration](#pre-registration--reproducibility)).
+* **Gym ↔ report firewall** (D-005, enforced in code + CI) — the realized mechanism
+  is `packages/operator-core/lib/gym/report-set-firewall.ts`: the gym's optimize-on
+  sets (`gym-synthetic`, `gym-real-anchor`) and the report-on suites
+  (`REPORT_ON_SUITES`) are declared, **statically proven disjoint in CI**, and the
+  gym's task-ingestion choke point (`insertTask`) refuses any task that fingerprints
+  to a report-on benchmark (`taskFingerprint` normalizes repo\@commit across URL
+  variants). `REPORT_ON_SUITES` is also the canonical `suite` vocabulary for the
+  run-result row, so the firewall and the results schema cannot drift.
+* **Hardened graders** — prefer graders augmented against false-positive passes
+  (UTBoost-style); drop flawed-grader benchmarks from the headline.
+
+## The benchmark must EXERCISE coordination
+
+The coordination advantage only shows up when there is something to coordinate. A
+single 3-line bug fix exercises neither the spine (L1) nor the Mug (L2–L5). So the
+suite is **weighted toward long-horizon, multi-file, decomposable backlogs** (SWE-EVO,
+RoadmapBench, the harder SWE-bench Pro instances) where current single agents are weak
+— e.g. GPT-5.4 + OpenHands gets only \~25% on SWE-EVO. That headroom is where both the
+spine and the Mug should open a visible, attributable gap.
+
+## Grading — the official harness is arm-agnostic
+
+The **generation** half is arm-specific; the **grading** half is byte-for-byte
+identical across arms or the comparison is unfair. We normalize to one interface
+(D-008) with two backends chosen per benchmark family:
+
+```
+ArmSubmission  →  OfficialGrader.grade()  →  GradeResult
+```
+
+### Modality M1 — offline diff-batch (SWE-bench Pro, SWE-rebench, SWE-bench-Live)
+
+The arm produces a **unified diff** per task; grading is a **separate, arm-agnostic
+Docker batch** over a predictions JSON. The clean, fair, easy path — the **pilot
+backbone**.
+
+* **Generation:** clone the repo `@ base_commit` → `instantiateBenchHarness` (the
+  `external-bench` or `coding-solo` blueprint) with `problem_statement` as the
+  work\_item brief → run to DONE under the iso-budget cap → extract the final `git diff`
+  (excluding grader-supplied test files) → emit `{ instance_id, patch, prefix }`
+  (`prefix` = seed).
+* **Grading:** the benchmark's own batch CLI pulls the per-instance prebuilt image,
+  applies the patch, runs the repo tests, and reports **resolved** on the SWE-bench
+  rule — **all `FAIL_TO_PASS` pass AND all `PASS_TO_PASS` still pass.** Grading is a
+  pure function of the predictions JSON: it runs long after generation, re-runs freely,
+  and is identical for every arm.
+
+### Modality M2 — online in-container (Terminal-Bench 2.0 / Harbor, Harness-Bench)
+
+No diff: the agent mutates a benchmark-provided sandbox and grading runs *in that same
+sandbox*. The harness attaches to an externally-owned environment and routes its tools
+into it (an exec shim). `resolved` is the verifier's pass/fail; no
+`FAIL_TO_PASS`/`PASS_TO_PASS` split.
+
+Harbor ships first-class adapters for Claude Code, Codex CLI, OpenHands, Mini-SWE-Agent
+and Terminus 2. So `baseline-b-native` on Terminal-Bench is essentially
+`--agent claude-code`, and the competitor orchestrators (P-028) likewise plug in via
+Harbor — a strong reason to make Terminal-Bench the second family after SWE-bench Pro.
+
+## Harness-Bench — methodology citation now, full run deferred
+
+Harness-Bench (arXiv 2605.27922) is purpose-built for exactly our question — it fixes
+task/budget/timeout/grader and varies only the harness — so we **cite its methodology
+and findings as third-party air cover**. The feasibility spike (D-008, §6) found the
+adapter is tractable (`clawbench_v2`, lightest of the three, no Docker) **but** only
+**28 of 106 tasks are public** and the repo has **no committed license**. Disposition
+(`P-014`): cite the methodology now; build the adapter opportunistically; run the
+28-task subset only as an internal cross-check, clearly labeled partial /
+unaudited-license; **defer the full 106-task headline run** until upstream publishes the
+complete set + a redistribution license.
+
+## Fairness traps and their mitigations
+
+| Trap                                          | Mitigation                                                                                                                                        |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Strawman baseline**                         | L1: native harness (B) + ablation (A) elicited to best (METR). L2–L5: the Mug-ablated fleet + competitor orchestrators, each run to *their* best. |
+| **Hidden compute advantage**                  | Iso-budget (L1) + tasks/$ (L2) + value-under-fixed-budget (L3); coordination overhead counted in *our* `tokens_total`.                            |
+| **"Better plumbing" confound**                | Ablation (A) and the Mug-ablation baseline hold tools/workers/substrate identical, so any delta is purely orchestration / the Mug.                |
+| **No public fleet-throughput benchmark**      | Public tasks + external grader + the within-system Mug-ablation control + pre-registration (the honesty caveat above).                            |
+| **Contamination / tune-to-test**              | Pre-registration + the gym↔report firewall (statically CI-proven) + fresh/live sets.                                                              |
+| **Coordination not exercised**                | Long-horizon, decomposable backlog weighting.                                                                                                     |
+| **Coordination claims unfalsifiable**         | L4 uses the *published* MAST taxonomy + third-party MAS baseline, not a metric we invented.                                                       |
+| **Flawed grader tests** (the Verified lesson) | Hardened/augmented graders; Verified dropped as a headline.                                                                                       |
+| **Noise**                                     | Multi-seed + confidence intervals; the same pass\@k protocol on every arm.                                                                        |
+
+## How it maps onto Papercusp machinery
+
+* **L1 per-task unit** — `external-bench` (`extends: coding-factory`, overrides nothing =
+  `papercusp` arm) and `coding-solo` (`extends: single-agent` = ablation arm); one
+  shared `instantiateBenchHarness` port (`external-bench/run-loop.ts`), arms differ
+  only by `blueprintId`. The clone→diff→grade→emit loop is `arm-generation.ts`
+  (`P-005`), **not** a blueprint op (D-009 — there is no `external-bench:run`).
+* **The Pot arm + Mug-ablated fleet** — a **fleet driver** over the backlog
+  (`P-022` / `P-023`), bound at the pilot via `setBenchHarnessDriver` like every other
+  arm. The Mug ablation swaps intelligent placement for a naive FIFO scheduler.
+* **Metrics** — `@papercusp/bench-metrics` (`P-011`): `buildSuiteReport(rows)`,
+  `aggregateArm`, `priceRun`; extended with fleet metrics by `P-025` (throughput) and
+  `P-026` (MAST).
+* **The UI** — the workspace-scoped **Evaluation** dock tab (D-007), a *reader* over the
+  runs, with subtabs **External benchmarks · Throughput · Value · Coordination ·
+  Internal trends · Report** (`P-030`), built on the shared `eval-viz` components
+  (`apps/operator/app/eval-viz/`: `Frontier`, `Compare`, plus throughput bars / MAST
+  breakdown / value-capture curve from `P-030`).
+* **Gym firewall** — `report-set-firewall.ts`, enforced in code + CI (D-005).
+
+## Pre-registration & reproducibility
+
+Reproducibility is a first-class commitment (D-005). The mechanism is the locked
+schema's three tables (`P-010` / migration `291`):
+
+* **`benchmark_prereg`** — the run config, committed to git **before** the run, keyed
+  by `prereg_hash` (sha256 of the canonical config). Every run-result row's
+  `prereg_hash` **must** match a prereg row whose git commit *predates* the rollouts —
+  `verifyPreregistration()` checks history + hash + ordering. This is the tune-to-test
+  firewall, made checkable rather than promised.
+* **`benchmark_rollout`** — the **Rollout Card** (the published unit of
+  reproducibility): full `config_snapshot`, model/harness versions + git SHA,
+  `env_fingerprint`, structured + **verbatim** raw grader output, the submission, and
+  the trajectory ref.
+* **`benchmark_run_result`** — the scoreable + provenance row that the metrics lib
+  aggregates.
+
+Artifact layout (the reproducer README points here): pre-registrations at
+`benchmarks/preregistrations/<run_id>.json`; published rollout bundles at
+`benchmarks/rollouts/<run_id>/<arm>/<suite>__<task_id>__seed-<n>.json` +
+`benchmarks/runs/<run_id>/manifest.json`. **PG is canonical; the files are the
+publication export.**
+
+## The run-result schema (LOCKED v1)
+
+One row per `(run_id, suite, task_id, arm, seed)` — `UNIQUE` on that tuple, so re-emit
+is idempotent. **All arms/runners emit through one function** —
+`emitRollout(input) → { rollout_id, run_id }`
+(`packages/operator-core/lib/external-bench/reproducibility/emit.ts`) — which writes
+the run-result row **and** the rollout card in one transaction, derives `cost_usd` via
+`priceRun()`, and fires `notifySyncInvalidate('evals.runs', …)`.
+
+| field                                       | source  | meaning                                                                                           |
+| ------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------- |
+| `rollout_id` / `run_id`                     | emit    | row PK / the run grouping                                                                         |
+| `prereg_hash`                               | runner  | must match a `benchmark_prereg` row (tune-to-test firewall)                                       |
+| `suite`                                     | runner  | `swe-bench-pro` / `terminal-bench` / … (= `REPORT_ON_SUITES`)                                     |
+| `task_id` / `seed` / `modality`             | runner  | task, seed (≥3), `diff` \| `in-container`                                                         |
+| `arm`                                       | runner  | locked L1 vocab + fleet arms (see [arms](#the-arms))                                              |
+| `generation_status`                         | runner  | `completed` \| `error` \| `timeout` \| `budget_exhausted`                                         |
+| `resolved` (**nullable**)                   | grader  | headline pass/fail; `NULL` ⇒ infra, excluded from accuracy                                        |
+| `grader_status`                             | grader  | `passed` \| `failed` \| `error` \| `timeout` \| `skipped`                                         |
+| `grader_family` / `grader_version`          | grader  | pinned grader identity (pre-registration)                                                         |
+| `grader_error`                              | grader  | infra failure, **distinct** from `resolved=false`                                                 |
+| `tokens_in` / `tokens_out` / `tokens_total` | runner  | `tokens_total` = **sum over ALL roles / candidates + verifier**                                   |
+| `tokens_cache_read` / `tokens_cache_write`  | runner  | cache tokens (material to $ on Opus)                                                              |
+| `cost_usd` / `price_table_version`          | derived | `priceRun()` at emit; tokens canonical, $ re-derivable                                            |
+| `wall_clock_ms` / `turns`                   | runner  | generation wall-clock; agent turns                                                                |
+| `budget_tokens` / `capped`                  | runner  | iso-budget cap (**generation only**) + whether it bound                                           |
+| `model_id` / `harness_version`              | runner  | exact versions                                                                                    |
+| `arm_meta` (jsonb)                          | runner  | per-arm extras (best-of-N `{n, candidates, verifier_tokens}`; fleet/coordination events for MAST) |
+
+The authoritative types live in `@papercusp/bench-metrics` (`TaskRunResult`, `P-011` —
+`libs/generic/bench-metrics/src/schema.ts`, re-exported from the package root) and
+`packages/operator-core/lib/external-bench/reproducibility/` (the rollout + prereg
+records + `emitRollout`, `P-010`), backed by migration
+`291-benchmark-reproducibility.sql`. The L2 pot layer adds `emitFleetRun` /
+`emitCoordEvents` (`reproducibility/fleet.ts`) and migration
+`292-benchmark-pot-layer.sql`. **Naming:** the schema table above lists the PG column
+names (snake\_case); the `@papercusp/bench-metrics` `TaskRunResult` TS fields are the
+camelCase equivalents (`tokens_total` ↔ `tokensTotal`, `cost_usd` ↔ `costUsd`,
+`generation_status` ↔ `generationStatus`), and `emitRollout` returns
+`{ rolloutId, runId }` in TS. Sync reads: `evals.suites` + `evals.runs` + `evals.fleet`
+
+* `evals.coordTrace` (`P-010`), `evals.report` = pass\@1 / CI / Pareto / delta (`P-011`).
+  This table is the documented contract, kept in sync with that code.

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# vite-watch-singleton — EI-306 guard: exactly ONE `vite build --watch` may
+# own this package's shared dist/ at a time.
+#
+# Two concurrent watchers (typically an orphan from a dead e2e/tauri session
+# racing the live one) interleave their writes into the single dist/ and a
+# fresh :3170 page load serves a PARTIAL bundle — missing chunks / components
+# that look exactly like app bugs (EI-306, 2026-06-11). This wrapper turns
+# that silent corruption into a loud, diagnosable refusal:
+#
+#   - The watcher holds an exclusive flock on $VITE_WATCH_LOCK for its whole
+#     lifetime (the lock fd is inherited across exec, so it releases exactly
+#     when the watcher process tree dies — orphans keep holding it, which is
+#     the point: they are detected, not raced).
+#   - A second invocation REFUSES with the holder's pid and a pointer here.
+#     Your edits are already being picked up by the running watcher.
+#   - VITE_WATCH_REPLACE=1 kills the current holder(s) and takes over —
+#     inode-scoped via `fuser -k` (kills exactly the processes holding the
+#     lock file open; never a name-pattern kill).
+#
+# Test seam: VITE_WATCH_CMD overrides the real vite invocation so the lock
+# mechanics can be exercised with a harmless long-running command
+# (src/__tests__/vite-watch-singleton.test.ts).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+LOCK="${VITE_WATCH_LOCK:-/tmp/papercup-operator-vite-watch.lock}"
+CMD="${VITE_WATCH_CMD:-npx vite build --watch --mode development}"
+
+# Append-open: never truncate a live holder's pid record.
+exec 9>>"$LOCK"
+if ! flock -n 9; then
+  HOLDER="$(head -n 1 "$LOCK" 2>/dev/null || true)"
+  if [ "${VITE_WATCH_REPLACE:-0}" = "1" ]; then
+    echo "[vite-watch-singleton] replacing the running watcher (pid ${HOLDER:-unknown}) — VITE_WATCH_REPLACE=1" >&2
+    # Drop our own handle first so fuser -k can't kill us, then kill every
+    # process actually holding the lock file open (inode-scoped — handles the
+    # npm → npx → vite chain regardless of which pid the record names).
+    exec 9>&-
+    fuser -k -TERM "$LOCK" >/dev/null 2>&1 || true
+    acquired=0
+    for _ in $(seq 1 40); do
+      exec 9>>"$LOCK"
+      if flock -n 9; then acquired=1; break; fi
+      exec 9>&-
+      sleep 0.25
+    done
+    if [ "$acquired" -ne 1 ]; then
+      fuser -k -KILL "$LOCK" >/dev/null 2>&1 || true
+      sleep 1
+      exec 9>>"$LOCK"
+      flock -n 9 || { echo "[vite-watch-singleton] could not replace the holder of $LOCK" >&2; exit 1; }
+    fi
+  else
+    echo "[vite-watch-singleton] REFUSING to start: another 'vite build --watch' already owns dist/ (pid ${HOLDER:-unknown})." >&2
+    echo "[vite-watch-singleton] Two watchers interleave into one dist/ and serve partial bundles (EI-306)." >&2
+    echo "[vite-watch-singleton] Your edits ride the running watcher already. To replace it: VITE_WATCH_REPLACE=1 npm run dev:nohmr" >&2
+    exit 1
+  fi
+fi
+
+# Record the holder pid on line 1 (post-exec this pid IS the watcher) —
+# diagnostic only; the kill path above is inode-scoped, not pid-trusting.
+# Line 2 records the ABSOLUTE dist/ this watcher serves so the one-shot-build
+# dist-wipe guard (dist-wipe-guard.ts) can refuse only when a one-shot
+# `vite build` would empty THIS live dist, never a different checkout's.
+printf '%s\n%s\n' "$$" "$(pwd)/dist" > "$LOCK"
+exec bash -c "$CMD"

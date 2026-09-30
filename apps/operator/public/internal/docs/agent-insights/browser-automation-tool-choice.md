@@ -1,0 +1,216 @@
+# Browser work: verdict is the answer — including for pages that need a login
+URL: /internal/docs/agent-insights/browser-automation-tool-choice
+
+verdict's daemon uses its own profile, so `goto` + `snapshot -i` on an authed site lands on the LOGIN PAGE. Agents read that as 'verdict can't do authenticated sessions' and abandon it — but handoff / auth-save / goto-auth --profile are documented in the same SKILL.md they just read. On 2026-07-15 that misread cascaded: agent drops verdict → Bytebot (dead, EI-12895) → successor hand-rolls Xvfb+xdotool+ImageMagick pixel-clicking for a task verdict handles natively. Also: on 2026-08-30 the GLOBAL `verdict` binary was found silently pointing at a stale, unpatched install in an unrelated project — every agent shared ONE session-less daemon, so one agent's navigation silently hijacked another's \"active\" tab.
+
+verdict's daemon uses its own profile, so `goto` + `snapshot -i` on an authed site lands on the LOGIN PAGE. Agents read that as 'verdict can't do authenticated sessions' and abandon it — but handoff / auth-save / goto-auth --profile are documented in the same SKILL.md they just read. On 2026-07-15 that misread cascaded: agent drops verdict → Bytebot (dead, EI-12895) → successor hand-rolls Xvfb+xdotool+ImageMagick pixel-clicking for a task verdict handles natively. The decision tree for every browser target on this box, and why xdotool is never the answer.
+
+## The mistake this prevents
+
+You need to drive a web page that requires a login (a Cloudflare dashboard, a
+Google admin console, any SaaS panel). You reach for `verdict` — correctly, it's
+the repo default. You run:
+
+```bash
+node $B goto https://dash.cloudflare.com/...
+node $B snapshot -i
+```
+
+…and you get the **login page**. Two links, `Cloudflare` and `Privacy`. Not the
+dashboard.
+
+The natural inference is *"verdict runs its own headless Chromium with its own
+profile, so it isn't logged in — verdict can't do this task."* **That inference is
+wrong, and it is expensive.** The first half is true; the conclusion is not.
+verdict has a first-class auth story, documented roughly twenty lines below the
+command list in the very same `SKILL.md` you just read.
+
+On **2026-07-15** this misread cascaded through two agents on an owner-directed
+Cloudflare DNS + Google Workspace recovery task:
+
+1. Agent A ran `verdict snapshot -i`, saw the login page, and **abandoned verdict.**
+2. Fell back to **Bytebot** — dead on every route (EI-12895): the model payload
+   rejects the plain string spec, direct-Anthropic instances sat on a depleted
+   balance, and the proxy failover was configured with the literal placeholder
+   `"dummy-key-for-proxy"`. Zero completed tasks across all ten instances.
+3. Tried the **Cloudflare API** — token reads zones fine, but has no DNS-edit
+   scope (deliberate least-privilege; see below).
+4. Agent B inherited the mess and **hand-rolled `Xvfb` + `xdotool` + ImageMagick
+   `import`** — roughly thirty full-page screenshots, every click a hardcoded
+   pixel coordinate, several misfires on dropdowns and scroll regions.
+
+The task did land. It cost tens of thousands of tokens and a fragile,
+coordinate-dependent session to do something verdict does in a handful of calls
+with semantic element refs.
+
+**The whole detour was one command deep.** If verdict shows you a login page, you
+have not hit a wall — you have hit `handoff`.
+
+## The decision tree
+
+| Target                                                                               | Tool                                                                                                                   |
+| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| **Any external / arbitrary web page — logged-in or not**                             | **`verdict`** (use the auth flow below when it needs a session)                                                        |
+| Operator UI (`:3055` / `:3070`)                                                      | **Never a browser.** The Tauri shell + `tauri-agent-tools` — see [testing/agent-e2e](/internal/docs/testing/agent-e2e) |
+| The committed e2e suite (`apps/operator/e2e/*.spec.ts`)                              | Playwright — running/extending that suite only                                                                         |
+| Drag-and-drop, pixel-diff screenshots, or a plan that says `QA Tool: PLAYWRIGHT_MCP` | Playwright MCP (verdict's own documented fallback)                                                                     |
+| Desktop GUI apps in the clean-room VM                                                | See [linux-vm-desktop-testing-workflow](/internal/docs/agent-insights/linux-vm-desktop-testing-workflow)               |
+
+And the ones that are **not** options on this box:
+
+* **`claude-in-chrome`** — the extension is **not installed**. Verified
+  2026-07-15: the Default Chrome profile carries ColorZilla, Honey, Loom, Keepa,
+  Jungle Scout, Toky, Video Speed Controller — nothing Anthropic — and
+  `list_connected_browsers` returns `[]`. It *would* be a good fit (it drives the
+  owner's real, already-authenticated Chrome), so this may change; check
+  `list_connected_browsers` before assuming, and don't plan around it while it
+  returns empty.
+* **Bytebot** — broken as of 2026-07-15, **EI-12895**. No working inference route
+  on any instance. Don't burn a task discovering this.
+* **Raw `xdotool` / `Xvfb` / `import` pixel-clicking** — see below.
+
+## The auth flow (the part everyone misses)
+
+```bash
+cd <project-root>
+B=node_modules/.bin/verdict
+
+node $B handoff                 # opens a VISIBLE Chrome — a human logs in by hand
+# ... human logs in ...
+node $B resume                  # back to headless
+node $B auth-save cloudflare    # session saved, encrypted
+node $B goto-auth https://dash.cloudflare.com/<acct>/<zone>/dns/records --profile cloudflare
+node $B snapshot -i             # you are now inside the authed dashboard
+```
+
+The session persists, so `handoff` is a **one-time cost per site**, not per task.
+Check what already exists before asking a human for anything:
+
+```bash
+node $B auth-list               # saved profiles
+node $B status                  # daemon: current URL / title / refs / viewport
+```
+
+The full verified command set (from the CLI itself, not the skill doc):
+
+> goto, back, forward, reload, url, title, snapshot, click, fill, select, hover,
+> type, press, scroll, wait, text, css, inspect, js, console, network, perf,
+> screenshot, viewport, responsive, style, **auth-save, auth-load, auth-list,
+> auth-delete, handoff, resume, goto-auth, cookies, cookie-set, cookie-import**,
+> tabs, newtab, tab, closetab, frame, frame-exit, diff, chain, status, stop
+
+Note `cookie-import` — a second route into an authenticated session when a
+human-driven `handoff` isn't practical.
+
+Skill file: `~/.omp/agent/skills/verdict/SKILL.md`. In-repo binary:
+`node_modules/.bin/verdict` (→ `verdict-cli/bin/browse.mjs`), auto-patched on
+every `npm install` by `patches/verdict-cli+0.1.1.patch`. The bare `verdict`
+command any agent types resolves via `$PATH` — see the next section for what
+that actually points at and why it matters.
+
+## The global `verdict` on PATH can silently drift to a stale, unpatched, unrelated install
+
+**MEASURED 2026-08-30.** `patches/verdict-cli+0.1.1.patch` keys each verdict
+daemon's data dir (and therefore its headless-Chromium *process* and its
+*browser tab*) off `VERDICT_SESSION` / `PAPERCUSP_SID` / `CODEX_SESSION_ID`, so
+concurrent agents get isolated daemons instead of fighting over one shared tab.
+That patch is real, applies cleanly, and is exercised correctly whenever a
+script runs `node_modules/.bin/verdict` from inside this checkout.
+
+But agents don't type that path — they type bare `verdict`, which resolves via
+`$PATH` to whatever `which verdict` finds first (here: `~/.local/bin/verdict`,
+a hand-written wrapper script, not an npm bin symlink). **That wrapper is not
+regenerated by anything in this repo** — no `postinstall`, no provisioning
+script, nothing git-tracked touches it — so it is exactly as durable as
+whoever last hand-edited it, and just as easy to point at the wrong thing by
+accident.
+
+It was found hardcoded to `~/Restart/node_modules/verdict-cli/bin/browse.mjs`
+— the **unpatched** `verdict-cli` copy belonging to a *completely unrelated*
+project (`Restart`, an NX monorepo with its own `apps/web`/`apps/api-gateway`)
+that merely happens to also list `verdict-cli` as a regular dependency. Nothing
+in that copy keys the daemon on a session identity, so **every agent on the
+box — regardless of which project it was working in — shared exactly one
+headless-Chromium tab.** Filed as **EI-21866234359350244**: one agent's `goto`
+silently became another agent's "current page" mid-task, including *inside a
+single `verdict chain` call*, because a peer's navigation landed in the
+millisecond gap between two `js` reads. The hijacked page was well-formed and
+plausible — nothing about the tool's output signaled the swap.
+
+**The fix:** `~/.local/bin/verdict` now dispatches through
+`papercupai-workspace/papercusp/node_modules/verdict-cli/bin/browse.mjs` — the
+patched, self-updating install kept current by this repo's own
+`patch-package` postinstall — with a fallback (and a loud stderr warning) to
+the old unpatched path if the papercusp checkout is ever missing. Verify the
+fix is actually live before trusting session isolation on this box:
+
+```bash
+which verdict                    # must resolve to ~/.local/bin/verdict
+cat "$(which verdict)"           # must reference .../papercusp/node_modules/verdict-cli, not an unrelated project
+verdict tabs                     # forces a daemon start; then:
+ls node_modules/verdict-cli/.verdict-data/sessions/   # (from inside the papercusp checkout)
+# — your own $PAPERCUSP_SID (or $CODEX_SESSION_ID) should appear as a session dir.
+# If it's missing, or the daemon's DATA_DIR isn't per-session, verdict is
+# STILL a shared instrument: don't trust two "independent" observations to
+# actually be independent until this checks out.
+```
+
+**The general lesson:** a defense patched into a *dependency* only protects you
+through the entry point that actually loads the patched copy. A global
+`$PATH` shim, a symlink, a second install elsewhere on the box — any of them
+can quietly route around the fix while every in-repo script keeps working
+correctly. When a shared daemon/tool is suspected of cross-contamination,
+check `which <tool>` and read what it actually execs, not just whether the
+in-repo copy is patched.
+
+## Why hand-rolled xdotool is never the answer
+
+The repo's `CLAUDE.md` already bans ad-hoc Puppeteer for browser checks.
+**Pixel-clicking is strictly worse than the thing that's already banned**, and it
+fails in ways that are hard to even notice:
+
+* **Coordinates, not elements.** `xdotool mousemove 305 799 click 1` breaks on any
+  reflow, scroll, or surprise banner. verdict's `snapshot -i` → `click @e3`
+  targets the actual ARIA node.
+* **No diffing.** verdict's `snapshot -D` tells you *whether the page changed*.
+  Under xdotool you infer that from screenshots — which is exactly how the
+  2026-07-15 session spent multiple rounds failing to notice a silent redirect
+  back to a prior step.
+* **Cost.** \~50–100 tokens per verdict call versus a \~1280×900 PNG per xdotool
+  observation.
+* **Real interference risk.** Driving the owner's *real* Chrome profile on a
+  scratch display fights their running browser for the profile lock, and stray
+  clicks land on whatever is actually under the cursor — on 2026-07-15 an
+  unrelated extension popup appeared mid-flow asking for read/change-all-sites
+  permission, directly beneath the click path.
+
+If you catch yourself composing an `xdotool` command to drive a web page: stop.
+That is this mistake, in progress.
+
+## Corollary: a read-only API token is not an invitation to widen it
+
+The host `CLOUDFLARE_API_TOKEN` resolves zones but **cannot edit DNS**; the
+wrangler OAuth session is likewise scoped. That is almost certainly deliberate
+least-privilege, not an oversight.
+
+The right response is **verdict + an auth profile**, not minting a broader token.
+Reach for a credential change only with an explicit owner decision — the browser
+path exists precisely so the write scope can stay narrow.
+
+## The general shape
+
+Three independent lessons, and each is worth carrying separately:
+
+1. **verdict handles authenticated pages.** A login page means run `handoff`.
+
+2. **When a documented tool appears not to fit, re-read its doc before you route
+   around it.** The escape hatch was in the file Agent A had already opened. Every
+   step after that — Bytebot, the API token, xdotool — was elaborate work built on
+   an unchecked assumption, and each step made the next detour feel more
+   reasonable. A tool that seems to lack an obvious capability usually has it;
+   the second look is far cheaper than the fallback.
+
+3. **A patched dependency only protects the callers that actually load it.**
+   Check what `$PATH` resolves to, not just what's patched in-repo — a stray
+   global shim can silently opt an entire fleet out of a fix that looks
+   complete from inside the checkout.

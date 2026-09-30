@@ -1,0 +1,48 @@
+# Agents — overview
+URL: /internal/docs/agents/index
+
+How the Operator (voice), Oracle (chat), and Pi (terminal) agents fit together in Papercusp.
+
+import { Aside } from '@astrojs/starlight/components';
+
+Papercusp has three first-class agent surfaces, each tuned for a different latency / depth tradeoff.
+
+## The three agents
+
+| Agent        | Surface                           | Latency budget      | Best for                                                                             |
+| ------------ | --------------------------------- | ------------------- | ------------------------------------------------------------------------------------ |
+| **Operator** | Voice (always-on, push-to-talk)   | `<300ms` TTFB       | Reflexive UI control, fast questions about state, conversational delegation          |
+| **Oracle**   | Chat tab in the harness dashboard | `<2s`               | Free-form chat, navigation, dispatch to existing chats                               |
+| **Pi**       | Terminal panel in the dashboard   | n/a (terminal pace) | Code analysis, file reads, long-running coding tasks via `claude` / `omp` subprocess |
+
+## Architectural split: fast voice + deep delegation
+
+The Operator's voice layer is intentionally a **fast router**, not a deep brain. When the user asks something simple ("is the harness running?", "open the operator panel"), voice handles it directly with sub-300ms latency. When the user asks something deep ("explain how authentication works in this repo", "what should I work on next?"), voice **delegates to a coding agent** via a single tool, which spawns `claude -p` (under `AGENT_BACKEND=claude-code`, the deployed default) or `omp -p` (routes through its own Meridian router + Claude Max) with the full agent-mcp tool surface — file reads, code analysis, multi-step planning.
+
+The architecture is documented in detail in the [Action Registry plan](/internal/docs/agents/action-registry).
+
+## Voice provider
+
+Voice runs through **ElevenLabs Conversational AI** with **Claude Haiku 4.5** as the underlying LLM (BYO LLM via the agent platform). OpenAI Realtime is supported as a manual fallback.
+
+ElevenLabs is the primary voice provider as of the v5 plan. See [§6 of the
+Action Registry plan](/internal/docs/agents/action-registry) for the rationale and §8
+for the integration shape.
+
+## What lives where
+
+* **Tool catalog** (what each agent can do): the [Action Registry](/internal/docs/agents/action-registry) — single typed source of truth with shims that emit transport-specific tool defs (MCP, ElevenLabs Conv AI, OpenAI Realtime SDK).
+* **Docs retrieval surfaces** (how agents read documentation): [Docs retrieval](/internal/docs/agents/docs-retrieval) — the `@papercusp/docs-engine` package, the three doc surfaces (public, engineering, per-harness), the context-aware `docs:*` tools, and the `cross_harness:docs_*` family for out-of-harness inspection.
+* **Audit trail**: `harness_shared.agent_actions` (full) + `harness_shared.agent_queries` (sampled, 1-in-20 / 5% random with a per-(agent, query-id) burst cap of 2 writes/second). Written by the audit buffer's PG flush; there is no UI that surfaces these tables today (the only action-log component, `OperatorActionLog`, reads a separate `user_actions` shape).
+* **Conversation memory**: a delegated task **is** a work\_item (kind `task`) in `harness_shared.engineer_issues`, written via `delegated-tasks` — the bespoke `delegates` session registry is retired. The resume key (`agentSessionId`), origin, and backend live in the work\_item's JSONB payload; the transcript lives in its coord thread (`harness_shared.coord_threads` comments). The session-picker projects these back into the old "session" shape by querying `engineer_issues LEFT JOIN coord_threads`. The operator auto-subscribes on create, so completions fan out to its coord inbox — no poll. See the [collapse-delegate-into-workitems plan](/internal/docs/plans/collapse-delegate-into-workitems-2026-06-04).
+
+When agents (or humans) build new panels, status indicators, or any
+component that reads from Postgres / the operator backend, **default to
+`useSyncQuery({queryName, args})` from `@papercusp/sync`**. Don't roll a
+new `fetch + setInterval` poll, and don't open a raw `EventSource` for
+query data — both fragment the architecture and forfeit the library's
+push semantics, IDB caching, and reconnect resilience.
+
+The full guidance + escape-hatch criteria + 3-step migration recipe
+lives at [Data Sync → overview](/internal/docs/data-sync). Read that callout
+before authoring new data fetching code.

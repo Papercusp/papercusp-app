@@ -1,0 +1,447 @@
+/*
+ * adv-workflow-detail — the Workflows detail surface (topology + agent).
+ *
+ * Plan: external-triggers-gmail-slack-2026-08-22 P-024 (D-016).
+ * Its own file rather than more of adv-automations.css: that sheet belongs to the tab
+ * landing and is about to be renamed wholesale under P-025, and a new surface's rules should
+ * not have to be untangled from that diff.
+ *
+ * Colours come from the same tokens adv-automations.css uses (--accent/--good/--warn/--bad,
+ * --fg/--fg-dim/--fg-mute, --border, --bg-raised) so the detail view inherits the operator's
+ * theme rather than pinning its own palette.
+ */
+
+.pc-workflow-detail {
+  --wf-line: color-mix(in srgb, var(--border, #26384a), transparent 8%);
+  /* OPAQUE on purpose — see adv-workflows-landing.css: a background mixed toward
+     `transparent` is alpha/dynamic, so the contrast lint cannot statically verify it
+     and the surface ships contrast-UNCHECKED behind a snapshot skip. */
+  --wf-panel: color-mix(in srgb, var(--bg-raised, #0d1a27), black 4%);
+  --wf-panel-2: color-mix(in srgb, var(--bg-raised, #0d1a27), white 2%);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  color: var(--fg, #e8f5ff);
+}
+
+/* ── header ─────────────────────────────────────────────────────────────────────────── */
+
+.pc-workflow-detail__head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.pc-workflow-detail__back {
+  border: 1px solid var(--wf-line);
+  background: var(--wf-panel);
+  color: var(--fg-dim, #a9c4da);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.pc-workflow-detail__back:hover {
+  color: var(--fg, #e8f5ff);
+  border-color: color-mix(in srgb, var(--accent, #38bdf8), transparent 55%);
+}
+
+.pc-workflow-detail__ident {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.pc-workflow-detail__title {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 620;
+}
+
+.pc-workflow-detail__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg-mute, #6f8ba3);
+  font-size: 0.82rem;
+}
+
+.pc-workflow-detail__badge {
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  border: 1px solid var(--wf-line);
+}
+
+.pc-workflow-detail__badge[data-armed='true'] {
+  color: var(--good, #4ade80);
+  border-color: color-mix(in srgb, var(--good, #4ade80), transparent 62%);
+  background: color-mix(in srgb, var(--good, #4ade80), transparent 90%);
+}
+
+.pc-workflow-detail__badge[data-armed='false'] {
+  color: var(--warn, #fbbf24);
+  border-color: color-mix(in srgb, var(--warn, #fbbf24), transparent 62%);
+  background: color-mix(in srgb, var(--warn, #fbbf24), transparent 90%);
+}
+
+.pc-workflow-detail__badge[data-armed='unknown'] {
+  color: var(--fg-mute, #6f8ba3);
+}
+
+/* ── two-pane body ──────────────────────────────────────────────────────────────────── */
+
+.pc-workflow-detail__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.85fr);
+  gap: 16px;
+  align-items: stretch;
+  min-height: 0;
+}
+
+/* Below the two-pane threshold the graph and the chat stack; the chat keeps a definite
+   height because <ChatPanel> sizes itself with flex and collapses in WebKitGTK otherwise
+   (same gotcha AdvConversationsTab documents for its live-chat embed). */
+@container (max-width: 1080px) {
+  .pc-workflow-detail__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── topology pane ──────────────────────────────────────────────────────────────────── */
+
+.pc-workflow-graph {
+  display: flex;
+  flex-direction: column;
+  min-height: 420px;
+  border: 1px solid var(--wf-line);
+  border-radius: 12px;
+  background: var(--wf-panel);
+  overflow: hidden;
+}
+
+.pc-workflow-graph__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--wf-line);
+}
+
+.pc-workflow-graph__title {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 620;
+}
+
+.pc-workflow-graph__sub {
+  margin: 2px 0 0;
+  font-size: 0.74rem;
+  color: var(--fg-mute, #6f8ba3);
+}
+
+.pc-workflow-graph__legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 0.72rem;
+  color: var(--fg-dim, #a9c4da);
+}
+
+.pc-workflow-graph__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pc-workflow-graph__swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--wf-kind, var(--fg-mute, #6f8ba3));
+}
+
+/* Node-kind palette — one variable per kind, consumed by both the legend swatch and the
+   node's left rail, so a legend can never disagree with the graph it describes. */
+.pc-wf-kind--trigger { --wf-kind: var(--accent, #38bdf8); }
+.pc-wf-kind--filter { --wf-kind: var(--warn, #fbbf24); }
+.pc-wf-kind--recipe { --wf-kind: #a78bfa; }
+.pc-wf-kind--plan { --wf-kind: var(--good, #4ade80); }
+.pc-wf-kind--tool { --wf-kind: #22d3ee; }
+.pc-wf-kind--outcome { --wf-kind: var(--fg-mute, #6f8ba3); }
+
+.pc-workflow-graph__canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 18px;
+  touch-action: none;
+  cursor: grab;
+  background-image: radial-gradient(
+    circle at 1px 1px,
+    color-mix(in srgb, var(--border, #26384a), transparent 45%) 1px,
+    transparent 0
+  );
+  background-size: 22px 22px;
+}
+
+.pc-workflow-graph__canvas:active { cursor: grabbing; }
+
+.pc-workflow-graph__viewport {
+  position: relative;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.pc-workflow-graph__empty {
+  margin: 0;
+  padding: 28px 8px;
+  text-align: center;
+  color: var(--fg-mute, #6f8ba3);
+  font-size: 0.84rem;
+}
+
+.pc-workflow-graph__empty--error { color: var(--bad, #f87171); }
+
+.pc-workflow-graph__edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+  color: color-mix(in srgb, var(--fg-mute, #6f8ba3), transparent 25%);
+}
+
+.pc-workflow-graph__edge polyline {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+}
+
+.pc-workflow-graph__edge-label {
+  fill: var(--fg-mute, #6f8ba3);
+  font-size: 10px;
+}
+
+.pc-workflow-graph__node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  text-align: left;
+  padding: 9px 11px 9px 13px;
+  border: 1px solid var(--wf-line);
+  border-left: 3px solid var(--wf-kind, var(--fg-mute, #6f8ba3));
+  border-radius: 9px;
+  background: var(--wf-panel-2);
+  color: inherit;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.pc-workflow-graph__node:hover {
+  border-color: color-mix(in srgb, var(--wf-kind, #38bdf8), transparent 45%);
+  border-left-color: var(--wf-kind, #38bdf8);
+}
+
+.pc-workflow-graph__node.is-selected {
+  border-color: var(--wf-kind, #38bdf8);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--wf-kind, #38bdf8), transparent 72%);
+}
+
+/* A disarmed/idle step is dimmed rather than recoloured: it is not an error, it is just
+   not currently doing anything. */
+.pc-wf-state--idle { opacity: 0.72; }
+
+.pc-wf-state--attention {
+  border-color: color-mix(in srgb, var(--bad, #f87171), transparent 45%);
+}
+
+.pc-workflow-graph__node-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.pc-workflow-graph__node-detail {
+  font-size: 0.7rem;
+  color: var(--fg-dim, #a9c4da);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.pc-workflow-graph__node-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+  font-size: 0.64rem;
+  color: var(--fg-mute, #6f8ba3);
+}
+
+/* Tracking is not an approved primitive (lint:design-primitives) — the kind chip carries
+   its distinction with case + weight instead. */
+.pc-workflow-graph__node-kind {
+  text-transform: uppercase;
+  color: var(--wf-kind, var(--fg-mute, #6f8ba3));
+  font-weight: 700;
+}
+
+.pc-workflow-graph__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--wf-line);
+  font-size: 0.72rem;
+  color: var(--fg-mute, #6f8ba3);
+}
+
+.pc-workflow-graph__reset {
+  border: 1px solid var(--wf-line);
+  background: transparent;
+  color: var(--fg-dim, #a9c4da);
+  border-radius: 7px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+/* ── agent pane ─────────────────────────────────────────────────────────────────────── */
+
+.pc-workflow-agent {
+  display: flex;
+  flex-direction: column;
+  min-height: 420px;
+  border: 1px solid var(--wf-line);
+  border-radius: 12px;
+  background: var(--wf-panel);
+  overflow: hidden;
+}
+
+.pc-workflow-agent__head {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--wf-line);
+}
+
+.pc-workflow-agent__title {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 620;
+}
+
+.pc-workflow-agent__sub {
+  margin: 2px 0 0;
+  font-size: 0.74rem;
+  color: var(--fg-mute, #6f8ba3);
+}
+
+.pc-workflow-agent__context {
+  margin: 0;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--wf-line);
+  font-size: 0.76rem;
+  color: var(--fg-dim, #a9c4da);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pc-workflow-agent__context-kind {
+  text-transform: uppercase;
+  font-weight: 700;
+  font-size: 0.62rem;
+  color: var(--fg-mute, #6f8ba3);
+  border: 1px solid var(--wf-line);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+/* <ChatPanel> sizes itself with flex, so the wrapper must hand it a definite box — the
+   same WebKitGTK height-collapse gotcha the dock and AdvConversationsTab document. */
+.pc-workflow-agent__chat {
+  flex: 1;
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pc-workflow-agent__chat > * { min-height: 0; }
+
+.pc-workflow-agent__notice {
+  margin: 0;
+  padding: 24px 14px;
+  text-align: center;
+  color: var(--fg-mute, #6f8ba3);
+  font-size: 0.82rem;
+}
+
+.pc-workflow-agent__notice--error { color: var(--bad, #f87171); }
+
+.pc-workflow-agent__controls {
+  border-top: 1px solid var(--wf-line);
+  padding: 10px 14px;
+  background: var(--wf-panel-2);
+}
+
+.pc-workflow-agent__armrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.pc-workflow-agent__spacer { flex: 1; }
+
+.pc-workflow-agent__armstate {
+  font-size: 0.78rem;
+  color: var(--fg-dim, #a9c4da);
+}
+
+.pc-workflow-agent__armstate[data-armed='true'] { color: var(--good, #4ade80); }
+.pc-workflow-agent__armstate[data-armed='false'] { color: var(--warn, #fbbf24); }
+
+.pc-workflow-agent__btn {
+  border: 1px solid var(--wf-line);
+  background: transparent;
+  color: var(--fg-dim, #a9c4da);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.pc-workflow-agent__btn:hover:not(:disabled) {
+  color: var(--fg, #e8f5ff);
+  border-color: color-mix(in srgb, var(--accent, #38bdf8), transparent 55%);
+}
+
+.pc-workflow-agent__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pc-workflow-agent__btn--primary {
+  color: var(--fg, #e8f5ff);
+  border-color: color-mix(in srgb, var(--accent, #38bdf8), transparent 45%);
+  background: color-mix(in srgb, var(--accent, #38bdf8), transparent 88%);
+}
+
+.pc-workflow-agent__note {
+  margin: 8px 0 0;
+  font-size: 0.7rem;
+  color: var(--fg-mute, #6f8ba3);
+}

@@ -1,0 +1,108 @@
+{
+  "evidenceRef": "plan sql-escape-tool-routing-2026-08-12 P-009 — buildSqlFixture(pair) over agent-authored dev:pg_query calls, 14d window, status=ok",
+  "extractedAt": "2026-08-12",
+  "totalAtoms": 83,
+  "totalSessions": 59,
+  "sample": [
+    {
+      "sid": "su-d1d193d9-67db-4459-a9ae-f0c76d395b2c",
+      "ts": "2026-08-11 14:55:22.023-04",
+      "atom": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'harness_shared' AND table_name ILIKE '%plan%' ORDER BY table_name"
+    },
+    {
+      "sid": "su-35330165-a301-49fa-a5e0-fd879444127b",
+      "ts": "2026-08-02 19:02:51.809-04",
+      "atom": "SELECT table_name FROM information_schema.tables WHERE table_schema='harness_shared' AND table_name ILIKE '%claim_spec%'"
+    },
+    {
+      "sid": "su-ae9eee96-e7b6-4d7d-bcc3-e74d283526f9",
+      "ts": "2026-08-08 22:46:48.264-04",
+      "atom": "SELECT table_name FROM information_schema.tables WHERE table_schema='harness_shared' AND table_name ILIKE '%coupl%'"
+    },
+    {
+      "sid": "su-163d6cdb-c98a-4c5e-8ddb-a32eedf63bd2",
+      "ts": "2026-08-11 15:32:20.979-04",
+      "atom": "SELECT table_name FROM information_schema.tables WHERE table_schema='harness_shared' AND table_name ILIKE '%goal%'"
+    },
+    {
+      "sid": "su-434d55bf-f415-4ad1-b3af-8bd970aa1de1",
+      "ts": "2026-08-09 14:56:53.775-04",
+      "atom": "SELECT table_name FROM information_schema.tables WHERE table_schema='harness_shared' AND table_name ILIKE '%session%' ORDER BY 1"
+    },
+    {
+      "sid": "su-434d55bf-f415-4ad1-b3af-8bd970aa1de1",
+      "ts": "2026-08-09 17:11:24.524-04",
+      "atom": "SELECT table_name FROM information_schema.tables WHERE table_schema='harness_shared' AND table_name LIKE '%embed%' ORDER BY table_name"
+    },
+    {
+      "sid": "su-5622daef-b534-4e76-85d8-7867636c29bb",
+      "ts": "2026-08-02 06:54:58.392-04",
+      "atom": "SELECT table_name FROM information_schema.tables WHERE table_schema='harness_shared' AND table_name LIKE '%session%'"
+    },
+    {
+      "sid": "su-e59ab7dc-c76f-4913-b890-528325364c1e",
+      "ts": "2026-08-12 06:03:51.535-04",
+      "atom": "SELECT table_schema, table_name FROM information_schema.tables WHERE table_name = 'spawned_agents'"
+    },
+    {
+      "sid": "su-e6ac4eb7-9966-4e03-8122-5d761aff294d",
+      "ts": "2026-08-01 17:05:59.697-04",
+      "atom": "SELECT table_schema, table_name FROM information_schema.tables WHERE table_name ILIKE '%claim_spec%' ORDER BY 1,2"
+    },
+    {
+      "sid": "su-e07d6f19-e063-4789-85f5-04a077d186ff",
+      "ts": "2026-08-09 01:26:39.484-04",
+      "atom": "SELECT table_schema, table_name FROM information_schema.tables WHERE table_name ILIKE '%fact%' ORDER BY table_schema, table_name"
+    },
+    {
+      "sid": "su-0dd2c62e-31ba-43c3-8046-58fc099b2cfd",
+      "ts": "2026-08-08 23:53:16.519-04",
+      "atom": "SELECT table_schema, table_name FROM information_schema.tables WHERE table_name ILIKE '%install%' ORDER BY 1,2 LIMIT 20"
+    },
+    {
+      "sid": "su-f93103b1-6fa7-4b79-97fb-4d2f4edacb4f",
+      "ts": "2026-08-12 00:36:09.819-04",
+      "atom": "SELECT table_schema, table_name FROM information_schema.tables WHERE table_name ILIKE '%migration%' ORDER BY table_schema, table_name"
+    },
+    {
+      "sid": "su-c9283328-ef01-4129-b1fc-9fa4f5f2d5a0",
+      "ts": "2026-08-11 23:53:25.456-04",
+      "atom": "SELECT table_schema, table_name FROM information_schema.tables WHERE table_name ILIKE '%post%' ORDER BY 1,2"
+    },
+    {
+      "sid": "su-e3077d7e-21ad-469e-8b73-a68ad5204d2a",
+      "ts": "2026-08-08 12:15:59.088-04",
+      "atom": "SELECT table_schema, table_name FROM information_schema.tables WHERE table_name ILIKE '%session%' AND table_schema NOT IN ('pg_catalog','information_schema') ORDER BY table_schema, table_name"
+    },
+    {
+      "sid": "su-83f46df7-9f59-4169-8eec-ddb13a6a3467",
+      "ts": "2026-08-10 14:03:21.666-04",
+      "atom": "SELECT table_schema, table_name FROM information_schema.tables WHERE table_name LIKE '%rubric%'"
+    },
+    {
+      "sid": "su-c4a0d771-78aa-4dec-821c-250b6fed11b4",
+      "ts": "2026-08-11 23:31:05.304-04",
+      "atom": "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema='harness_shared' AND table_name ILIKE '%migration%' ORDER BY table_name"
+    },
+    {
+      "sid": "su-d09b9b13-7504-4382-8004-690d8d508ede",
+      "ts": "2026-08-08 15:23:48.542-04",
+      "atom": "SELECT table_schema||'.'||table_name AS rel FROM information_schema.tables WHERE table_name ILIKE '%coord%' ORDER BY 1"
+    },
+    {
+      "sid": "su-ca2f3fa0-1aa4-458e-afa7-dbf087c05762",
+      "ts": "2026-08-12 04:41:31.364-04",
+      "atom": "SELECT table_schema||'.'||table_name AS t FROM information_schema.tables WHERE table_name ILIKE '%fact%'"
+    },
+    {
+      "sid": "su-119d89f6-8690-4544-8727-2d19ae7f3121",
+      "ts": "2026-08-11 16:50:42.874-04",
+      "atom": "select table_name from information_schema.tables where table_schema='harness_shared' and (table_name ilike '%lock%') order by 1"
+    },
+    {
+      "sid": "su-6ab684ac-35e9-4fd1-a992-169c86dfdda5",
+      "ts": "2026-08-12 11:59:22.994-04",
+      "atom": "select table_schema, table_name from information_schema.tables where table_name ilike '%account%' order by 1,2"
+    }
+  ]
+}

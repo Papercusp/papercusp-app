@@ -1,0 +1,24 @@
+-- Migration 285 — drop the harness_phases mirror table.
+-- Part of fs-watcher-retirement-2026-05-10 step 5. (Reserved via db:next-migration.)
+--
+-- harness_shared.harness_phases was an fs-watcher mirror ("Mirror 5"): the
+-- watcher's upsertPhases() encoded a subset of /api/harness/<slug>/phases
+-- (config.json + worktree existence) into PG on the 60s reconcile sweep.
+--
+-- It was effectively dead on both ends:
+--   • Its `alive` field was HARDCODED false (never live process state — see the
+--     old upsertPhases values + the absent `alive` in its onConflict set), so
+--     its only consumer (HealthBadge's liveness dot) was always dark. HealthBadge
+--     is repointed to harness_lanes (the PID-swept live lane tracker).
+--   • The live phase state is the on-demand REST route GET /api/harness/:slug/phases
+--     (branch-actions-style recompute from fs/proc), which does NOT read this table.
+--
+-- It was mis-classified as a git-export document (GIT_DOCS) despite being a
+-- machine-local derived mirror; it's removed from GIT_DOCS + GIT_KEY_COLS, so
+-- detachStaleGitCaptureTriggers drops its capture trigger on the next boot and
+-- the boot-hydrate no longer reads its .papercusp/state/phases/*.json files
+-- (those committed files go inert — harmless, cleaned up separately).
+--
+-- Dropping the table loses no live data (the REST route recomputes). Idempotent.
+
+DROP TABLE IF EXISTS harness_shared.harness_phases CASCADE;

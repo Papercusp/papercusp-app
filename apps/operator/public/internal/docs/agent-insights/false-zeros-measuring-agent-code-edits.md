@@ -1,0 +1,74 @@
+# Two false zeros when measuring what an agent actually did
+URL: /internal/docs/agent-insights/false-zeros-measuring-agent-code-edits
+
+tool_invocations records MCP tools only, and the transcript store that sees native Edit/Write is corpus-namespaced under workspace_id='default' — the two zeros compose and read as corroboration.
+
+Asking "did this agent edit code?" against this database has two independent ways to return a clean, well-formed **zero** while the agent was editing constantly. Each is individually survivable. The reason they have cost real time is that they **compose**, and the second one looks like confirmation of the first.
+
+## Trap 1 — `tool_invocations` records MCP tools only
+
+`harness_shared.tool_invocations` is an **MCP** ledger. Claude's native `Edit` / `Write` / `Bash` never pass through MCP, so they never produce a row. Measured over 24h:
+
+| tool\_name                         | rows  |
+| ---------------------------------- | ----- |
+| `capability:bash`                  | 1997  |
+| `capability:read`                  | 73    |
+| `capability:edit`                  | 17    |
+| `Edit` / `Write` / `Bash` (native) | **0** |
+
+So `WHERE tool_name IN ('Edit','Write','MultiEdit')` returns zero — not because nothing happened, but because this table cannot see it. Any "did agent X do Y" metric built here under-reports by exactly the amount of work done with native tools, which for coding agents here is most of it.
+
+(Two incidental traps in the same table: the timestamp column is **`invoked_at`, not `ts`**, and unlike the table below it **is** genuinely multi-tenant, so a `workspace_id` predicate there is correct.)
+
+## Trap 2 — the store that *does* see native tools is corpus-namespaced
+
+`harness_shared.session_turn_parts` carries `{ owner, tool_name, part_kind, ts }` and records native tools. But every row sits under `workspace_id = 'default'`.
+
+That is **not** a bug to fix. `search/session-ingest.ts` hardcodes it at three insert sites and documents why: `'default'` is the session-transcript **corpus namespace, not a tenant**, and it is the leading column of the primary key. Change it to carry the real workspace and every reader that correctly queries under `'default'` breaks.
+
+The trap is that *every other table an agent touches here is tenant-scoped*, and `dev:pg_query` correctly advises adding `workspace_id = '<tenant>'` all session long. Applying that habit here returns **0 of 603,723 rows**.
+
+## Why the pair is worse than either half
+
+An agent hits trap 1, reasons correctly — *"tool\_invocations can't see native tools, I need the transcript store"* — lands on `session_turn_parts`, adds the tenant predicate out of habit, and gets a second zero.
+
+**Two sources agreeing feels like corroboration. It was the same mistake twice.** That is the whole failure mode: neither zero looks suspicious, because a well-formed empty result is exactly what "nothing happened" also looks like.
+
+## The query that works
+
+```sql
+SELECT owner,
+       count(*) FILTER (WHERE tool_name IN ('Edit','Write','MultiEdit')) AS code_edits
+FROM harness_shared.session_turn_parts
+WHERE workspace_id = 'default'          -- corpus namespace, NOT your tenant
+  AND ts > now() - interval '24 hours'
+  AND owner IS NOT NULL
+GROUP BY 1;
+```
+
+`owner` is the coord ownerId (`su-<uuid>`), so it joins straight to an agent — it is the column that actually identifies *who*, which is what the `workspace_id` predicate was reaching for in the first place.
+
+## Which tables are corpus-namespaced
+
+Measured 2026-08-10 across the whole session/event family. **Do not infer membership from a name** — verify with `count(*) GROUP BY workspace_id`:
+
+| table                                                                           | `'default'` | tenant rows     | verdict                                             |
+| ------------------------------------------------------------------------------- | ----------- | --------------- | --------------------------------------------------- |
+| `session_turn_parts`                                                            | 603,723     | 0               | corpus                                              |
+| `tool_usage_rollup`, `event_awaits`, `event_key_fires`, `event_wake_deliveries` | all         | 0               | corpus                                              |
+| `session_turns`                                                                 | 362,038     | 15 strays       | corpus                                              |
+| `session_turn_chunks`                                                           | 123,498     | 12 strays       | probably corpus, writer unread                      |
+| `session_turn_journal`                                                          | 10,453      | **4,706 (31%)** | **genuinely mixed — a tenant predicate is correct** |
+
+That last row is why the tempting sweep-in-every-`session_*`-table fix is wrong: it would start warning about correct queries and train callers to ignore the advisory.
+
+## What now guards this
+
+`dev:pg_query` gained two advisories (`pg-read-query.ts`), deliberately separate from the tenant advisory because they warn about a different thing — that one says *the rows may be from the wrong tenant*; these say *there will be no rows at all, from a query that looks perfectly scoped*:
+
+* **`buildNativeToolAttributionAdvisory`** — fires when `tool_invocations` is asked about a native tool name, and hands over the working query with `workspace_id = 'default'` already in it, so following the advice cannot deliver you into trap 2.
+* **`buildCorpusNamespaceAdvisory`** — fires on the **presence** of a non-`'default'` `workspace_id` predicate against a corpus table. Suppressing the wrong *suggestion* was never enough; the caller who gets hurt writes the predicate from habit. The sibling `buildTestRunsAdvisory` makes the identical inversion for the identical reason: **for these tables the column's presence is the trap, not the fix**, so an advisory that cleared when it appeared would go silent exactly when it is needed.
+
+## The transferable rule
+
+When a query about activity returns zero, the question to ask before believing it is not "is my filter right?" but **"can this table observe the thing I am asking about at all?"** A suspiciously clean zero is far more often a scope or observability artifact than a real absence — and a second zero from a second source is only independent evidence if the two sources fail differently.

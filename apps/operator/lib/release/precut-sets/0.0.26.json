@@ -1,0 +1,104 @@
+{
+  "release": "0.0.26",
+  "items": [
+    {
+      "id": "WI-10004073",
+      "label": "cross-FS release root no longer nests runtime assets; sidecar verify checks SPA layout",
+      "paths": [
+        { "path": "apps/operator/bin/release/setup-release-checkout.sh", "marker": "provision_runtime_asset" },
+        "apps/operator/lib/release/setup-release-checkout-cross-fs-provision.test.ts",
+        { "path": "papercusp-desktop/bin/verify-sidecar-bundle.sh", "marker": "check_spa_runtime_layout" },
+        "papercusp-desktop/test/verify-sidecar-bundle-spa-layout.test.js",
+        "papercusp-desktop/package.json"
+      ]
+    },
+    {
+      "id": "WI-10004079",
+      "label": "built SPA no longer bakes the build host's flag snapshot",
+      "paths": [
+        { "path": "apps/operator-vite/flags-bootstrap.ts", "marker": "apply: 'serve'" },
+        "apps/operator-vite/flags-bootstrap.test.ts",
+        "apps/operator-vite/vite.config.ts"
+      ]
+    },
+    {
+      "id": "WI-10004074",
+      "label": "runtime mirrors reconcile their file set (no stale monaco chunks)",
+      "paths": [
+        "apps/operator/scripts/lib/mirror-tree.sh",
+        { "path": "apps/operator/scripts/setup-monaco-runtime.sh", "marker": "mirror_matches" },
+        { "path": "apps/operator/scripts/setup-excalidraw-runtime.sh", "marker": "mirror_matches" },
+        { "path": "apps/operator/scripts/setup-vditor-runtime.sh", "marker": "mirror_matches" },
+        "apps/operator/scripts/__tests__/setup-runtime-mirror-reconcile.test.ts"
+      ]
+    },
+    {
+      "id": "WI-10003596",
+      "label": "release:cut canonical version writeback",
+      "note": "leader named staging abfb677388",
+      "paths": [
+        { "path": "packages/operator-core/lib/release-cut-launch.ts", "marker": "canonicalDesktopRoot" },
+        "packages/operator-core/lib/release-canonical-version-writeback.test.ts"
+      ]
+    },
+    {
+      "id": "EI-24635523980082322",
+      "label": "delegated-seat refusal stops spawned members (D-080 seat-stop)",
+      "paths": [
+        { "path": "packages/operator-core/lib/p2p/delegated-spawn-honor.ts", "marker": "stopSpawnedMembers" },
+        "packages/operator-core/lib/task-manager/control.ts",
+        { "path": "packages/operator-core/lib/process-identity.ts", "marker": "readProcessGroupId" }
+      ]
+    },
+    {
+      "id": "EI-24635529006243850",
+      "label": "delegated-seat refusal attributes auth failures (D-080)",
+      "paths": [
+        { "path": "packages/operator-core/lib/p2p/delegated-spawn-honor.ts", "marker": "readMemberLogTail" },
+        { "path": "packages/operator-core/lib/p2p/honor-account-resolution.ts", "marker": "extractAuthFailureExcerpt" }
+      ]
+    },
+    {
+      "id": "WI-10003964",
+      "label": "drill leg I (F6 remainder: phase I, host receipt, producer)",
+      "paths": [
+        "packages/operator-core/lib/hive-git-drill-failure-summary-guard.test.ts",
+        "packages/operator-core/lib/hive-git-drill-phase-select.test.ts",
+        "packages/operator-core/lib/hive-git-drill-zero-skip-guard.test.ts",
+        "packages/operator-core/lib/sync/pot-git/physical-drill-evidence.ts",
+        "packages/operator-core/lib/sync/pot-git/physical-drill-host-receipt.test.ts",
+        "packages/operator-core/lib/sync/pot-git/physical-drill-host-receipt.ts",
+        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.fixture.ts",
+        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.test.ts",
+        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.ts",
+        "packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts",
+        "papercusp-desktop/bin/hive-git-drill.sh",
+        "papercusp-desktop/bin/vm-rig/hive-git-physical-probe.sh",
+        "papercusp-desktop/bin/vm-rig/hive-git-physical-scenario.sh"
+      ]
+    },
+    {
+      "id": "WI-10003961",
+      "label": "drill leg J (F4 target-apply outage)",
+      "note": "open; su-2e125621 running the leg-J rig run. Add paths when it closes",
+      "paths": []
+    },
+    {
+      "id": "WI-10003963",
+      "label": "drill leg H (F3 serving identity; installed-artifact owner restart)",
+      "note": "leader msg 02:18Z named it; open, rig shakedown still owed. Add paths if the shakedown changes code",
+      "paths": [
+        { "path": "packages/operator-core/lib/sync/pot-git/physical-drill-phase-h.ts", "marker": "after.build === before.build" },
+        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-h.fixture.ts",
+        "packages/operator-core/lib/sync/pot-git/physical-drill-phase-h.test.ts",
+        { "path": "papercusp-desktop/bin/vm-rig/hive-git-physical-scenario.sh", "marker": "HIVE_GIT_PHYSICAL_VM_OWNER_LAUNCHER" }
+      ]
+    },
+    {
+      "id": "WI-10004062",
+      "label": "physical drill probe pins the tower-side producer",
+      "note": "open; su-a8392484 working. Add paths when it closes",
+      "paths": []
+    }
+  ]
+}

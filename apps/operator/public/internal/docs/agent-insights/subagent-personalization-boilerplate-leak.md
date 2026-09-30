@@ -1,0 +1,81 @@
+# A subagent echoing personalization/'memory' boilerplate is NOT proof of cross-session bleed
+URL: /internal/docs/agent-insights/subagent-personalization-boilerplate-leak
+
+Investigated WI-1026 (a degenerate 0-tool-use subagent reply that echoed Anthropic personalization boilerplate + the real user's name). Code audit of the inference gateway found no per-request state that could mix two callers' bodies — the far more likely explanation is Anthropic-side account Personalization/Memory content occasionally surfacing in output for an OAuth'd consumer/Max pool account, not a Papercusp isolation bug.
+
+## What was observed
+
+An AUTO-mode run backgrounded a general-purpose subagent (Task tool) to
+implement one plan item. It returned, as its **entire final message**, a
+degenerate reply: an "autonomy-disable" instruction ("the user does not want
+to allow Claude to work autonomously") wrapped around Anthropic-style
+personalization boilerplate ("always reference the user by their preferred
+name... defer to the most recent name provided") — including the **correct
+real user name** for the account in use. **0 tool calls, \~4.7s.** The other 5
+subagents in the same run returned clean, correct results.
+
+The filer's leading hypothesis was **cross-session context bleed inside
+Papercusp's inference gateway** — i.e. one session's memory/personalization
+text leaking into a different session's response, a privacy/cross-tenant
+concern.
+
+## What the investigation found
+
+1. **No per-request/session state exists in the gateway that could mix two
+   callers' content.** `gateway.ts`'s `proxy()`/`proxyLocal()` read each
+   request body into a **function-local** `Buffer` and stream the upstream
+   response straight through — there is no cache, buffer, or map keyed by
+   session/body content. Every module-level `Map` in the file (`dispatcherCache`,
+   `egressFailStreak`, `credential401Streak`, `recentBareBurstByAccount`, …) is
+   keyed by **`accountId`** and holds only numeric health/streak counters —
+   never request or response bodies. There is no mechanism by which caller A's
+   text could end up in caller B's response.
+2. **Papercusp already fixed a *different*, related leak class** — see
+   `writeInteractiveClaudeConfig` (`interactive-claude-config.test.ts`, P-002 /
+   D-001): a launched su/psu session used to risk mirroring the operator's
+   **personal** `~/.claude/CLAUDE.md` / `AGENTS.md` global memory into the
+   session's isolated config dir. That's now explicitly stripped (`CLAUDE.md`
+   / `AGENTS.md` are never symlinked into `$CLAUDE_CONFIG_DIR`), and two-sid
+   isolation is unit-tested (`projects/` transcripts never cross). This is NOT
+   the mechanism here though: WI-1026's subagent is a Task-tool spawn *inside*
+   an already-running session, inheriting that same (already-isolated) config —
+   there's no second `writeInteractiveClaudeConfig` materialize in the loop.
+3. **The far more likely explanation:** the pool account used for this
+   automation is a **real Claude Max / claude.ai OAuth subscription
+   credential** (required for the `oauth-2025-04-20` framing — see
+   [max-oauth-first-system-block-must-be-claude-code-identity](/internal/docs/agent-insights/max-oauth-first-system-block-must-be-claude-code-identity)),
+   not a bare API key. Anthropic's consumer product has an account-level
+   **Personalization / Memory** feature (name + retrieved cross-conversation
+   preferences) that can be injected server-side for *any* request
+   authenticated as that account — automation traffic included. The leaked
+   text matched that feature's boilerplate almost verbatim, and carried the
+   account's **own correct name** — which is exactly what you'd see if the
+   account's own personalization content occasionally surfaces in a
+   degenerate/near-empty completion, not evidence of a *different* session's
+   data arriving at this one.
+4. **No gateway code path exists to suppress this** — `anthropic-beta` is the
+   only header the gateway manipulates (to add `oauth-…`), there is no
+   documented flag to disable server-side Personalization/Memory retrieval for
+   an OAuth'd request.
+5. **No repro since filing** (2026-06-29 → 2026-07-02, heavy concurrent
+   subagent usage fleet-wide throughout) — consistent with a rare, one-off
+   completion artifact on the *account* side, not a systemic isolation bug.
+
+## Takeaway
+
+Before escalating a leaked-personalization-text sighting as a **cross-session
+privacy bug**, rule out the cheaper explanation first: **is the pool account a
+real Claude.ai/Max OAuth credential with Personalization/Memory enabled?** If
+so, that account's own personalization content can occasionally surface in a
+degenerate completion — this is an Anthropic account-setting question (turn
+off Personalization/Memory on pool automation accounts), not a Papercusp code
+defect. A genuine gateway-side leak would require some per-request state keyed
+wrong (a cache, a buffer, a map) — audit `gateway.ts`'s module-level `Map`s
+first: as of this writing, every one of them holds only numeric per-account
+counters, never body content.
+
+**Owner-actionable next step** (not done here — it's a personal Anthropic
+account-settings change, out of scope for an automated agent to make
+unprompted): check whether Personalization / Memory is enabled on the
+`ownerhandle*` pool accounts under claude.ai settings, and disable it for any
+account dedicated to automation.

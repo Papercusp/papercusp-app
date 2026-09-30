@@ -1,0 +1,1232 @@
+/* SessionsRosterView — the live agent roster (P-006), dossier pane (P-007),
+ * files-in-play map (P-008), and facet filters (P-010).
+ *
+ * Design: grounded in the bluefrost semantic scale (--fg/--fg-dim/--fg-mute,
+ * --good/--warn/--bad, --accent, --bg/--bg-2, --border) and matched to the
+ * sibling Plans/Inbox panes (gradient surfaces, sticky detail, 16px radius,
+ * flat interactive elements — no shadows/transforms per design HR#9). The
+ * enclosing .pc-plans__main scrolls; the roster column flows and the dossier
+ * sticks, exactly like .pc-items + .pc-items__detail.
+ */
+
+/* ───────────────────────────── layout shell ────────────────────────────── */
+/* Two independently-scrolling columns: the roster scrolls on the left, the
+   dossier is a flush full-height panel on the right (the "before" pane the
+   user preferred over a floating card). */
+/* The 2-pane layout now lives in the shared TwoPaneShell (.pc-twopane). This is
+   the Sessions-only token override applied on the shell frame: a brighter text
+   scale (the default --fg-dim/--fg-mute read too dark at 10–12px on the
+   near-black bg for the dense roster), lifted toward --fg while keeping the
+   fg → dim → mute hierarchy. Plans/Inbox keep the default scale. */
+.pc-twopane--sessions {
+  --fg-dim: #e1eef8;
+  --fg-mute: #bfd4e5;
+  --pc-roster-row-bg: color-mix(in oklab, var(--bg-raised), white 5%);
+  --pc-roster-row-hover: color-mix(in oklab, var(--bg-raised), white 10%);
+  --pc-roster-chip-bg: color-mix(in oklab, var(--bg-3), white 6%);
+  --pc-roster-border: color-mix(in oklab, var(--border-strong), white 14%);
+}
+
+.pc-twopane--sessions .pc-twopane__list {
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--bg), white 2%),
+    color-mix(in oklab, var(--bg-1), white 1%)
+  );
+}
+
+/* The roster is the LIST slot's inner content; the shell's .pc-twopane__list
+   owns the scroll + flex sizing. */
+.pc-roster {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px 14px 28px;
+  min-width: 0;
+  color: var(--fg);
+}
+
+/* Header + filters stick to the top of the scrolling main, like the plan
+   detail head — they stay reachable while the long roster scrolls. */
+.pc-roster__sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px 10px;
+  margin: 0 -2px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--bg), transparent 8%) 72%,
+    transparent
+  );
+  backdrop-filter: blur(8px);
+}
+
+.pc-roster__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.pc-roster__head-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--fg);
+}
+/* Summary doubles as a quick health read: live in --good, idle in --warn,
+   so the header alone tells you the fleet's pulse before you scan rows. */
+.pc-roster__head-summary {
+  display: inline-flex;
+  align-items: baseline;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-dim);
+}
+.pc-roster__count {
+  white-space: nowrap;
+}
+.pc-roster__count:not(:first-child)::before {
+  content: '·';
+  margin: 0 8px;
+  color: var(--fg-mute);
+  opacity: 0.75;
+}
+.pc-roster__count--shown {
+  color: var(--fg-dim);
+}
+.pc-roster__count--shown b {
+  color: var(--fg);
+  font-weight: 600;
+}
+.pc-roster__count--live {
+  color: var(--good);
+  font-weight: 600;
+}
+.pc-roster__count--idle {
+  color: var(--warn);
+}
+.pc-roster__stale-toggle {
+  font-size: 11px;
+  color: var(--fg);
+  background: color-mix(in oklab, var(--bg-3), transparent 8%);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  padding: 3px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.pc-roster__stale-toggle:hover {
+  background: color-mix(in oklab, var(--bg-3), white 6%);
+  border-color: var(--border-strong);
+}
+.pc-roster__stale-toggle[aria-pressed='true'] {
+  color: var(--fg-dim);
+  border-color: color-mix(in oklab, var(--accent), transparent 55%);
+}
+.pc-roster__stale-toggle:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* ───────────────────────── facet filters (P-010) ───────────────────────── */
+.pc-roster__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+/* The client/liveness/role dropdowns are the harness <Select> wrapper (Radix,
+   token-styled trigger). Only the native file search + clear button need CSS. */
+.pc-roster__filter-file {
+  flex: 1 1 150px;
+  min-width: 130px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--fg);
+  background: color-mix(in oklab, var(--bg-2), white 4%);
+  border: 1px solid var(--pc-roster-border);
+  border-radius: 7px;
+  padding: 5px 9px;
+}
+.pc-roster__filter-file::placeholder {
+  color: var(--fg-mute);
+}
+.pc-roster__filter-file:focus-visible {
+  outline: none;
+  border-color: color-mix(in oklab, var(--accent), transparent 40%);
+}
+.pc-roster__filter-clear {
+  font-size: 11.5px;
+  color: var(--fg);
+  background: color-mix(in oklab, var(--bg-3), transparent 8%);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.pc-roster__filter-clear:hover {
+  background: color-mix(in oklab, var(--bg-3), white 6%);
+  border-color: var(--border-strong);
+}
+.pc-roster__filter-clear:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* ───────────────────────── status banners ──────────────────────────────── */
+.pc-roster__error,
+.pc-roster__loading,
+.pc-roster__empty {
+  font-size: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+.pc-roster__error {
+  color: color-mix(in oklab, var(--bad), white 18%);
+  border-color: color-mix(in oklab, var(--bad), transparent 55%);
+  background: color-mix(in oklab, var(--bad), transparent 88%);
+}
+.pc-roster__loading,
+.pc-roster__empty {
+  color: var(--fg-dim);
+  background: color-mix(in oklab, var(--bg-2), transparent 30%);
+}
+
+/* ───────────────────────── groups ──────────────────────────────────────── */
+.pc-roster__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pc-roster__group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 7px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border), transparent 25%);
+}
+.pc-roster__group-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* WI-39533: the group title is the group's IDENTITY, so it must ellipsize —
+     never vanish. `max-width: calc(100% - 94px)` computed to <= 0 whenever the
+     roster sat in a column narrower than 94px (measured: ~90px in the /adv
+     plans+sessions dock at a 1280px viewport), and because `overflow: hidden`
+     removes the automatic min-width floor a flex item otherwise gets, the title
+     shrank to exactly zero width and disappeared while the count/`n live` chips
+     beside it stayed. Shrink it instead, with a floor. */
+  flex: 0 1 auto;
+  min-width: 4ch;
+}
+.pc-roster__group-count {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  background: var(--pc-roster-chip-bg);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.pc-roster__group-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--good);
+}
+/* A small dot prefix so "N live" reads as a status, matching the row dots. */
+.pc-roster__group-live::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--good);
+  box-shadow: 0 0 5px color-mix(in oklab, var(--good), transparent 45%);
+}
+
+/* ───────────────────────── rows ────────────────────────────────────────── */
+.pc-roster__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pc-roster__row {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px 10px 15px;
+  border: 1px solid var(--pc-roster-border);
+  border-radius: 12px;
+  /* Solid RAISED card surface (same tone as the dossier the user likes) rather
+     than a translucent fill over the near-black page — gives text + colored
+     chips a defined surface to contrast against so they stop reading muted. */
+  background: var(--pc-roster-row-bg);
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+/* A liveness accent bar runs down the left edge (rounded with the card). */
+.pc-roster__row::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--fg-mute);
+}
+.pc-roster__row[data-liveness='live']::before {
+  background: var(--good);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--good), transparent 55%);
+  /* Opacity-only breathe (no transform — freeze-proof) so genuinely-live
+     agents read at a glance vs. idle/stale. Calmed for reduced-motion below. */
+  animation: pc-roster-live-pulse 2.6s var(--ease-mid, ease-in-out) infinite;
+}
+.pc-roster__row[data-liveness='idle']::before {
+  background: var(--warn);
+}
+.pc-roster__row[data-liveness='stale'] {
+  opacity: 0.68;
+}
+@keyframes pc-roster-live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pc-roster__row[data-liveness='live']::before {
+    animation: none;
+  }
+}
+.pc-roster__row:hover {
+  border-color: var(--border-strong);
+  background: var(--pc-roster-row-hover);
+}
+.pc-roster__row:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+/* Selected = a solid accent-blended card (not a faint translucent tint), so the
+   open agent is unmistakable. Blends the theme --accent into the raised surface
+   → reads blue on frost, grey on the monochrome theme, vivid on both. */
+.pc-roster__row[data-selected] {
+  border-color: color-mix(in oklab, var(--accent), transparent 25%);
+  background: color-mix(in oklab, var(--accent) 18%, var(--bg-raised));
+}
+.pc-roster__row[data-selected]:hover {
+  background: color-mix(in oklab, var(--accent) 24%, var(--bg-raised));
+}
+
+.pc-roster__row--ended {
+  cursor: default;
+  opacity: 0.6;
+  border-style: dashed;
+  background: transparent;
+}
+.pc-roster__row--ended::before {
+  display: none;
+}
+.pc-roster__row--ended:hover {
+  border-color: var(--border);
+  background: transparent;
+}
+
+.pc-roster__row-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.pc-roster__badge {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: lowercase;
+  color: var(--fg);
+  background: var(--pc-roster-chip-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 7px;
+}
+/* Client badges read as their own COLOR — a vivid hue + a matching tinted fill
+   and border — instead of a grey pill with faintly-tinted text. */
+.pc-roster__badge[data-client='claude'] {
+  color: #e2c9ff;
+  background: color-mix(in oklab, #a855f7, transparent 82%);
+  border-color: color-mix(in oklab, #a855f7, transparent 58%);
+}
+.pc-roster__badge[data-client='codex'] {
+  color: var(--accent-strong, var(--accent));
+  background: color-mix(in oklab, var(--accent), transparent 82%);
+  border-color: color-mix(in oklab, var(--accent), transparent 58%);
+}
+.pc-roster__badge[data-client='omp'] {
+  color: var(--amber-400);
+  background: color-mix(in oklab, var(--amber-400), transparent 84%);
+  border-color: color-mix(in oklab, var(--amber-400), transparent 60%);
+}
+.pc-roster__chip {
+  font-size: 11px;
+  color: var(--fg);
+  background: var(--pc-roster-chip-bg);
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 5px;
+  padding: 2px 7px;
+}
+.pc-roster__chip--feature {
+  color: color-mix(in oklab, var(--accent-strong), white 18%);
+  background: color-mix(in oklab, var(--accent), transparent 58%);
+  border-color: color-mix(in oklab, var(--accent), transparent 38%);
+}
+.pc-roster__chip--warn {
+  color: color-mix(in oklab, var(--bad), white 30%);
+  background: color-mix(in oklab, var(--bad), transparent 66%);
+  border-color: color-mix(in oklab, var(--bad), transparent 46%);
+}
+/* Official standing modes (agent_modes → RosterEntry.modes, EI-7626): green-leaning
+   so a granted mode reads as "engaged", distinct from the accent feature chip. */
+.pc-roster__chip--mode {
+  color: color-mix(in oklab, var(--good), white 22%);
+  background: color-mix(in oklab, var(--good), transparent 74%);
+  border-color: color-mix(in oklab, var(--good), transparent 52%);
+}
+.pc-roster__label {
+  flex: 1 1 90px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--fg);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-roster__age {
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.pc-roster__intent {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg);
+}
+
+.pc-roster__files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.pc-roster__file-chip {
+  font-size: 10.5px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--fg);
+  background: var(--pc-roster-chip-bg);
+  border: 1px solid color-mix(in oklab, var(--border), white 8%);
+  border-radius: 4px;
+  padding: 2px 6px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-roster__meta {
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--fg-dim);
+  margin-left: 2px;
+}
+
+/* ───────────────────────── files in play (P-008) ───────────────────────── */
+.pc-files__contend {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: color-mix(in oklab, var(--bad), white 28%);
+}
+.pc-files__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.pc-files__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+}
+.pc-files__row:hover {
+  background: color-mix(in oklab, var(--bg-2), transparent 35%);
+}
+.pc-files__row[data-contended] {
+  border-color: color-mix(in oklab, var(--bad), transparent 62%);
+  background: color-mix(in oklab, var(--bad), transparent 90%);
+}
+.pc-files__path {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.pc-files__agents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+}
+.pc-files__agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--fg);
+  background: var(--pc-roster-chip-bg);
+  border: 1px solid var(--pc-roster-border);
+  border-radius: 5px;
+  padding: 2px 7px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.pc-files__agent:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+.pc-files__agent[data-selected] {
+  border-color: color-mix(in oklab, var(--accent), transparent 40%);
+  background: color-mix(in oklab, var(--accent), transparent 86%);
+  color: var(--fg);
+}
+.pc-files__zombie {
+  color: color-mix(in oklab, var(--bad), white 18%);
+  font-weight: 700;
+}
+
+/* ───────────────────────── recently ended ──────────────────────────────── */
+.pc-roster__ended {
+  margin-top: 4px;
+}
+
+/* ───────────────────────── agent dossier (P-007) ───────────────────────── */
+/* The dossier is the DETAIL slot's inner content; the shell's
+   .pc-twopane__detail owns the column geometry + left border + gradient. */
+.pc-dossier {
+  --pc-dossier-text: color-mix(in oklab, var(--fg), white 12%);
+  --pc-dossier-dim: color-mix(in oklab, var(--fg-dim), white 22%);
+  --pc-dossier-mute: color-mix(in oklab, var(--fg-mute), white 26%);
+  --pc-dossier-rule: color-mix(in oklab, var(--border), white 18%);
+
+  padding: 14px 16px 28px;
+  color: var(--pc-dossier-text);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Empty state — keeps the 2-pane structure when no agent is selected. */
+.pc-dossier__placeholder {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pc-dossier__placeholder-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pc-dossier-dim);
+}
+.pc-dossier__placeholder-hint {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--pc-dossier-mute);
+}
+
+.pc-dossier__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pc-dossier__head-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.pc-dossier__close {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--pc-dossier-mute);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 6px;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+.pc-dossier__close:hover {
+  color: var(--pc-dossier-text);
+  background: color-mix(in oklab, var(--bg-2), transparent 10%);
+}
+.pc-dossier__close:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+/* WI-7310: this is the pane TITLE, not the machine-text role. It renders
+   `agentDisplayLabel(entry.label)` — HUMAN text — whenever the agent has a
+   label, and falls back to the raw ownerId only when it has none; the id is
+   always carried by the `title` attribute either way. It was named
+   `.pc-dossier__id` before the text ROLES existed (P-007, 2026-06-02), so when
+   this file later defined `.pc-dossier__id` as "machine text -> MONO" the two
+   silently collided: being the later rule, the role block won the cascade and
+   restyled this title to mono at weight 500 — a human label set in a machine
+   face, and a pane title lighter than a section heading. Renamed so each role
+   owns its own selector. Title treatment is size + weight + brightest ink; the
+   machine/human family split below governs INLINE body text only. */
+.pc-dossier__title {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--pc-dossier-text);
+  word-break: break-word;
+}
+.pc-dossier__intent {
+  font-size: 12.5px;
+  line-height: 1.55;
+  font-style: italic;
+  color: var(--pc-dossier-dim);
+}
+/* popup-agent-state-coverage-2026-08-18 P-009. Upright and tabular against the
+   italic sentence it trails: the intent is prose the agent wrote, this is a
+   measurement, and reading as one run-on phrase is what let a stale intent pass
+   for a live one. */
+.pc-dossier__intent-age {
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  color: var(--pc-dossier-mute);
+  white-space: nowrap;
+}
+.pc-dossier__note {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--pc-dossier-mute);
+}
+.pc-dossier__section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 12px;
+  border-top: 1px solid var(--pc-dossier-rule);
+}
+.pc-dossier__h {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  /* WI-7310 [owner 2026-08-03]: "very little distinction between the different
+     kinds of text, heading vs. regular". This sat at `--pc-dossier-dim`, i.e. a
+     section heading rendered DIMMER than the body it labels — an inverted
+     hierarchy, where the eye is pulled to the content and has to hunt for the
+     structure. Headings take the brightest ink; the heading now reads as a
+     heading by weight + case + ink together rather than fighting two of them.
+     The popup's filled cap sets its own `--pc-dossier-cap-label` further down
+     and is unaffected — this governs the /adv two-pane, where there is no cap
+     plate to carry the hierarchy. */
+  color: var(--pc-dossier-text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pc-dossier__h-note {
+  font-weight: 400;
+  text-transform: none;
+  color: var(--pc-dossier-mute);
+}
+.pc-dossier__h-note--err {
+  color: color-mix(in oklab, var(--bad), white 20%);
+}
+
+/* ── section collapse (adv/sessions/rail-sections.tsx) ─────────────────────── */
+/* Unscoped on purpose: the cap is a toggle wherever this rail renders — the
+   session popup AND the /adv two-pane — because "this section is enormous" is
+   not a popup-only problem. Only the FRAMED look below is popup-scoped.
+   Everything but the cap folds away; the cap keeps the count, so folding Coord
+   never hides that 19 messages arrived. */
+.pc-dossier__section[data-collapsed='true'] > *:not(.pc-dossier__h) {
+  display: none;
+}
+
+/* ── the session popup's Framed zone (owner-approved artifact 6379bb65) ─────
+   Scoped to `.pc-zone--activity`, the wrapper SessionChatModal puts on this
+   rail. In the popup this column is one of six named zones and its sections are
+   framed cards; in the /adv two-pane it is the detail pane of a board that
+   already frames it, so it stays exactly as it was. */
+.pc-zone--activity .pc-dossier {
+  /* ── the card + its edge — Treatment C3's two load-bearing values ──────────
+     Plan P-005, applied identically to the Orders rail (AgentOrders.css carries
+     the full measurement and the reasoning). The short version: on this ground
+     card FILL has no range (1.11:1 to 1.58:1 before the rail reads washed), so
+     separation has to come from the STROKE — and both rails shipped a day with
+     an edge at 1.92:1, under the 3:1 non-text floor, around a 1.09:1 fill.
+
+     Measured live in the Tauri webview:
+                       was                    now                  C3 target
+       card    #152030  1.09:1 vs ground  #1c3146  1.34:1      #1d3048  1.33:1
+       edge    #205170  1.92:1 vs card    #4c81a0  3.15:1      #5182a0  3.22:1
+
+     Kept byte-identical to the Orders rail on purpose: two rails flanking the
+     same popup that separate their sections differently read as one of them
+     being broken — the same rule the cap inversion below already follows. */
+  --pc-dossier-card: color-mix(in oklab, var(--accent-strong) 16%, var(--bg-popover));
+  --pc-dossier-edge: color-mix(in oklab, var(--accent-strong) 60%, var(--bg-popover));
+  /* ── section-cap plate ────────────────────────────────────────────────────
+     The Activity rail's caps had the same defect as the Orders rail's (see the
+     long note in AgentOrders.css): `var(--accent)` / `var(--warn)` at full
+     saturation, stacked down a narrow column [owner 2026-08-02, "the bars are
+     too bright"]. Fixed the same way, deliberately — two rails flanking the
+     same popup must not calm down differently, or the asymmetry reads as one
+     of them being broken.
+
+     INVERTED, not merely dimmed — see the measured curve in AgentOrders.css.
+     The short version: holding the dark ink, the plate is AA-legal only down
+     to 71% (-21% luminance, which does not read as "less bright"), and 55-70%
+     is a dead zone where no ink reaches 4.5:1. A dark plate with light text is
+     the only pairing that gets a real reduction AND stays legible:
+
+       blue   #30526c  -44% luminance   label #c1eafe  6.46:1   AA
+       amber  #574f3a  -49% luminance   label #fdd37d  5.72:1   AA
+
+     35% rather than lower because below ~25% the plate stops separating from
+     the card it sits on and the bar dissolves.
+
+     ⚠ That separation moved to 1.62:1 (from ~2.0:1) when P-005 adopted C3's
+     lighter card above. NOT repaired by raising the mix — that is a brightness
+     increase, the exact thing the owner asked to reduce, and it costs the label
+     6.42:1 -> 4.91:1. Repaid in FORM instead: a hairline under the cap in the
+     card's edge colour, free in luminance. Full reasoning in AgentOrders.css.
+
+     File-local because the css-tokens lint only resolves a component token
+     inside its DEFINING file — chat-controls.css's `--pc-zone-fill` named here
+     would compute to unset, i.e. an invisible cap rather than a loud fail. */
+  --pc-dossier-cap-fill: color-mix(in oklab, var(--accent-strong) 35%, var(--bg-popover));
+  /* Derived from the theme's accent (see AgentOrders.css) — a pinned sky-blue
+     is off-palette under the `black` and `honeycomb` themes. */
+  --pc-dossier-cap-label: color-mix(in oklab, var(--accent-strong), white 50%);
+  --pc-dossier-cap-fill-warn: color-mix(in oklab, var(--warn) 35%, var(--bg-popover));
+  /* Lifted toward white: raw --warn on the amber plate is 4.87:1 — over the
+     AA line but with no margin for 9px uppercase text. (`--amber-200` does not
+     exist in _brand-primitives.css; an undefined var() computes to unset.) */
+  --pc-dossier-cap-label-warn: color-mix(in oklab, var(--warn), white 30%);
+  /* Badges/notes ride ON the cap. The veil stays BLACK: measured, a white veil
+     lightens the chip toward its own light label and pushes the amber badge to
+     4.14:1 (sub-AA); black holds both at 8.1:1 / 7.2:1. */
+  --pc-dossier-cap-veil: rgb(0 0 0 / 0.2);
+  padding: 0 0 12px;
+  gap: 6px;
+}
+/* The chrome that is not a section keeps the padding the rail used to own. */
+.pc-zone--activity .pc-dossier > *:not(.pc-dossier__section):not(.pc-zone-title) {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.pc-zone--activity .pc-dossier__head {
+  padding-top: 8px;
+}
+.pc-zone--activity .pc-dossier__section {
+  /* Same measured trap as the Orders rail's cards (see AgentOrders.css):
+     `.pc-dossier` is a flex column, so a card left at the default
+     `flex-shrink: 1` gets squeezed once the rail overflows — and with
+     `overflow-y: auto` below, squeezed means CLIPPED, silently. */
+  flex: none;
+  margin: 0 8px;
+  padding: 0 8px 6px;
+  border: 1px solid var(--pc-dossier-edge);
+  border-radius: 4px;
+  background: var(--pc-dossier-card);
+  /* An open section still cannot run away with the column: its body scrolls
+     inside its own card with the cap pinned. This is the half of the owner's
+     "sections that get big" ask that works for a reader who never clicks. */
+  max-height: 44vh;
+  overflow-y: auto;
+}
+.pc-zone--activity .pc-dossier__section[data-attn='true'] {
+  border-color: var(--warn);
+}
+.pc-zone--activity .pc-dossier__section[data-collapsed='true'] {
+  max-height: none;
+  padding-bottom: 0;
+}
+/* The section CAP — filled, full-bleed across the card's padding, pinned. */
+.pc-zone--activity .pc-dossier__h {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 0 -8px;
+  padding: 3px 8px;
+  /* 9px -> 10.5px with the P-008 type lift (owner: rail text is hard to read).
+     Measured, the rails' CONTRAST was never the problem — body text already
+     ran 15.1:1 and even the muted tier 7.7:1 on this ground. The defect was
+     SIZE alone, so this raises the scale and leaves the tonal ladder intact
+     (lifting contrast too would have flattened mute into body text). */
+  font-size: 10.5px;
+  background: var(--pc-dossier-cap-fill);
+  color: var(--pc-dossier-cap-label);
+  /* Form, not luminance — repays the plate/card separation C3's lighter card
+     cost. Matches the Orders rail exactly (see the cap-fill note above). */
+  border-bottom: 1px solid var(--pc-dossier-edge);
+}
+.pc-zone--activity .pc-dossier__section[data-attn='true'] > .pc-dossier__h {
+  background: var(--pc-dossier-cap-fill-warn);
+  color: var(--pc-dossier-cap-label-warn);
+  border-bottom-color: var(--warn);
+}
+
+/* ── cluster labels + the quiet-empty line ────────────────────────────────── */
+/* Layout/dot/type scale are shared with the Orders rail (chat-controls.css);
+   only the INK is set here, because each rail lifts its own muted tier. Both
+   sit OUTSIDE the cards, so they take the rail ground rather than the card. */
+.pc-zone--activity .pc-dossier > .pc-rail-cluster,
+.pc-zone--activity .pc-dossier > .pc-rail-quiet {
+  color: var(--pc-dossier-mute);
+  /* These are not sections, so the `> *:not(.pc-dossier__section)` rule above
+     would give them the rail's own 10px chrome padding on top of their own.
+     Restated so the quiet line's dot aligns with the cards' text column. */
+  padding: 1px 10px;
+}
+.pc-zone--activity .pc-dossier > .pc-rail-quiet .pc-rail-quiet__label {
+  color: var(--pc-dossier-dim);
+}
+/* Badges and notes ride ON the filled cap, so they take the cap's ink rather
+   than the rail ground's — the contrast pairing the lint requires. */
+.pc-zone--activity .pc-dossier__h .pc-dossier__badge-count {
+  background: var(--pc-dossier-cap-veil);
+  color: var(--pc-dossier-cap-label);
+  font-size: 10px;
+}
+.pc-zone--activity .pc-dossier__h .pc-dossier__h-note,
+.pc-zone--activity .pc-dossier__h .pc-dossier__h-note--err {
+  color: var(--pc-dossier-cap-label);
+  opacity: 0.72;
+}
+
+/* ── P-008: the Activity rail's BODY type, lifted for the popup only ─────────
+ * [owner 2026-08-02] "I'm finding the text hard to read on the left and right
+ * hand sidebars."
+ *
+ * MEASURED: contrast was never the problem here — on this ground the rail runs
+ * 15.1:1 (body), 11.7:1 (dim) and 7.7:1 (muted), all comfortably AAA. Raising
+ * contrast would only have flattened the muted tier into body text and cost the
+ * tonal hierarchy. The defect is SIZE, so this moves size and nothing else.
+ *
+ * Values chosen to MATCH the Orders rail on the opposite edge (body 12.5px,
+ * caps 10.5px). The two rails flank the same popup and are read in one glance;
+ * two different body sizes there read as a bug, not as hierarchy.
+ *
+ * SCOPED to `.pc-zone--activity` on purpose, accepting the duplication. The
+ * `.pc-dossier__*` rules below are shared with the /adv detail pane, which is a
+ * different density context (a full-width pane in a two-pane board, not a
+ * ~200px rail in a 740px popup) and was not part of this ask. Lifting the
+ * shared rules would silently restyle a screen the owner was not looking at.
+ * If /adv is ever judged to have the same problem, the right move is to lift
+ * the shared rules and DELETE this block — not to let the two drift. */
+.pc-zone--activity .pc-dossier__meta-row,
+.pc-zone--activity .pc-dossier__coord-line,
+.pc-zone--activity .pc-dossier__empty-line,
+.pc-zone--activity .pc-dossier__checkpoint,
+.pc-zone--activity .pc-dossier__lock,
+.pc-zone--activity .pc-dossier__windown {
+  font-size: 12.5px;
+}
+.pc-zone--activity .pc-dossier__meta-val {
+  font-size: 12.5px;
+}
+.pc-zone--activity .pc-dossier__dir,
+.pc-zone--activity .pc-dossier__coord-ts,
+.pc-zone--activity .pc-dossier__lock-exp,
+.pc-zone--activity .pc-dossier__lock-intent,
+.pc-zone--activity .pc-dossier__drillin,
+.pc-zone--activity .pc-dossier__ctxbar-pct {
+  font-size: 12px;
+}
+/* NB `__badge-count` here is the one in a section BODY. The badge riding ON a
+   cap bar is already pinned to the smaller cap scale (10px) by the rule above,
+   which is more specific (3 classes vs 2) and therefore wins — it must stay
+   subordinate to its 10.5px bar rather than take the body size. */
+.pc-zone--activity .pc-dossier__meta-key,
+.pc-zone--activity .pc-dossier__badge-count {
+  font-size: 11.5px;
+}
+.pc-zone--activity .pc-dossier__subhead,
+.pc-zone--activity .pc-dossier__lockmark {
+  font-size: 11px;
+}
+.pc-dossier__badge-count {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: color-mix(in oklab, var(--accent), var(--fg) 40%);
+  background: color-mix(in oklab, var(--accent), transparent 80%);
+  border-radius: 5px;
+  padding: 0 6px;
+}
+.pc-dossier__meta-row {
+  display: flex;
+  gap: 10px;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.pc-dossier__meta-key {
+  flex: 0 0 76px;
+  color: var(--pc-dossier-mute);
+  text-transform: uppercase;
+  font-size: 10.5px;
+  line-height: 1.65;
+}
+.pc-dossier__meta-val {
+  color: var(--pc-dossier-text);
+  min-width: 0;
+  word-break: break-word;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.pc-dossier__files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pc-dossier__file,
+.pc-dossier__lock {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.pc-dossier__file-path {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--pc-dossier-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.pc-dossier__lockmark {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+.pc-dossier__lockmark--held {
+  color: var(--good);
+  background: color-mix(in oklab, var(--good), transparent 82%);
+}
+.pc-dossier__lockmark--wait {
+  color: var(--warn);
+  background: color-mix(in oklab, var(--warn), transparent 82%);
+}
+.pc-dossier__lock-exp {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--pc-dossier-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pc-dossier__lock-intent {
+  flex: 1 1 100%;
+  padding-left: 21px;
+  color: var(--pc-dossier-mute);
+  font-style: italic;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.pc-dossier__coord-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  flex-wrap: wrap;
+}
+.pc-dossier__dir {
+  flex: 0 0 auto;
+  color: var(--pc-dossier-dim);
+  font-size: 11px;
+}
+.pc-dossier__dir[data-dir='outbound'] {
+  color: color-mix(in oklab, var(--accent), var(--fg) 15%);
+}
+.pc-dossier__dir[data-dir='inbound'] {
+  color: var(--good);
+}
+.pc-dossier__dir--esc[data-sev='blocker'] {
+  color: color-mix(in oklab, var(--bad), white 18%);
+}
+.pc-dossier__dir--esc[data-sev='question'] {
+  color: var(--warn);
+}
+.pc-dossier__coord-text {
+  color: var(--pc-dossier-text);
+  min-width: 0;
+  flex: 1 1 60%;
+}
+
+/* ── TEXT ROLES (WI-7310) ───────────────────────────────────────────────────
+   [owner 2026-08-03] "the difference between `coord:inbox-wake:su-1c1faa38-…`
+   and the other text should be more clear … lots of other places in this pane
+   where there is very little distinction between the different kinds of text".
+
+   The rail mixes two fundamentally different kinds of string on ONE line — an
+   opaque machine identifier and a human sentence — and was setting both in the
+   same face at nearly the same colour, so the only thing separating them was a
+   `·`. The pane already had the right idea and had not generalised it:
+   `.pc-dossier__meta-val` puts machine values in the mono face. These two
+   classes make that implicit convention an explicit, reusable ROLE:
+
+     __id    machine text  -> MONO, brightest ink   (event keys, ids, slugs, paths)
+     __note  human text    -> SANS, muted           (notes, intents, reasons)
+
+   Family is the load-bearing signal, not colour: it survives both themes, both
+   rail contexts, and low-contrast displays, and it degrades gracefully for a
+   reader who cannot separate the two greys. Colour and weight only reinforce it.
+
+   ⚠ letter-spacing MUST stay 0 here. The design system mandates it app-wide and
+   `blocks nonzero letter spacing` lints it with NO allowlist (same note as
+   `.pc-dossier__subhead`), so tracking is NOT available as a differentiator —
+   family + colour + weight + size carry the whole distinction. */
+.pc-dossier__id {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--pc-dossier-text);
+  font-weight: 500;
+  /* Long ids must break rather than force the row to scroll sideways. */
+  word-break: break-word;
+}
+.pc-dossier__note {
+  /* Explicit sans: these often sit INSIDE a mono run (an id, then its note), so
+     the face has to be re-asserted rather than inherited. */
+  font-family: var(--font-sans, system-ui, sans-serif);
+  color: var(--pc-dossier-mute);
+  font-weight: 400;
+}
+/* The separator is punctuation between two roles — it should read as neither.
+   Dropping it below both is what stops "id · note" scanning as one string.
+
+   WI-7310: this asked for `--pc-dossier-dim` on the reasonable-sounding premise
+   that "dim" is the dimmest ink. It is not. The pane's ramp is text > dim >
+   mute (`_semantic.black.css`: --fg #f5f5f5, --fg-dim #b8b8b8, --fg-mute
+   #808080), so `dim` is the MIDDLE step and `--pc-dossier-mute` — what
+   `.pc-dossier__note` uses — is the dimmest. The separator was therefore
+   rendering BRIGHTER than the prose it separates: the exact inversion the
+   comment above says to avoid, from a token whose name reads like a rank it
+   does not hold.
+   Fixed structurally rather than by picking a different token: the separator
+   now takes the SAME ink as the note and steps down from it with opacity, so
+   "below the note" is true by construction in every theme instead of resting on
+   an assumption about how two token names happen to be ordered. */
+.pc-dossier__sep {
+  color: var(--pc-dossier-mute);
+  opacity: 0.55;
+  /* Not a semantic character; keep it out of the accessibility tree via the
+     markup's aria-hidden, and keep it from being selected with the id. */
+  user-select: none;
+}
+.pc-dossier__coord-ts {
+  margin-left: auto;
+  color: var(--pc-dossier-mute);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.pc-dossier__empty-line {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--pc-dossier-mute);
+}
+
+/* ── Rail R1: capped sections (session-chat-popup-direction-d-2026-08-02 P-008) ──
+   Every section previews DOSSIER_ROW_CAP rows and drills in. The rail's height
+   is bounded BY CONSTRUCTION rather than by hoping no agent holds 32 locks. */
+.pc-dossier__capped {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+/* Expanding must not undo the cap: an opened section scrolls WITHIN the rail
+   instead of pushing it taller. This is the deck's one open R1 cost — "Open all
+   32 needs somewhere to go" — answered in place, so the drill-in needs no
+   separate destination surface. */
+.pc-dossier__capped[data-open] {
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  border-left: 2px solid var(--pc-dossier-rule);
+  padding-left: 8px;
+  margin-left: -2px;
+}
+.pc-dossier__drillin {
+  align-self: flex-start;
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: color-mix(in oklab, var(--accent), var(--fg) 25%);
+  cursor: pointer;
+  border-radius: 4px;
+}
+.pc-dossier__drillin:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.pc-dossier__drillin:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── Rail R1+ new legs (session-chat-popup-direction-d-2026-08-02 P-009) ──── */
+
+/* (d) Fleet wind-down banner. Sits above every section because it REFRAMES them:
+   an agent claiming nothing under a winding-down fleet is being refused work by
+   the scheduler, not stuck. Warn-toned, not bad-toned — this is a deliberate
+   fleet state, not a fault. */
+.pc-dossier__windown {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin: 0 0 10px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  border-left: 3px solid var(--warn);
+  background: color-mix(in oklab, var(--warn), transparent 88%);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.pc-dossier__windown-state {
+  font-weight: 600;
+  color: color-mix(in oklab, var(--warn), var(--fg) 25%);
+}
+.pc-dossier__windown-reason {
+  color: var(--fg);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* (c) The claim's health word, on the claim's own row. Colour carries the
+   verdict so it survives a glance; the text carries it for anyone who cannot
+   use the colour (the two must never disagree, so 'unknown' is muted rather
+   than merely uncoloured). */
+.pc-dossier__claim-health {
+  font-weight: 600;
+}
+.pc-dossier__claim-health[data-progress='progressing'] {
+  color: color-mix(in oklab, var(--good), var(--fg) 30%);
+}
+.pc-dossier__claim-health[data-progress='stalled'] {
+  color: color-mix(in oklab, var(--warn), var(--fg) 20%);
+}
+.pc-dossier__claim-health[data-progress='unknown'] {
+  font-weight: 400;
+  color: var(--pc-dossier-mute);
+}
+
+/* (b) "available, not awaited" — the second half of Waiting on. Deliberately a
+   sub-heading INSIDE that section rather than a section of its own: the two
+   lists are only diagnostic read together. */
+.pc-dossier__subhead {
+  margin: 8px 0 4px;
+  font-size: 10px;
+  font-weight: 600;
+  /* letter-spacing stays 0: the design system mandates it app-wide and the
+     `blocks nonzero letter spacing` lint enforces it with NO allowlist. The
+     uppercase-label tracking convention this reached for is exactly what that
+     rule exists to override. */
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--pc-dossier-mute);
+}
+
+/* ── Health signals (hud-first-nav-and-dossier-2026-07-26 P-005) ── */
+.pc-dossier__ctxbar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pc-dossier__ctxbar {
+  flex: 1 1 auto;
+  height: 5px;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--pc-dossier-rule), transparent 20%);
+  overflow: hidden;
+}
+.pc-dossier__ctxbar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.pc-dossier__ctxbar-fill[data-risk='warn'] {
+  background: var(--warn);
+}
+.pc-dossier__ctxbar-fill[data-risk='bad'] {
+  background: var(--bad);
+}
+.pc-dossier__ctxbar-pct {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--pc-dossier-dim);
+}
+.pc-dossier__checkpoint {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--pc-dossier-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Responsive 2-pane stacking is owned by the shared shell (TwoPaneShell.css). */

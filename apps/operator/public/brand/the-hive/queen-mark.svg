@@ -1,0 +1,33 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Queen mark</title>
+  <desc id="desc">The Swarm Queen brain emblem: a crowned hexagonal coordination core.</desc>
+  <defs>
+    <radialGradient id="queen-bg" cx="50%" cy="35%" r="72%">
+      <stop offset="0%" stop-color="#2B250D"/>
+      <stop offset="62%" stop-color="#10120E"/>
+      <stop offset="100%" stop-color="#070807"/>
+    </radialGradient>
+    <linearGradient id="queen-crown" x1="20%" y1="0%" x2="86%" y2="100%">
+      <stop offset="0%" stop-color="#FFF2C2"/>
+      <stop offset="46%" stop-color="#FFD166"/>
+      <stop offset="100%" stop-color="#B97812"/>
+    </linearGradient>
+    <radialGradient id="queen-core" cx="50%" cy="46%" r="58%">
+      <stop offset="0%" stop-color="#FFF8D6" stop-opacity=".96"/>
+      <stop offset="38%" stop-color="#F6B72F" stop-opacity=".78"/>
+      <stop offset="100%" stop-color="#F6B72F" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="queen-glow" x="-35%" y="-35%" width="170%" height="170%">
+      <feGaussianBlur stdDeviation="4.2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <path d="M64 8 113 36v56l-49 28-49-28V36z" fill="url(#queen-bg)" stroke="#FFD166" stroke-width="3.2" stroke-linejoin="round"/>
+  <path d="M35 48 48 30l16 19 16-19 13 18-8 37H43z" fill="url(#queen-crown)" stroke="#FFD166" stroke-width="2.2" stroke-linejoin="round"/>
+  <circle cx="64" cy="72" r="25" fill="url(#queen-core)" stroke="#FFD166" stroke-opacity=".62" stroke-width="1.8"/>
+  <g filter="url(#queen-glow)">
+    <path d="M47 75h34M52 65h24M57 55h14" stroke="#FFD166" stroke-width="2.8" stroke-linecap="round"/>
+    <path d="M64 42v54" stroke="#FFD166" stroke-width="2.6" stroke-linecap="round"/>
+  </g>
+  <path d="M31 91h66" stroke="#FFD166" stroke-opacity=".42" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

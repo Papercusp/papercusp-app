@@ -1,0 +1,44 @@
+-- 556-coord-event-log-surface-kind-id-idx.sql
+--
+-- WI-3957: a composite expression index for the coord_event_log kinds-filter
+-- query shape. readEventsBounded/readLinesBounded (and their -Cursor
+-- siblings, packages/coordination/src/event-log/pg-log.ts) support an
+-- optional `kinds` filter that compiles to:
+--   WHERE workspace_id = $1 AND surface = $2
+--     AND body->>'kind' = ANY($kinds::text[])
+--   ORDER BY id DESC LIMIT $limit
+-- The only prior index on this table, coord_event_log_surface_id
+-- (workspace_id, surface, id), cannot apply the jsonb-text-extraction
+-- predicate, so the planner falls back to a backward index scan on
+-- (workspace_id, surface) with a row-Filter on body->>'kind' — fine when the
+-- kind filter matches nearly all rows of the surface or the match is found
+-- within the first few dozen rows, but pg_stat_statements showed this query
+-- shape averaging 6.2s/call with ~27h cumulative DB time (found during
+-- WI-3937's root-cause pass) under this fleet's actual concurrent load,
+-- where every extra buffer touched under contention is expensive even
+-- though the same query looks instant (sub-2ms) on an idle box.
+--
+-- Live-verified on the dev box (~101.6k rows in coord_event_log):
+--   Built CONCURRENTLY out-of-band first (avoids locking the hot table under
+--   the live fleet's continuous read/write traffic), matching the
+--   established pattern (see 543-coord-event-log-msg-id-index.sql).
+--   EXPLAIN (ANALYZE, BUFFERS) confirms the planner picks this index for
+--   selective/multi-value ANY() filters — e.g. surface='messages' AND
+--   body->>'kind' = ANY('{notify,ack}') switches from the old
+--   Index Scan Backward + Filter plan to
+--   `Index Scan using coord_event_log_surface_kind_id_idx` (Index Cond
+--   includes the kind predicate directly, no post-scan Filter) — while the
+--   single-common-kind LIMIT-50 case (e.g. kinds:['escalation'], the actual
+--   escalations.ts call site) is left on the cheap backward-scan plan,
+--   unaffected, since the planner correctly judges it already fast under
+--   the LIMIT. No regression either way; a real win for the multi/rare-kind
+--   shape that was the pg_stat_statements outlier.
+--
+-- Idempotent (IF NOT EXISTS); no top-level BEGIN/COMMIT (runner wraps each
+-- file in its own transaction, per the lint-migrations enforced-era
+-- contract) — non-concurrent here is fine: migrations run at boot/provision
+-- before load, and IF NOT EXISTS skips it where the index was already built
+-- live (see 543 for the same rationale).
+
+CREATE INDEX IF NOT EXISTS coord_event_log_surface_kind_id_idx
+  ON harness_shared.coord_event_log (workspace_id, surface, (body->>'kind'), id DESC);

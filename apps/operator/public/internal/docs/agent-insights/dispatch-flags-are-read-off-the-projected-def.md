@@ -1,0 +1,54 @@
+# Dispatch flags (crossWorkspace, etc.) are read off the PROJECTED def, not the source def
+URL: /internal/docs/agent-insights/dispatch-flags-are-read-off-the-projected-def
+
+A defineTool flag like crossWorkspace can be set on the def yet silently dropped in projection, so the host dispatch never honors it. Symptom appears far from cause. Diff the source def against lookupByMcpName(name).
+
+## The trap
+
+`defineTool` has **two** registration paths into the projected-tool registry:
+
+* **principal-gated** (the default) → `definePrincipalGatedTool` → `registerLegacyAsProjected(def, …)`
+* **role-gated** (`requirePrincipal: false`, or `agentRoles`) → `defineRoleGatedTool`
+
+The host dispatch (`_mcp-handler.ts`) and the scoped-superuser clamp read a tool's
+dispatch-relevant flags — `crossWorkspace`, `profile`, `harness`, … — off the
+**PROJECTED** def via `lookupByMcpName(name)`, **not** off the source def you wrote.
+
+So a flag that is set on the source def but not threaded through *both* projection
+paths is **silently ignored** by the host. EI-2378 was exactly this: `crossWorkspace`
+was on the principal-gated `def` (with a P-062 comment intending it) but
+`registerLegacyAsProjected` didn't copy it into `registerProjectedTool({…})`, while
+the role-gated path did. Result: `memory:*` (principal-gated, `crossWorkspace: true`)
+ran on a workspace-scoped tx instead of the admin handle, and failed
+`requires a workspace-scoped call` from an unscoped (`?workspace=*`) psu session.
+
+## Why it's nasty
+
+The **symptom is far from the cause**. You set `crossWorkspace: true`, read the code,
+see the flag on the def, and the tool *still* behaves workspace-isolated. The drop is
+in a generic projection helper you'd never think to look at, one path of two.
+
+## The heuristic
+
+When a `defineTool` dispatch flag seems ignored, **diff the source def against the
+projected def**:
+
+```ts
+import { lookupByMcpName } from '@papercusp/tooldef'; // (the registry this file lives in)
+lookupByMcpName('memory:search')?.crossWorkspace // ← what the HOST actually sees
+```
+
+If the projected value disagrees with your source `defineTool({ … })`, the projection
+dropped it. Fix it in the registration path that's missing the field (and add a parity
+test — see `crossWorkspace projection parity (EI-2378)` in
+`libs/generic/tooldef/src/positional-integration.test.ts`).
+
+## Related: crossWorkspace + the scoped-superuser clamp
+
+A `crossWorkspace` tool runs on the `getOrgPg` admin (rolbypassrls) handle — it
+**must self-derive `workspaceId`** (`args.workspace ?? ctx.principal?.workspaceId ??
+activeWorkspaceId()`) and never rely on the tx's RLS for confinement. The
+scoped-superuser clamp DENIES `crossWorkspace` tools from a workspace-scoped session
+unless they're on `SCOPED_SAFE_CROSSWORKSPACE` (a reviewed-in-the-gate allowlist).
+A surface partitioned by a non-workspace axis (e.g. `memory:*` by user-id/harness-slug)
+belongs on that allowlist — it crosses no workspace tenant boundary.

@@ -1,0 +1,18 @@
+{
+  "$comment": "Self-contained — no monorepo dependency, so this lib is borrowable standalone. (Was `extends ../../tsconfig.base.json`, a path stale since the libs/ → libs/generic/ regroup — it resolved nothing and broke vitest/typecheck.)",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"]
+}

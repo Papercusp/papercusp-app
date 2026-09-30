@@ -1,0 +1,999 @@
+/**
+ * review-report (cleanup-report-flows-2026-08-24 P-001) — shared styles for the
+ * report-takeover shell consumed by the plan-cleanup review (P-007) and the
+ * inbox bulk-resolve review (P-008). Palette = the app's own vars
+ * (--bg/--fg/--accent/--good/--border/--fg-mute…), never raw hex, so the
+ * surface follows the live theme — same rule as plan-dashboard.css.
+ */
+
+/* ── The takeover layer (ReportTakeoverLayer) ──────────────────────────── */
+/* Absolute inside <main data-route-transition-page> (position:relative in
+ * globals.css). Solid background: the routed page stays MOUNTED underneath —
+ * it must not shine through. Same geometry as .plan-dash-takeover. */
+.review-report-takeover {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  overflow-y: auto;
+  background: var(--bg);
+  container-type: inline-size;
+}
+
+/* The shared host's inner wrapper. Carries `data-presentation` so the phase a
+   report was admitted under is addressable from CSS and from a test without
+   either consumer re-deriving it (bulk-review-report-legibility P-005/D-005). */
+.review-report-surface {
+  display: contents;
+}
+
+.review-report__loading {
+  width: min(1120px, calc(100% - 40px));
+  margin: 24px auto;
+  padding: 18px 20px;
+  color: var(--fg-mute, var(--fg));
+  font-size: 13px;
+}
+
+/* ── Frame ─────────────────────────────────────────────────────────────── */
+.review-report {
+  --review-accent: color-mix(in oklab, var(--accent) 62%, var(--bad));
+  --review-accent-strong: color-mix(in oklab, var(--review-accent), white 28%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(1120px, calc(100% - 40px));
+  margin: 24px auto;
+  padding: 18px 20px 16px;
+  min-height: calc(100% - 48px);
+  box-sizing: border-box;
+  font-size: 12.5px;
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--review-accent), transparent 56%);
+  border-radius: 14px;
+  background:
+    radial-gradient(
+      circle at 50% -12%,
+      color-mix(in oklab, var(--review-accent) 8%, transparent),
+      transparent 42%
+    ),
+    color-mix(in oklab, var(--bg) 94%, var(--bg-2));
+  box-shadow: 0 18px 50px rgb(0 0 0 / 24%);
+}
+
+.review-report:focus-visible {
+  outline: 2px solid var(--review-accent-strong);
+  outline-offset: 2px;
+}
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+.review-report__head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 0 4px;
+  border-bottom: 1px solid
+    color-mix(in oklab, var(--review-accent), transparent 78%);
+  /* This surface must stay opaque: the sticky header sits over live report
+   * rows, and a translucent/blur-only scrim leaves their text competing with
+   * the report identity and destructive boundary actions. `--bg-2` is an
+   * alpha surface tier, so even mixing it with `--bg` breaks this contract. */
+  background: var(--bg);
+  box-shadow: 0 10px 18px color-mix(in oklab, var(--bg) 56%, transparent);
+}
+
+.review-report__identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.review-report__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border: 1px solid color-mix(in oklab, var(--review-accent), transparent 42%);
+  border-radius: 10px;
+  color: var(--review-accent-strong);
+  background: linear-gradient(
+    145deg,
+    color-mix(in oklab, var(--review-accent) 58%, transparent),
+    color-mix(in oklab, var(--review-accent) 30%, var(--bg))
+  );
+  box-shadow: 0 8px 24px
+    color-mix(in oklab, var(--review-accent) 18%, transparent);
+}
+
+.review-report__head-text {
+  min-width: 0;
+}
+
+.review-report__title {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.1;
+  font-weight: 750;
+}
+
+.review-report__subtitle {
+  margin-top: 3px;
+  color: var(--fg-mute);
+  font-size: 11.5px;
+}
+
+.review-report__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.review-report__apply.pc-btn {
+  min-width: 166px;
+  border-color: color-mix(in oklab, var(--good), white 6%);
+  background: linear-gradient(
+    145deg,
+    color-mix(in oklab, var(--good) 72%, var(--bg)),
+    color-mix(in oklab, var(--good) 48%, var(--bg))
+  );
+  color: color-mix(in oklab, var(--good), white 84%);
+  font-weight: 600;
+  box-shadow: 0 8px 22px color-mix(in oklab, var(--good) 18%, transparent);
+}
+
+.review-report__dismiss.pc-btn {
+  min-width: 92px;
+}
+
+.review-report__apply.pc-btn:disabled,
+.review-report__dismiss.pc-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Exhaustive result accounting (bulk-review D-003) ─────────────────── */
+.review-report__summary {
+  padding: 9px;
+  border: 1px solid color-mix(in oklab, var(--review-accent), transparent 68%);
+  border-radius: 12px;
+  background:
+    linear-gradient(
+      110deg,
+      color-mix(in oklab, var(--review-accent) 10%, transparent),
+      transparent 45%
+    ),
+    color-mix(in oklab, var(--bg-2) 76%, var(--bg));
+}
+
+.review-report__metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.review-report__metric {
+  min-width: 0;
+  padding: 7px 10px;
+  border-left: 2px solid var(--border);
+}
+
+.review-report__metric dt {
+  color: var(--fg-mute);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.review-report__metric dd {
+  margin: 2px 0 0;
+  color: var(--fg);
+  font-size: 17px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+/* The tile's count doubles as its filter control. It inherits the count's own
+ * type so filtering does not change the summary's visual rhythm — only the
+ * pointer, the focus ring and the pressed state say it is actionable. */
+.review-report__metric-filter {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.review-report__metric-filter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.review-report__metric--active {
+  background: var(--bg-2);
+}
+
+.review-report__metric--active dd {
+  color: var(--accent);
+}
+
+.review-report__metric--results {
+  border-left-color: var(--review-accent);
+}
+
+.review-report__metric--ready {
+  border-left-color: var(--accent);
+}
+
+.review-report__metric--handled {
+  border-left-color: var(--good);
+}
+
+.review-report__metric--manual {
+  border-left-color: var(--warn);
+}
+
+.review-report__metric--not-applied {
+  border-left-color: var(--fg-mute);
+}
+
+.review-report__groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* ── Groups ────────────────────────────────────────────────────────────── */
+.review-report__group {
+  scroll-margin-top: 64px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--bg) 82%, var(--bg-2));
+}
+
+.review-report__group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 12px;
+  background: color-mix(in oklab, var(--bg-2), white 4%);
+}
+
+.review-report__group-toggle {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.review-report__group-toggle-inner {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-width: 0;
+}
+
+.review-report__chevron {
+  flex: 0 0 auto;
+  margin-left: auto;
+  transition: transform 120ms ease;
+  color: var(--fg-mute);
+}
+
+.review-report__chevron--closed {
+  transform: rotate(-90deg);
+}
+
+.review-report__group-title {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.review-report__group-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  min-height: 20px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in oklab, var(--review-accent), transparent 44%);
+  border-radius: 999px;
+  color: var(--review-accent-strong);
+  background: color-mix(in oklab, var(--review-accent) 12%, transparent);
+  font-size: 10.5px;
+  font-weight: 750;
+}
+
+.review-report__group-desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-mute);
+  font-size: 11px;
+  font-weight: 450;
+}
+
+/* ── Rows ──────────────────────────────────────────────────────────────── */
+.review-report__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.review-report__row {
+  display: grid;
+  /* check | VERB | identity | change | evidence | confidence | why | ⋯
+   * The verb column is second on purpose (D-001): the row reads as a sentence
+   * — what will happen, to what, how it changes, and why. */
+  grid-template-columns:
+    20px minmax(96px, max-content) minmax(128px, 190px)
+    minmax(104px, max-content) minmax(0, 1fr) max-content max-content
+    max-content;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+  contain: layout paint;
+  transition: background-color 120ms ease;
+}
+
+.review-report__row:not(.review-report__row--busy):hover {
+  background: color-mix(in oklab, var(--review-accent) 3%, transparent);
+}
+
+.review-report__row--busy {
+  cursor: default;
+}
+
+.review-report__row--detail-open {
+  background: color-mix(in oklab, var(--review-accent) 4%, transparent);
+}
+
+.review-report__row:focus-visible {
+  outline: 2px solid var(--review-accent-strong);
+  outline-offset: -2px;
+}
+
+.review-report__row--applied {
+  opacity: 0.62;
+}
+
+.review-report__row--dismissed {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.review-report__row-check-slot {
+  display: inline-flex;
+  justify-content: center;
+  padding-top: 1px;
+}
+
+.review-report__row-status-mark {
+  color: var(--good, var(--accent));
+  font-weight: 700;
+}
+
+.review-report__row-identity {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+/* ── The row's action verb (D-001) ─────────────────────────────────────── */
+.review-report__row-verb-slot {
+  display: flex;
+  min-width: 0;
+}
+.review-report__verb {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 56%);
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+  color: color-mix(in oklab, var(--accent), white 34%);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.review-report__verb-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.review-report__verb-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-report__verb--good {
+  border-color: color-mix(in oklab, var(--good), transparent 56%);
+  background: color-mix(in oklab, var(--good) 12%, transparent);
+  color: color-mix(in oklab, var(--good), white 26%);
+}
+.review-report__verb--warn {
+  border-color: color-mix(in oklab, var(--warn), transparent 56%);
+  background: color-mix(in oklab, var(--warn) 12%, transparent);
+  color: color-mix(in oklab, var(--warn), white 26%);
+}
+.review-report__verb--danger {
+  border-color: color-mix(in oklab, var(--bad), transparent 52%);
+  background: color-mix(in oklab, var(--bad) 12%, transparent);
+  color: color-mix(in oklab, var(--bad), white 26%);
+}
+/* Manual work is deliberately the quietest verb: it is not a thing Apply
+ * commits, so it must not compete with the rows that are. */
+.review-report__verb--manual {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--fg-mute, var(--muted));
+}
+
+.review-report__source-chip {
+  overflow: hidden;
+  max-width: 150px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 48%);
+  border-radius: 999px;
+  color: color-mix(in oklab, var(--accent), white 28%);
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+  font-size: 10.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Interactive: keeps the accent chip treatment, and now actually does
+ * something when clicked. */
+.review-report__source-chip--link {
+  display: inline-block;
+  max-width: 100%;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--accent), transparent 62%);
+  text-underline-offset: 2px;
+}
+.review-report__source-chip--link:hover:not(:disabled),
+.review-report__source-chip--link:focus-visible {
+  background: color-mix(in oklab, var(--accent) 20%, transparent);
+}
+.review-report__source-chip--link:focus-visible {
+  outline: 2px solid var(--review-accent-strong);
+  outline-offset: 2px;
+}
+.review-report__source-chip--link:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+/* Inert: an inert chip must NOT wear the accent's clickable colouring — the
+ * link-styled-but-dead chip is the affordance bug D-001 removed. */
+.review-report__source-chip--static {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--fg-dim, var(--muted));
+  font-weight: 600;
+}
+
+.review-report__reference {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: color-mix(in oklab, var(--fg), transparent 18%);
+}
+
+.review-report__row-change {
+  min-width: 0;
+}
+
+.review-report__transition {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.review-report__state {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--fg-mute);
+}
+
+.review-report__state--to {
+  color: var(--good);
+  border-color: color-mix(in oklab, var(--good), transparent 52%);
+}
+
+.review-report__state[data-state="wip"],
+.review-report__state[data-state="running"] {
+  color: var(--accent-strong);
+  border-color: color-mix(in oklab, var(--accent), transparent 52%);
+}
+
+.review-report__state[data-state="blocked"] {
+  color: var(--bad);
+  border-color: color-mix(in oklab, var(--bad), transparent 48%);
+}
+
+.review-report__state[data-state="archived"] {
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn), transparent 48%);
+}
+
+.review-report__transition-arrow {
+  color: var(--fg-mute);
+}
+
+.review-report__row-title {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+.review-report__row-error {
+  grid-column: 2 / -1;
+  min-width: 0;
+  color: var(--bad);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.review-report__row-evidence {
+  min-width: 0;
+  color: var(--fg-mute);
+  font-size: 11.5px;
+}
+
+.review-report__evidence-item {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-report__row-detail-slot {
+  grid-column: 2 / -1;
+  display: grid;
+  grid-template-rows: 0fr;
+  min-width: 0;
+  cursor: default;
+  opacity: 0;
+  transform: translateY(-4px);
+  animation: review-report-detail-reveal 180ms cubic-bezier(0.2, 0.72, 0.2, 1)
+    forwards;
+}
+
+.review-report__row-detail-clip {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.review-report__row-detail {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.6fr);
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-left: 2px solid
+    color-mix(in oklab, var(--review-accent), transparent 35%);
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in oklab, var(--review-accent) 7%, transparent);
+  color: var(--fg);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+@keyframes review-report-detail-reveal {
+  to {
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .review-report__row-detail-slot {
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transform: none;
+    animation: none;
+  }
+}
+
+.review-report__detail-evidence {
+  min-width: 0;
+}
+
+.review-report__detail-evidence > strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--review-accent-strong);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.review-report__detail-evidence > ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.review-report__detail-evidence li {
+  overflow-wrap: anywhere;
+}
+
+.review-report__detail-evidence li + li {
+  margin-top: 3px;
+}
+
+.review-report__detail-consumer {
+  min-width: 0;
+}
+
+/* ── Confidence: a STATIC indicator (D-001) ────────────────────────────────
+ * This used to be a bordered pill carrying a chevron and a value label, sized
+ * exactly like a select — and it was in fact the evidence-disclosure toggle for
+ * a value that is not editable. Nothing here may read as "pick another value":
+ * no pill border, no chevron, no pointer cursor, no focus ring. The row's one
+ * chevron now lives on .review-report__row-detail-toggle beside it. */
+.review-report__row-conf {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  justify-self: end;
+  padding: 1px 0;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: inherit;
+}
+
+.review-report__conf-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.review-report__conf-label {
+  color: var(--fg-dim, inherit);
+}
+
+/* ── The disclosure — the only control on the row that may wear a chevron ── */
+.review-report__row-detail-toggle {
+  justify-self: end;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.review-report__row-detail-toggle-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ── Per-row overflow menu (P-008) ──────────────────────────────────────── */
+.review-report__row-menu-slot {
+  justify-self: end;
+}
+
+.review-report__row-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.review-report__row-menu-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  /* globals.css `:where(button, .pc-btn) { min-height: 26px }` silently wins over
+     a declared height < 26px (EI-18690913356156250), so the 20px above would have
+     rendered as 26px. State it explicitly to keep the declared height honest. */
+  min-height: 20px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.review-report__row-menu-toggle:hover:not(:disabled),
+.review-report__row-menu-toggle:focus-visible,
+.review-report__row-menu-toggle[aria-expanded="true"] {
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.review-report__row-menu-toggle:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.review-report__row-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  min-width: 168px;
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-2, var(--bg));
+  box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+}
+
+.review-report__row-menu-item {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.review-report__row-menu-item:hover:not(:disabled),
+.review-report__row-menu-item:focus-visible {
+  background: color-mix(in oklab, var(--review-accent), transparent 88%);
+}
+
+.review-report__row-menu-item--danger {
+  color: var(--bad);
+}
+
+/* A disabled entry stays VISIBLE and keeps its `title` reason: a recovery that
+   silently disappears is indistinguishable from one that never existed. */
+.review-report__row-menu-item:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.review-report__row-detail-toggle:hover:not(:disabled),
+.review-report__row-detail-toggle:focus-visible {
+  color: var(--fg);
+  background: color-mix(in oklab, currentColor 8%, transparent);
+}
+
+.review-report__row-detail-toggle:focus-visible {
+  outline: 2px solid var(--review-accent-strong);
+  outline-offset: 2px;
+}
+
+.review-report__row-detail-toggle:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.review-report__row-detail-chevron {
+  flex: 0 0 auto;
+  transition: transform 120ms ease;
+}
+
+.review-report__row-detail-chevron--open {
+  transform: rotate(180deg);
+}
+
+.review-report__row-conf--high {
+  color: var(--good, var(--accent));
+}
+
+.review-report__row-conf--medium {
+  color: var(--warn);
+}
+
+.review-report__row-conf--low {
+  color: var(--bad);
+}
+
+.review-report__row-conf--insufficient {
+  color: var(--muted);
+}
+
+.review-report__footer {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  color: var(--fg-mute);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.review-report__footer > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--good);
+}
+
+@container (max-width: 760px) {
+  .review-report {
+    width: calc(100% - 20px);
+    margin: 10px auto;
+    padding: 14px;
+    min-height: calc(100% - 20px);
+  }
+
+  .review-report__head,
+  .review-report__group-toggle-inner {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .review-report__actions {
+    width: 100%;
+  }
+
+  .review-report__apply.pc-btn {
+    flex: 1 1 auto;
+  }
+
+  .review-report__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .review-report__metric--results {
+    grid-column: 1 / -1;
+  }
+
+  .review-report__group-title {
+    flex: 1 1 160px;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .review-report__group-desc {
+    order: 4;
+    flex-basis: 100%;
+    white-space: normal;
+  }
+
+  .review-report__row {
+    grid-template-columns: 20px minmax(0, 1fr) max-content;
+    align-items: start;
+  }
+
+  /* Stacked, the first line is checkbox · verb · confidence — what will happen
+   * and how sure Papercup is. Everything else flows beneath it, full width. */
+  .review-report__row-check-slot {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .review-report__row-verb-slot {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+  }
+
+  .review-report__row-identity,
+  .review-report__row-evidence,
+  .review-report__row-error {
+    grid-column: 2 / -1;
+  }
+
+  .review-report__row-change,
+  .review-report__row-detail-slot {
+    grid-column: 2 / -1;
+  }
+
+  .review-report__transition {
+    max-width: 100%;
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+
+  .review-report__state {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .review-report__row-conf {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  /* Auto-placed onto its own full-width line below the stack; the explicitly
+   * placed cells above never collide with it. */
+  .review-report__row-detail-toggle {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .review-report__row-menu-slot {
+    grid-column: 3;
+    justify-self: end;
+  }
+
+  .review-report__row-change,
+  .review-report__row-evidence,
+  .review-report__row-detail-slot,
+  .review-report__row-error {
+    margin-top: 2px;
+  }
+
+  .review-report__row-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container (max-width: 420px) {
+  .review-report__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .review-report__metric--results {
+    grid-column: 1 / -1;
+  }
+}
+
+/* The app chrome can leave less inline space than the viewport width implies.
+ * Once the two 40px-tall actions no longer fit side by side, stack them rather
+ * than making the takeover horizontally scroll just to reveal Close. */
+@container (max-width: 315px) {
+  .review-report__actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .review-report__apply.pc-btn,
+  .review-report__dismiss.pc-btn {
+    width: 100%;
+    min-width: 0;
+  }
+}

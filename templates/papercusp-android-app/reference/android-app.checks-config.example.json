@@ -1,0 +1,25 @@
+{
+  "$doc": "Neutral answer record for the exact papercusp-android-app@0.1.0 closure. Replace every answer; never add secret or signing values.",
+  "app": { "name": "harbor-mobile", "root": "." },
+  "composition": {
+    "templateYamls": [
+      "template.yaml",
+      "template-manifests/papercusp-mobile-base.yaml",
+      "template-manifests/papercusp-android-shell.yaml"
+    ],
+    "decisionPointAnswers": {
+      "papercusp-android-app:android-app-purpose": "Harbor Mobile is an offline-first field-log app; this record supplies every base and Android-shell decision for the first Android release.",
+      "papercusp-mobile-base:product-domain": "Validated field-log entries, synchronization state transitions, serialization, and error taxonomy live in Rust; Compose owns presentation and Android lifecycle.",
+      "papercusp-mobile-base:rust-msrv": "Rust 1.88 across the workspace and CI.",
+      "papercusp-mobile-base:license-and-repository": "Apache-2.0, Harbor Mobile contributors, and the final public repository URL replace all neutral starter metadata.",
+      "papercusp-mobile-base:design-token-source": "design/mobile-tokens.json is the single source for product colors, spacing, radii, and typography; generated Kotlin and Swift outputs are drift-checked.",
+      "papercusp-mobile-base:optional-capabilities": "Credentials and deep links are selected; push, analytics, crash reporting, camera, microphone, media playback, and local networking are not selected.",
+      "papercusp-mobile-base:runtime-configuration": "Non-secret service endpoints are runtime inputs; device credentials use platform secure storage and no provider value enters this file.",
+      "papercusp-android-shell:android-identity": "Namespace and application ID are dev.harbor.mobile, package sources live under dev/harbor/mobile, display name is Harbor Mobile, and release version comes from HARBOR_ANDROID_RELEASE_VERSION.",
+      "papercusp-android-shell:android-sdk-floor": "Keep min SDK 24; compile and target SDK remain 36.",
+      "papercusp-android-shell:android-local-network": "No cleartext endpoint is required, including debug; debugCleartext remains false.",
+      "papercusp-android-shell:android-capabilities": "Declare INTERNET plus the selected credentials and deep-link seams only; add no unselected service, plugin, repository, or permission.",
+      "papercusp-android-shell:android-release": "Use external HARBOR_ANDROID_RELEASE_* signing input names, publish APK and AAB together, bind the version input to atomic SHA-256 provenance, and keep every signing value outside the repository."
+    }
+  }
+}

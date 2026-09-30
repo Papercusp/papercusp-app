@@ -1,0 +1,174 @@
+/**
+ * llm-test.css — the pc-test-* classes <LlmTestPanel> uses, shipped with the
+ * lib so the panel is self-contained (a consumer that mounts only the LLM panel
+ * still gets the styling). Token-based so it inherits the host's theme. Ported
+ * from the operator's app/admin/testing/testing.css for cross-project use
+ * (universal-testing-domains-generic-2026-06-03 Phase 7, P-072).
+ *
+ * Class names are shared with chaos-desktop.css by design (both ported from the
+ * same operator testing.css); duplicate rules are harmless (identical) so the
+ * two panels can be mounted together.
+ */
+
+.pc-test-tab-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.pc-test-tab-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0 0 4px;
+  color: var(--fg);
+}
+.pc-test-tab-intro {
+  font-size: 12px;
+  color: var(--fg-mute);
+  margin: 0;
+  max-width: 70ch;
+  line-height: 1.6;
+}
+
+.pc-test-loading {
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-2) 88%, transparent);
+  color: var(--fg-mute);
+}
+
+.pc-test-card {
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-2) 92%, var(--bg-3)), var(--bg-2));
+}
+.pc-test-card.is-bad {
+  border-color: color-mix(in srgb, var(--bad) 42%, var(--border));
+}
+.pc-test-card-title {
+  margin: 0 0 10px;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 760;
+  letter-spacing: 0.01em;
+}
+.pc-test-card-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin: 8px 0;
+}
+.pc-test-card-row:first-child {
+  margin-top: 0;
+}
+.pc-test-card-row:last-child {
+  margin-bottom: 0;
+}
+
+.pc-test-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.pc-test-table th {
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-3) 72%, var(--bg-2));
+  color: var(--fg-mute);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-align: left;
+  text-transform: uppercase;
+}
+.pc-test-table td {
+  padding: 9px 11px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
+  color: var(--fg-dim);
+  vertical-align: top;
+}
+.pc-test-table tr:last-child td {
+  border-bottom: none;
+}
+.pc-test-table tbody tr:hover {
+  background: color-mix(in srgb, var(--bg-3) 64%, transparent);
+}
+.pc-test-table tbody tr.is-selected {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.pc-test-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 20px;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.045em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.pc-test-badge.is-good {
+  border-color: color-mix(in srgb, var(--good) 44%, transparent);
+  background: color-mix(in srgb, var(--good) 16%, transparent);
+  color: var(--good);
+}
+.pc-test-badge.is-needs {
+  border-color: color-mix(in srgb, var(--warn) 42%, transparent);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn);
+}
+.pc-test-badge.is-poor,
+.pc-test-badge.is-bad {
+  border-color: color-mix(in srgb, var(--bad) 44%, transparent);
+  background: color-mix(in srgb, var(--bad) 16%, transparent);
+  color: var(--bad);
+}
+.pc-test-badge.is-muted {
+  border-color: var(--border);
+  background: var(--bg-3);
+  color: var(--fg-mute);
+}
+
+.pc-test-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+
+.pc-test-input {
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-2) 88%, var(--bg-3));
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+textarea.pc-test-input {
+  min-height: 86px;
+  border-radius: 12px;
+}
+.pc-test-input:focus,
+.pc-test-input:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  outline: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  outline-offset: 1px;
+}

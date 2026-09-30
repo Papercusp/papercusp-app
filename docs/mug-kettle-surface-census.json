@@ -1,0 +1,2323 @@
+{
+  "generatedAt": "2026-08-09T21:45:22.263Z",
+  "plan": "retire-mug-kettle-su-only-2026-08-09",
+  "item": "P-005",
+  "scanned": {
+    "roots": [
+      "packages",
+      "libs",
+      "apps",
+      "scripts"
+    ],
+    "codeFiles": 7134,
+    "constantsResolved": 1574
+  },
+  "totals": {
+    "live": 258,
+    "alreadyRetired": 0,
+    "distinctLiveFiles": 146,
+    "sharedSubstrate": 53,
+    "byCategory": {
+      "system-action": 6,
+      "spawn-role": 45,
+      "blueprint-launch": 4,
+      "tool": 51,
+      "flag": 30,
+      "prompt": 9,
+      "ui": 26,
+      "wake": 87
+    }
+  },
+  "coverage": {
+    "status": "partial",
+    "unresolvedCount": 4,
+    "unresolved": [
+      {
+        "category": "blueprint-launch",
+        "file": "packages/operator-core/lib/agent-tools/pot/_create.ts",
+        "line": 809,
+        "arg": "identifier blueprintId"
+      },
+      {
+        "category": "blueprint-launch",
+        "file": "packages/operator-core/lib/blueprint/launch-blueprint.ts",
+        "line": 666,
+        "arg": "expression blueprintId: string"
+      },
+      {
+        "category": "blueprint-launch",
+        "file": "packages/operator-core/lib/blueprint/launch-blueprint.ts",
+        "line": 761,
+        "arg": "identifier blueprintId"
+      },
+      {
+        "category": "blueprint-launch",
+        "file": "packages/operator-core/lib/endpoint-route/routes/harness/spawn.ts",
+        "line": 582,
+        "arg": "expression bodyExtra.spawnModel"
+      }
+    ],
+    "systemActionSitesSeen": 63,
+    "detectorShapes": {
+      "system-action": "registerSystemAction(<literal|CONST>, …) — identifier args resolved via the constant table",
+      "spawn-role": "role|childRole|child_role|parent_role [:=] 'mug'|'kettle'|'cup' (incl. inside SQL template strings)",
+      "blueprint-launch": "fireLaunchBlueprint(<CONST>) where CONST ∈ {POT_BLUEPRINT_ID, OVERWATCH_BLUEPRINT_ID} — classified by NAME, not value",
+      "tool": "name: '<pot|cup|kettle|overwatch|mug>:<verb>' tool registrations",
+      "flag": "FLAGS entries in libs/flags/src/types.ts whose KEY or VALUE names the tier",
+      "prompt": "blueprints/**/prompts/(mug|kettle|cup).md and files under a role-owned blueprint dir",
+      "ui": ".tsx named for the tier, or a sidebar/rail/tab file mounting a tier tab token",
+      "wake": "call sites of 16 wake/started-bit functions (one finding per function per file)"
+    },
+    "notCovered": [
+      "live routine rows (harness_shared.routines) — query separately, see --sql",
+      "dynamic dispatch through a variable action name not in the constant table",
+      "prompt/doc prose mentioning the tier without offering it (deliberately excluded — prose is not an entry point)"
+    ],
+    "readingRule": "An empty category is meaningful ONLY when coverage.status === \"complete\". Read `unresolved` before concluding a surface is absent — this reports \"none found\", never \"none exists\"."
+  },
+  "findings": [
+    {
+      "category": "system-action",
+      "subject": "bee-transcript-cap",
+      "file": "packages/operator-core/lib/harness/routines/bee-transcript-cap-action.ts",
+      "line": 110,
+      "detail": "registerSystemAction via literal",
+      "retired": false,
+      "matchedToken": "bee"
+    },
+    {
+      "category": "system-action",
+      "subject": "cross-hive-outbox-drain",
+      "file": "packages/operator-core/lib/harness/routines/cross-hive-drain-action.ts",
+      "line": 82,
+      "detail": "registerSystemAction via literal",
+      "retired": false,
+      "matchedToken": "hive"
+    },
+    {
+      "category": "system-action",
+      "subject": "hive-canary",
+      "file": "packages/operator-core/lib/harness/routines/hive-canary-action.ts",
+      "line": 333,
+      "detail": "registerSystemAction via literal",
+      "retired": false,
+      "matchedToken": "hive"
+    },
+    {
+      "category": "system-action",
+      "subject": "hive-canary-sla",
+      "file": "packages/operator-core/lib/harness/routines/hive-canary-action.ts",
+      "line": 556,
+      "detail": "registerSystemAction via literal",
+      "retired": false,
+      "matchedToken": "hive"
+    },
+    {
+      "category": "system-action",
+      "subject": "hive-git-gc",
+      "file": "packages/operator-core/lib/harness/routines/hive-git-gc-action.ts",
+      "line": 27,
+      "detail": "registerSystemAction via literal",
+      "retired": false,
+      "matchedToken": "hive"
+    },
+    {
+      "category": "system-action",
+      "subject": "system:overwatch-launch",
+      "file": "packages/operator-core/lib/overwatch/loop.ts",
+      "line": 576,
+      "detail": "registerSystemAction via const OVERWATCH_LAUNCH_ACTION DERIVED from OVERWATCH_WAKE_TARGET_ACTION (packages/operator-core/lib/overwatch/loop.ts)",
+      "retired": false,
+      "matchedToken": "overwatch"
+    },
+    {
+      "category": "spawn-role",
+      "subject": "kettle",
+      "file": "packages/operator-core/lib/agent-tools/autonomy/decide.ts",
+      "line": 97,
+      "detail": "role: 'kettle'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/agent-tools/cup/spawn.ts",
+      "line": 31,
+      "detail": "role=\"cup\"",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/agent-tools/cup/spawn.ts",
+      "line": 204,
+      "detail": "role=\"cup\"",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/agent-tools/fleet/place_batch.ts",
+      "line": 579,
+      "detail": "role: 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/agent-tools/pot/pause.ts",
+      "line": 112,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/agent-tools/scheduler/get_next.ts",
+      "line": 438,
+      "detail": "role=\"cup\"",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/agent-tools/scheduler/set_claim_spec.ts",
+      "line": 64,
+      "detail": "role=\"cup\"",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "mug",
+      "file": "packages/operator-core/lib/blueprint/launch-blueprint.ts",
+      "line": 510,
+      "detail": "child_role = 'mug'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "mug",
+      "file": "packages/operator-core/lib/dbos/durable-spawn.ts",
+      "line": 587,
+      "detail": "child_role = 'mug'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "mug",
+      "file": "packages/operator-core/lib/dbos/durable-spawn.ts",
+      "line": 595,
+      "detail": "child_role = 'mug'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/events/await/wake-executor-fresh-context.ts",
+      "line": 96,
+      "detail": "role: 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/external-bench/hive-backlog-live.ts",
+      "line": 616,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/external-bench/hive-backlog-live.ts",
+      "line": 752,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/external-bench/hive-backlog-realqueen.ts",
+      "line": 727,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "mug",
+      "file": "packages/operator-core/lib/external-bench/hive-backlog-realqueen.ts",
+      "line": 754,
+      "detail": "child_role = 'mug'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/external-bench/report/report-builder-pg.ts",
+      "line": 100,
+      "detail": "role: 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/fleet/fleet-roster.ts",
+      "line": 654,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/fleet/fleet-roster.ts",
+      "line": 675,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/fleet/fleet-roster.ts",
+      "line": 694,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/fleet/operator-spawn.ts",
+      "line": 839,
+      "detail": "role=\"cup\"",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/fleet/operator-spawn.ts",
+      "line": 867,
+      "detail": "role=\"cup\"",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "kettle",
+      "file": "packages/operator-core/lib/fleet/operator-spawn.ts",
+      "line": 882,
+      "detail": "role=\"kettle\"",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/fleet/operator-spawn.ts",
+      "line": 1122,
+      "detail": "role: 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/fleet/placement-gather.ts",
+      "line": 221,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/fleet/placement-gather.ts",
+      "line": 279,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/fleet/spawn-relaunch.ts",
+      "line": 98,
+      "detail": "role: 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "kettle",
+      "file": "packages/operator-core/lib/harness/improvements/watchdog.ts",
+      "line": 2106,
+      "detail": "role = 'kettle'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "kettle",
+      "file": "packages/operator-core/lib/harness/routines/autoloop-chronic-failure.ts",
+      "line": 491,
+      "detail": "role='kettle'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/harness/routines/bee-transcript-cap-action.ts",
+      "line": 58,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/iq-battery/bee-instance.ts",
+      "line": 273,
+      "detail": "role: 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "kettle",
+      "file": "packages/operator-core/lib/llm-testing/scenarios/overwatch/OW01-nudge-not-replace.ts",
+      "line": 97,
+      "detail": "role: 'kettle'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "kettle",
+      "file": "packages/operator-core/lib/llm-testing/scenarios/overwatch/OW02-observe-not-idea.ts",
+      "line": 74,
+      "detail": "role: 'kettle'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/modes/registry.ts",
+      "line": 186,
+      "detail": "role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/papercup/papercup-deep-delegate-deps.ts",
+      "line": 176,
+      "detail": "role: 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/pot/cup-spawn-health-watchdog.ts",
+      "line": 19,
+      "detail": "child_role='cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/pot/cup-spawn-health-watchdog.ts",
+      "line": 161,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/pot/cup-wake-efficiency.ts",
+      "line": 145,
+      "detail": "role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "mug",
+      "file": "packages/operator-core/lib/pot/mug-wake-efficiency.ts",
+      "line": 118,
+      "detail": "role = 'mug'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/pot/placement-watchdog.ts",
+      "line": 1234,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "mug",
+      "file": "packages/operator-core/lib/pot/placement-watchdog.ts",
+      "line": 2460,
+      "detail": "child_role = 'mug'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/pot/soak-report.ts",
+      "line": 90,
+      "detail": "role: 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/pot/soak-report.ts",
+      "line": 385,
+      "detail": "child_role: 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "cup",
+      "file": "packages/operator-core/lib/pot/throughput.ts",
+      "line": 352,
+      "detail": "child_role = 'cup'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "mug",
+      "file": "apps/operator/app/settings/agent/page.tsx",
+      "line": 127,
+      "detail": "role: 'mug'",
+      "retired": false
+    },
+    {
+      "category": "spawn-role",
+      "subject": "kettle",
+      "file": "apps/operator/app/settings/agent/page.tsx",
+      "line": 132,
+      "detail": "role: 'kettle'",
+      "retired": false
+    },
+    {
+      "category": "blueprint-launch",
+      "subject": "POT_BLUEPRINT_ID",
+      "file": "packages/operator-core/lib/agent-tools/pot/wake.ts",
+      "line": 169,
+      "detail": "fireLaunchBlueprint(POT_BLUEPRINT_ID) → 'coding'",
+      "retired": false,
+      "note": "value is shared with ordinary coding sessions — the CONSTANT is the discriminator"
+    },
+    {
+      "category": "blueprint-launch",
+      "subject": "POT_BLUEPRINT_ID",
+      "file": "packages/operator-core/lib/events/await/wake-executor.ts",
+      "line": 820,
+      "detail": "fireLaunchBlueprint(POT_BLUEPRINT_ID) → 'coding'",
+      "retired": false,
+      "note": "value is shared with ordinary coding sessions — the CONSTANT is the discriminator"
+    },
+    {
+      "category": "blueprint-launch",
+      "subject": "POT_BLUEPRINT_ID",
+      "file": "packages/operator-core/lib/pot/mug-brief-launch.ts",
+      "line": 5,
+      "detail": "fireLaunchBlueprint(POT_BLUEPRINT_ID) → 'coding'",
+      "retired": false,
+      "note": "value is shared with ordinary coding sessions — the CONSTANT is the discriminator"
+    },
+    {
+      "category": "blueprint-launch",
+      "subject": "POT_BLUEPRINT_ID",
+      "file": "packages/operator-core/lib/pot/urgent-wake.ts",
+      "line": 84,
+      "detail": "fireLaunchBlueprint(POT_BLUEPRINT_ID) → 'coding'",
+      "retired": false,
+      "note": "value is shared with ordinary coding sessions — the CONSTANT is the discriminator"
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/agent-tools/cup/spawn.ts",
+      "line": 26,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "kettle:declare-wake",
+      "file": "packages/operator-core/lib/agent-tools/overwatch/declare_wake.ts",
+      "line": 39,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "kettle:pause",
+      "file": "packages/operator-core/lib/agent-tools/overwatch/pause.ts",
+      "line": 29,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "kettle:start",
+      "file": "packages/operator-core/lib/agent-tools/overwatch/start.ts",
+      "line": 34,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:add-member",
+      "file": "packages/operator-core/lib/agent-tools/pot/add_member.ts",
+      "line": 35,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:ask",
+      "file": "packages/operator-core/lib/agent-tools/pot/ask.ts",
+      "line": 25,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:asks",
+      "file": "packages/operator-core/lib/agent-tools/pot/asks.ts",
+      "line": 20,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:ban_member",
+      "file": "packages/operator-core/lib/agent-tools/pot/ban_member.ts",
+      "line": 25,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:beacon_consent",
+      "file": "packages/operator-core/lib/agent-tools/pot/beacon_consent.ts",
+      "line": 23,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:control_policy",
+      "file": "packages/operator-core/lib/agent-tools/pot/control-policy.ts",
+      "line": 30,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:create",
+      "file": "packages/operator-core/lib/agent-tools/pot/create.ts",
+      "line": 24,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:create_from_repo",
+      "file": "packages/operator-core/lib/agent-tools/pot/create_from_repo.ts",
+      "line": 26,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:cross_grant",
+      "file": "packages/operator-core/lib/agent-tools/pot/cross_grant.ts",
+      "line": 28,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:declare-wake",
+      "file": "packages/operator-core/lib/agent-tools/pot/declare_wake.ts",
+      "line": 58,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:dissolve",
+      "file": "packages/operator-core/lib/agent-tools/pot/dissolve.ts",
+      "line": 49,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:get",
+      "file": "packages/operator-core/lib/agent-tools/pot/get.ts",
+      "line": 20,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:get-steering",
+      "file": "packages/operator-core/lib/agent-tools/pot/get_steering.ts",
+      "line": 21,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:leave",
+      "file": "packages/operator-core/lib/agent-tools/pot/leave.ts",
+      "line": 29,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:list",
+      "file": "packages/operator-core/lib/agent-tools/pot/list.ts",
+      "line": 19,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:membership_decide",
+      "file": "packages/operator-core/lib/agent-tools/pot/membership_decide.ts",
+      "line": 37,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:membership_pending",
+      "file": "packages/operator-core/lib/agent-tools/pot/membership_pending.ts",
+      "line": 21,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:moderation_queue",
+      "file": "packages/operator-core/lib/agent-tools/pot/moderation_queue.ts",
+      "line": 17,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:moderation_resolve",
+      "file": "packages/operator-core/lib/agent-tools/pot/moderation_resolve.ts",
+      "line": 28,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:mug_efficiency",
+      "file": "packages/operator-core/lib/agent-tools/pot/mug_efficiency.ts",
+      "line": 20,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:obliterate",
+      "file": "packages/operator-core/lib/agent-tools/pot/obliterate.ts",
+      "line": 145,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:pause",
+      "file": "packages/operator-core/lib/agent-tools/pot/pause.ts",
+      "line": 28,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:report",
+      "file": "packages/operator-core/lib/agent-tools/pot/report.ts",
+      "line": 34,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:request_work",
+      "file": "packages/operator-core/lib/agent-tools/pot/request_work.ts",
+      "line": 26,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:set-steering",
+      "file": "packages/operator-core/lib/agent-tools/pot/set_steering.ts",
+      "line": 28,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:start",
+      "file": "packages/operator-core/lib/agent-tools/pot/start.ts",
+      "line": 32,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:status",
+      "file": "packages/operator-core/lib/agent-tools/pot/status.ts",
+      "line": 32,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:survey",
+      "file": "packages/operator-core/lib/agent-tools/pot/survey.ts",
+      "line": 130,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:takedown",
+      "file": "packages/operator-core/lib/agent-tools/pot/takedown.ts",
+      "line": 22,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:update",
+      "file": "packages/operator-core/lib/agent-tools/pot/update.ts",
+      "line": 24,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:wake",
+      "file": "packages/operator-core/lib/agent-tools/pot/wake.ts",
+      "line": 56,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/llm-testing/scenarios/overwatch/OW01-nudge-not-replace.ts",
+      "line": 146,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/llm-testing/scenarios/overwatch/OW02-observe-not-idea.ts",
+      "line": 152,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/llm-testing/scenarios/papercup/SN-D01-delegate-hard-thinking.ts",
+      "line": 51,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/llm-testing/scenarios/papercup/SN-D02-work-not-delegated.ts",
+      "line": 30,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/llm-testing/scenarios/papercup/SN-D03-existing-delegation-status.ts",
+      "line": 29,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/llm-testing/scenarios/papercup/SN-H04-assign-to-mug.ts",
+      "line": 31,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/llm-testing/scenarios/papercup/SN-H05-urgent-handoff.ts",
+      "line": 30,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/llm-testing/scenarios/papercup/SN-H07-multi-item-handoff.ts",
+      "line": 29,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/llm-testing/scenarios/papercup/SN01-handoff-planning-ask.ts",
+      "line": 59,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/llm-testing/targets/mug.ts",
+      "line": 185,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:declare-wake",
+      "file": "packages/operator-core/lib/llm-testing/targets/mug.ts",
+      "line": 231,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:status",
+      "file": "packages/operator-core/lib/llm-testing/targets/overwatch.ts",
+      "line": 148,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "cup:spawn",
+      "file": "packages/operator-core/lib/llm-testing/targets/overwatch.ts",
+      "line": 190,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:wake",
+      "file": "apps/operator/app/admin/plans/attention-card.ts",
+      "line": 231,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:set-steering",
+      "file": "apps/operator-vite/src/components/left-sidebar/MugTab.tsx",
+      "line": 237,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "tool",
+      "subject": "pot:set-steering",
+      "file": "apps/operator-vite/src/components/left-sidebar/useModelOverride.ts",
+      "line": 38,
+      "detail": "tool registration",
+      "retired": false
+    },
+    {
+      "category": "flag",
+      "subject": "THE_HIVE",
+      "file": "libs/flags/src/types.ts",
+      "line": 117,
+      "detail": "FLAGS.THE_HIVE = \"papercusp-the-hive\"",
+      "retired": false,
+      "matchedToken": "hive"
+    },
+    {
+      "category": "flag",
+      "subject": "POT_AGENT_TABS",
+      "file": "libs/flags/src/types.ts",
+      "line": 139,
+      "detail": "FLAGS.POT_AGENT_TABS = \"papercusp-hive-agent-tabs\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "POT_FROM_GITHUB_URL",
+      "file": "libs/flags/src/types.ts",
+      "line": 192,
+      "detail": "FLAGS.POT_FROM_GITHUB_URL = \"papercusp-hive-from-github-url\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "MUG_TIER_SELECTION",
+      "file": "libs/flags/src/types.ts",
+      "line": 205,
+      "detail": "FLAGS.MUG_TIER_SELECTION = \"papercusp-queen-tier-selection\"",
+      "retired": false,
+      "matchedToken": "mug"
+    },
+    {
+      "category": "flag",
+      "subject": "POT_MEMBERSHIP_ENFORCEMENT",
+      "file": "libs/flags/src/types.ts",
+      "line": 394,
+      "detail": "FLAGS.POT_MEMBERSHIP_ENFORCEMENT = \"papercusp-pot-membership-enforcement\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "POT_WAKE_FRONTIER_GUARD",
+      "file": "libs/flags/src/types.ts",
+      "line": 400,
+      "detail": "FLAGS.POT_WAKE_FRONTIER_GUARD = \"papercusp-hive-wake-frontier-guard\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "PER_POT_LEARNING_LOOPS",
+      "file": "libs/flags/src/types.ts",
+      "line": 416,
+      "detail": "FLAGS.PER_POT_LEARNING_LOOPS = \"papercusp-per-hive-learning-loops\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "PER_POT_RELEASE_GATE",
+      "file": "libs/flags/src/types.ts",
+      "line": 424,
+      "detail": "FLAGS.PER_POT_RELEASE_GATE = \"papercusp-per-hive-release-gate\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "RED_QUEEN",
+      "file": "libs/flags/src/types.ts",
+      "line": 720,
+      "detail": "FLAGS.RED_QUEEN = \"papercusp-red-queen\"",
+      "retired": false,
+      "matchedToken": "queen"
+    },
+    {
+      "category": "flag",
+      "subject": "MUG_CARD_INTERCEPTION",
+      "file": "libs/flags/src/types.ts",
+      "line": 753,
+      "detail": "FLAGS.MUG_CARD_INTERCEPTION = \"papercusp-queen-card-interception\"",
+      "retired": false,
+      "matchedToken": "mug"
+    },
+    {
+      "category": "flag",
+      "subject": "POT_PLACEMENT_WATCHDOG",
+      "file": "libs/flags/src/types.ts",
+      "line": 834,
+      "detail": "FLAGS.POT_PLACEMENT_WATCHDOG = \"papercusp-hive-placement-watchdog\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "MUG_AUTONOMY_ARMED",
+      "file": "libs/flags/src/types.ts",
+      "line": 845,
+      "detail": "FLAGS.MUG_AUTONOMY_ARMED = \"papercusp-queen-autonomy-armed\"",
+      "retired": false,
+      "matchedToken": "mug"
+    },
+    {
+      "category": "flag",
+      "subject": "MUG_FULL_AUTONOMY",
+      "file": "libs/flags/src/types.ts",
+      "line": 865,
+      "detail": "FLAGS.MUG_FULL_AUTONOMY = \"papercusp-queen-full-autonomy\"",
+      "retired": false,
+      "matchedToken": "mug"
+    },
+    {
+      "category": "flag",
+      "subject": "MUG_AUTONOMY_SETTINGS",
+      "file": "libs/flags/src/types.ts",
+      "line": 874,
+      "detail": "FLAGS.MUG_AUTONOMY_SETTINGS = \"papercusp-queen-autonomy-settings\"",
+      "retired": false,
+      "matchedToken": "mug"
+    },
+    {
+      "category": "flag",
+      "subject": "POT_ROLE_TIERS",
+      "file": "libs/flags/src/types.ts",
+      "line": 990,
+      "detail": "FLAGS.POT_ROLE_TIERS = \"papercusp-hive-role-tiers\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "POT_CONTROL",
+      "file": "libs/flags/src/types.ts",
+      "line": 1012,
+      "detail": "FLAGS.POT_CONTROL = \"papercusp-hive-control\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "MUG_BRAIN_FRESH",
+      "file": "libs/flags/src/types.ts",
+      "line": 1018,
+      "detail": "FLAGS.MUG_BRAIN_FRESH = \"papercusp-queen-brain-fresh\"",
+      "retired": false,
+      "matchedToken": "mug"
+    },
+    {
+      "category": "flag",
+      "subject": "OVERWATCH",
+      "file": "libs/flags/src/types.ts",
+      "line": 1056,
+      "detail": "FLAGS.OVERWATCH = \"papercusp-overwatch\"",
+      "retired": false,
+      "matchedToken": "overwatch"
+    },
+    {
+      "category": "flag",
+      "subject": "CUP_FRESH_CONTEXT_WARM_INJECT",
+      "file": "libs/flags/src/types.ts",
+      "line": 1137,
+      "detail": "FLAGS.CUP_FRESH_CONTEXT_WARM_INJECT = \"papercusp-bee-fresh-context-warm-inject\"",
+      "retired": false,
+      "matchedToken": "cup"
+    },
+    {
+      "category": "flag",
+      "subject": "CUP_WAKE_DOSSIER",
+      "file": "libs/flags/src/types.ts",
+      "line": 1146,
+      "detail": "FLAGS.CUP_WAKE_DOSSIER = \"papercusp-bee-wake-dossier\"",
+      "retired": false,
+      "matchedToken": "cup"
+    },
+    {
+      "category": "flag",
+      "subject": "CUP_TRANSCRIPT_CAP",
+      "file": "libs/flags/src/types.ts",
+      "line": 1156,
+      "detail": "FLAGS.CUP_TRANSCRIPT_CAP = \"papercusp-bee-transcript-cap\"",
+      "retired": false,
+      "matchedToken": "cup"
+    },
+    {
+      "category": "flag",
+      "subject": "QUEEN_GROUP_TOPIC_SUBSCRIBE",
+      "file": "libs/flags/src/types.ts",
+      "line": 1173,
+      "detail": "FLAGS.QUEEN_GROUP_TOPIC_SUBSCRIBE = \"papercusp-queen-group-topic-subscribe\"",
+      "retired": false,
+      "matchedToken": "queen"
+    },
+    {
+      "category": "flag",
+      "subject": "STEERING_POT_TREE",
+      "file": "libs/flags/src/types.ts",
+      "line": 1190,
+      "detail": "FLAGS.STEERING_POT_TREE = \"papercusp-steering-hive-tree\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "POT_REKEY",
+      "file": "libs/flags/src/types.ts",
+      "line": 1386,
+      "detail": "FLAGS.POT_REKEY = \"papercusp-hive-rekey\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "POT_SEED_BUNDLE",
+      "file": "libs/flags/src/types.ts",
+      "line": 1399,
+      "detail": "FLAGS.POT_SEED_BUNDLE = \"papercusp-hive-seed-bundle\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "POT_SEED_SELF_ADMIT",
+      "file": "libs/flags/src/types.ts",
+      "line": 1406,
+      "detail": "FLAGS.POT_SEED_SELF_ADMIT = \"papercusp-hive-seed-self-admit\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "MUG_WARM_SESSION",
+      "file": "libs/flags/src/types.ts",
+      "line": 1541,
+      "detail": "FLAGS.MUG_WARM_SESSION = \"papercusp-queen-warm-session\"",
+      "retired": false,
+      "matchedToken": "mug"
+    },
+    {
+      "category": "flag",
+      "subject": "MUG_CAPACITY_DISPATCH",
+      "file": "libs/flags/src/types.ts",
+      "line": 1683,
+      "detail": "FLAGS.MUG_CAPACITY_DISPATCH = \"papercusp-queen-capacity-dispatch\"",
+      "retired": false,
+      "matchedToken": "mug"
+    },
+    {
+      "category": "flag",
+      "subject": "DOGFOOD_PAPERCUSP_POT",
+      "file": "libs/flags/src/types.ts",
+      "line": 1854,
+      "detail": "FLAGS.DOGFOOD_PAPERCUSP_POT = \"papercusp-dogfood-papercusp-hive\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "flag",
+      "subject": "DOGFOOD_PAPERCUSP_POT_SHARE",
+      "file": "libs/flags/src/types.ts",
+      "line": 1864,
+      "detail": "FLAGS.DOGFOOD_PAPERCUSP_POT_SHARE = \"papercusp-dogfood-papercusp-hive-share\"",
+      "retired": false,
+      "matchedToken": "pot"
+    },
+    {
+      "category": "prompt",
+      "subject": "base/cup",
+      "file": "libs/papercusp/packages/harness/blueprints/base/prompts/cup.base.md",
+      "line": 1,
+      "detail": "role prompt for 'cup' in blueprint 'base'",
+      "retired": false
+    },
+    {
+      "category": "prompt",
+      "subject": "base/kettle",
+      "file": "libs/papercusp/packages/harness/blueprints/base/prompts/kettle.md",
+      "line": 1,
+      "detail": "role prompt for 'kettle' in blueprint 'base'",
+      "retired": false
+    },
+    {
+      "category": "prompt",
+      "subject": "base/mug",
+      "file": "libs/papercusp/packages/harness/blueprints/base/prompts/mug.base.md",
+      "line": 1,
+      "detail": "role prompt for 'mug' in blueprint 'base'",
+      "retired": false
+    },
+    {
+      "category": "prompt",
+      "subject": "base/mug",
+      "file": "libs/papercusp/packages/harness/blueprints/base/prompts/mug.md",
+      "line": 1,
+      "detail": "role prompt for 'mug' in blueprint 'base'",
+      "retired": false
+    },
+    {
+      "category": "prompt",
+      "subject": "coding/cup",
+      "file": "libs/papercusp/packages/harness/blueprints/coding/prompts/cup.md",
+      "line": 1,
+      "detail": "role prompt for 'cup' in blueprint 'coding'",
+      "retired": false
+    },
+    {
+      "category": "prompt",
+      "subject": "coding/kettle",
+      "file": "libs/papercusp/packages/harness/blueprints/coding/prompts/kettle.md",
+      "line": 1,
+      "detail": "role prompt for 'kettle' in blueprint 'coding'",
+      "retired": false
+    },
+    {
+      "category": "prompt",
+      "subject": "coding/mug",
+      "file": "libs/papercusp/packages/harness/blueprints/coding/prompts/mug.md",
+      "line": 1,
+      "detail": "role prompt for 'mug' in blueprint 'coding'",
+      "retired": false
+    },
+    {
+      "category": "prompt",
+      "subject": "work/cup",
+      "file": "libs/papercusp/packages/harness/blueprints/work/prompts/cup.md",
+      "line": 1,
+      "detail": "role prompt for 'cup' in blueprint 'work'",
+      "retired": false
+    },
+    {
+      "category": "prompt",
+      "subject": "work/mug",
+      "file": "libs/papercusp/packages/harness/blueprints/work/prompts/mug.md",
+      "line": 1,
+      "detail": "role prompt for 'mug' in blueprint 'work'",
+      "retired": false
+    },
+    {
+      "category": "ui",
+      "subject": "PotHealthPane",
+      "file": "apps/operator/app/_components/PotHealthPane.tsx",
+      "line": 1,
+      "detail": "named control surface for pot/plan start-stop (plan D-009/D-010)",
+      "retired": false
+    },
+    {
+      "category": "ui",
+      "subject": "FleetPeersRail",
+      "file": "apps/operator/app/_components/chat/FleetPeersRail.tsx",
+      "line": 69,
+      "detail": "mounts tier tab token(s): cup",
+      "retired": false
+    },
+    {
+      "category": "ui",
+      "subject": "PlanRail",
+      "file": "apps/operator/app/admin/plans/PlanRail.tsx",
+      "line": 1,
+      "detail": "named control surface for pot/plan start-stop (plan D-009/D-010)",
+      "retired": false
+    },
+    {
+      "category": "ui",
+      "subject": "HiveBeaconToggle",
+      "file": "apps/operator/app/adv/harnesses/HiveBeaconToggle.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "hive",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "HiveContentPanel",
+      "file": "apps/operator/app/adv/harnesses/HiveContentPanel.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "hive",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "HiveMemberRail",
+      "file": "apps/operator/app/adv/harnesses/HiveMemberRail.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "hive",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "HiveWorkspaceCards",
+      "file": "apps/operator/app/adv/harnesses/HiveWorkspaceCards.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "hive",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "PublishHiveCard",
+      "file": "apps/operator/app/harness/PublishHiveCard.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "hive",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "ShareHiveDialog",
+      "file": "apps/operator/app/harness/ShareHiveDialog.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "hive",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "HivePolicyPanel",
+      "file": "apps/operator/app/settings/pot-customization/HivePolicyPanel.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "hive",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "AdvEvalsTab",
+      "file": "apps/operator-vite/src/components/adv/AdvEvalsTab.tsx",
+      "line": 1305,
+      "detail": "mounts tier tab token(s): mug",
+      "retired": false
+    },
+    {
+      "category": "ui",
+      "subject": "AdvNowRunning",
+      "file": "apps/operator-vite/src/components/adv/AdvNowRunning.tsx",
+      "line": 1,
+      "detail": "named control surface for pot/plan start-stop (plan D-009/D-010)",
+      "retired": false
+    },
+    {
+      "category": "ui",
+      "subject": "AdvPotBar",
+      "file": "apps/operator-vite/src/components/adv/AdvPotBar.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "pot",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "MugWakeEfficiencyPanel",
+      "file": "apps/operator-vite/src/components/adv/MugWakeEfficiencyPanel.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "mug",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "RedQueenPanel",
+      "file": "apps/operator-vite/src/components/adv/RedQueenPanel.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "queen",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "hive-control",
+      "file": "apps/operator-vite/src/components/adv/hive-control.ts",
+      "line": 1,
+      "detail": "named control surface for pot/plan start-stop (plan D-009/D-010)",
+      "retired": false
+    },
+    {
+      "category": "ui",
+      "subject": "HiveFederationStatus",
+      "file": "apps/operator-vite/src/components/left-sidebar/HiveFederationStatus.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "hive",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "HiveSteeringTree",
+      "file": "apps/operator-vite/src/components/left-sidebar/HiveSteeringTree.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "hive",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "LeftSidebar",
+      "file": "apps/operator-vite/src/components/left-sidebar/LeftSidebar.tsx",
+      "line": 133,
+      "detail": "mounts tier tab token(s): kettle, queen",
+      "retired": false
+    },
+    {
+      "category": "ui",
+      "subject": "LocalHivesControl",
+      "file": "apps/operator-vite/src/components/left-sidebar/LocalHivesControl.tsx",
+      "line": 1,
+      "detail": "named control surface for pot/plan start-stop (plan D-009/D-010)",
+      "retired": false
+    },
+    {
+      "category": "ui",
+      "subject": "MugHeartbeat",
+      "file": "apps/operator-vite/src/components/left-sidebar/MugHeartbeat.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "mug",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "MugTab",
+      "file": "apps/operator-vite/src/components/left-sidebar/MugTab.tsx",
+      "line": 1,
+      "detail": "named control surface for pot/plan start-stop (plan D-009/D-010)",
+      "retired": false
+    },
+    {
+      "category": "ui",
+      "subject": "OverwatchTab",
+      "file": "apps/operator-vite/src/components/left-sidebar/OverwatchTab.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "overwatch",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "SpendTab",
+      "file": "apps/operator-vite/src/components/left-sidebar/SpendTab.tsx",
+      "line": 9,
+      "detail": "mounts tier tab token(s): mug, kettle, cup",
+      "retired": false
+    },
+    {
+      "category": "ui",
+      "subject": "WorkbenchHiveDirectoryPanel",
+      "file": "apps/operator-vite/src/components/workbench/WorkbenchHiveDirectoryPanel.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "hive",
+      "tabTokens": 0
+    },
+    {
+      "category": "ui",
+      "subject": "pot-customization",
+      "file": "apps/operator-vite/src/routes/settings/pot-customization.tsx",
+      "line": 1,
+      "detail": "component file named for the retiring tier",
+      "retired": false,
+      "matchedToken": "pot",
+      "tabTokens": 0
+    },
+    {
+      "category": "wake",
+      "subject": "recentWatchdogFires",
+      "file": "packages/operator-core/lib/agent-state-divergence-sweep.ts",
+      "line": 373,
+      "detail": "calls recentWatchdogFires() [from ./pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/loop/arm.ts",
+      "line": 506,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/loop/checkpoint.ts",
+      "line": 330,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/loop/session_audit.ts",
+      "line": 26,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/loop/soak_report.ts",
+      "line": 30,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/overwatch/declare_wake.ts",
+      "line": 97,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "setOverwatchStarted",
+      "file": "packages/operator-core/lib/agent-tools/overwatch/pause.ts",
+      "line": 85,
+      "detail": "calls setOverwatchStarted() [from ../../overwatch/control-state]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/overwatch/pause.ts",
+      "line": 66,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "setOverwatchStarted",
+      "file": "packages/operator-core/lib/agent-tools/overwatch/start.ts",
+      "line": 91,
+      "detail": "calls setOverwatchStarted() [from ../../overwatch/control-state]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/overwatch/start.ts",
+      "line": 74,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "declarePotTimeWake",
+      "file": "packages/operator-core/lib/agent-tools/pot/_create.ts",
+      "line": 813,
+      "detail": "calls declarePotTimeWake() [from ../../pot/wake]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "recordPotWake",
+      "file": "packages/operator-core/lib/agent-tools/pot/_create.ts",
+      "line": 810,
+      "detail": "calls recordPotWake() [from ../../pot/wake]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "readPotWakeState",
+      "file": "packages/operator-core/lib/agent-tools/pot/_resolve.ts",
+      "line": 104,
+      "detail": "calls readPotWakeState() [from ../../pot/wake]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/pot/_resolve.ts",
+      "line": 204,
+      "detail": "calls resolvePotHomeSlug() [from defined in a domain file]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "declarePotTimeWake",
+      "file": "packages/operator-core/lib/agent-tools/pot/declare_wake.ts",
+      "line": 201,
+      "detail": "calls declarePotTimeWake() [from ../../pot/wake]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "getPotStarted",
+      "file": "packages/operator-core/lib/agent-tools/pot/declare_wake.ts",
+      "line": 153,
+      "detail": "calls getPotStarted() [from ../../pot/started]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/pot/declare_wake.ts",
+      "line": 101,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/pot/get_steering.ts",
+      "line": 49,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "readPotWakeState",
+      "file": "packages/operator-core/lib/agent-tools/pot/list.ts",
+      "line": 63,
+      "detail": "calls readPotWakeState() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/pot/mug_efficiency.ts",
+      "line": 42,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "setPotStarted",
+      "file": "packages/operator-core/lib/agent-tools/pot/pause.ts",
+      "line": 94,
+      "detail": "calls setPotStarted() [from ../../pot/started]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/pot/pause.ts",
+      "line": 61,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/pot/set_steering.ts",
+      "line": 163,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "setPotStarted",
+      "file": "packages/operator-core/lib/agent-tools/pot/start.ts",
+      "line": 103,
+      "detail": "calls setPotStarted() [from ../../pot/started]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/pot/start.ts",
+      "line": 60,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "readPotWakeState",
+      "file": "packages/operator-core/lib/agent-tools/pot/status.ts",
+      "line": 65,
+      "detail": "calls readPotWakeState() [from ../../pot/wake]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "getPotStarted",
+      "file": "packages/operator-core/lib/agent-tools/pot/status.ts",
+      "line": 76,
+      "detail": "calls getPotStarted() [from ../../pot/started]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/pot/status.ts",
+      "line": 58,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recentWatchdogFires",
+      "file": "packages/operator-core/lib/agent-tools/pot/status.ts",
+      "line": 77,
+      "detail": "calls recentWatchdogFires() [from ../../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/pot/survey.ts",
+      "line": 189,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "effectivePotWakeFloorSec",
+      "file": "packages/operator-core/lib/agent-tools/pot/wake.ts",
+      "line": 144,
+      "detail": "calls effectivePotWakeFloorSec() [from ../../pot/wake]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "getPotStarted",
+      "file": "packages/operator-core/lib/agent-tools/pot/wake.ts",
+      "line": 102,
+      "detail": "calls getPotStarted() [from ../../pot/started]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/agent-tools/pot/wake.ts",
+      "line": 81,
+      "detail": "calls resolvePotHomeSlug() [from ../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "listStartedPots",
+      "file": "packages/operator-core/lib/dbos/orchestrator-loop.ts",
+      "line": 432,
+      "detail": "calls listStartedPots() [from ../pot/started]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/endpoint-route/routes/operator/hive-steering.ts",
+      "line": 22,
+      "detail": "calls resolvePotHomeSlug() [from ../../../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "claimWatchdogFire",
+      "file": "packages/operator-core/lib/harness/routines/autoloop-chronic-failure.ts",
+      "line": 396,
+      "detail": "calls claimWatchdogFire() [from ../../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recentWatchdogFires",
+      "file": "packages/operator-core/lib/harness/routines/autoloop-chronic-failure.ts",
+      "line": 385,
+      "detail": "calls recentWatchdogFires() [from ../../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "claimWatchdogFire",
+      "file": "packages/operator-core/lib/harness/routines/learning-loop-health-sweep.ts",
+      "line": 108,
+      "detail": "calls claimWatchdogFire() [from ../../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recentWatchdogFires",
+      "file": "packages/operator-core/lib/harness/routines/learning-loop-health-sweep.ts",
+      "line": 100,
+      "detail": "calls recentWatchdogFires() [from ../../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "claimWatchdogFire",
+      "file": "packages/operator-core/lib/harness/routines/stale-routine-executor-watchdog.ts",
+      "line": 337,
+      "detail": "calls claimWatchdogFire() [from ../../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recentWatchdogFires",
+      "file": "packages/operator-core/lib/harness/routines/stale-routine-executor-watchdog.ts",
+      "line": 331,
+      "detail": "calls recentWatchdogFires() [from ../../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "claimWatchdogFire",
+      "file": "packages/operator-core/lib/harness/routines/sync-read-budget-watchdog.ts",
+      "line": 309,
+      "detail": "calls claimWatchdogFire() [from ../../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/network-board/build-board.ts",
+      "line": 231,
+      "detail": "calls resolvePotHomeSlug() [from ../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recordFire",
+      "file": "packages/operator-core/lib/overwatch/brief-types.ts",
+      "line": 403,
+      "detail": "calls recordFire() [from defined in a domain file]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolveMugOwner",
+      "file": "packages/operator-core/lib/overwatch/compute-brief.ts",
+      "line": 590,
+      "detail": "calls resolveMugOwner() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "getOverwatchStarted",
+      "file": "packages/operator-core/lib/overwatch/control-state.ts",
+      "line": 116,
+      "detail": "calls getOverwatchStarted() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "setOverwatchStarted",
+      "file": "packages/operator-core/lib/overwatch/control-state.ts",
+      "line": 128,
+      "detail": "calls setOverwatchStarted() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/overwatch/control-state.ts",
+      "line": 261,
+      "detail": "calls resolvePotHomeSlug() [from defined in a domain file]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "getPotStarted",
+      "file": "packages/operator-core/lib/overwatch/loop.ts",
+      "line": 511,
+      "detail": "calls getPotStarted() [from ../pot/started]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/overwatch/loop.ts",
+      "line": 144,
+      "detail": "calls resolvePotHomeSlug() [from ../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recordFire",
+      "file": "packages/operator-core/lib/overwatch/scorecard-backstop.ts",
+      "line": 443,
+      "detail": "calls recordFire() [from defined in a domain file]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/overwatch/snapshot.ts",
+      "line": 88,
+      "detail": "calls resolvePotHomeSlug() [from ../pot/wake]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "wakeMug",
+      "file": "packages/operator-core/lib/pot/placement-watchdog.ts",
+      "line": 996,
+      "detail": "calls wakeMug() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolveMugOwner",
+      "file": "packages/operator-core/lib/pot/placement-watchdog.ts",
+      "line": 963,
+      "detail": "calls resolveMugOwner() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "getPotStarted",
+      "file": "packages/operator-core/lib/pot/started.ts",
+      "line": 67,
+      "detail": "calls getPotStarted() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "setPotStarted",
+      "file": "packages/operator-core/lib/pot/started.ts",
+      "line": 86,
+      "detail": "calls setPotStarted() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "listStartedPots",
+      "file": "packages/operator-core/lib/pot/started.ts",
+      "line": 211,
+      "detail": "calls listStartedPots() [from defined in a domain file]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/pot/started.ts",
+      "line": 260,
+      "detail": "calls resolvePotHomeSlug() [from defined in a domain file]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "declarePotTimeWake",
+      "file": "packages/operator-core/lib/pot/wake.ts",
+      "line": 159,
+      "detail": "calls declarePotTimeWake() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "recordPotWake",
+      "file": "packages/operator-core/lib/pot/wake.ts",
+      "line": 569,
+      "detail": "calls recordPotWake() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "readPotWakeState",
+      "file": "packages/operator-core/lib/pot/wake.ts",
+      "line": 324,
+      "detail": "calls readPotWakeState() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "withinWakeFloor",
+      "file": "packages/operator-core/lib/pot/wake.ts",
+      "line": 516,
+      "detail": "calls withinWakeFloor() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "effectivePotWakeFloorSec",
+      "file": "packages/operator-core/lib/pot/wake.ts",
+      "line": 144,
+      "detail": "calls effectivePotWakeFloorSec() [from defined in a domain file]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolvePotHomeSlug",
+      "file": "packages/operator-core/lib/pot/wake.ts",
+      "line": 592,
+      "detail": "calls resolvePotHomeSlug() [from defined in a domain file]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "claimWatchdogFire",
+      "file": "packages/operator-core/lib/pot/watchdog.ts",
+      "line": 564,
+      "detail": "calls claimWatchdogFire() [from defined in a domain file]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recentWatchdogFires",
+      "file": "packages/operator-core/lib/pot/watchdog.ts",
+      "line": 507,
+      "detail": "calls recentWatchdogFires() [from defined in a domain file]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recordFire",
+      "file": "packages/operator-core/lib/pot/watchdog.ts",
+      "line": 364,
+      "detail": "calls recordFire() [from defined in a domain file]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "setPotStarted",
+      "file": "packages/operator-core/lib/pot-eval/live-ops.ts",
+      "line": 295,
+      "detail": "calls setPotStarted() [from ../pot/started]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "claimWatchdogFire",
+      "file": "packages/operator-core/lib/release-deploy-staleness-watchdog.ts",
+      "line": 331,
+      "detail": "calls claimWatchdogFire() [from ./pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recentWatchdogFires",
+      "file": "packages/operator-core/lib/release-deploy-staleness-watchdog.ts",
+      "line": 322,
+      "detail": "calls recentWatchdogFires() [from ./pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "wakeMug",
+      "file": "packages/operator-core/lib/scout/draft-review-watchdog.ts",
+      "line": 212,
+      "detail": "calls wakeMug() [from ../pot/placement-watchdog]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolveMugOwner",
+      "file": "packages/operator-core/lib/scout/draft-review-watchdog.ts",
+      "line": 286,
+      "detail": "calls resolveMugOwner() [from ../pot/placement-watchdog]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "claimWatchdogFire",
+      "file": "packages/operator-core/lib/scout/draft-review-watchdog.ts",
+      "line": 260,
+      "detail": "calls claimWatchdogFire() [from ../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "listStartedPots",
+      "file": "packages/operator-core/lib/scout/draft-review-watchdog.ts",
+      "line": 243,
+      "detail": "calls listStartedPots() [from ../pot/started]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "wakeMug",
+      "file": "packages/operator-core/lib/scout/ready-plan-autostart.ts",
+      "line": 186,
+      "detail": "calls wakeMug() [from ../pot/placement-watchdog]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolveMugOwner",
+      "file": "packages/operator-core/lib/scout/ready-plan-autostart.ts",
+      "line": 277,
+      "detail": "calls resolveMugOwner() [from ../pot/placement-watchdog]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "claimWatchdogFire",
+      "file": "packages/operator-core/lib/scout/ready-plan-autostart.ts",
+      "line": 268,
+      "detail": "calls claimWatchdogFire() [from ../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "listStartedPots",
+      "file": "packages/operator-core/lib/scout/ready-plan-autostart.ts",
+      "line": 213,
+      "detail": "calls listStartedPots() [from ../pot/started]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recentWatchdogFires",
+      "file": "packages/operator-core/lib/scout/ready-plan-autostart.ts",
+      "line": 262,
+      "detail": "calls recentWatchdogFires() [from ../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "listStartedPots",
+      "file": "packages/operator-core/lib/scout/signal-accumulator.ts",
+      "line": 353,
+      "detail": "calls listStartedPots() [from ../pot/started]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "wakeMug",
+      "file": "packages/operator-core/lib/scout/ungraded-filings-watchdog.ts",
+      "line": 219,
+      "detail": "calls wakeMug() [from ../pot/placement-watchdog]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "resolveMugOwner",
+      "file": "packages/operator-core/lib/scout/ungraded-filings-watchdog.ts",
+      "line": 278,
+      "detail": "calls resolveMugOwner() [from ../pot/placement-watchdog]",
+      "retired": false
+    },
+    {
+      "category": "wake",
+      "subject": "claimWatchdogFire",
+      "file": "packages/operator-core/lib/scout/ungraded-filings-watchdog.ts",
+      "line": 273,
+      "detail": "calls claimWatchdogFire() [from ../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "listStartedPots",
+      "file": "packages/operator-core/lib/scout/ungraded-filings-watchdog.ts",
+      "line": 247,
+      "detail": "calls listStartedPots() [from ../pot/started]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recentWatchdogFires",
+      "file": "packages/operator-core/lib/scout/ungraded-filings-watchdog.ts",
+      "line": 262,
+      "detail": "calls recentWatchdogFires() [from ../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recentWatchdogFires",
+      "file": "packages/operator-core/lib/sync/hyperbee/cold-join-canary.ts",
+      "line": 94,
+      "detail": "calls recentWatchdogFires() [from ../../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    },
+    {
+      "category": "wake",
+      "subject": "recordFire",
+      "file": "packages/operator-core/lib/sync/hyperbee/cold-join-canary.ts",
+      "line": 98,
+      "detail": "calls recordFire() [from ../../pot/watchdog]",
+      "retired": false,
+      "substrate": true,
+      "why": "D-003 population (b): the su system itself depends on this — inventory, do NOT gate"
+    }
+  ],
+  "alreadyRetired": []
+}

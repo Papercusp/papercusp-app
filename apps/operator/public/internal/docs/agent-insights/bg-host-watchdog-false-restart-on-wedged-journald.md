@@ -1,0 +1,88 @@
+# A 'freeze' watchdog that reads journald silence false-restarts a healthy host when journald itself wedges
+URL: /internal/docs/agent-insights/bg-host-watchdog-false-restart-on-wedged-journald
+
+Cups/spawns kept dying at boot (exit-143, 0 invocations, EI-2186 reclaim). It looked like capacity or the gateway — it was neither. The bg-host watchdog judged 'frozen' by journalctl silence, but journald's capture had wedged host-wide, so it restarted a perfectly healthy durable-spawn host every ~5-11 min, and each unclean restart reclaim-killed every in-flight spawn. The fix + the generalizable detector-design lesson.
+
+## Symptom
+
+Fleet-wide, freshly-placed cups (and any durable spawn) died **at boot**: `status=failed`,
+**zero tool invocations**, and a reclaim message like:
+
+> reclaimed at operator boot: launched by a prior incarnation … (host/process restarted
+> before its admission-release ran) — stale spawn-ceiling debit freed by the boot reconcile (EI-2186)
+
+Placements went `cursed` with `failCount: 0` (the infra-victim signature — killed before doing
+any real work, which still counts toward the cursed breaker). For hours, "thousands of agents"
+was capped not by capacity but by spawns that never survived their first turn.
+
+## The two misdiagnosis traps
+
+1. **"We're capacity-gated."** The inference gateway logged `all accounts transiently throttled
+   on claude-opus-4-8 → no-fresh-account, pausing as before`, which reads as "out of quota." It
+   was not — the account pool had headroom (one account at 2% of its 7-day window). See the
+   multi-account routing insights: a "limit" is almost always routing/health, not real exhaustion.
+2. **"It's the gateway."** There *was* a separate gateway crash-loop (EI-2421), and fixing it was
+   necessary — but **not sufficient**. A canary cup still died with 0 invocations *after* the
+   gateway was stabilized, because a **different** restart source was killing it.
+
+## Root cause (the chain)
+
+1. `papercup-bg-host` — the **durable-spawn primary** (it hosts cup spawns) — was being restarted
+   roughly **every 5-11 minutes**.
+2. It was **not** systemd auto-restart: `systemctl --user show papercup-bg-host.service -p NRestarts`
+   read `0`, yet `ExecMainStartTimestamp` was minutes-old. A recent main-start with `NRestarts=0`
+   means **something other than systemd restarted it** — a watchdog or a script, not a crash.
+3. That something was `papercup-bg-host-watchdog.service`, whose job is *"auto-restart on
+   journal-silence freeze"* — it infers the host is **frozen** when its journal goes silent for N
+   seconds.
+4. **But journald's capture was wedged host-wide.** `journalctl --user -u papercup-bg-host.service`
+   (and `-u papercup-bg-host-watchdog.service`) returned **"No entries"** for services that were
+   demonstrably *active and ticking* — the logs weren't flowing because **journald** was broken,
+   not because the services were frozen.
+5. So the watchdog saw silence → **false-detected a freeze** → restarted a perfectly healthy host.
+6. Each restart was **unclean**: `State 'final-sigterm' timed out. Killing` + `Found left-over
+   process … in control group` → SIGKILL + cgroup orphan leak. Because the bg-host hosts
+   durable-spawn, every in-flight cup was orphaned, and the next operator boot-reconcile
+   (`reconcileSpawnAdmissionOnBoot`) marked them `failed` (EI-2186). Net: a restart storm that
+   manufactured the exact spawn-death outage the watchdog existed to prevent.
+
+## How to diagnose it (the method that cracked it)
+
+* **`systemctl --user show <svc> -p ExecMainStartTimestamp -p NRestarts`** — a *recent* main-start
+  with `NRestarts=0` ⇒ restarted by a watchdog/script, not a crash. Walk the watchdog units.
+* **`journalctl --user -u <a-clearly-active-svc>` returning "No entries"** ⇒ **journald capture is
+  wedged**, not the service. This is the load-bearing tell: don't trust log-absence as liveness.
+* **`dev:session_detail` on a dead spawn** — `"host/process restarted before its admission-release
+  ran (EI-2186)"` names a *host restart* (not the gateway) as the killer.
+* **`ps -o etimes,wchan -p <pid>`** on a wedged cup — `ep_poll` with 0 invocations ⇒ blocked on
+  first inference (a *different* failure: the gateway egress circuit; see the egress-probe insight).
+  Distinguish "wedged on I/O" (gateway) from "reclaimed at boot" (host restart) — they need
+  different fixes.
+
+## The fix (two layers, two owners)
+
+* **Cadence half** (stop the false restarts): make the watchdog's freeze-detection
+  **journald-independent** — never judge a process's liveness by `journalctl` silence, because
+  journald can fail on its own and take the signal down with it. Probe liveness **directly** (the
+  ticker writes a heartbeat to a channel — a DB row / a routine tick — that does not share
+  journald's blind spot).
+* **Durable, source-agnostic half** (EI-2186): the boot-reconcile (`reconcileSpawnAdmissionOnBoot`)
+  should **RE-LAUNCH** an in-flight spawn whose durable work-item is **non-terminal**, not
+  reclaim-**kill** it — so a spawn survives **any** restart (gateway / operator / bg-host / deploy /
+  legit crash), not only the false ones. Reclaim-only when the work-item is already terminal.
+  Complemented by a deterministic **spawn-admission readiness gate** (don't boot a cup into a
+  gateway that can't serve it) so a fresh spawn never wedges in the first place.
+
+## The lesson (generalizable)
+
+**A watchdog's health signal must be independent of the failure mode it monitors.** A "freeze
+detector" that infers freeze from *journald silence* shares a failure mode with journald: when
+journald wedges, the detector fires on **every** healthy host and triggers a restart storm. **A
+detector that can be fooled by the failure of its own observability is worse than no detector** —
+it manufactures the outage it was meant to prevent. Two corollaries:
+
+* Probe liveness by a **positive heartbeat the monitored thing actively writes**, never by the
+  **absence of logs** (absence is indistinguishable between "frozen" and "the log pipe broke").
+* An automated remediation (restart) on a noisy/shared-failure signal is **self-amplifying** — pair
+  it with a confirm-by-second-independent-signal gate before it's allowed to act destructively. See
+  also `auto-fix-lane-watchdog-self-amplifying-noise`.

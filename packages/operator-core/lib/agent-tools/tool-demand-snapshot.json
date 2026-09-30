@@ -1,0 +1,2329 @@
+{
+  "_generatedBy": "npm run refresh:tool-demand",
+  "_doNotEdit": "Committed measurement, not hand-maintained data. Regenerate with the command above; the diff is the review surface.",
+  "capturedAt": "2026-09-21T22:40:11.922Z",
+  "windowDays": 14,
+  "window": {
+    "start": "2026-09-07T22:40:11.922Z",
+    "end": "2026-09-21T22:40:11.922Z"
+  },
+  "workspace": "papercusp-workspace",
+  "source": {
+    "relation": "harness_shared.tool_invocations",
+    "numerator": "distinct coord_owner_id (D-001)"
+  },
+  "sql": "SELECT tool_name AS name,\n       count(DISTINCT coord_owner_id)::int AS callers,\n       count(*)::int AS calls\n  FROM harness_shared.tool_invocations\n WHERE invoked_at >= $1 AND invoked_at < $2\n   AND ($3::text IS NULL OR workspace_id = $3)\n GROUP BY tool_name\n ORDER BY tool_name",
+  "sqlParams": [
+    "2026-09-07T22:40:11.922Z",
+    "2026-09-21T22:40:11.922Z",
+    "papercusp-workspace"
+  ],
+  "totals": {
+    "calls": 1775190,
+    "tools": 460,
+    "callers": 3175,
+    "unattributedCalls": 0
+  },
+  "tools": [
+    {
+      "name": "accounts:get-session-override",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "accounts:link-start",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "accounts:link-status",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "accounts:list",
+      "callers": 6,
+      "calls": 7
+    },
+    {
+      "name": "accounts:pin",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "accounts:probe-capacity",
+      "callers": 4,
+      "calls": 8
+    },
+    {
+      "name": "accounts:status",
+      "callers": 37,
+      "calls": 309739
+    },
+    {
+      "name": "activity:bash-substitution-report",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "activity:mix",
+      "callers": 8,
+      "calls": 21
+    },
+    {
+      "name": "activity:recent",
+      "callers": 56,
+      "calls": 399
+    },
+    {
+      "name": "activity:report",
+      "callers": 2644,
+      "calls": 618956
+    },
+    {
+      "name": "activity:tool-log",
+      "callers": 72,
+      "calls": 277
+    },
+    {
+      "name": "agent_chats:send_message",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "agent_tools:list",
+      "callers": 34,
+      "calls": 76
+    },
+    {
+      "name": "agents:list",
+      "callers": 8,
+      "calls": 8
+    },
+    {
+      "name": "audit:list",
+      "callers": 16,
+      "calls": 33
+    },
+    {
+      "name": "autoloop:status",
+      "callers": 2,
+      "calls": 4
+    },
+    {
+      "name": "backup:restore",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "backup:settings_get",
+      "callers": 8,
+      "calls": 16
+    },
+    {
+      "name": "backup:snapshot_create",
+      "callers": 7,
+      "calls": 12
+    },
+    {
+      "name": "backup:snapshot_list",
+      "callers": 26,
+      "calls": 90
+    },
+    {
+      "name": "blender:attach-goal-evidence",
+      "callers": 2,
+      "calls": 17
+    },
+    {
+      "name": "blender:goal-drafts",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "blender:grade-idea",
+      "callers": 1,
+      "calls": 53
+    },
+    {
+      "name": "blender:ideate-pass-record",
+      "callers": 1,
+      "calls": 23
+    },
+    {
+      "name": "blender:ideation-feedback",
+      "callers": 1,
+      "calls": 17
+    },
+    {
+      "name": "blender:route-idea",
+      "callers": 2,
+      "calls": 8
+    },
+    {
+      "name": "blueprint:catalog",
+      "callers": 3,
+      "calls": 4
+    },
+    {
+      "name": "blueprint:publish",
+      "callers": 1,
+      "calls": 4
+    },
+    {
+      "name": "build:typecheck",
+      "callers": 42,
+      "calls": 146
+    },
+    {
+      "name": "capability:bash",
+      "callers": 252,
+      "calls": 11563
+    },
+    {
+      "name": "capability:bash_kill",
+      "callers": 13,
+      "calls": 19
+    },
+    {
+      "name": "capability:bash_output",
+      "callers": 129,
+      "calls": 2011
+    },
+    {
+      "name": "capability:computer",
+      "callers": 3,
+      "calls": 12
+    },
+    {
+      "name": "capability:edit",
+      "callers": 26,
+      "calls": 367
+    },
+    {
+      "name": "capability:fetch",
+      "callers": 20,
+      "calls": 91
+    },
+    {
+      "name": "capability:git",
+      "callers": 32,
+      "calls": 135
+    },
+    {
+      "name": "capability:inspect",
+      "callers": 10,
+      "calls": 25
+    },
+    {
+      "name": "capability:launch-agent",
+      "callers": 42,
+      "calls": 236
+    },
+    {
+      "name": "capability:list",
+      "callers": 3,
+      "calls": 5
+    },
+    {
+      "name": "capability:notebook_edit",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "capability:patch",
+      "callers": 2,
+      "calls": 5
+    },
+    {
+      "name": "capability:pty_kill",
+      "callers": 3,
+      "calls": 4
+    },
+    {
+      "name": "capability:pty_open",
+      "callers": 4,
+      "calls": 9
+    },
+    {
+      "name": "capability:pty_read_screen",
+      "callers": 5,
+      "calls": 15
+    },
+    {
+      "name": "capability:pty_resize",
+      "callers": 1,
+      "calls": 3
+    },
+    {
+      "name": "capability:pty_write_stdin",
+      "callers": 4,
+      "calls": 9
+    },
+    {
+      "name": "capability:read",
+      "callers": 503,
+      "calls": 8576
+    },
+    {
+      "name": "capability:terminal",
+      "callers": 2,
+      "calls": 5
+    },
+    {
+      "name": "capability:write",
+      "callers": 14,
+      "calls": 27
+    },
+    {
+      "name": "chat:ask_choice",
+      "callers": 4,
+      "calls": 5
+    },
+    {
+      "name": "checkpoint:await",
+      "callers": 11,
+      "calls": 42
+    },
+    {
+      "name": "code:run",
+      "callers": 482,
+      "calls": 11392
+    },
+    {
+      "name": "code:tools",
+      "callers": 100,
+      "calls": 302
+    },
+    {
+      "name": "computer:list_desktops",
+      "callers": 8,
+      "calls": 10
+    },
+    {
+      "name": "computer:observe",
+      "callers": 4,
+      "calls": 7
+    },
+    {
+      "name": "computer:provision_desktop",
+      "callers": 4,
+      "calls": 6
+    },
+    {
+      "name": "computer:release_desktop",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "config:role-launch",
+      "callers": 3,
+      "calls": 3
+    },
+    {
+      "name": "config:set-compaction-limit",
+      "callers": 32,
+      "calls": 305
+    },
+    {
+      "name": "config:terminal-emulator",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "config:tiers-get",
+      "callers": 3,
+      "calls": 5079
+    },
+    {
+      "name": "consult:close",
+      "callers": 22,
+      "calls": 42
+    },
+    {
+      "name": "consult:decline",
+      "callers": 7,
+      "calls": 13
+    },
+    {
+      "name": "consult:get_feedback",
+      "callers": 54,
+      "calls": 170
+    },
+    {
+      "name": "consult:reply",
+      "callers": 27,
+      "calls": 84
+    },
+    {
+      "name": "conversations:answer",
+      "callers": 5,
+      "calls": 8
+    },
+    {
+      "name": "conversations:get",
+      "callers": 75,
+      "calls": 492
+    },
+    {
+      "name": "conversations:list",
+      "callers": 13,
+      "calls": 19
+    },
+    {
+      "name": "conversations:post",
+      "callers": 12,
+      "calls": 28
+    },
+    {
+      "name": "conversations:resolve",
+      "callers": 8,
+      "calls": 15
+    },
+    {
+      "name": "coord:ack",
+      "callers": 196,
+      "calls": 460
+    },
+    {
+      "name": "coord:ask-owner",
+      "callers": 34,
+      "calls": 83
+    },
+    {
+      "name": "coord:await-inbox",
+      "callers": 40,
+      "calls": 144
+    },
+    {
+      "name": "coord:catch-up",
+      "callers": 193,
+      "calls": 1189
+    },
+    {
+      "name": "coord:conditions",
+      "callers": 5,
+      "calls": 7
+    },
+    {
+      "name": "coord:couple",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "coord:declare-intent",
+      "callers": 607,
+      "calls": 11112
+    },
+    {
+      "name": "coord:dispatch",
+      "callers": 42,
+      "calls": 122
+    },
+    {
+      "name": "coord:emit",
+      "callers": 615,
+      "calls": 16975
+    },
+    {
+      "name": "coord:escalate",
+      "callers": 22,
+      "calls": 116
+    },
+    {
+      "name": "coord:escalations",
+      "callers": 13,
+      "calls": 43
+    },
+    {
+      "name": "coord:feed",
+      "callers": 156,
+      "calls": 836
+    },
+    {
+      "name": "coord:focus-window",
+      "callers": 2,
+      "calls": 5
+    },
+    {
+      "name": "coord:glance",
+      "callers": 1239,
+      "calls": 124380
+    },
+    {
+      "name": "coord:goal",
+      "callers": 4,
+      "calls": 17
+    },
+    {
+      "name": "coord:inbox",
+      "callers": 588,
+      "calls": 10474
+    },
+    {
+      "name": "coord:mark-terminal",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "coord:message-agent",
+      "callers": 3,
+      "calls": 6
+    },
+    {
+      "name": "coord:orient",
+      "callers": 544,
+      "calls": 5516
+    },
+    {
+      "name": "coord:plan-events",
+      "callers": 527,
+      "calls": 4149
+    },
+    {
+      "name": "coord:presence",
+      "callers": 286,
+      "calls": 2768
+    },
+    {
+      "name": "coord:read",
+      "callers": 222,
+      "calls": 1273
+    },
+    {
+      "name": "coord:rebind-identity",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "coord:resolve",
+      "callers": 3,
+      "calls": 3
+    },
+    {
+      "name": "coord:retract",
+      "callers": 4,
+      "calls": 5
+    },
+    {
+      "name": "coord:roster",
+      "callers": 57,
+      "calls": 140
+    },
+    {
+      "name": "coord:send",
+      "callers": 577,
+      "calls": 13046
+    },
+    {
+      "name": "coord:thread",
+      "callers": 38,
+      "calls": 110
+    },
+    {
+      "name": "coord:thread-post",
+      "callers": 3,
+      "calls": 6
+    },
+    {
+      "name": "coord:wake",
+      "callers": 41,
+      "calls": 100
+    },
+    {
+      "name": "coord:wake-mode",
+      "callers": 6,
+      "calls": 12
+    },
+    {
+      "name": "coord:wake-queue",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "coord:walls",
+      "callers": 23,
+      "calls": 540
+    },
+    {
+      "name": "coord:watermark",
+      "callers": 3,
+      "calls": 3
+    },
+    {
+      "name": "coord:whoami",
+      "callers": 597,
+      "calls": 11038
+    },
+    {
+      "name": "cross_harness:docs_get",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "cross_harness:docs_search",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "cross_harness:plans_get",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "cross_harness:plans_search",
+      "callers": 4,
+      "calls": 7
+    },
+    {
+      "name": "cupboard:install-blueprint",
+      "callers": 3,
+      "calls": 21
+    },
+    {
+      "name": "cupboard:publish-plan",
+      "callers": 1,
+      "calls": 7
+    },
+    {
+      "name": "cupboard:publish-recipe",
+      "callers": 1,
+      "calls": 4
+    },
+    {
+      "name": "cupboard:search",
+      "callers": 8,
+      "calls": 39
+    },
+    {
+      "name": "curation:state-of-pot",
+      "callers": 2,
+      "calls": 4
+    },
+    {
+      "name": "db:check_drift",
+      "callers": 15,
+      "calls": 26
+    },
+    {
+      "name": "db:migrate",
+      "callers": 12,
+      "calls": 34
+    },
+    {
+      "name": "db:migrations",
+      "callers": 31,
+      "calls": 89
+    },
+    {
+      "name": "db:next-migration",
+      "callers": 13,
+      "calls": 17
+    },
+    {
+      "name": "deploy:await",
+      "callers": 3,
+      "calls": 7
+    },
+    {
+      "name": "deploy:status",
+      "callers": 3,
+      "calls": 3
+    },
+    {
+      "name": "deploys:vintage",
+      "callers": 18,
+      "calls": 27
+    },
+    {
+      "name": "design-phase.get_accepted_spec",
+      "callers": 2,
+      "calls": 18
+    },
+    {
+      "name": "design-phase.get_design_spec",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "design-phase.get_registry_component",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "design-phase.lint_spec",
+      "callers": 4,
+      "calls": 5
+    },
+    {
+      "name": "design-phase.list_tokens",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "design-phase.search_registry",
+      "callers": 12,
+      "calls": 29
+    },
+    {
+      "name": "design-phase.submit_spec",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "design-phase.validate_spec",
+      "callers": 5,
+      "calls": 6
+    },
+    {
+      "name": "dev:activity",
+      "callers": 7,
+      "calls": 11
+    },
+    {
+      "name": "dev:audit",
+      "callers": 3,
+      "calls": 3
+    },
+    {
+      "name": "dev:build_status",
+      "callers": 70,
+      "calls": 111
+    },
+    {
+      "name": "dev:cache_stats",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "dev:claude_session",
+      "callers": 14,
+      "calls": 37
+    },
+    {
+      "name": "dev:dogfood_substrate_status",
+      "callers": 10,
+      "calls": 18
+    },
+    {
+      "name": "dev:embed_latency",
+      "callers": 12,
+      "calls": 21
+    },
+    {
+      "name": "dev:harnesses",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "dev:listening_ports",
+      "callers": 59,
+      "calls": 125
+    },
+    {
+      "name": "dev:omp_session",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "dev:pg_active_queries",
+      "callers": 45,
+      "calls": 67
+    },
+    {
+      "name": "dev:pg_health",
+      "callers": 33,
+      "calls": 42
+    },
+    {
+      "name": "dev:pg_hot_queries",
+      "callers": 6,
+      "calls": 10
+    },
+    {
+      "name": "dev:pg_mutate",
+      "callers": 13,
+      "calls": 39
+    },
+    {
+      "name": "dev:pg_query",
+      "callers": 608,
+      "calls": 9306
+    },
+    {
+      "name": "dev:pg_table_sizes",
+      "callers": 3,
+      "calls": 5
+    },
+    {
+      "name": "dev:pipeline_position",
+      "callers": 572,
+      "calls": 30069
+    },
+    {
+      "name": "dev:processes",
+      "callers": 5,
+      "calls": 5
+    },
+    {
+      "name": "dev:rate_governor_status",
+      "callers": 19,
+      "calls": 23
+    },
+    {
+      "name": "dev:resolve_owner",
+      "callers": 11,
+      "calls": 171
+    },
+    {
+      "name": "dev:restart",
+      "callers": 88,
+      "calls": 793
+    },
+    {
+      "name": "dev:service_health",
+      "callers": 152,
+      "calls": 521
+    },
+    {
+      "name": "dev:session_detail",
+      "callers": 18,
+      "calls": 38
+    },
+    {
+      "name": "dev:sessions",
+      "callers": 3,
+      "calls": 4
+    },
+    {
+      "name": "dev:stall_waker_status",
+      "callers": 3,
+      "calls": 4
+    },
+    {
+      "name": "dev:telemetry",
+      "callers": 6,
+      "calls": 15
+    },
+    {
+      "name": "dev:why",
+      "callers": 7,
+      "calls": 9
+    },
+    {
+      "name": "docs:author",
+      "callers": 14,
+      "calls": 23
+    },
+    {
+      "name": "docs:get",
+      "callers": 129,
+      "calls": 533
+    },
+    {
+      "name": "docs:outline",
+      "callers": 18,
+      "calls": 33
+    },
+    {
+      "name": "docs:search",
+      "callers": 160,
+      "calls": 559
+    },
+    {
+      "name": "events:await",
+      "callers": 277,
+      "calls": 2056
+    },
+    {
+      "name": "events:cancel",
+      "callers": 139,
+      "calls": 418
+    },
+    {
+      "name": "events:catalog",
+      "callers": 104,
+      "calls": 251
+    },
+    {
+      "name": "events:emit",
+      "callers": 32,
+      "calls": 79
+    },
+    {
+      "name": "events:lost-wake-check",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "events:status",
+      "callers": 225,
+      "calls": 2013
+    },
+    {
+      "name": "facts:assert",
+      "callers": 223,
+      "calls": 3210
+    },
+    {
+      "name": "facts:list",
+      "callers": 286,
+      "calls": 62387
+    },
+    {
+      "name": "facts:retract",
+      "callers": 26,
+      "calls": 169
+    },
+    {
+      "name": "fetch_plus.fetch_clean",
+      "callers": 5,
+      "calls": 525
+    },
+    {
+      "name": "flags:attest",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "flags:get",
+      "callers": 112,
+      "calls": 2063
+    },
+    {
+      "name": "flags:list",
+      "callers": 2,
+      "calls": 3
+    },
+    {
+      "name": "fleet:assignments",
+      "callers": 543,
+      "calls": 6171
+    },
+    {
+      "name": "fleet:audit",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "fleet:bench",
+      "callers": 3,
+      "calls": 7
+    },
+    {
+      "name": "fleet:capacity",
+      "callers": 6,
+      "calls": 9
+    },
+    {
+      "name": "fleet:create",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "fleet:cup_mail",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "fleet:headcount-target",
+      "callers": 3,
+      "calls": 3
+    },
+    {
+      "name": "fleet:invariant",
+      "callers": 6,
+      "calls": 9
+    },
+    {
+      "name": "fleet:join",
+      "callers": 3,
+      "calls": 3
+    },
+    {
+      "name": "fleet:kill",
+      "callers": 2,
+      "calls": 9
+    },
+    {
+      "name": "fleet:launch-on-plan",
+      "callers": 6,
+      "calls": 33
+    },
+    {
+      "name": "fleet:leader-brief",
+      "callers": 41,
+      "calls": 802
+    },
+    {
+      "name": "fleet:leave",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "fleet:list",
+      "callers": 20,
+      "calls": 28
+    },
+    {
+      "name": "fleet:pause",
+      "callers": 7,
+      "calls": 47
+    },
+    {
+      "name": "fleet:require-checkpoint",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "fleet:respawn-member",
+      "callers": 2,
+      "calls": 8
+    },
+    {
+      "name": "fleet:resume",
+      "callers": 17,
+      "calls": 223
+    },
+    {
+      "name": "fleet:status",
+      "callers": 104,
+      "calls": 489
+    },
+    {
+      "name": "fleet:take-leadership",
+      "callers": 13,
+      "calls": 21
+    },
+    {
+      "name": "fleet:tree",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "fleet:wind-down",
+      "callers": 6,
+      "calls": 10
+    },
+    {
+      "name": "gates:degenerate-check",
+      "callers": 73,
+      "calls": 86
+    },
+    {
+      "name": "gateway:egress_mode",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "gateway:owner_report",
+      "callers": 11,
+      "calls": 52
+    },
+    {
+      "name": "gateway:status",
+      "callers": 9,
+      "calls": 13
+    },
+    {
+      "name": "git-sync:await",
+      "callers": 113,
+      "calls": 206
+    },
+    {
+      "name": "git-sync:run",
+      "callers": 219,
+      "calls": 1062
+    },
+    {
+      "name": "gitnexus.context",
+      "callers": 3,
+      "calls": 35
+    },
+    {
+      "name": "gitnexus.list_repos",
+      "callers": 3,
+      "calls": 6
+    },
+    {
+      "name": "goals:get",
+      "callers": 13,
+      "calls": 103
+    },
+    {
+      "name": "goals:list",
+      "callers": 8,
+      "calls": 19
+    },
+    {
+      "name": "goals:pots",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "goals:set-property",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "goals:start",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "goals:start-from-package",
+      "callers": 1,
+      "calls": 3
+    },
+    {
+      "name": "goals:update",
+      "callers": 2,
+      "calls": 9
+    },
+    {
+      "name": "governor:state_snapshot",
+      "callers": 8,
+      "calls": 16
+    },
+    {
+      "name": "graph:query",
+      "callers": 4,
+      "calls": 9
+    },
+    {
+      "name": "gym:judge",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "harness:escalation",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "harness:generate-from-repo",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "harness:get",
+      "callers": 8,
+      "calls": 17
+    },
+    {
+      "name": "harness:list",
+      "callers": 19,
+      "calls": 47
+    },
+    {
+      "name": "harness:phase_path",
+      "callers": 5,
+      "calls": 6
+    },
+    {
+      "name": "harness:status",
+      "callers": 3,
+      "calls": 3
+    },
+    {
+      "name": "harness_docs:anchor",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "harness_docs:list",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "hive:store_breakdown",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "host:memory_pressure",
+      "callers": 21,
+      "calls": 30
+    },
+    {
+      "name": "identities:get",
+      "callers": 1,
+      "calls": 4
+    },
+    {
+      "name": "identities:list",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "improvements:agent-review",
+      "callers": 2,
+      "calls": 20
+    },
+    {
+      "name": "improvements:capture",
+      "callers": 863,
+      "calls": 15335
+    },
+    {
+      "name": "improvements:digest",
+      "callers": 6,
+      "calls": 12
+    },
+    {
+      "name": "improvements:learning_loops",
+      "callers": 33,
+      "calls": 74
+    },
+    {
+      "name": "improvements:resolve",
+      "callers": 8,
+      "calls": 10
+    },
+    {
+      "name": "improvements:triage",
+      "callers": 2,
+      "calls": 8
+    },
+    {
+      "name": "improvements:watchdog-status",
+      "callers": 5,
+      "calls": 5
+    },
+    {
+      "name": "inbox:bulk-run-manifest",
+      "callers": 1,
+      "calls": 3
+    },
+    {
+      "name": "intel:spawn_tree",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "issues:list",
+      "callers": 33,
+      "calls": 70
+    },
+    {
+      "name": "journal:recent",
+      "callers": 4,
+      "calls": 8
+    },
+    {
+      "name": "journal:record-turn",
+      "callers": 532,
+      "calls": 4727
+    },
+    {
+      "name": "learning:set-pot-scope",
+      "callers": 1,
+      "calls": 28
+    },
+    {
+      "name": "locks:acquire",
+      "callers": 415,
+      "calls": 11695
+    },
+    {
+      "name": "locks:acquire_resource",
+      "callers": 19,
+      "calls": 62
+    },
+    {
+      "name": "locks:cancel_wait",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "locks:check_command",
+      "callers": 220,
+      "calls": 26965
+    },
+    {
+      "name": "locks:heartbeat",
+      "callers": 18,
+      "calls": 27
+    },
+    {
+      "name": "locks:heartbeat_resource",
+      "callers": 1,
+      "calls": 43
+    },
+    {
+      "name": "locks:list",
+      "callers": 114,
+      "calls": 408
+    },
+    {
+      "name": "locks:queue",
+      "callers": 257,
+      "calls": 1902
+    },
+    {
+      "name": "locks:release",
+      "callers": 395,
+      "calls": 7301
+    },
+    {
+      "name": "locks:release_resource",
+      "callers": 17,
+      "calls": 46
+    },
+    {
+      "name": "logs:read",
+      "callers": 81,
+      "calls": 562
+    },
+    {
+      "name": "loop:arm",
+      "callers": 413,
+      "calls": 2103
+    },
+    {
+      "name": "loop:checkpoint",
+      "callers": 416,
+      "calls": 12936
+    },
+    {
+      "name": "loop:end",
+      "callers": 431,
+      "calls": 1612
+    },
+    {
+      "name": "loop:session-audit",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "loop:soak-report",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "loop:standdown-all",
+      "callers": 5,
+      "calls": 10
+    },
+    {
+      "name": "loop:status",
+      "callers": 372,
+      "calls": 3343
+    },
+    {
+      "name": "lsp:query",
+      "callers": 2,
+      "calls": 5
+    },
+    {
+      "name": "mail:draft",
+      "callers": 2,
+      "calls": 9
+    },
+    {
+      "name": "mail:reply",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "mail:send",
+      "callers": 3,
+      "calls": 323
+    },
+    {
+      "name": "mail:send-draft",
+      "callers": 2,
+      "calls": 4
+    },
+    {
+      "name": "memory:forget",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "memory:list",
+      "callers": 8,
+      "calls": 12
+    },
+    {
+      "name": "memory:remember",
+      "callers": 81,
+      "calls": 174
+    },
+    {
+      "name": "memory:search",
+      "callers": 522,
+      "calls": 3506
+    },
+    {
+      "name": "mode:get",
+      "callers": 30,
+      "calls": 37
+    },
+    {
+      "name": "mode:set",
+      "callers": 130,
+      "calls": 256
+    },
+    {
+      "name": "notifications:recent",
+      "callers": 15,
+      "calls": 19
+    },
+    {
+      "name": "notifications:send_owner",
+      "callers": 2,
+      "calls": 5
+    },
+    {
+      "name": "omp:sessions",
+      "callers": 4,
+      "calls": 4
+    },
+    {
+      "name": "operator:converse",
+      "callers": 1,
+      "calls": 66
+    },
+    {
+      "name": "operator:credentials_status",
+      "callers": 5,
+      "calls": 11
+    },
+    {
+      "name": "orchestrate:inspect",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "orchestrate:run",
+      "callers": 1,
+      "calls": 4
+    },
+    {
+      "name": "orchestrate:search",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "orders:capture-pending",
+      "callers": 5,
+      "calls": 8
+    },
+    {
+      "name": "orders:disposition",
+      "callers": 8,
+      "calls": 14
+    },
+    {
+      "name": "orders:get",
+      "callers": 17,
+      "calls": 85
+    },
+    {
+      "name": "orders:list",
+      "callers": 12,
+      "calls": 25
+    },
+    {
+      "name": "orders:record",
+      "callers": 4,
+      "calls": 11
+    },
+    {
+      "name": "orders:resolve-pending",
+      "callers": 4,
+      "calls": 8
+    },
+    {
+      "name": "p2p:trace",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "personal:search",
+      "callers": 3,
+      "calls": 26
+    },
+    {
+      "name": "plan_items:assign",
+      "callers": 5,
+      "calls": 8
+    },
+    {
+      "name": "plan_items:claim",
+      "callers": 11,
+      "calls": 26
+    },
+    {
+      "name": "plan_items:convert",
+      "callers": 4,
+      "calls": 5
+    },
+    {
+      "name": "plan_items:release",
+      "callers": 80,
+      "calls": 317
+    },
+    {
+      "name": "plan_items:status",
+      "callers": 22,
+      "calls": 43
+    },
+    {
+      "name": "plan_items:unassign",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "plans:acceptance-bar-census",
+      "callers": 16,
+      "calls": 27
+    },
+    {
+      "name": "plans:add-decision",
+      "callers": 88,
+      "calls": 586
+    },
+    {
+      "name": "plans:add-item",
+      "callers": 31,
+      "calls": 94
+    },
+    {
+      "name": "plans:audit",
+      "callers": 101,
+      "calls": 553
+    },
+    {
+      "name": "plans:backfill-revisions",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "plans:bind-spec-evidence",
+      "callers": 80,
+      "calls": 870
+    },
+    {
+      "name": "plans:edit",
+      "callers": 34,
+      "calls": 151
+    },
+    {
+      "name": "plans:evaluate-spec-quality",
+      "callers": 136,
+      "calls": 513
+    },
+    {
+      "name": "plans:evaluate-spec-test-adequacy",
+      "callers": 640,
+      "calls": 3865
+    },
+    {
+      "name": "plans:export",
+      "callers": 7,
+      "calls": 117
+    },
+    {
+      "name": "plans:get",
+      "callers": 348,
+      "calls": 6436
+    },
+    {
+      "name": "plans:get-input-schema",
+      "callers": 11,
+      "calls": 33
+    },
+    {
+      "name": "plans:get-item",
+      "callers": 62,
+      "calls": 220
+    },
+    {
+      "name": "plans:get-output-schema",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "plans:get-properties",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "plans:get-spec-evidence",
+      "callers": 306,
+      "calls": 2244
+    },
+    {
+      "name": "plans:get-specs",
+      "callers": 199,
+      "calls": 1203
+    },
+    {
+      "name": "plans:get-template-data",
+      "callers": 28,
+      "calls": 49
+    },
+    {
+      "name": "plans:items",
+      "callers": 112,
+      "calls": 561
+    },
+    {
+      "name": "plans:lint",
+      "callers": 3,
+      "calls": 14
+    },
+    {
+      "name": "plans:list",
+      "callers": 44,
+      "calls": 367
+    },
+    {
+      "name": "plans:migrate-acceptance-bars",
+      "callers": 26,
+      "calls": 68
+    },
+    {
+      "name": "plans:new",
+      "callers": 55,
+      "calls": 159
+    },
+    {
+      "name": "plans:revision-diff",
+      "callers": 4,
+      "calls": 13
+    },
+    {
+      "name": "plans:revision-transcript",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "plans:revisions",
+      "callers": 16,
+      "calls": 22
+    },
+    {
+      "name": "plans:runs",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "plans:search",
+      "callers": 58,
+      "calls": 167
+    },
+    {
+      "name": "plans:set-archived",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "plans:set-content",
+      "callers": 17,
+      "calls": 28
+    },
+    {
+      "name": "plans:set-content-chunk",
+      "callers": 4,
+      "calls": 107
+    },
+    {
+      "name": "plans:set-decision-body",
+      "callers": 23,
+      "calls": 108
+    },
+    {
+      "name": "plans:set-frontmatter",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "plans:set-input-schema",
+      "callers": 3,
+      "calls": 3
+    },
+    {
+      "name": "plans:set-item-blocked-by",
+      "callers": 5,
+      "calls": 6
+    },
+    {
+      "name": "plans:set-now",
+      "callers": 45,
+      "calls": 139
+    },
+    {
+      "name": "plans:set-plan-status",
+      "callers": 38,
+      "calls": 197
+    },
+    {
+      "name": "plans:set-specs",
+      "callers": 55,
+      "calls": 178
+    },
+    {
+      "name": "plans:set-status",
+      "callers": 94,
+      "calls": 524
+    },
+    {
+      "name": "plans:set-template-data",
+      "callers": 8,
+      "calls": 13
+    },
+    {
+      "name": "plans:spec-reconciliation",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "plans:start",
+      "callers": 52,
+      "calls": 289
+    },
+    {
+      "name": "plugins:runtime_status",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "pot:get",
+      "callers": 3,
+      "calls": 3
+    },
+    {
+      "name": "pot:list",
+      "callers": 4,
+      "calls": 7
+    },
+    {
+      "name": "pot:pause",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "pot:status",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "pot_git:secrets_exemptions",
+      "callers": 1,
+      "calls": 3
+    },
+    {
+      "name": "processes:freeze",
+      "callers": 2,
+      "calls": 3
+    },
+    {
+      "name": "processes:kill",
+      "callers": 67,
+      "calls": 264
+    },
+    {
+      "name": "processes:limit",
+      "callers": 2,
+      "calls": 3
+    },
+    {
+      "name": "processes:list",
+      "callers": 93,
+      "calls": 589
+    },
+    {
+      "name": "prompt:role_override",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "rationale:reproject",
+      "callers": 415,
+      "calls": 7695
+    },
+    {
+      "name": "recipes:get",
+      "callers": 49,
+      "calls": 91
+    },
+    {
+      "name": "recipes:list",
+      "callers": 3,
+      "calls": 7
+    },
+    {
+      "name": "recipes:revise",
+      "callers": 8,
+      "calls": 10
+    },
+    {
+      "name": "recipes:run",
+      "callers": 27,
+      "calls": 56
+    },
+    {
+      "name": "recipes:search",
+      "callers": 537,
+      "calls": 3156
+    },
+    {
+      "name": "recipes:sweep",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "release:checkpoint-cancel",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "release:checkpoint-run",
+      "callers": 19,
+      "calls": 66
+    },
+    {
+      "name": "release:cut",
+      "callers": 2,
+      "calls": 313
+    },
+    {
+      "name": "release:deploy",
+      "callers": 49,
+      "calls": 405
+    },
+    {
+      "name": "release:repair-queue",
+      "callers": 114,
+      "calls": 2865
+    },
+    {
+      "name": "release:trace",
+      "callers": 51,
+      "calls": 275
+    },
+    {
+      "name": "reports:get",
+      "callers": 2,
+      "calls": 21
+    },
+    {
+      "name": "reports:list",
+      "callers": 2,
+      "calls": 3
+    },
+    {
+      "name": "reports:publish",
+      "callers": 2,
+      "calls": 13
+    },
+    {
+      "name": "reports:search",
+      "callers": 2,
+      "calls": 5
+    },
+    {
+      "name": "roles:get",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "roles:known",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "roles:list",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "routines:fire",
+      "callers": 4,
+      "calls": 5
+    },
+    {
+      "name": "routines:list",
+      "callers": 151,
+      "calls": 928
+    },
+    {
+      "name": "routines:revert",
+      "callers": 4,
+      "calls": 16
+    },
+    {
+      "name": "routines:set",
+      "callers": 10,
+      "calls": 55
+    },
+    {
+      "name": "rubrics:amend",
+      "callers": 65,
+      "calls": 592
+    },
+    {
+      "name": "rubrics:get",
+      "callers": 816,
+      "calls": 3493
+    },
+    {
+      "name": "rubrics:list",
+      "callers": 190,
+      "calls": 415
+    },
+    {
+      "name": "rubrics:propose",
+      "callers": 16,
+      "calls": 54
+    },
+    {
+      "name": "rubrics:repair",
+      "callers": 8,
+      "calls": 10
+    },
+    {
+      "name": "rubrics:retire",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "rubrics:search",
+      "callers": 31,
+      "calls": 62
+    },
+    {
+      "name": "rubrics:trend",
+      "callers": 6,
+      "calls": 6
+    },
+    {
+      "name": "schedule:inventory",
+      "callers": 9,
+      "calls": 20
+    },
+    {
+      "name": "scheduler:get_claim_spec",
+      "callers": 134,
+      "calls": 841
+    },
+    {
+      "name": "scheduler:get_next",
+      "callers": 356,
+      "calls": 8013
+    },
+    {
+      "name": "scheduler:preview_spec_delta",
+      "callers": 4,
+      "calls": 10
+    },
+    {
+      "name": "scheduler:pull_ledger",
+      "callers": 18,
+      "calls": 90
+    },
+    {
+      "name": "scheduler:running",
+      "callers": 29,
+      "calls": 42
+    },
+    {
+      "name": "scheduler:set_claim_spec",
+      "callers": 12,
+      "calls": 35
+    },
+    {
+      "name": "scorecards:emit",
+      "callers": 727,
+      "calls": 1953
+    },
+    {
+      "name": "scorecards:evaluate",
+      "callers": 144,
+      "calls": 500
+    },
+    {
+      "name": "scorecards:freshness",
+      "callers": 13,
+      "calls": 20
+    },
+    {
+      "name": "scorecards:get",
+      "callers": 360,
+      "calls": 4871
+    },
+    {
+      "name": "scorecards:list",
+      "callers": 820,
+      "calls": 4365
+    },
+    {
+      "name": "scorecards:repair",
+      "callers": 20,
+      "calls": 83
+    },
+    {
+      "name": "scorecards:retract",
+      "callers": 14,
+      "calls": 44
+    },
+    {
+      "name": "search:fulltext",
+      "callers": 150,
+      "calls": 630
+    },
+    {
+      "name": "search:query",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "search:semantic",
+      "callers": 12,
+      "calls": 24
+    },
+    {
+      "name": "service:await-up",
+      "callers": 11,
+      "calls": 14
+    },
+    {
+      "name": "session:carry-drill",
+      "callers": 5,
+      "calls": 23
+    },
+    {
+      "name": "session:request-compaction",
+      "callers": 477,
+      "calls": 9795
+    },
+    {
+      "name": "sessions:digest",
+      "callers": 35,
+      "calls": 69
+    },
+    {
+      "name": "sessions:ingest-gate-event",
+      "callers": 538,
+      "calls": 5411
+    },
+    {
+      "name": "sessions:list",
+      "callers": 94,
+      "calls": 241
+    },
+    {
+      "name": "sessions:list-pending-gates",
+      "callers": 4,
+      "calls": 5
+    },
+    {
+      "name": "sessions:read",
+      "callers": 419,
+      "calls": 5838
+    },
+    {
+      "name": "sessions:record-prompt-origin",
+      "callers": 83,
+      "calls": 1105
+    },
+    {
+      "name": "sessions:search",
+      "callers": 360,
+      "calls": 5340
+    },
+    {
+      "name": "sessions:timeline",
+      "callers": 161,
+      "calls": 952
+    },
+    {
+      "name": "setup:save_integration_key",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "setup:status",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "state:read",
+      "callers": 169,
+      "calls": 22240
+    },
+    {
+      "name": "state:subscribe",
+      "callers": 9,
+      "calls": 22
+    },
+    {
+      "name": "storage:prune",
+      "callers": 5,
+      "calls": 75
+    },
+    {
+      "name": "storage:usage",
+      "callers": 9,
+      "calls": 35
+    },
+    {
+      "name": "tasks:get",
+      "callers": 9,
+      "calls": 17
+    },
+    {
+      "name": "tasks:list",
+      "callers": 10,
+      "calls": 17
+    },
+    {
+      "name": "tasks:ops",
+      "callers": 5,
+      "calls": 12
+    },
+    {
+      "name": "tasks:update_plan",
+      "callers": 23,
+      "calls": 53
+    },
+    {
+      "name": "templates:list",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "testing:coverage",
+      "callers": 9,
+      "calls": 69
+    },
+    {
+      "name": "testing:flakiness",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "testing:record-run",
+      "callers": 19,
+      "calls": 37
+    },
+    {
+      "name": "testing:run",
+      "callers": 224,
+      "calls": 3114
+    },
+    {
+      "name": "testing:run-status",
+      "callers": 152,
+      "calls": 1139
+    },
+    {
+      "name": "testing:runs",
+      "callers": 271,
+      "calls": 1463
+    },
+    {
+      "name": "tools:find",
+      "callers": 1077,
+      "calls": 57073
+    },
+    {
+      "name": "tools:invoke",
+      "callers": 1252,
+      "calls": 117963
+    },
+    {
+      "name": "turn:interrupt",
+      "callers": 1,
+      "calls": 111
+    },
+    {
+      "name": "ui:get_state",
+      "callers": 3,
+      "calls": 4
+    },
+    {
+      "name": "ui:list_clients",
+      "callers": 2,
+      "calls": 3
+    },
+    {
+      "name": "watch:create",
+      "callers": 47,
+      "calls": 71
+    },
+    {
+      "name": "watchdog:status",
+      "callers": 2,
+      "calls": 4
+    },
+    {
+      "name": "work-item:await",
+      "callers": 21,
+      "calls": 38
+    },
+    {
+      "name": "work_items:amend",
+      "callers": 5,
+      "calls": 15
+    },
+    {
+      "name": "work_items:bulk_dedup",
+      "callers": 2,
+      "calls": 45
+    },
+    {
+      "name": "work_items:burn_down",
+      "callers": 7,
+      "calls": 29
+    },
+    {
+      "name": "work_items:checkpoint",
+      "callers": 419,
+      "calls": 16843
+    },
+    {
+      "name": "work_items:claim",
+      "callers": 230,
+      "calls": 840
+    },
+    {
+      "name": "work_items:claim_next",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "work_items:claimable",
+      "callers": 362,
+      "calls": 2014
+    },
+    {
+      "name": "work_items:comment",
+      "callers": 350,
+      "calls": 1764
+    },
+    {
+      "name": "work_items:complete",
+      "callers": 395,
+      "calls": 7970
+    },
+    {
+      "name": "work_items:completion_stats",
+      "callers": 5,
+      "calls": 5
+    },
+    {
+      "name": "work_items:create",
+      "callers": 173,
+      "calls": 915
+    },
+    {
+      "name": "work_items:export",
+      "callers": 1,
+      "calls": 194
+    },
+    {
+      "name": "work_items:get",
+      "callers": 1026,
+      "calls": 38481
+    },
+    {
+      "name": "work_items:hold_open",
+      "callers": 18,
+      "calls": 47
+    },
+    {
+      "name": "work_items:link",
+      "callers": 115,
+      "calls": 278
+    },
+    {
+      "name": "work_items:links",
+      "callers": 16,
+      "calls": 26
+    },
+    {
+      "name": "work_items:list",
+      "callers": 646,
+      "calls": 7528
+    },
+    {
+      "name": "work_items:observe",
+      "callers": 504,
+      "calls": 4001
+    },
+    {
+      "name": "work_items:park",
+      "callers": 8,
+      "calls": 10
+    },
+    {
+      "name": "work_items:pickup",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "work_items:rehome",
+      "callers": 2,
+      "calls": 5
+    },
+    {
+      "name": "work_items:release",
+      "callers": 166,
+      "calls": 333
+    },
+    {
+      "name": "work_items:request_release",
+      "callers": 8,
+      "calls": 22
+    },
+    {
+      "name": "work_items:search",
+      "callers": 234,
+      "calls": 1844
+    },
+    {
+      "name": "work_items:set_blocker",
+      "callers": 102,
+      "calls": 263
+    },
+    {
+      "name": "work_items:set_priority",
+      "callers": 1,
+      "calls": 2
+    },
+    {
+      "name": "work_items:set_state",
+      "callers": 143,
+      "calls": 316
+    },
+    {
+      "name": "work_items:subscribe",
+      "callers": 2,
+      "calls": 2
+    },
+    {
+      "name": "work_items:update",
+      "callers": 75,
+      "calls": 183
+    },
+    {
+      "name": "work_items:withdraw_release_request",
+      "callers": 1,
+      "calls": 1
+    },
+    {
+      "name": "workspace:work_scope",
+      "callers": 7,
+      "calls": 30
+    },
+    {
+      "name": "workspace:work_scope_status",
+      "callers": 3,
+      "calls": 4
+    }
+  ]
+}

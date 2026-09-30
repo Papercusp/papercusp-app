@@ -1,0 +1,17 @@
+# Per-machine symlinks, generated at startup — NEVER commit them (WI-39462).
+#
+# bin/docs-viewer.sh:84 does `ln -sfn "$path/docs" "$PROJECTS_CONTENT/$slug"` for
+# every project in ~/.restart-harness-projects.json, a registry whose contents are
+# specific to whoever is running the viewer. A symlink's git blob content IS its
+# target string, so committing one commits an ABSOLUTE PATH from that machine —
+# which is exactly what happened: `restart` and `sheets` shipped the owner's home
+# path (/home/<owner>/...) inside every release's source.tar.zst for months.
+#
+# It stayed invisible because `grep -r` never reads a symlink and never descends
+# into a symlinked directory, so no working-tree scan we own could see it. Only
+# the tar linkname manifest could — and that was blind for .tar.zst until WI-39462.
+#
+# These links are regenerated on every `docs-viewer.sh` startup, so ignoring them
+# costs nothing: the viewer still resolves them locally.
+*
+!.gitignore

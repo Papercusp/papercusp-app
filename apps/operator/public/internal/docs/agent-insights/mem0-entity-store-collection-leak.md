@@ -1,0 +1,72 @@
+# mem0 entity store leaked COMPOUND fragments into memory recall — the collectionName the canonical store ignores
+URL: /internal/docs/agent-insights/mem0-entity-store-collection-leak
+
+84% of memory_canonical was mem0 entity-linking junk ("ticks with", "s interactive session") surfacing in memory:search — mem0 separates its entity store ONLY by a *_entities collectionName suffix, and our patched CanonicalVectorStore ignored collectionName, so both stores shared one pool. Fix at the store, not the read seam.
+
+## Symptom
+
+`memory:search` (and pre-turn injection candidates) returned junk fragment
+rows at near-zero scores — `"ticks with"`, `"s interactive session"`,
+`"second watchdog added to"` — each carrying
+`metadata: { entityType: 'COMPOUND', linkedMemoryIds: [...] }` (EI-366).
+At the 2026-06-12 audit, 6 of the top-10 hits for a representative query
+were fragments, and **1,829 of 2,170 rows (84%) in
+`harness_shared.memory_canonical` were entity rows** — only 341 real
+memories. The Learning tab's `totalMemories` counted all of them.
+
+## Root cause — a collection contract our store patch silently dropped
+
+mem0ai 3.x's `Memory.add()` runs entity extraction (proper nouns, quoted
+strings, compound noun phrases) and writes each entity as a row in a
+**second vector store**, created by `getEntityStore()` in `mem0ai/oss`
+via the same VectorStoreFactory with the same config except
+`collectionName` suffixed `_entities`.
+Entity payloads are `{ data, entityType, linkedMemoryIds, user_id }`.
+At search time mem0 reads that store back for its entity-boost pass —
+the machinery is legitimate.
+
+Our `CanonicalVectorStore` (patched into mem0's factory —
+`libs/generic/memory/src/mem0-client.ts`) **deliberately ignores
+`collectionName`** so canonical rows survive embedder-mode switches.
+That design choice silently erased the ONLY thing distinguishing mem0's
+entity store from its memory store: both instances wrote to the same
+`memory_canonical` + vec tables, and semantic search over the memory
+pool returned entity fragments as memories.
+
+## Fix — segregate at the store, not the read seam
+
+`libs/generic/memory/src/canonical-store.ts` now derives a store kind
+from the collectionName suffix (`*_entities` → entity store) and
+partitions `search()`/`list()` by **payload shape**: entity payloads
+always carry `entityType`; real memory payloads never do
+(`payload ? 'entityType'` / `NOT (payload ? 'entityType')`).
+
+Why this layer (the brief's read-seam-vs-indexer investigation):
+
+* A read-seam filter (in `Mem0Backend.search` or the tool) would hide
+  the junk from us but leave mem0's OWN entity-boost pass broken — its
+  entity-store searches were matching real memory rows too (and its
+  ≥0.95-similarity dedupe could link entities onto memories).
+* The store-level partition fixes BOTH directions with no migration and
+  no backfill: the 1,829 pre-fix entity rows become invisible to memory
+  recall and correctly visible to the entity store, retroactively.
+* Top-K is no longer wasted: pre-fix, fragments consumed most of the
+  candidate slots before the score floor.
+
+`readMemoryHealth` (knowledge-read.ts) now counts `totalMemories`
+excluding entity rows and reports `entityRows` separately; recall
+telemetry (`memory_recall_stats`, migration 240) carries a
+`fragment_count` regression canary surfaced on the Learning tab
+memory-health card — it must stay 0.
+
+## Watch out for
+
+* **Any vector-store impl handed to mem0 must honor collection
+  separation** — by name, by table, or by a payload discriminator. If a
+  future backend ignores `collectionName`, it has this bug.
+* The discriminator is payload shape. Never write `entityType` into a
+  real memory's metadata via `memory:remember` — it would be segregated
+  out of recall.
+* Tests: `libs/generic/memory/src/canonical-store.test.ts` pins the SQL
+  partition; the live proof is the audit query returning zero
+  `entityType` rows in its top 10.

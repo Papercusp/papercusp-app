@@ -1,0 +1,23 @@
+{
+  "name": "markdown-preview",
+  "version": "0.1.0",
+  "description": "Batch H7 bundled smoke plugin: renders Markdown in a sandboxed iframe via the iframe SDK postMessage bridge.",
+  "license": "Elastic-2.0",
+  "papercusp": "^0.1",
+  "protocol": "^1",
+  "capabilities": ["ui:harness-route"],
+  "actions": [
+    {
+      "name": "render",
+      "capabilities": []
+    }
+  ],
+  "ui": [
+    {
+      "type": "iframe",
+      "slug": "markdown-preview",
+      "label": "Markdown Preview",
+      "iframeEntry": "iframe/index.html"
+    }
+  ]
+}

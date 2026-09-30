@@ -1,0 +1,24 @@
+/*
+ * Default modal surface for every <Modal> (harness/Modal.tsx).
+ *
+ * The Dialog.Content used to carry no background, so a consumer that forgot to
+ * pass `contentStyle`/`contentClassName` with a surface rendered a fully
+ * transparent panel over the dark scrim — unreadable (this is what bit
+ * ShareWizard, and MarketplaceList's enable dialog has no panel bg either).
+ *
+ * `:where()` gives this rule ZERO specificity, so it is the floor: any
+ * consumer's inline `contentStyle` (highest priority) OR a `contentClassName`
+ * that sets its own background (e.g. `.pc-conflict` → #0f1a14) always wins.
+ * That means existing self-styled modals are untouched; only the
+ * otherwise-translucent ones gain a surface.
+ *
+ * Intentionally only background/color/radius — NOT padding or border. Several
+ * modals wrap their content in their own inner panel (InsightsPanel,
+ * SpecEditor); adding padding/border here would double-frame them. Bare modals
+ * that want padding still pass it via `contentStyle`.
+ */
+:where(.pc-modal-content) {
+  background: var(--bg-popover, #0d1829);
+  color: var(--fg, #e8e8ea);
+  border-radius: 10px;
+}

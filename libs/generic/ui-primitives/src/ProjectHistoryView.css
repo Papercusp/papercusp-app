@@ -1,0 +1,998 @@
+/* @papercusp/ui-primitives — ProjectHistoryView stylesheet.
+ *
+ * Lifted from SideStage's build-history.css (2026-09-16, plan
+ * project-history-tab-desktop-and-portal-2026-09-16 P-001) and parameterised on the `--ph-*`
+ * token contract below. A host themes the view by defining these custom properties on any
+ * ancestor (the desktop History tab binds them to the papercusp theme, the :3081 portal to the
+ * portal theme). The :where(:root) block only supplies zero-specificity fallbacks so the view
+ * renders standalone; any host declaration wins. Only `--ph-*` tokens may be referenced here —
+ * ProjectHistoryView.css.test.ts enforces that and that every class the component emits is styled.
+ */
+:where(:root) {
+  --ph-border: #e4e4e7;
+  --ph-surface: #ffffff;
+  --ph-surface-sunken: #f4f4f5;
+  --ph-surface-soft: #fafafa;
+  --ph-muted: #71717a;
+  --ph-text: #18181b;
+  --ph-danger: #dc2626;
+  --ph-danger-text: #b91c1c;
+  --ph-success: #16a34a;
+  --ph-accent: #facc15;
+  --ph-on-accent: #1c1917;
+  --ph-accent-text: #a16207;
+  --ph-brand: #dc2626;
+  --ph-control-h: 32px;
+  --ph-shadow-float: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.build-history-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  gap: 1.5rem;
+}
+
+.build-validation-contract {
+  display: grid;
+  gap: .75rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--ph-accent) 34%, var(--ph-border));
+  border-radius: .75rem;
+  background: color-mix(in srgb, var(--ph-accent) 5%, var(--ph-surface));
+}
+
+.build-validation-contract.is-passed {
+  border-color: color-mix(in srgb, var(--ph-success) 36%, var(--ph-border));
+  background: color-mix(in srgb, var(--ph-success) 5%, var(--ph-surface));
+}
+
+.build-validation-contract.is-failed {
+  border-color: color-mix(in srgb, var(--ph-danger) 42%, var(--ph-border));
+  background: color-mix(in srgb, var(--ph-danger) 6%, var(--ph-surface));
+}
+
+.build-validation-contract > header,
+.build-validation-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+
+.build-validation-contract > header span,
+.build-validation-heading span {
+  color: var(--ph-muted);
+  font-size: .62rem;
+  font-weight: 780;
+  letter-spacing: .065em;
+  text-transform: uppercase;
+}
+
+.build-validation-contract > header strong { display: block; margin-top: .2rem; }
+.build-validation-contract > header small,
+.build-validation-heading small { color: var(--ph-muted); font-size: .65rem; }
+.build-validation-contract > ul { display: grid; gap: .55rem; margin: 0; padding: 0; list-style: none; }
+.build-validation-contract > ul > li { padding: .75rem; border: 1px solid var(--ph-border); border-radius: .6rem; background: var(--ph-surface); }
+.build-validation-contract p { margin: .55rem 0; font-size: .75rem; line-height: 1.5; }
+.build-validation-contract dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .25rem .6rem; margin: 0; font-size: .66rem; }
+.build-validation-contract dt { color: var(--ph-muted); font-weight: 750; }
+.build-validation-contract dd { margin: 0; overflow-wrap: anywhere; }
+
+.build-history-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 2rem;
+}
+
+.build-history-head-actions,
+.build-plan-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .55rem;
+}
+
+/* WI-38718 — the per-entry "Read full work item" / "Read full plan" pair. */
+.build-item-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .5rem;
+  margin-top: .55rem;
+}
+
+/* The work-item record viewer reuses .build-plan-dialog's chrome but not its
+   three-row grid: its body is one scrolling column, not a document pane. */
+.build-work-item-dialog {
+  width: min(94vw, 64rem);
+  height: min(88vh, 48rem);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.build-work-item-dialog-body {
+  display: grid;
+  align-content: start;
+  gap: 1.1rem;
+  overflow-y: auto;
+  padding: 1.1rem 1.2rem 1.4rem;
+}
+
+.build-work-item-dialog-evidence {
+  margin: 0;
+}
+
+.build-history-head-actions {
+  flex: none;
+  justify-content: flex-end;
+}
+
+.build-metric-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) repeat(3, minmax(0, 1fr));
+  gap: .75rem;
+}
+
+.build-metric {
+  display: grid;
+  align-content: start;
+  gap: .35rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--ph-border);
+  border-radius: .75rem;
+  background: var(--ph-surface);
+}
+
+.build-metric > span,
+.build-evidence-block h4,
+.build-history-toolbar label > span,
+.build-item-kind,
+.build-item-state,
+.build-plan-status {
+  font-size: .62rem;
+  font-weight: 780;
+  letter-spacing: .065em;
+  text-transform: uppercase;
+}
+
+.build-metric > span,
+.build-evidence-block h4,
+.build-history-toolbar label > span {
+  color: var(--ph-muted);
+}
+
+.build-metric strong {
+  overflow: hidden;
+  color: var(--ph-text);
+  font-size: clamp(1.1rem, 2vw, 1.55rem);
+  line-height: 1.1;
+  text-overflow: ellipsis;
+}
+
+.build-metric:first-child strong,
+.build-metric:last-child strong {
+  font-size: .98rem;
+  line-height: 1.3;
+}
+
+.build-metric small {
+  color: var(--ph-muted);
+  font-size: .68rem;
+  line-height: 1.45;
+}
+
+.build-verification-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: .8rem;
+  padding: .85rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--ph-success) 35%, var(--ph-border));
+  border-radius: .75rem;
+  color: var(--ph-success);
+  background: color-mix(in srgb, var(--ph-success) 7%, var(--ph-surface));
+}
+
+.build-verification-banner.is-pending {
+  border-color: color-mix(in srgb, var(--ph-accent) 42%, var(--ph-border));
+  color: var(--ph-accent-text);
+  background: color-mix(in srgb, var(--ph-accent) 8%, var(--ph-surface));
+}
+
+.build-verification-mark {
+  display: grid;
+  width: 1.8rem;
+  height: 1.8rem;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--ph-surface);
+  background: var(--ph-success);
+  font-weight: 850;
+}
+
+.is-pending .build-verification-mark {
+  color: var(--ph-on-accent);
+  background: var(--ph-accent);
+}
+
+.build-verification-banner strong {
+  display: block;
+  color: var(--ph-text);
+  font-size: .78rem;
+}
+
+.build-verification-banner p {
+  margin: .18rem 0 0;
+  color: var(--ph-muted);
+  font-size: .68rem;
+  line-height: 1.45;
+}
+
+.build-verification-status {
+  padding: .3rem .45rem;
+  border-radius: .35rem;
+  color: currentColor;
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  font-size: .6rem;
+  font-weight: 800;
+  letter-spacing: .055em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.build-history-toolbar {
+  display: grid;
+  grid-template-columns: minmax(15rem, 2fr) repeat(3, minmax(8rem, 1fr));
+  gap: .65rem;
+  padding: .75rem;
+  border: 1px solid var(--ph-border);
+  border-radius: .75rem;
+  background: var(--ph-surface-soft);
+}
+
+.build-history-toolbar label {
+  display: grid;
+  gap: .35rem;
+  min-width: 0;
+}
+
+.build-history-toolbar select {
+  width: 100%;
+  min-height: var(--ph-control-h);
+  border: 1px solid var(--ph-border);
+  border-radius: .55rem;
+  padding: calc((var(--ph-control-h) - 1.35em) / 2) .7rem;
+  color: var(--ph-text);
+  background: var(--ph-surface);
+  font: inherit;
+  font-size: .72rem;
+}
+
+.build-history-toolbar select:focus {
+  border-color: var(--ph-danger-text);
+  outline: 2px solid color-mix(in srgb, var(--ph-brand) 36%, transparent);
+  outline-offset: 1px;
+}
+
+.build-history-search .text-input {
+  min-width: 0;
+}
+
+.build-history-results-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.build-history-results-heading h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.build-history-results-heading p {
+  margin: .2rem 0 0;
+  color: var(--ph-muted);
+  font-size: .7rem;
+}
+
+.build-plan-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  gap: .85rem;
+}
+
+.build-plan-card {
+  overflow: clip;
+  border: 1px solid var(--ph-border);
+  border-radius: .85rem;
+  background: var(--ph-surface);
+  box-shadow: var(--ph-shadow-float);
+  content-visibility: auto;
+  contain-intrinsic-size: 13rem;
+}
+
+.build-plan-card[open] {
+  border-color: color-mix(in srgb, var(--ph-brand) 22%, var(--ph-border));
+}
+
+.build-plan-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.1rem 1.2rem;
+  background: color-mix(in srgb, var(--ph-accent) 6%, var(--ph-surface));
+  cursor: pointer;
+  list-style: none;
+}
+
+.build-plan-heading::-webkit-details-marker,
+.build-work-items-disclosure > summary::-webkit-details-marker,
+.build-raw-evidence > summary::-webkit-details-marker {
+  display: none;
+}
+
+.build-plan-heading:hover {
+  background: color-mix(in srgb, var(--ph-accent) 11%, var(--ph-surface));
+}
+
+.build-plan-meta-row,
+.build-item-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .45rem;
+  color: var(--ph-muted);
+  font-size: .65rem;
+}
+
+.build-plan-status,
+.build-item-kind,
+.build-item-state {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border-radius: .35rem;
+}
+
+.build-plan-status {
+  padding: .25rem .42rem;
+  color: var(--ph-on-accent);
+  background: var(--ph-accent);
+}
+
+.build-plan-title h2 {
+  margin: .6rem 0 .3rem;
+  font-size: 1.15rem;
+  letter-spacing: -.03em;
+}
+
+.build-plan-title p {
+  max-width: 78ch;
+  margin: 0;
+  color: var(--ph-muted);
+  font-size: .75rem;
+  line-height: 1.5;
+}
+
+.build-plan-title code,
+.build-item-meta code {
+  display: inline-block;
+  margin-top: .55rem;
+  color: var(--ph-muted);
+  font-size: .62rem;
+  overflow-wrap: anywhere;
+}
+
+.build-plan-meta-row time,
+.build-item-heading time {
+  white-space: nowrap;
+}
+
+.build-plan-disclosure {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border: 1px solid var(--ph-border);
+  border-radius: 50%;
+  color: var(--ph-danger-text);
+  background: var(--ph-surface);
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.build-plan-body {
+  display: grid;
+  gap: 1rem;
+  padding: 1.1rem 1.2rem 1.2rem;
+  border-top: 1px solid var(--ph-border);
+}
+
+.build-plan-evidence-grid,
+.build-item-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .7rem;
+}
+
+.build-evidence-block {
+  min-width: 0;
+  padding: .8rem;
+  border: 1px solid var(--ph-border);
+  border-radius: .65rem;
+  background: var(--ph-surface-sunken);
+}
+
+.build-evidence-block h4 {
+  margin: 0 0 .4rem;
+  color: var(--ph-danger-text);
+}
+
+.build-evidence-block p {
+  margin: .25rem 0 0;
+  color: var(--ph-text);
+  font-size: .7rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.build-evidence-block .build-evidence-empty {
+  color: var(--ph-muted);
+}
+
+.build-work-items-disclosure {
+  border-top: 1px solid var(--ph-border);
+  padding-top: .85rem;
+}
+
+.build-work-items-disclosure > summary,
+.build-raw-evidence > summary {
+  width: fit-content;
+  color: var(--ph-danger-text);
+  font-size: .7rem;
+  font-weight: 750;
+  cursor: pointer;
+  list-style: none;
+}
+
+.build-work-items-disclosure > summary:hover,
+.build-raw-evidence > summary:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.build-item-list {
+  display: grid;
+  gap: .7rem;
+  margin: .85rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.build-item {
+  padding: 1rem;
+  border: 1px solid var(--ph-border);
+  border-radius: .7rem;
+  background: var(--ph-surface);
+}
+
+.build-item:target,
+.build-plan-card:target {
+  outline: 3px solid color-mix(in srgb, var(--ph-brand) 32%, transparent);
+  outline-offset: 2px;
+}
+
+.build-item-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.25rem;
+}
+
+.build-item-heading h3 {
+  margin: .4rem 0 0;
+  font-size: .9rem;
+  letter-spacing: -.02em;
+}
+
+.build-item-heading time {
+  flex: none;
+  color: var(--ph-muted);
+  font-size: .65rem;
+}
+
+.build-item-kind {
+  padding: .2rem .35rem;
+  color: var(--ph-danger-text);
+  background: color-mix(in srgb, var(--ph-brand) 10%, transparent);
+}
+
+.build-item-meta {
+  margin-top: .6rem;
+}
+
+.build-item-meta code {
+  margin-top: 0;
+}
+
+.build-item-meta a {
+  color: var(--ph-danger-text);
+}
+
+.build-item-state {
+  padding: .18rem .35rem;
+  color: var(--ph-success);
+  background: color-mix(in srgb, var(--ph-success) 10%, transparent);
+}
+
+.build-item-evidence-grid {
+  margin-top: .85rem;
+}
+
+.build-item-commits {
+  margin-top: .85rem;
+  padding: .8rem;
+  border: 1px solid var(--ph-border);
+  border-radius: .65rem;
+  background: var(--ph-surface-sunken);
+}
+
+.build-item-commits > header,
+.build-commit-title,
+.build-commit-meta {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+
+.build-item-commits > header {
+  justify-content: space-between;
+}
+
+.build-item-commits h4 {
+  margin: 0;
+  color: var(--ph-danger-text);
+}
+
+.build-item-commits > header > span {
+  color: var(--ph-muted);
+  font-size: .65rem;
+}
+
+.build-item-commits ul {
+  display: grid;
+  gap: .55rem;
+  margin: .65rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.build-item-commits li {
+  min-width: 0;
+  padding-top: .55rem;
+  border-top: 1px solid var(--ph-border);
+}
+
+/* Plan-level commit list — same chrome as the per-item one, but mounted directly on
+   the expanded plan card so the GitHub links are one click deep instead of three
+   (WI-39898). `.build-show-more` centres via justify-self in its grid parent; this
+   section is not a grid, so centre it explicitly. */
+.build-plan-commits {
+  margin-top: .75rem;
+}
+
+.build-plan-commits .build-show-more {
+  display: block;
+  margin: .65rem auto 0;
+}
+
+.build-commit-title {
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.build-commit-title a,
+.build-commit-title strong {
+  min-width: 0;
+  color: var(--ph-text);
+  font-size: .72rem;
+  overflow-wrap: anywhere;
+}
+
+.build-commit-title a {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: .65rem;
+  flex: 1;
+  text-decoration: none;
+}
+
+/* A commit anchor previously inherited body colour with no underline, so it was
+   visually indistinguishable from the un-linked <strong> fallback beside it —
+   the whole feature read as "the GitHub links are gone" (WI-39898). The link
+   affordance is now resting state, not hover-only. */
+.build-commit-title a span {
+  color: var(--ph-danger-text);
+  text-decoration: underline;
+  text-decoration-thickness: from-font;
+  text-underline-offset: 3px;
+}
+
+.build-commit-title a:hover span,
+.build-commit-title a:focus-visible span {
+  text-decoration-thickness: 2px;
+}
+
+.build-commit-title a small {
+  color: var(--ph-danger-text);
+}
+
+.build-commit-title small,
+.build-commit-title code,
+.build-commit-meta {
+  color: var(--ph-muted);
+  font-size: .62rem;
+}
+
+.build-commit-title small,
+.build-commit-title code {
+  flex: none;
+}
+
+.build-commit-meta {
+  flex-wrap: wrap;
+  margin-top: .35rem;
+}
+
+.build-commit-meta .is-confirmed {
+  color: var(--ph-success);
+}
+
+.build-commit-meta .is-local-only,
+.build-commit-meta .is-unknown {
+  color: var(--ph-accent-text);
+}
+
+.build-raw-evidence {
+  margin-top: .8rem;
+}
+
+.build-raw-evidence pre {
+  max-height: 20rem;
+  overflow: auto;
+  margin: .65rem 0 0;
+  padding: .75rem;
+  border: 1px solid var(--ph-border);
+  border-radius: .55rem;
+  color: var(--ph-text);
+  background: var(--ph-surface-sunken);
+  font-size: .65rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.build-show-more {
+  justify-self: center;
+  margin-top: .25rem;
+}
+
+.build-plan-empty,
+.build-history-loading,
+.build-history-empty,
+.build-history-error {
+  margin: 0;
+  padding: 1.5rem;
+  border: 1px solid var(--ph-border);
+  border-radius: .75rem;
+  color: var(--ph-muted);
+  background: var(--ph-surface-sunken);
+}
+
+.build-history-empty {
+  display: grid;
+  justify-items: center;
+  gap: .35rem;
+  padding: 3rem 1.5rem;
+  text-align: center;
+}
+
+.build-history-empty > span {
+  color: var(--ph-danger-text);
+  font-size: 2rem;
+}
+
+.build-history-empty h2 {
+  margin: 0;
+  color: var(--ph-text);
+}
+
+.build-history-empty p {
+  margin: 0;
+}
+
+.build-history-error {
+  display: grid;
+  justify-items: start;
+  gap: .5rem;
+  border-color: color-mix(in srgb, var(--ph-danger) 45%, var(--ph-border));
+  color: var(--ph-danger);
+}
+
+.build-plan-dialog-overlay {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  background: color-mix(in srgb, #241d17 62%, transparent);
+  backdrop-filter: blur(5px);
+  animation: build-dialog-fade-in 140ms ease-out;
+}
+
+.build-plan-dialog {
+  position: fixed;
+  z-index: 101;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  width: min(94vw, 92rem);
+  height: min(92vh, 60rem);
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--ph-brand) 26%, var(--ph-border));
+  border-radius: 1rem;
+  color: var(--ph-text);
+  background: var(--ph-surface);
+  box-shadow: 0 2rem 6rem rgb(31 22 16 / 36%);
+  transform: translate(-50%, -50%);
+  animation: build-dialog-enter 160ms ease-out;
+}
+
+.build-plan-dialog:focus {
+  outline: none;
+}
+
+.build-plan-dialog-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 1rem;
+  padding: 1rem 1.2rem;
+  border-bottom: 1px solid var(--ph-border);
+  background: color-mix(in srgb, var(--ph-accent) 8%, var(--ph-surface));
+}
+
+.build-plan-dialog-eyebrow,
+.build-plan-dialog-provenance dt {
+  color: var(--ph-danger-text);
+  font-size: .62rem;
+  font-weight: 800;
+  letter-spacing: .065em;
+  text-transform: uppercase;
+}
+
+.build-plan-dialog-header h2 {
+  margin: .3rem 0 0;
+  font-size: clamp(1.2rem, 2vw, 1.7rem);
+  letter-spacing: -.035em;
+  line-height: 1.15;
+}
+
+.build-plan-dialog-header p {
+  max-width: 80ch;
+  margin: .35rem 0 0;
+  color: var(--ph-muted);
+  font-size: .72rem;
+  line-height: 1.5;
+}
+
+.build-plan-dialog-close {
+  display: grid;
+  width: 2.6rem;
+  height: 2.6rem;
+  place-items: center;
+  border: 1px solid var(--ph-border);
+  border-radius: 50%;
+  color: var(--ph-text);
+  background: var(--ph-surface);
+  cursor: pointer;
+  font: inherit;
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.build-plan-dialog-close:hover {
+  border-color: var(--ph-danger-text);
+  color: var(--ph-danger-text);
+}
+
+.build-plan-dialog-provenance {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: .65rem;
+  margin: 0;
+  padding: .7rem 1.2rem;
+  border-bottom: 1px solid var(--ph-border);
+  background: var(--ph-surface-soft);
+}
+
+.build-plan-dialog-provenance > div {
+  min-width: 0;
+}
+
+.build-plan-dialog-provenance dd {
+  overflow: hidden;
+  margin: .18rem 0 0;
+  color: var(--ph-muted);
+  font-size: .68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.build-plan-dialog-provenance code {
+  color: var(--ph-text);
+}
+
+.build-plan-dialog-provenance a {
+  color: var(--ph-danger-text);
+}
+
+.build-plan-dialog-document {
+  --fg: #28231f;
+  --fg-dim: #514941;
+  --fg-mute: #766c63;
+  --bg-popover: #f5f1ea;
+  --border-strong: #bdb2a7;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 1.1rem 1.2rem 2rem;
+  color: #28231f;
+  background: #fffdfa;
+  overscroll-behavior: contain;
+}
+
+.build-plan-dialog-document .pc-md-outline a {
+  color: #6d6259;
+}
+
+.build-plan-dialog-document .pc-md-outline a:hover {
+  color: #2b2520;
+  background: #efe8de;
+}
+
+.build-plan-dialog-missing {
+  align-self: start;
+  margin: 1.2rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--ph-danger) 38%, var(--ph-border));
+  border-radius: .75rem;
+  color: var(--ph-danger);
+  background: color-mix(in srgb, var(--ph-danger) 6%, var(--ph-surface));
+}
+
+.build-plan-dialog-missing p {
+  margin: .35rem 0 0;
+  color: var(--ph-muted);
+}
+
+@keyframes build-dialog-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes build-dialog-enter {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + .65rem)) scale(.992);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@media (max-width: 900px) {
+  .build-metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .build-history-toolbar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .build-history-search {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 680px) {
+  .build-history-hero,
+  .build-history-results-heading,
+  .build-item-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .build-history-head-actions,
+  .build-history-head-actions .button,
+  .build-history-head-actions a,
+  .build-history-results-heading .button {
+    width: 100%;
+  }
+
+  .build-history-head-actions .button,
+  .build-history-head-actions a {
+    justify-content: center;
+  }
+
+  .build-metric-grid,
+  .build-history-toolbar,
+  .build-plan-evidence-grid,
+  .build-item-evidence-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .build-history-search {
+    grid-column: auto;
+  }
+
+  .build-verification-banner {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .build-verification-status {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .build-plan-heading {
+    align-items: start;
+    padding: 1rem;
+  }
+
+  .build-plan-body {
+    padding: 1rem;
+  }
+
+  .build-item-heading time {
+    white-space: normal;
+  }
+
+  .build-plan-dialog {
+    width: 100vw;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .build-plan-dialog-header,
+  .build-plan-dialog-provenance,
+  .build-plan-dialog-document {
+    padding-right: 1rem;
+    padding-left: 1rem;
+  }
+
+  .build-plan-dialog-provenance {
+    grid-template-columns: 1fr;
+  }
+
+  .build-plan-dialog-document .pc-md-outline {
+    display: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .build-plan-dialog-overlay,
+  .build-plan-dialog {
+    animation: none;
+  }
+}

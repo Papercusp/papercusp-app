@@ -1,0 +1,61 @@
+[package]
+name = "pui"
+version = "0.1.0"
+edition = "2021"
+description = "Papercusp terminal workbench (TUI) — SP-TUI tui-workbench-ratatui-2026-06-04"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "pui"
+path = "src/main.rs"
+
+[[bin]]
+name = "pui-audio"
+path = "src/bin/pui_audio.rs"
+
+# Standalone crate: there is no Cargo workspace under papercup/, so this never
+# participates in (or breaks) a peer's workspace build. Run from apps/tui/.
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+dirs = "5"
+sha2 = "0.10"
+# IPC transport (Unix-socket; replaces HTTP/SSE).
+bytes = "1"
+thiserror = "2"
+# OS desktop notifications (P8) — best-effort; fails silently when no D-Bus
+# session (headless / remote). z-bus backend on Linux.
+notify-rust = "4"
+# HTTP backend transport (D-009) — remote/Claude-Code-plugin deployment where no
+# local Unix socket exists. rustls (no OpenSSL); SSE via Response::chunk().
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Shared wire protocol for the companion zellij plugin link (P-004 / D-008). Pure
+# serde; the SAME crate the wasm plugin (apps/pui-zellij-plugin) depends on, so
+# both ends of the `zellij pipe` duplex speak one format.
+pui-companion-proto = { path = "../pui-companion-proto" }
+# Voice mode (voice-mode-tui-port-2026-06-05): PTT mic capture + TTS playback.
+# cpal rides ALSA→PipeWire on Linux; rodio decodes wav+mp3 (kokoro/cloud TTS);
+# hound encodes the 16k mono PCM16 WAV Whisper wants; base64 because audio
+# crosses the operator transport as JSON (IPC string frames are binary-unsafe —
+# plan D-006).
+cpal = "0.15"
+rodio = "0.20"
+hound = "3.5"
+base64 = "0.22"
+# Display-column widths for terminal_safe_text's tab expansion (glyph.rs,
+# pui-chat-first-ux P-011) and the glyph width-safety tests. Same crate
+# ratatui already pulls (0.2.0 in the lock), so no new transitive cost.
+unicode-width = "0.2"
+# (tokio-tungstenite + futures-util removed: the pui no longer owns the EL
+# Conv-AI WebSocket — the host does (universal-voice-interface-2026-06-05
+# D-002/D-003); realtime voice rides the operator-voice bus over the local
+# Unix socket instead.)
+
+[dev-dependencies]
+tempfile = "3"

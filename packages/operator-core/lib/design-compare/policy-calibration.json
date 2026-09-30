@@ -1,0 +1,278 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "dcp-2026-08-25.1",
+  "generatedAt": "2026-08-25T07:37:55.797Z",
+  "engine": {
+    "engine": "lost-pixel/pixelmatch",
+    "engineVersion": "5.3.0"
+  },
+  "environment": {
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "deviceScaleFactor": 1,
+    "browser": "chromium",
+    "theme": "light",
+    "fontSet": "system",
+    "state": "default"
+  },
+  "realSurface": {
+    "source": "apps/operator/storybook-static",
+    "storiesCaptured": 12,
+    "refusals": []
+  },
+  "classes": [
+    {
+      "referenceClass": "artifact-capture",
+      "cohorts": [
+        "fixture-corpus",
+        "real-surface"
+      ],
+      "noise": {
+        "n": 12,
+        "maxDiffRatio": 0,
+        "samples": [
+          {
+            "caseId": "real-surface:noise:components-apikeystatus--all-configured",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 0.59759
+          },
+          {
+            "caseId": "real-surface:noise:components-apikeystatus--anthropic-only",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 0.654649
+          },
+          {
+            "caseId": "real-surface:noise:components-apikeystatus--loading",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 0.666302
+          },
+          {
+            "caseId": "real-surface:noise:components-apikeystatus--none-configured",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 0.511083
+          },
+          {
+            "caseId": "real-surface:noise:components-hostcheckbanner--allowed-no-banner",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 9.116158
+          },
+          {
+            "caseId": "real-surface:noise:components-hostcheckbanner--already-acked",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 0.313162
+          },
+          {
+            "caseId": "real-surface:noise:components-hostcheckbanner--gated-shared",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 0.315457
+          },
+          {
+            "caseId": "real-surface:noise:components-lazydetails--closed",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 0.495514
+          },
+          {
+            "caseId": "real-surface:noise:components-lazydetails--open-by-default",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 0.404889
+          },
+          {
+            "caseId": "real-surface:noise:components-lazydetails--rich-summary",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 0.310508
+          },
+          {
+            "caseId": "real-surface:noise:components-review-report-reviewreportshell--inbox-bulk-resolve",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 0.216967
+          },
+          {
+            "caseId": "real-surface:noise:components-review-report-reviewreportshell--plans-clean-up",
+            "diffRatio": 0,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 0.274959
+          }
+        ]
+      },
+      "regression": {
+        "n": 4,
+        "minDiffRatio": 0.001171,
+        "samples": [
+          {
+            "caseId": "real-surface:regression:components-apikeystatus--all-configured|components-apikeystatus--anthropic-only",
+            "diffRatio": 0.001171,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 223.054832
+          },
+          {
+            "caseId": "real-surface:regression:components-lazydetails--closed|components-lazydetails--open-by-default",
+            "diffRatio": 0.002084,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 232.612401
+          },
+          {
+            "caseId": "real-surface:regression:components-lazydetails--open-by-default|components-lazydetails--rich-summary",
+            "diffRatio": 0.005604,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 212.012008
+          },
+          {
+            "caseId": "real-surface:regression:components-review-report-reviewreportshell--inbox-bulk-resolve|components-review-report-reviewreportshell--plans-clean-up",
+            "diffRatio": 0.445773,
+            "pixelsTotal": 1024000,
+            "comparisonMs": 280.132911
+          }
+        ]
+      },
+      "indistinguishablePairs": [
+        "components-apikeystatus--anthropic-only|components-apikeystatus--loading",
+        "components-apikeystatus--loading|components-apikeystatus--none-configured",
+        "components-hostcheckbanner--allowed-no-banner|components-hostcheckbanner--already-acked",
+        "components-hostcheckbanner--already-acked|components-hostcheckbanner--gated-shared"
+      ],
+      "fidelityCorpus": {
+        "faithfulMaxDiffRatio": 0.002526,
+        "driftedMinDiffRatio": 0.042604,
+        "samples": [
+          {
+            "caseId": "fixture-corpus:artifact-capture/faithful",
+            "diffRatio": 0.002526,
+            "pixelsTotal": 76800,
+            "comparisonMs": 42.230432
+          },
+          {
+            "caseId": "fixture-corpus:artifact-capture/drifted",
+            "diffRatio": 0.042604,
+            "pixelsTotal": 76800,
+            "comparisonMs": 30.628823
+          }
+        ]
+      },
+      "captureRuntime": {
+        "n": 24,
+        "p50Ms": 1171.688207,
+        "maxMs": 1570.562824
+      },
+      "comparisonRuntime": {
+        "n": 22,
+        "p50Ms": 0.5147,
+        "maxMs": 280.132911
+      },
+      "smallestPixelsTotal": 1024000
+    },
+    {
+      "referenceClass": "figma-export",
+      "cohorts": [
+        "fixture-corpus"
+      ],
+      "noise": {
+        "n": 0,
+        "maxDiffRatio": null,
+        "samples": []
+      },
+      "regression": {
+        "n": 0,
+        "minDiffRatio": null,
+        "samples": []
+      },
+      "indistinguishablePairs": [],
+      "fidelityCorpus": {
+        "faithfulMaxDiffRatio": 0.002526,
+        "driftedMinDiffRatio": 0.044062,
+        "samples": [
+          {
+            "caseId": "fixture-corpus:figma-export/faithful",
+            "diffRatio": 0.002526,
+            "pixelsTotal": 76800,
+            "comparisonMs": 23.242773
+          },
+          {
+            "caseId": "fixture-corpus:figma-export/drifted",
+            "diffRatio": 0.044062,
+            "pixelsTotal": 76800,
+            "comparisonMs": 25.249234
+          }
+        ]
+      },
+      "captureRuntime": {
+        "n": 0,
+        "p50Ms": null,
+        "maxMs": null
+      },
+      "comparisonRuntime": {
+        "n": 2,
+        "p50Ms": 24.246004,
+        "maxMs": 25.249234
+      },
+      "smallestPixelsTotal": null
+    },
+    {
+      "referenceClass": "raster-mockup",
+      "cohorts": [
+        "fixture-corpus"
+      ],
+      "noise": {
+        "n": 0,
+        "maxDiffRatio": null,
+        "samples": []
+      },
+      "regression": {
+        "n": 0,
+        "minDiffRatio": null,
+        "samples": []
+      },
+      "indistinguishablePairs": [],
+      "fidelityCorpus": {
+        "faithfulMaxDiffRatio": 0.977253,
+        "driftedMinDiffRatio": 0.975495,
+        "samples": [
+          {
+            "caseId": "fixture-corpus:raster-mockup/faithful",
+            "diffRatio": 0.977253,
+            "pixelsTotal": 76800,
+            "comparisonMs": 110.774114
+          },
+          {
+            "caseId": "fixture-corpus:raster-mockup/drifted",
+            "diffRatio": 0.975495,
+            "pixelsTotal": 76800,
+            "comparisonMs": 32.385553
+          }
+        ]
+      },
+      "captureRuntime": {
+        "n": 0,
+        "p50Ms": null,
+        "maxMs": null
+      },
+      "comparisonRuntime": {
+        "n": 2,
+        "p50Ms": 71.579834,
+        "maxMs": 110.774114
+      },
+      "smallestPixelsTotal": null
+    }
+  ],
+  "measuredOnRenderHost": "chromium/147;probe@72px[monospace=1213.734,sans-serif=1393.102,serif=1318.184]",
+  "caveats": [
+    "RENDER HOST ATTESTED POST-HOC, NOT DERIVED (P-011/D-023). This artifact was generated before report-cli recorded a render host, so `measuredOnRenderHost` was measured afterwards on the same machine, with the same operator-core playwright chromium the real-surface leg captures through, and verified stable across two independent reads. report-cli now derives the field from the captures themselves, so the next calibration will not need this attestation. Treat the value as an attestation of provenance, not as a reading taken during the samples above.",
+    "SAME-HOST ONLY. Every noise sample was captured on one machine, so this measures capture-to-capture variance and NOT host-to-host variance. Font rasterisation and GPU differences across machines are entirely unmeasured here, and are plausibly far larger than the same-host figure. This is the single most important reason the gate stays report-only (D-006): the CI report run is the instrument that will measure cross-host noise, and P-011 must not enable enforcement before it has.",
+    "Real-surface regression samples are SIBLING STORY VARIANTS of the same component: two real renders that differ by content. They establish that separation exists at this scale; they do NOT establish a minimum detectable change, so no one may quote the regression figure as the smallest difference the gate can catch.",
+    "Noise samples are two independent captures at stabilityRetries: 0. The production capture path defaults to retrying until byte-identical, so this figure is an UPPER bound on the variance a real comparison sees, not the variance it will see.",
+    "The synthetic fixture corpus contributes engine soundness and comparison runtime only (fidelityCorpus). It is NOT a threshold input: it captures nothing, so it cannot measure capture noise (D-021). A class with only corpus evidence therefore has no measured noise floor and `policy.ts` refuses to make it gateable rather than borrowing another class’s.",
+    "indistinguishablePairs, when non-empty, means two DIFFERENT surfaces produced identical captures — a live bypass (D-020), not a cohort defect to tidy away."
+  ]
+}

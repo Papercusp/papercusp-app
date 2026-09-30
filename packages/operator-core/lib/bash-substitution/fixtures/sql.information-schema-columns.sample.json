@@ -1,0 +1,108 @@
+{
+  "evidenceRef": "plan sql-escape-tool-routing-2026-08-12 P-009 — buildSqlFixture(pair) over agent-authored dev:pg_query calls, 14d window, status=ok",
+  "extractedAt": "2026-08-12",
+  "totalAtoms": 119,
+  "totalSessions": 68,
+  "sample": [
+    {
+      "sid": "su-b91d2668-90dc-4c11-aedb-49c522bba693",
+      "ts": "2026-08-10 17:03:46.584-04",
+      "atom": "SELECT c.column_name FROM information_schema.columns c WHERE c.table_schema='harness_shared' AND c.table_name='harness_features_consolidated' AND c.column_name IN ('lane','audit_reasons','audited_at','condition_key','created_by_github_user_id','embedding_mode','embedding_recipe','run_seq','schedule','schedule_active','scheduled_at','template_slug','tzid','verified_done_at_remote_ts','verifier_last_checked_at','verifier_last_error','worked_by_history','working_users') ORDER BY 1"
+    },
+    {
+      "sid": "su-434d55bf-f415-4ad1-b3af-8bd970aa1de1",
+      "ts": "2026-08-09 15:11:09.292-04",
+      "atom": "SELECT column_name FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='adv_sessions' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-e0359276-aef4-4b14-952a-a2a4e54def51",
+      "ts": "2026-08-12 00:35:38.924-04",
+      "atom": "SELECT column_name FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='engineer_issues' AND column_name IN ('parent_id','id','state')"
+    },
+    {
+      "sid": "su-04c552b7-09e5-498b-b2da-c80b2cfb79b0",
+      "ts": "2026-08-09 06:14:04.721-04",
+      "atom": "SELECT column_name FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='harness_registry' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-fc401d17-1c5d-415b-9406-f963e4f3f2d0",
+      "ts": "2026-08-08 19:15:40.599-04",
+      "atom": "SELECT column_name FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='scout_routed_ideas' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "s-1786233942856-ea3ac019",
+      "ts": "2026-08-08 20:09:41.703-04",
+      "atom": "SELECT column_name FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='spawned_agents' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-07374fbd-e848-4204-87aa-bb86a31e5a92",
+      "ts": "2026-08-02 13:27:58.712-04",
+      "atom": "SELECT column_name, column_default FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='work_items' AND column_name IN ('status','origin','item_kind')"
+    },
+    {
+      "sid": "su-d1d193d9-67db-4459-a9ae-f0c76d395b2c",
+      "ts": "2026-08-11 14:55:29.243-04",
+      "atom": "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'harness_shared' AND table_name = 'plan_items' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-4fcbd8d3-ce2b-47ed-b98d-4e5eaa754b33",
+      "ts": "2026-08-12 05:53:19.619-04",
+      "atom": "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='agent_facts' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-b9269a31-fa09-465f-8690-a04e6bb30470",
+      "ts": "2026-08-03 13:26:18.947-04",
+      "atom": "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='coord_event_log' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-5b23300b-ff55-49d4-957a-3e4b31710443",
+      "ts": "2026-08-03 02:18:26.196-04",
+      "atom": "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='fleet_membership_events' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-e0359276-aef4-4b14-952a-a2a4e54def51",
+      "ts": "2026-08-09 14:54:37.195-04",
+      "atom": "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='operator_credentials' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-d12e79e1-a68f-4526-b48f-2650c61c47c1",
+      "ts": "2026-08-11 15:45:03.228-04",
+      "atom": "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='work_item_claims'"
+    },
+    {
+      "sid": "su-c0a1265b-887f-478f-9f4b-f9780e2abb26",
+      "ts": "2026-08-12 00:34:28.254-04",
+      "atom": "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='work_items' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-85a7c2e0-2a86-4c4e-bb69-8bf1a080da9a",
+      "ts": "2026-08-10 05:40:06.778-04",
+      "atom": "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='session_briefs' AND column_name='goal_id'"
+    },
+    {
+      "sid": "su-145fd394-aaf1-4177-ac4d-ebf6d18854af",
+      "ts": "2026-08-09 10:33:56.702-04",
+      "atom": "SELECT column_name, is_nullable FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='engineer_issues' AND column_name IN ('updated_at','created_at')"
+    },
+    {
+      "sid": "su-1c49a88c-177d-4298-94aa-4d59737fe242",
+      "ts": "2026-08-12 02:25:33.319-04",
+      "atom": "SELECT column_name,data_type FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='adv_sessions' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-60237937-9d3a-4d97-8db9-29af7e632624",
+      "ts": "2026-08-11 18:59:19.372-04",
+      "atom": "SELECT ordinal_position, column_name, data_type FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='engineer_issues' AND column_name IN ('state','terminal_owner','terminal_completion_ref','authority','terminal_reason') ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-5d510ab1-e784-495f-b54b-ea8bff022e51",
+      "ts": "2026-08-12 00:30:06.51-04",
+      "atom": "SELECT table_schema, table_name, column_name FROM information_schema.columns WHERE table_schema='harness_shared' AND table_name='engineer_issues' ORDER BY ordinal_position"
+    },
+    {
+      "sid": "su-4ca244e4-540e-4acc-bb67-9335192fc85f",
+      "ts": "2026-08-01 22:17:10.868-04",
+      "atom": "select column_name, data_type from information_schema.columns where table_schema='harness_shared' and table_name='federation_refused_op_counters' order by ordinal_position"
+    }
+  ]
+}

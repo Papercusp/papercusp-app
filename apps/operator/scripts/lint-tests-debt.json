@@ -1,0 +1,6 @@
+{
+  "_doc": "Debt baseline for lint-tests.ts (admin-testing-tab-restructure-2026-05-24 P-038). Files listed here are pre-migration legacy that pre-date the four-framework convention (D-006). The lint accepts these but FAILS on any NEW file in __tests__/integration/*.mjs or scripts/*-smoke.ts. Removing entries is encouraged (means a file got migrated to Vitest); ADDING entries is rejected at PR review.",
+  "_owner": "admin-testing-tab-restructure-2026-05-24 plan",
+  "integrationMjs": [],
+  "scriptsSmoke": []
+}

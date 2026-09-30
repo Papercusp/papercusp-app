@@ -1,0 +1,15 @@
+{
+  "name": "@papercusp/desktop",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Tauri desktop shell for Papercusp. Spawns the Node sidecar and embeds the web UI.",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:debug": "tauri build --debug"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  }
+}

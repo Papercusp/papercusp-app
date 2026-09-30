@@ -1,0 +1,136 @@
+# operator-core `lint:tsc` is a PER-FILE gate — vitest-green != tsc-clean
+URL: /internal/docs/agent-insights/operator-core-lint-tsc-count-gate
+
+npm run lint:tsc gates packages/operator-core against a PER-FILE tsc-error baseline in .tsc-baseline.json — a file above ITS baseline is a NEW, ATTRIBUTED regression (the gate NAMES it), hard-fails TS1xxx syntax errors, and blocks green-checkpoint when a file rises. vitest (esbuild) does NOT typecheck, so a vitest-green test edit can add tsc errors. Run lint:tsc (or lint:tsc -- --mine) after operator-core edits — not just test:affected.
+
+## What
+
+`npm run lint:tsc` (`scripts/lint-tsc.mjs`) runs
+`tsc -p packages/operator-core/tsconfig.json --noEmit --incremental false` and
+compares each file's error count against a **PER-FILE baseline** in
+`packages/operator-core/.tsc-baseline.json` (the `files` map:
+`{ "packages/operator-core/lib/x.ts": 2, … }`; `operatorCoreErrorCount` is a
+derived total, kept for humans). Don't trust any literal value cited here as
+current — run `npm run lint:tsc` for the live picture. The gate:
+
+* **any file above ITS baseline ⇒ HARD FAIL, and the gate NAMES it**
+  (`lib/x.ts: 2 → 4  (+2)`). It runs in green-checkpoint, so a net-new error
+  blocks the whole fleet's deploy — but now you see exactly which file caused
+  it. A file absent from the baseline has an implicit baseline of `0`, so any
+  error in a brand-new file is a named regression.
+* **`--mine` scopes the FAILURE to files you changed** (`git status`): a
+  regression in a file you didn't touch is reported as *peer drift* and does
+  NOT fail your run, so you can verify "my change is tsc-clean" even while the
+  shared tree carries unrelated concurrent-edit noise. `--mine` is opt-in and
+  never the CI default (CI runs bare = strict, gating any file's regression).
+* **a file below its baseline ⇒ ratchets down, but ONLY on an explicit
+  `npm run lint:tsc -- --update`** (audit P-073 / EI-104). A **bare** run (CI,
+  or a peer's plain `npm run lint:tsc`) never rewrites the baseline — it only
+  checks. Regressions always win over improvements, so `--update` can never
+  *raise* a file; raising a file's baseline is a deliberate hand-edit of the
+  JSON with a justification. This policy lives in the pure `decidePerFile()`
+  and is locked by `lint-tsc.test.ts`, so a `main()` refactor can't silently
+  reintroduce an auto-ratchet.
+* **any TS1xxx parse error ⇒ HARD FAIL** — syntax-broken files fail regardless
+  of counts, because `tsc` under-reports the errors behind a parse failure.
+
+### Why per-file (migrated 2026-07-13, P-010 / WI-4535)
+
+This gate used to compare ONE integer — the total error count — against a single
+pin (last `224`). On this heavily-parallel shared tree that number **could not
+attribute a regression and inherently flapped ±N** as peers edited the
+type-graph concurrently: a run reading "231 vs 224" told you seven errors
+appeared but not which files, not whether *you* caused them, and not whether it
+was the same deep-instantiation ripple (e.g.
+`inference-gateway/observability.test.ts`'s `GatewayStats`) shuffling again. That
+drove repeated false-reds and baseline-pinning wars (EI-379, EI-1984, and the
+old baseline `note`'s 223↔224 saga). The per-file map localizes flapping (a flap
+in file A never reds an agent editing file B) and makes every regression
+attributable to a file — and via `git blame`, its author. This is the same
+"scope to touched files" philosophy as apps/operator's
+\[\[tsc-baseline-vs-next-build]], now applied to operator-core too.
+
+## The trap: vitest is green, lint:tsc is red
+
+`npm run test:affected` runs **vitest**, which transforms with **esbuild** and
+does **NOT typecheck**. So a test file can be fully vitest-green while carrying
+tsc errors that only `lint:tsc` sees. You commit, vitest passes, and a peer (or
+green-checkpoint) finds the count over baseline minutes later — now everyone's
+deploy is blocked.
+
+The recurring test-specific cause: a `vi.fn(async () => …)` mock infers a
+**zero-parameter** call signature, so `mock.calls[0]` is the empty tuple `[]`.
+`mock.calls[0][0]` then trips **TS2493** ("Tuple type '\[]' has no element at
+index '0'"), and the `as {…}` cast on the resulting `undefined` trips
+**TS2352**. Give the mock a typed parameter (`vi.fn(async (spec: CardSpec) =>
+…)`), or read the first arg through a typed accessor.
+
+Concrete (B-10, 2026-06-13): a new describe block in `ask_choice.test.ts` was
+15/15 vitest-green, but six existing `vi.fn(async () => …)` mocks' `mock.calls [0][0]` casts tipped operator-core 455 → 466 and blocked green-checkpoint. Fix
+was a one-helper `firstSpec(askUser)` typed accessor → 0 errors in the file →
+count back to baseline.
+
+## How to verify
+
+After **any** edit under `packages/operator-core` (source *or* test):
+
+```bash
+npm run lint:tsc -- --mine   # gate ONLY the files you changed — the fast self-check
+npm run lint:tsc             # the authoritative CI gate — every file vs its baseline
+```
+
+* On a regression the gate **NAMES the file** (`lib/x.ts: 2 → 4  (+2)`) — no
+  grep needed; the attribution is built in. Fix the named file. **Do not** raise
+  its baseline to absorb your own new errors (the script only ratchets *down*;
+  raising is a reviewed human act with a justification).
+* `--mine` fails only on regressions in files *you* changed; a regression in a
+  file you didn't touch is reported as peer drift and won't red your run. A bare
+  `npm run lint:tsc` (what CI runs) gates every file.
+* If it reports TS1xxx syntax-broken files, fix those first — counts are ignored
+  for that verdict.
+* To lock in a genuine improvement (a file you drove below its baseline), run
+  `npm run lint:tsc -- --update` on a quiet tree — it lowers only the improved
+  files, never raises.
+* `test:affected` (vitest) is necessary but **not sufficient** — it proves
+  behavior, not types. Run both.
+
+## Two gates, one tree: `0 → N` on files you never opened is an implicit-0 gap
+
+There is a **second** gate on the same policy — `npm run lint:tsc:operator-vite`
+(`scripts/lint-tsc-operator-vite.mjs`, baseline `apps/operator-vite/.tsc-baseline.json`).
+The SPA's type graph pulls `packages/operator-core` in transitively, so the two
+gates **overlap**: \~27 of the vite baseline's entries are operator-core files.
+
+The trap (EI-18649014117371738): a file absent from a baseline is scored as an
+implicit **0**. That is right for a file the gate *owns* — a fresh file arriving
+with errors IS a regression — and wrong for a file another package owns and has
+already baselined. The two baselines were seeded four days apart under different
+tsconfigs, so `lint:tsc` **passed** and `lint:tsc:operator-vite` **failed** on the
+same untouched source: 12 operator-core files reported as regressions to an agent
+who had opened none of them. That cost a full investigation and nearly produced a
+wrong "you broke this" message to a peer.
+
+**Diagnostic heuristic — read the arrow, not just the count.** A gate naming
+files you never touched, *every one of them at exactly `0 → N`*, is the signature
+of a baseline **gap**, not of your change. A real regression in a file with
+history reads `2 → 4`; a uniform wall of `0 → 1` means the gate has no record for
+those files. Before you believe you broke something:
+
+```bash
+# Is the "0" measured, or merely absent? Check the OWNING package's baseline.
+node -e "console.log(require('./packages/operator-core/.tsc-baseline.json').files['<the/file.ts>'])"
+```
+
+A non-zero answer there means the error is **known and tolerated** by the gate
+that owns the file — you did not introduce it.
+
+Fixed structurally rather than by editing either JSON: `runTscBaselineGate` takes
+`foreignBaselines`, and a measured file under another package's prefix that this
+gate has not recorded **inherits the owning package's count** instead of 0
+(`effectiveBaselineByFile` in `scripts/lib/tsc-baseline-gate.mjs`). An explicit
+own-baseline entry always wins, so ratchet-only-down is untouched, and absent
+from *both* is still 0 — a genuinely new error in a foreign file still gates.
+
+Carry the general lesson to any second gate you add over an overlapping file set:
+**absent-from-baseline means "never recorded", not "was clean"** — and two gates
+that can disagree about the same file make *neither* number trustworthy.

@@ -1,0 +1,39 @@
+/**
+ * Do not edit directly, this file was auto-generated.
+ */
+
+[data-theme="honeycomb"], [data-theme-base="honeycomb"] {
+  --bg-deepest: #030303; /** Near-black depth from the swarm identity demo */
+  --bg-deeper: #050504;
+  --bg-deep: #080806;
+  --bg: #070704; /** Charcoal page base with only a faint warm cast */
+  --bg-1: #0d0d08;
+  --bg-2: rgba(255, 255, 255, 0.045); /** Neutral low glass tier; avoids amber-washing every panel */
+  --bg-3: rgba(255, 255, 255, 0.07);
+  --bg-4: rgba(198, 142, 36, 0.12);
+  --bg-popover: #11100b; /** Solid elevated comb surface */
+  --bg-raised: #15130b;
+  --bg-raised-high: #1d190d;
+  --fg: #f4ebd4;
+  --fg-dim: #cdbc98;
+  --fg-mute: #9f9378;
+  --border: rgba(196, 143, 45, 0.16);
+  --border-strong: rgba(214, 166, 74, 0.34);
+  --accent: #c68e24; /** Muted honey primary accent */
+  --accent-rgb: 198, 142, 36; /** RGB triplet of --accent for rgba() alpha composition — every theme that overrides accent must override this too, or the frost sky triplet leaks through :root */
+  --accent-strong: #d6a64a; /** Restrained honey hover/focus accent */
+  --accent-strong-rgb: 214, 166, 74; /** RGB triplet of --accent-strong for rgba() alpha composition (same leak rule as accent-rgb) */
+  --accent-cool: #e8d9b5; /** Cream highlight for glows and linework */
+  --accent-soft: #e0c071; /** Soft honey signal tint */
+  --accent-soft-rgb: 224, 192, 113; /** RGB triplet of --accent-soft for rgba() alpha composition (same leak rule as accent-rgb) */
+  --accent-deep: #8b5e16; /** Burnt honey active tint */
+  --accent-deeper: #5f3f12; /** Deep amber shadow tint */
+  --accent-ink: #130d03; /** Text on honey fills */
+  --good: #68d391;
+  --warn: #d6a64a;
+  --bad: #e06f69;
+  --warn-bg: rgba(198, 142, 36, 0.11);
+  --warn-border: rgba(214, 166, 74, 0.34);
+  --good-bg: rgba(104, 211, 145, 0.11);
+  --bad-bg: rgba(224, 111, 105, 0.11);
+}

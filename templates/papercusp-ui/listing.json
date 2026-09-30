@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-ui",
+  "id": "papercusp-ui",
+  "title": "Papercusp Official: UI Kit (Operator-Style SPA)",
+  "description": "Aspect template: the operator-style SPA kit — headless UI primitives, papergrid data grids, dock-workbench layout, and the lexicon seam for app-specific naming. Compose for a papercusp-native UI. Docs: /internal/docs on your install.",
+  "category": "ui",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

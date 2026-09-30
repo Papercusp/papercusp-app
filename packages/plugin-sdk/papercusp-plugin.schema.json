@@ -1,0 +1,651 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "title": "papercusp.json plugin manifest",
+  "description": "Manifest for a Papercusp plugin. See packages/plugin-sdk for the runtime types.",
+  "type": "object",
+  "required": [
+    "name",
+    "version"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference. Standard meta-keyword for editor LSP autocomplete. Operationally ignored by the loader."
+    },
+    "name": {
+      "type": "string",
+      "description": "Plugin id. Used as a directory name, Postgres schema prefix, event-bus topic prefix, and capability namespace.",
+      "pattern": "^(@[a-z][a-z0-9_.-]{0,62}/)?[a-z][a-z0-9_.-]{2,62}$"
+    },
+    "version": {
+      "type": "string",
+      "description": "Semver version string.",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "description": {
+      "type": "string"
+    },
+    "author": {
+      "type": "string"
+    },
+    "license": {
+      "type": "string"
+    },
+    "homepage": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "plugin",
+        "pack",
+        "template",
+        "snapshot",
+        "service",
+        "theme",
+        "harness"
+      ],
+      "description": "Distribution kind. Defaults to 'plugin'. 'pack' = a runtime-less code-tool pack: tools only — no ui/roles/routines/actions, runtime must stay js (tool-distribution-granularity-2026-06-05 D-001/D-004; replaces the never-used 'subagent-pack'). 'template' = a harness/project template (papercusp CLI). 'service'/'theme'/'harness'/'snapshot' = reserved/dormant — the loader treats every non-'pack' value as a default plugin. KEEP IN SYNC with the SDK `kind` union in packages/plugin-sdk/src/index.ts (EI-29)."
+    },
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Tool/pack/plugin/event deps this unit's tools + reactions need (tool-distribution-granularity D-003 plugin-to-tool deps; events axis: cupboard-public-release-2026-07-12 D-003). Validated at Cupboard install time against the host's pack catalog; same shape as a blueprint's dependencies.",
+      "properties": {
+        "tools": { "type": "array", "items": { "type": "string" } },
+        "packs": { "type": "array", "items": { "type": "string" } },
+        "plugins": { "type": "array", "items": { "type": "string" } },
+        "events": {
+          "type": "array",
+          "description": "Event-family deps (D-003). Resolved against provides.events across the pack catalog: an installed provider satisfies it, a Cupboard provider makes it installable, neither is a HARD failure like an unresolvable tool dep — unless optional:true (listen-if-present soft dep).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["family"],
+            "properties": {
+              "family": { "type": "string", "minLength": 1, "description": "The provided event-family id this unit needs." },
+              "optional": { "type": "boolean", "description": "optional:true = listen-if-present soft dep; an unresolvable optional event dep never blocks install." }
+            }
+          }
+        }
+      }
+    },
+    "provides": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Distribution-unit provisions surfaced to the Cupboard catalog + dependency resolver (cupboard-public-release-2026-07-12 D-003). Mirrors the provides_tools axis at the unit level. Pure DATA — a runtime-less kind:'pack' may declare provides.events (the pack-purity check allows it); actually emitting a family or reacting to one is runtime that rides a plugin.",
+      "properties": {
+        "events": {
+          "type": "array",
+          "description": "Awaitable event-key families this unit provides. Structural subset of the events:catalog EventCatalogEntry; the installed-tier catalog merge lifts these over the builtin registry with provenance.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["family", "keyTemplate"],
+            "properties": {
+              "family": { "type": "string", "minLength": 1, "description": "Stable family id — the catalog lookup key + buildKey handle. Unique within provides.events." },
+              "keyTemplate": { "type": "string", "minLength": 1, "description": "Exact key template with <param> placeholders; a no-param family is a literal key. Every <name> needs a matching params entry (validated at load)." },
+              "params": {
+                "type": "array",
+                "description": "Placeholders the keyTemplate interpolates, in order.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name", "required", "describe"],
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1, "description": "Placeholder name as it appears in the template." },
+                    "required": { "type": "boolean", "description": "Must a caller supply it? An omitted optional param collapses its :<name> segment." },
+                    "describe": { "type": "string", "description": "One line for the catalog + sugar arg docs." }
+                  }
+                }
+              },
+              "describe": { "type": "string", "description": "What firing this key MEANS (one line), for the catalog." }
+            }
+          }
+        }
+      }
+    },
+    "triggerPack": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Pure-data workflow graph (external-triggers D-014/D-015/P-012): N plan|recipe targets, single-target bindings, and event-stitched internal edges. It rides kind:'plugin', never executable-tool kind:'pack'. Installation exposes the graph but never arms it.",
+      "required": ["inputs", "targets", "bindings", "edges"],
+      "properties": {
+        "inputs": {
+          "type": "object",
+          "description": "Workflow-level declared input JSON Schema. Credential/channel install fields retain their per-field share semantics in configSchema."
+        },
+        "defaultStormPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxRuns": { "type": "integer", "minimum": 1 },
+            "windowSeconds": { "type": "integer", "minimum": 1 }
+          },
+          "description": "Pack-wide storm-policy default; a binding may override it."
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Graph target nodes. Stored kinds are plan|recipe; a UI tool call is a one-step recipe.",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "kind", "path", "inputSchema"],
+                "properties": {
+                  "id": { "type": "string", "minLength": 1 },
+                  "kind": { "const": "plan" },
+                  "path": { "type": "string", "minLength": 4 },
+                  "inputSchema": { "type": "object" }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "kind", "ref", "argsSchema"],
+                "properties": {
+                  "id": { "type": "string", "minLength": 1 },
+                  "kind": { "const": "recipe" },
+                  "ref": { "type": "string", "minLength": 1 },
+                  "revision": { "type": "integer", "minimum": 1 },
+                  "argsSchema": { "type": "object" }
+                }
+              }
+            ]
+          }
+        },
+        "bindings": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Each binding invokes exactly one target. Chains use internal-source bindings plus edges, never a steps orchestrator.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "source", "target"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "source": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "sourceKind"],
+                    "properties": {
+                      "kind": { "const": "external" },
+                      "sourceKind": { "type": "string", "pattern": "^[a-z][a-z0-9._-]*$" },
+                      "oauthField": { "type": "string", "minLength": 1 }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "event"],
+                    "properties": {
+                      "kind": { "const": "internal" },
+                      "event": { "type": "string", "enum": ["binding-run-completed", "plan-completed"] }
+                    }
+                  },
+                  {
+                    "deprecated": true,
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Deprecated and rejected by trigger-pack semantic validation: trigger packs do not consume schedules. Use a manual binding and arm the instantiated plan with plans:set-schedule followed by plans:arm-schedule.",
+                    "required": ["kind", "scheduleRef"],
+                    "properties": {
+                      "kind": { "const": "schedule" },
+                      "scheduleRef": { "type": "string", "minLength": 1 }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": { "kind": { "const": "manual" } }
+                  }
+                ]
+              },
+              "target": { "type": "string", "minLength": 1 },
+              "eventPattern": { "type": "string", "minLength": 1 },
+              "filter": { "type": "object" },
+              "mapping": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["mode"],
+                "properties": {
+                  "mode": { "type": "string", "enum": ["type-match", "fields", "payload-context"] },
+                  "fields": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  }
+                }
+              },
+              "stormPolicy": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "maxRuns": { "type": "integer", "minimum": 1 },
+                  "windowSeconds": { "type": "integer", "minimum": 1 }
+                }
+              },
+              "retry": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["maxAttempts", "onExhausted"],
+                "properties": {
+                  "maxAttempts": { "type": "integer", "minimum": 1 },
+                  "backoffSeconds": { "type": "integer", "minimum": 1 },
+                  "onExhausted": { "const": "dead-letter" }
+                }
+              }
+            }
+          }
+        },
+        "edges": {
+          "type": "array",
+          "description": "Internal event edges between bindings. One-node v1 packs declare an empty array.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to", "event", "correlation"],
+            "properties": {
+              "from": { "type": "string", "minLength": 1 },
+              "to": { "type": "string", "minLength": 1 },
+              "event": { "type": "string", "enum": ["binding-run-completed", "plan-completed"] },
+              "correlation": { "const": "inherit" }
+            }
+          }
+        }
+      }
+    },
+    "papercusp": {
+      "type": "string",
+      "description": "Semver range against the runtime version (PAPERCUSP_RUNTIME_VERSION)."
+    },
+    "protocol": {
+      "type": "string",
+      "description": "Semver range against the plugin wire protocol version. Independent of the runtime release cycle so hooks can evolve without bumping the whole runtime."
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Declarative permissions. Format: namespace:action[:resource]. The host AND-checks declared capabilities against the user-granted set."
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "MCP tool declarations."
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "Action declarations bound at init() time."
+    },
+    "roles": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "dashboardTabs": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "sidebarItems": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "ui": {
+      "type": "array",
+      "description": "UI surface contributions. Each entry is a top-level pane/tab a host renders. v1 hosts: React (in-bundle component) and iframe (sandboxed) on desktop; tui-pane in the pui (terminal).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "react",
+              "iframe",
+              "tui-pane"
+            ],
+            "description": "react = in-bundle component (default for back-compat). iframe = sandboxed iframe (Batch H). tui-pane = a terminal pane the pui opens via zellij, running `command` (revive-plugin-system D-002)."
+          },
+          "slug": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "icon": {
+            "type": "string"
+          },
+          "iframeEntry": {
+            "type": "string",
+            "description": "Relative path to the iframe HTML entry. Required when type='iframe'."
+          },
+          "iframeNavigateOrigins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Origins the iframe is allowed to top-navigate to. Honored by the iframe:navigate cap gate."
+          },
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "argv to run in the pui's zellij pane. Required when type='tui-pane'. command[0] must be a PATH basename (or absolute path) the plugin holds `compute:exec:<command[0]>` for; runs with cwd = the plugin's install dir. Example: [\"sh\", \"render.sh\"]."
+          }
+        },
+        "required": [
+          "slug",
+          "label"
+        ]
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "description": "Optional runtime descriptor. Defaults to {kind:'js'} (existing JS plugins). 'wasm' loads a wasm32-wasip2 component artifact via @papercusp/plugin-loader/wasm. 'daemon' loads a long-running stdio JSON-RPC peer via @papercusp/plugin-loader/daemon.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "js",
+            "wasm",
+            "daemon"
+          ]
+        },
+        "wasmPath": {
+          "type": "string",
+          "description": "Relative path from manifest dir to the .wasm artifact. Required when kind='wasm'."
+        },
+        "daemonCommand": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "argv for the daemon binary. Required when kind='daemon'."
+        },
+        "daemonRestart": {
+          "type": "object",
+          "properties": {
+            "policy": {
+              "type": "string",
+              "enum": [
+                "never",
+                "on-failure",
+                "always"
+              ]
+            },
+            "maxRestarts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "backoffMs": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "memoryBudgetMb": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096,
+          "description": "Hard cap for WASM linear-memory growth (MiB). Default 64 (Batch G4)."
+        },
+        "concurrency": {
+          "type": "string",
+          "enum": [
+            "serial",
+            "parallel"
+          ],
+          "description": "Action-invocation concurrency. WASM defaults to 'serial' (mpsc actor pattern); daemon defaults to 'parallel'."
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "apiRoutes": {},
+    "routines": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "reactions": {
+      "description": "Declarative event-reaction rules (plugin-system-hive-port D-003): when trigger `on` settles, fire one of THIS plugin's tools through normal dispatch. Manifest rules are the declarative subset — `when` is a data-match object, `args` a static object; function forms need an entry-point plugin. Each `on` trigger requires an `events:listen:<on>` capability.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "on": {
+            "anyOf": [
+              { "type": "string", "minLength": 1 },
+              { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+            ]
+          },
+          "when": { "type": "object" },
+          "fire": { "type": "string", "minLength": 1 },
+          "args": { "type": "object" },
+          "onlyOnSuccess": { "type": "boolean" },
+          "capability": { "type": "string", "minLength": 1 }
+        },
+        "required": ["id", "on", "fire"],
+        "additionalProperties": false
+      }
+    },
+    "models": {
+      "type": "object"
+    },
+    "configSchema": {
+      "type": "object"
+    },
+    "uiSchema": {
+      "type": "object"
+    },
+    "schema": {
+      "type": "object"
+    },
+    "plugins": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "configFiles": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "requiresTemplateKinds": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "forkedFrom": {
+      "type": "object"
+    },
+    "publishedAt": {
+      "type": "string"
+    },
+    "publishedBy": {
+      "type": "string"
+    },
+    "tierMap": {
+      "type": "object"
+    },
+    "icon": {
+      "type": "string",
+      "description": "Lucide icon name or emoji shown next to the plugin in catalog UI."
+    },
+    "bundled": {
+      "type": "boolean",
+      "description": "Build-pipeline only \u2014 DO NOT set in your plugin's manifest. Operator install stamps this on plugins that ship pre-installed; capture excludes bundled plugins from snapshot.plugins[]. Lint rejects author-set values. (rev3 plan G+5 / A10)"
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Plugin-author opt-in for files in the per-plugin work-dir that should travel with snapshots. Default: work-dir stripped on capture. (rev3 plan G+4)",
+      "properties": {
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Path relative to plugin work-dir root. Globs supported (minimatch)."
+              },
+              "redact": {
+                "type": "string",
+                "enum": [
+                  "strip"
+                ],
+                "description": "When 'strip': include path as zero-byte placeholder (vs. absent which means 'never existed')."
+              }
+            }
+          }
+        }
+      }
+    },
+    "hidden": {
+      "type": "boolean",
+      "description": "Hide from catalog surfaces; complements harness_shared.hidden_plugins."
+    },
+    "hiddenReason": {
+      "type": "string"
+    },
+    "publisher": {
+      "type": "string",
+      "description": "Publisher slug (often === author or scope)."
+    },
+    "pluginVersionPinned": {
+      "deprecated": true,
+      "description": "DEPRECATED v1: use `versionPin` instead. Reader still accepts this for back-compat. true \u2192 equivalent to `versionPin.mode: 'exact'`; false \u2192 equivalent to `versionPin.mode: 'semver'`. Schema previously allowed string here; that's no longer used (was a band-aid for in-flight first-party plugins \u2014 replaced by `versionPin` cleanly).",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "boolean"
+        }
+      ]
+    },
+    "versionPin": {
+      "description": "v2 (rev3 plan G+2) per-plugin version-pinning policy. Replaces `pluginVersionPinned`. mode='semver' for JS plugins (default), 'exact' for legacy strict pinning, 'hash' for content-addressed (WASM/daemon default). allowOverride lets marketplace-flagged security patches supersede pinned versions; defaults to 'security-patch'.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "semver",
+            "exact",
+            "hash"
+          ]
+        },
+        "allowOverride": {
+          "type": "string",
+          "enum": [
+            "security-patch",
+            "always",
+            "never"
+          ]
+        }
+      }
+    },
+    "hotReload": {
+      "description": "Hot-reload state preservation opt-in. When `preserveState: true`, the host calls `getStateForReload` before unload and `restoreFromReload(state)` on the next init. State must be JSON-serialisable and \u2264 64 KiB.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preserveState": {
+          "type": "boolean"
+        }
+      }
+    },
+    "kvQuota": {
+      "description": "Optional override of the default ctx.kv quotas. maxBytesPerKey defaults to 10 KiB; maxBytesPerPlugin defaults to 1 MiB.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxBytesPerKey": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "maxBytesPerPlugin": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 104857600
+        }
+      }
+    },
+    "provision": {
+      "type": "object",
+      "description": "Cloudflare/infra provisioning hints."
+    },
+    "oauth": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "OAuth provider declarations consumed by ctx.oauth."
+    },
+    "main": {
+      "type": "string",
+      "description": "Node-style entry-point hint; CLI also probes index.{cjs,js,mjs,ts}."
+    },
+    "config": {
+      "type": "object",
+      "description": "Default config values. configSchema describes the shape; this provides defaults."
+    },
+    "_legacyExtras": {
+      "type": "object",
+      "description": "Escape hatch for forward-compatible extras the schema doesn't know yet."
+    },
+    "requires": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Plugin slugs this plugin requires. Used by lock-resolve to build a dependency graph (CLI: papercusp install, papercusp plugin install). Each entry is a slug like \"@org/dep-plugin\"."
+    },
+    "recommends": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Plugin slugs this plugin recommends (soft dependencies \u2014 surfaced to the user during install but not auto-installed). Same shape as requires."
+    },
+    "defaultConfig": {
+      "type": "object",
+      "description": "Initial config values written to ~/.papercusp/plugin-configs/<slug>.json on first install. Must conform to configSchema if both are declared. Used by papercusp plugin init seeding."
+    }
+  }
+}

@@ -1,0 +1,108 @@
+{
+ "generatedFrom": {
+  "path": "packages/operator-core/lib/agent-tools/search/sources.ts",
+  "blobSha": "ef700ac66adf1943f832f54bcd589ceae06fb32e",
+  "lastCommit": "084e8e8205a30395c83338e16ddb518604c24962",
+  "capturedAt": "2026-09-30T01:11:01.156Z"
+ },
+ "queries": {
+  "q0-limit10": [
+   {
+    "key": "session_turn:claude:parity-session:1",
+    "score": 0.9961947202682495
+   },
+   {
+    "key": "session_turn:claude:parity-session:0",
+    "score": 0.9848077590706281
+   },
+   {
+    "key": "session_turn:claude:parity-session:4",
+    "score": 0.9781475676210202
+   },
+   {
+    "key": "session_turn:claude:parity-session:2",
+    "score": 0.9396926164627075
+   },
+   {
+    "key": "session_turn:claude:parity-session:5",
+    "score": 0.8910065293312073
+   },
+   {
+    "key": "session_turn:claude:parity-session:3",
+    "score": 0.7071067901583552
+   }
+  ],
+  "q0-limit3": [
+   {
+    "key": "session_turn:claude:parity-session:1",
+    "score": 0.9961947202682495
+   },
+   {
+    "key": "session_turn:claude:parity-session:0",
+    "score": 0.9848077590706281
+   },
+   {
+    "key": "session_turn:claude:parity-session:4",
+    "score": 0.9781475676210202
+   }
+  ],
+  "q50-limit10": [
+   {
+    "key": "session_turn:claude:parity-session:3",
+    "score": 0.9961947499571671
+   },
+   {
+    "key": "session_turn:claude:parity-session:1",
+    "score": 0.9848077297210693
+   },
+   {
+    "key": "session_turn:claude:parity-session:2",
+    "score": 0.9396926164627075
+   },
+   {
+    "key": "session_turn:claude:parity-session:5",
+    "score": 0.9271838665008545
+   },
+   {
+    "key": "session_turn:claude:parity-session:4",
+    "score": 0.7880107290738401
+   },
+   {
+    "key": "session_turn:claude:parity-session:0",
+    "score": 0.7660445203198353
+   }
+  ],
+  "q0-assistant": [
+   {
+    "key": "session_turn:claude:parity-session:1",
+    "score": 0.9961947202682495
+   },
+   {
+    "key": "session_turn:claude:parity-session:5",
+    "score": 0.8910065293312073
+   },
+   {
+    "key": "session_turn:claude:parity-session:3",
+    "score": 0.7071067901583552
+   }
+  ],
+  "q90-limit4": [
+   {
+    "key": "session_turn:claude:parity-session:1",
+    "score": 0.9848077590706281
+   },
+   {
+    "key": "session_turn:claude:parity-session:5",
+    "score": 0.9510565400123596
+   },
+   {
+    "key": "session_turn:claude:parity-session:3",
+    "score": 0.7071067901583552
+   },
+   {
+    "key": "session_turn:claude:parity-session:2",
+    "score": 0.5
+   }
+  ]
+ }
+}

@@ -1,0 +1,61 @@
+# Autonomous-role spawns dying with model:null → a malformed committed role-default model spec
+URL: /internal/docs/agent-insights/autonomous-role-spawn-model-null-invalid-model-spec
+
+When Mug/queen/bee/kettle spawns end before their first LLM turn (model:null, empty intent, \"selected model unavailable\"), suspect a versioned-shorthand model spec (sonnet-5) in ROLE_MODEL_DEFAULTS — the bare alias (sonnet) is required.
+
+## Symptom
+
+An autonomous-role session (Mug / queen / bee / kettle / overwatch / sentinel /
+operator) spawns and **ends before executing a single LLM turn**. `coord:presence`
+on it shows `sessionState:"ended"`, `model:null`, `intent:""` (empty), no claimed
+items, 0 LLM tokens across consecutive wakes. Concurrent spawn-failure rows report
+**"selected model unavailable/inaccessible"**. The whole autonomous-role class stalls
+(e.g. Mug placement dead for 10+ wakes) while the rest of the fleet (haiku cups,
+sonnet workers, opus fixers) keeps making LLM calls — so it is **not** capacity
+exhaustion, rate limits, or an account wall. (EI-12657; the "kettle-invalid-model-config"
+/ EI-12531 lineage.)
+
+## Root cause
+
+A **committed role-default model spec** in `ROLE_MODEL_DEFAULTS`
+(`libs/papercusp/packages/orchestrator/src/role-models.ts`) used a **versioned
+shorthand** — `sonnet-5[1m]:high` — instead of the **bare alias** `sonnet[1m]:high`.
+
+`sonnet-5` is not a resolvable alias anywhere in the launch path:
+
+* `validateCloudModelSpec` / the psu-launcher `validateModelSpec` **reject** it
+  ("Did you mean `sonnet:high`? Type the BARE alias…").
+* The inference gateway's `resolveGatewayModel` strips the `[1m]` marker + effort
+  to bare `sonnet-5`, which is **absent from `ONE_MILLION_MODEL_ALIASES`** (only
+  bare `sonnet` → `claude-sonnet-5`), so it forwards `sonnet-5` **verbatim** as an
+  unrunnable upstream Anthropic model id → 4xx "unavailable".
+
+Either way the spawn dies at model resolution, before its first turn. The
+`model:null` in presence is a *symptom* of the early death, not the cause.
+
+## Why existing defenses missed it
+
+The launcher's model-spec validation runs on **hand-typed** specs (the
+`cup:spawn`/`fleet:launch-on-plan` tool boundary). A **committed** `ROLE_MODEL_DEFAULTS`
+entry flows straight into `resolveModel` / `applyRoleModel` and reaches the
+CLI/gateway **without passing that gate** — so a malformed committed default sails
+past every existing guard until spawn time. Worse, the buggy commit **updated the
+unit tests to assert the broken value**, so the suite was green.
+
+## The rule
+
+* **Committed role defaults are bare aliases, not versioned shorthands.** Use
+  `sonnet[1m]:high` (resolves to the latest sonnet = `claude-sonnet-5`), matching
+  `DEFAULT_MODEL_TIERS`' `sonnet[1m]`. Only pin a specific generation as a **full
+  id** (`claude-sonnet-5[1m]:high`, as `scout/models.ts` does — the `claude-`
+  prefix is a valid upstream id the gateway forwards verbatim). Never the bare
+  `<alias>-<version>` middle form.
+* A guard now enforces this: `agent-config-constants.test.ts` asserts **every**
+  `ROLE_MODEL_DEFAULTS` spec passes `validateCloudModelSpec`. If you add/retune a
+  role default, keep it launcher-valid or that test reds with the role name.
+
+## First move when you see it
+
+Read the role's resolved spec — `ROLE_MODEL_DEFAULTS[role]` (or `AGENT_MODELS` env
+override / owner tier-ceiling steering) — and run it through `validateCloudModelSpec`.
+A rejection there is your bug; a versioned-shorthand alias is the most common shape.

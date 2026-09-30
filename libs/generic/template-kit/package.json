@@ -1,0 +1,21 @@
+{
+  "name": "@papercusp/template-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pure schema + validation kit for the templates system (agent-composed apps): the component-manifest format ({id, version, tier, kind, provides, composesWith, source, tests, summary}) with a zero-dep structural validator, and the curated component catalog (the machine-readable source of truth the human docs catalog projects from). Plus the template.yaml manifest schema, multi-template composition semantics (union-of-checks), and the reference template manifests pinned to the repo templates/ dir by test (plan app-templates-2026-07-04 P-005/P-014/P-006). Zero I/O, zero runtime deps, zero domain coupling — validation is pure data-in/data-out; YAML parsing stays in the consumer (yaml is a test-only devDep).",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "@types/node": "^22.0.0",
+    "vitest": "^4.1.4",
+    "yaml": "^2.6.0"
+  }
+}

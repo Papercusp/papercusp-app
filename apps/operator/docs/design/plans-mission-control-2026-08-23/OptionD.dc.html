@@ -1,0 +1,196 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    :root{
+      --bg:#07101d;--bg-1:#0b1220;--bg-2:rgba(255,255,255,0.045);--bg-3:rgba(255,255,255,0.075);
+      --bg-raised:#112235;--fg:#e7f7ff;--fg-dim:#b9d4e8;--fg-mute:#7f9bb4;
+      --border-muted:rgba(125,211,252,0.08);--border:rgba(125,211,252,0.15);--border-strong:rgba(125,211,252,0.32);
+      --accent:#38bdf8;--accent-strong:#7dd3fc;--accent-soft:#bae6fd;
+      --good:#34d399;--warn:#fbbf24;--bad:#fb7185;
+      --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    }
+    body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:12.5px;-webkit-font-smoothing:antialiased;}
+    a{color:var(--accent-strong)}a:hover{color:var(--accent-soft)}
+    .ic{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+    .appbar{display:flex;align-items:center;gap:18px;height:38px;padding:0 16px;border-bottom:1px solid var(--border-muted);background:var(--bg-1)}
+    .brand{font-family:var(--mono);font-size:12px;color:var(--fg-dim);display:flex;align-items:center;gap:7px}
+    .brand-dot{width:8px;height:8px;border-radius:999px;background:var(--accent)}
+    .tabs{display:flex;align-items:center;gap:2px;height:100%}
+    .tab{padding:0 11px;height:100%;display:flex;align-items:center;font-size:12px;color:var(--fg-mute);border-bottom:2px solid transparent}
+    .tab.on{color:var(--fg);border-bottom-color:var(--accent)}
+    .viewbar{display:flex;align-items:center;gap:14px;padding:12px 16px 8px}
+    .viewbar h1{margin:0;font-size:15px;font-weight:650}
+    .seg{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+    .seg span{padding:4px 11px;font-size:11px;color:var(--fg-mute);border-right:1px solid var(--border-muted)}
+    .seg span:last-child{border-right:0}
+    .seg span.on{background:rgba(56,189,248,0.14);color:var(--accent-soft)}
+    .legend{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:10.5px;color:var(--fg-mute)}
+    .lg{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono)}
+    .lgdot{width:8px;height:8px;border-radius:3px}
+    .win{display:flex;align-items:center;gap:8px;padding:0 16px 10px;font-size:11px;color:var(--fg-mute)}
+    .win .chip{padding:2px 9px;border-radius:999px;border:1px solid var(--border);font-size:10.5px;font-weight:650}
+    .win .chip.on{color:var(--accent-soft);border-color:rgba(56,189,248,0.45);background:rgba(56,189,248,0.12)}
+    .lanes{flex:1;min-height:0;display:flex;flex-direction:column;padding:0 16px 8px}
+    .time-head{display:grid;grid-template-columns:250px minmax(0,1fr);align-items:end;padding-bottom:4px}
+    .ticks{position:relative;height:18px;border-bottom:1px solid var(--border-muted)}
+    .tick{position:absolute;bottom:2px;font-size:9.5px;color:var(--fg-mute);font-variant-numeric:tabular-nums;transform:translateX(-50%)}
+    .lane{display:grid;grid-template-columns:250px minmax(0,1fr);align-items:stretch;border-bottom:1px solid var(--border-muted);min-height:52px}
+    .lane-label{display:flex;flex-direction:column;justify-content:center;gap:2px;padding:6px 10px 6px 0;min-width:0}
+    .lane-label b{font-size:12px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .lane-sub{display:flex;align-items:center;gap:6px;font-size:9.5px;color:var(--fg-mute)}
+    .bucket{padding:0 4px;border-radius:999px;font-size:8px;font-weight:650;text-transform:uppercase;border:1px solid var(--border);color:var(--fg-mute)}
+    .bucket.run{color:#bae6fd;border-color:rgba(56,189,248,0.4)}
+    .bucket.ready{color:#93c5fd;border-color:rgba(96,165,250,0.4)}
+    .tl{position:relative;border-left:1px solid var(--border-muted)}
+    .gline{position:absolute;top:0;bottom:0;width:1px;background:var(--border-muted)}
+    .now{position:absolute;top:0;bottom:0;width:1px;background:color-mix(in srgb,var(--bad) 70%,transparent)}
+    .bar{position:absolute;top:50%;transform:translateY(-50%);height:22px;border-radius:6px;display:flex;align-items:center;gap:5px;padding:0 7px;font-size:9.5px;font-family:var(--mono);color:var(--fg);white-space:nowrap;overflow:hidden}
+    .bav{width:13px;height:13px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:6.5px;font-weight:700;color:#051827;flex:0 0 auto}
+    .stall{position:absolute;top:50%;transform:translateY(-50%);height:22px;border-radius:6px;border:1px dashed color-mix(in srgb,var(--warn) 55%,transparent);color:#fde68a;display:flex;align-items:center;gap:4px;padding:0 7px;font-size:9px}
+    .tip{position:absolute;z-index:3;background:#0d1829;border:1px solid var(--border-strong);border-radius:8px;padding:8px 10px;font-size:10.5px;color:var(--fg-dim);box-shadow:0 24px 70px rgba(0,0,0,0.32);display:flex;flex-direction:column;gap:3px;width:230px}
+    .tip b{color:var(--fg);font-family:var(--mono);font-weight:600}
+    .tip .open{color:var(--accent-soft);font-weight:600}
+    .foot{display:flex;align-items:center;gap:14px;padding:8px 16px;font-size:10.5px;color:var(--fg-mute);border-top:1px solid var(--border-muted)}
+  </style>
+</helmet>
+<div style="display:flex;flex-direction:column;width:1440px;height:798px;overflow:hidden">
+  <div class="appbar">
+    <span class="brand"><span class="brand-dot"></span>papercusp</span>
+    <div class="tabs">
+      <span class="tab">Overview</span><span class="tab">Work</span><span class="tab">HUD</span>
+      <span class="tab on">Plans</span><span class="tab">Git</span><span class="tab">More ▾</span>
+    </div>
+  </div>
+  <div class="viewbar">
+    <h1>Plans — Mission Control</h1>
+    <div class="seg"><span>Mission control</span><span>List</span><span class="on">Lanes</span></div>
+    <span class="legend">
+      <span class="lg"><span class="lgdot" style="background:#7dd3fc"></span>su-76a83</span>
+      <span class="lg"><span class="lgdot" style="background:#a78bfa"></span>su-6e294</span>
+      <span class="lg"><span class="lgdot" style="background:#34d399"></span>su-7f4eb</span>
+      <span class="lg"><span class="lgdot" style="background:#fda4af"></span>su-50a5a</span>
+      <span class="lg"><span class="lgdot" style="background:#fbbf24"></span>su-82be7</span>
+      <span class="lg"><span class="lgdot" style="background:#f9a8d4"></span>su-f4df4</span>
+    </span>
+  </div>
+  <div class="win">
+    <span>Window:</span>
+    <span class="chip on">today</span><span class="chip">24h</span><span class="chip">week</span>
+    <span style="margin-left:auto">active plans only · sorted by last work</span>
+  </div>
+
+  <div class="lanes">
+    <div class="time-head">
+      <span style="font-size:9.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-mute)">Plan</span>
+      <div class="ticks">
+        <span class="tick" style="left:0%">10:00</span><span class="tick" style="left:12.5%">11:00</span>
+        <span class="tick" style="left:25%">12:00</span><span class="tick" style="left:37.5%">13:00</span>
+        <span class="tick" style="left:50%">14:00</span><span class="tick" style="left:62.5%">15:00</span>
+        <span class="tick" style="left:75%">16:00</span><span class="tick" style="left:87.5%">17:00</span>
+      </div>
+    </div>
+
+    <!-- Lane 1 -->
+    <div class="lane">
+      <div class="lane-label">
+        <b>EI-100 security posture closure</b>
+        <span class="lane-sub"><span class="bucket run">plan</span><span>4 live · 3/9 items</span></span>
+      </div>
+      <div class="tl">
+        <span class="gline" style="left:12.5%"></span><span class="gline" style="left:25%"></span><span class="gline" style="left:37.5%"></span><span class="gline" style="left:50%"></span><span class="gline" style="left:62.5%"></span><span class="gline" style="left:75%"></span><span class="gline" style="left:87.5%"></span>
+        <span class="now" style="left:91%"></span>
+        <span class="bar" style="left:40%;width:51%;background:rgba(125,211,252,0.22);border:1px solid rgba(125,211,252,0.45)"><span class="bav" style="background:#7dd3fc">76</span>su-76a83</span>
+        <span class="bar" style="left:58%;width:26%;top:78%;background:rgba(167,139,250,0.20);border:1px solid rgba(167,139,250,0.45)"><span class="bav" style="background:#a78bfa">6e</span>su-6e294</span>
+      </div>
+    </div>
+
+    <!-- Lane 2 with tooltip -->
+    <div class="lane" style="min-height:64px">
+      <div class="lane-label">
+        <b>P2P git public release</b>
+        <span class="lane-sub"><span class="bucket run">plan</span><span>3 live · 21/30 items</span></span>
+      </div>
+      <div class="tl">
+        <span class="gline" style="left:12.5%"></span><span class="gline" style="left:25%"></span><span class="gline" style="left:37.5%"></span><span class="gline" style="left:50%"></span><span class="gline" style="left:62.5%"></span><span class="gline" style="left:75%"></span><span class="gline" style="left:87.5%"></span>
+        <span class="now" style="left:91%"></span>
+        <span class="bar" style="left:6%;width:34%;background:rgba(52,211,153,0.20);border:1px solid rgba(52,211,153,0.45)"><span class="bav" style="background:#34d399">7f</span>su-7f4eb</span>
+        <span class="bar" style="left:47%;width:44%;background:rgba(253,164,175,0.18);border:1px solid rgba(253,164,175,0.45)"><span class="bav" style="background:#fda4af">50</span>su-50a5a</span>
+        <div class="tip" style="left:52%;top:58%">
+          <b>su-50a5a · claude</b>
+          <span>13:47 → now · 214 tool calls</span>
+          <span>“release verification evidence sweep”</span>
+          <span class="open">Open session →</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Lane 3 -->
+    <div class="lane">
+      <div class="lane-label">
+        <b>Agent launch unification</b>
+        <span class="lane-sub"><span class="bucket run">plan</span><span>1 live · 44/45 items</span></span>
+      </div>
+      <div class="tl">
+        <span class="gline" style="left:12.5%"></span><span class="gline" style="left:25%"></span><span class="gline" style="left:37.5%"></span><span class="gline" style="left:50%"></span><span class="gline" style="left:62.5%"></span><span class="gline" style="left:75%"></span><span class="gline" style="left:87.5%"></span>
+        <span class="now" style="left:91%"></span>
+        <span class="bar" style="left:20%;width:18%;background:rgba(167,139,250,0.20);border:1px solid rgba(167,139,250,0.45)"><span class="bav" style="background:#a78bfa">6e</span>su-6e294</span>
+        <span class="bar" style="left:74%;width:17%;background:rgba(167,139,250,0.20);border:1px solid rgba(167,139,250,0.45)"><span class="bav" style="background:#a78bfa">6e</span>su-6e294</span>
+      </div>
+    </div>
+
+    <!-- Lane 4: stall -->
+    <div class="lane">
+      <div class="lane-label">
+        <b>Owner plans single pane</b>
+        <span class="lane-sub"><span class="bucket run">plan</span><span>2 live · 9/11 items</span></span>
+      </div>
+      <div class="tl">
+        <span class="gline" style="left:12.5%"></span><span class="gline" style="left:25%"></span><span class="gline" style="left:37.5%"></span><span class="gline" style="left:50%"></span><span class="gline" style="left:62.5%"></span><span class="gline" style="left:75%"></span><span class="gline" style="left:87.5%"></span>
+        <span class="now" style="left:91%"></span>
+        <span class="bar" style="left:2%;width:23%;background:rgba(125,211,252,0.22);border:1px solid rgba(125,211,252,0.45)"><span class="bav" style="background:#7dd3fc">5a</span>su-5ae5f</span>
+        <span class="stall" style="left:28%;width:34%"><svg class="ic" viewBox="0 0 24 24" style="width:10px;height:10px"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>no tool calls 2h — parked on WI-40971</span>
+        <span class="bar" style="left:65%;width:26%;background:rgba(251,191,36,0.16);border:1px solid rgba(251,191,36,0.4)"><span class="bav" style="background:#fbbf24">82</span>su-82be7</span>
+      </div>
+    </div>
+
+    <!-- Lane 5 -->
+    <div class="lane">
+      <div class="lane-label">
+        <b>Event system drift to derived</b>
+        <span class="lane-sub"><span class="bucket ready">ready</span><span>0 live · 2/16 items</span></span>
+      </div>
+      <div class="tl">
+        <span class="gline" style="left:12.5%"></span><span class="gline" style="left:25%"></span><span class="gline" style="left:37.5%"></span><span class="gline" style="left:50%"></span><span class="gline" style="left:62.5%"></span><span class="gline" style="left:75%"></span><span class="gline" style="left:87.5%"></span>
+        <span class="now" style="left:91%"></span>
+        <span class="bar" style="left:8%;width:11%;background:rgba(249,168,212,0.18);border:1px solid rgba(249,168,212,0.45)"><span class="bav" style="background:#f9a8d4">f4</span>su-f4df4</span>
+      </div>
+    </div>
+
+    <!-- Lane 6 -->
+    <div class="lane">
+      <div class="lane-label">
+        <b>Queue authorization redesign</b>
+        <span class="lane-sub"><span class="bucket run">plan</span><span>0 live · 12/14 items</span></span>
+      </div>
+      <div class="tl">
+        <span class="gline" style="left:12.5%"></span><span class="gline" style="left:25%"></span><span class="gline" style="left:37.5%"></span><span class="gline" style="left:50%"></span><span class="gline" style="left:62.5%"></span><span class="gline" style="left:75%"></span><span class="gline" style="left:87.5%"></span>
+        <span class="now" style="left:91%"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <span>Bar = one agent session on the plan · click → transcript · lane label → plan</span>
+    <span style="margin-left:auto">6 of 14 running lanes · <span style="color:#fde68a">1 stall flagged</span></span>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

@@ -1,0 +1,29 @@
+id: su.mode-grade
+extends: base
+version: 0.1.0
+description: "Built-in GRADE mode identity component; host policy remains in the mode registry."
+slots:
+  - slot: grade
+contributions:
+  - id: grade-definition
+    purpose: prompt
+    source: fixed
+    refresh: source-change
+    inputKind: prompt-file
+    ref: "mode:su.mode-grade:grade"
+  - id: current-mode-state
+    purpose: operational
+    source: provider
+    refresh: turn
+    inputKind: setting
+    ref: mode
+    producerRef: modes/store:agent_modes
+mode:
+  id: grade
+  policyRef: grade
+  title: "GRADE — score, repair, and re-grade"
+  oneLiner: "enter AUTO, grade with a reused rubric, and drive confirmed findings through a verified fix and re-grade"
+  definitionContributionId: grade-definition
+  implies: [auto]
+  requiresSubject: false
+  launchable: true

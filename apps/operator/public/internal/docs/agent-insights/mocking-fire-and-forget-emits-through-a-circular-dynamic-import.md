@@ -1,0 +1,60 @@
+# Mock the leaf sink, not the mid-cycle module, for fire-and-forget emits
+URL: /internal/docs/agent-insights/mocking-fire-and-forget-emits-through-a-circular-dynamic-import
+
+A vitest vi.mock over a module reached by a fire-and-forget dynamic import inside a circular graph races the import and leaks the real function; mock the single downstream sink instead.
+
+## Symptom
+
+A unit test that mocks a module to suppress fire-and-forget lifecycle emits flakes
+red intermittently (or, on a loaded machine, deterministically), with a
+`console.warn` from the *real* module the mock was supposed to replace —
+tripping `vitest-fail-on-console`. The warn often surfaces inside a *later*
+test than the one that triggered it (the emit is fire-and-forget, so the
+rejected promise resolves on a subsequent tick).
+
+Concrete instance (EI-8413): `work-items-urgent.test.ts` mocked
+`./work-items-events` (spreading `importOriginal` + overriding the `emit*`
+functions), yet
+`[work-items-events] created-event for WI-9001 emit failed: Cannot read
+properties of undefined (reading 'startsWith')` still fired.
+
+## Root cause
+
+`createWorkItem` reaches the emit through a **fire-and-forget dynamic**
+`import('./work-items-events')`, and `work-items-events` statically imports
+`./work-items` back — a **circular import graph**. An **async** `vi.mock`
+factory (one that `await importOriginal()`s and spreads the result) does not
+reliably intercept that dynamic import under the cycle: exactly one call per
+run resolves to the **real** module, so the real `emitWorkItemCreatedEvent`
+runs — reaching the real `emitAwaitedEvent`, which (in the test) queries the
+fake `sql` seam, gets a garbage waiter row whose `pattern` is `undefined`, and
+crashes on `pattern.startsWith('@')`. The `.catch` fail-soft then `console.warn`s.
+
+The mock *looks* correct in isolation (a single-test probe returns the mock),
+which is why it survives review — the race only manifests when a create runs
+after the module graph is warm.
+
+## The fix: mock the single downstream SINK
+
+Don't fight the racy mock on the mid-cycle module. Mock the **one leaf function
+every emit funnels into** — here `emitAwaitedEvent` in `./events/await/engine`,
+which is NOT in a circular import with the module under test, so the mock is
+race-free:
+
+```ts
+vi.mock('./events/await/engine', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  emitAwaitedEvent: vi.fn(async () => ({ ok: true, key: '', woken: 0, notified: [], msgId: null })),
+}));
+```
+
+Even when the real `emitWorkItemCreatedEvent` slips past the module spy, it now
+hits a no-op engine and never touches the fake DB. Keep the module-level spy if
+you want assertable emit functions, but the engine mock is the load-bearing one.
+
+## Rule of thumb
+
+When suppressing a **fire-and-forget** side effect that reaches its target via a
+**dynamic import inside a circular graph**, mock the **innermost sink** the
+effect ultimately calls (the leaf with no cycle back to the SUT), not the
+cyclic mid-layer module the async `vi.mock` factory can't reliably intercept.

@@ -1,0 +1,62 @@
+# A re-firing watchdog signal whose fix is \\\"already in the code\\\" — check bg-host uptime first
+URL: /internal/docs/agent-insights/a-landed-watchdog-fix-can-refire-if-bg-host-is-stale
+
+A self-improvement / watchdog collector fix that is committed, tested, in main, AND deployed to :3070 can STILL keep firing its own signal, because the watchdog runs in the bg-host, which loads tsx once at boot with no file-watch. Before diagnosing a re-fire as a code defect, compare bg-host uptime against the fix's commit time.
+
+## The trap
+
+A watchdog / self-improvement collector (e.g. `collectStalledClaimSignals` in
+`packages/operator-core/lib/harness/improvements/watchdog.ts`) keeps emitting the
+SAME signal — re-dispatching a "bug" whose fix you can see plainly in the source.
+You confirm the exclusion is present, the regression test is green, the file is
+`committed ✓ · main ✓ · deployed ✓` per `dev:pipeline_position`, and even replay the
+collector's SQL against the live DB and it returns **0 rows**. Yet the signal fired
+again today. It looks impossible.
+
+## Why it happens
+
+**The watchdog does not run from the release checkout (`:3070`) or re-read source.**
+The improvement-watchdog routine runs in the **bg-host**, which loads a BUNDLE built
+from the staging tree **once at process start, with no file-watch** — the unit's
+`ExecStartPre=bundle-host.sh` rebuilds that bundle on every start (fail-closed), so a
+restart, and only a restart, picks up your edit. A module loaded at boot stays loaded. So the RUNNING watchdog holds whatever the code
+was **at the moment bg-host last started** — not what is on disk now, and a `:3070`
+deploy does not touch it (deploy restarts the release operator, not bg-host).
+
+Worked example (WI-3669 / EI-18605426497677302, 2026-07-25): the `_claimHold`
+exclusion was committed `2026-07-20 21:42:32`, but the bg-host booted
+`2026-07-20 21:16:33` — **26 minutes earlier** — and had run continuously for 4.5
+days. The fix lived in `main` + the source tree the whole time, but the running
+watchdog was 26-minutes-too-old to have it, so it re-flagged the claim-held item.
+
+## The one check that settles it
+
+Before concluding "the collector code is wrong" (and before writing a new fix):
+
+```bash
+# When did the fix commit land?
+git log -1 --format=%ci -S '<a string unique to the fix>' -- <collector file>
+# When did the running watchdog last (re)load its code?
+systemctl --user show papercup-bg-host.service -p ExecMainStartTimestamp
+```
+
+If **bg-host started before the fix commit**, the fix is simply not loaded — this is
+an *activation gap, not a code defect*. Replaying the collector SQL against the live
+DB tests the SOURCE, not the running process, so 0 rows there does not prove the
+running watchdog excludes the row.
+
+## Remediation
+
+Load the already-landed code into the running watchdog by restarting the host:
+`dev:restart { target: 'bg-host', confirm: true, authorize: true, reason: 'reload the background host with updated code' }` (coordinated/drained; never a raw
+`systemctl restart`). Any deploy-adjacent or routine bg-host restart also activates
+it. This is a shared routines/DBOS host restart — outside a sandboxed runner-worker's
+lane, so a worker should land the code + test and flag the restart, not perform it.
+
+## The general rule
+
+The same holds for **every** path that bg-host / the gateway (`:8788`) / `:3170`
+loads from the staging tree via `tsx`: a committed edit is inert in those processes
+until that host restarts. `dev:pipeline_position` says as much in its `notes` /
+`activation` for such a path — read it. "It's in the code and deployed" ≠ "the
+process that runs it has loaded it."

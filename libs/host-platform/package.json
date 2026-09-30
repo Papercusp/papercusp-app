@@ -1,0 +1,42 @@
+{
+  "name": "@papercusp/host-platform",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Host-boundary interface — fs / paths / database URL resolution behind one swappable adapter. Desktop impl + server stub.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./desktop": {
+      "types": "./src/desktop.ts",
+      "import": "./src/desktop.ts",
+      "default": "./src/desktop.ts"
+    },
+    "./server": {
+      "types": "./src/server.ts",
+      "import": "./src/server.ts",
+      "default": "./src/server.ts"
+    },
+    "./process-environment": {
+      "types": "./src/process-environment.ts",
+      "import": "./src/process-environment.ts",
+      "default": "./src/process-environment.ts"
+    }
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@typescript/native": "npm:typescript@7.0.2",
+    "@papercusp/test-config": "*",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "vitest": "^3.0.0"
+  }
+}

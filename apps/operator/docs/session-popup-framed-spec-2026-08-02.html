@@ -1,0 +1,442 @@
+<title>Session popup — Framed, every zone</title>
+
+<style>
+  :root {
+    --ground: #f6f7f9; --raised: #ffffff; --ink: #101720; --ink-2: #3d4a58;
+    --muted: #5b6875; --rule: #dfe4ea; --rule-2: #c8d1db;
+    --accent: #0a6f9e; --accent-wash: #e8f2f8;
+    --good: #1a7f52; --warn: #9a6a06; --bad: #a83232;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0a0e14; --raised: #111821; --ink: #e4ecf4; --ink-2: #b3c2d0;
+      --muted: #8496a8; --rule: #1c242e; --rule-2: #2b3743;
+      --accent: #5cc6f5; --accent-wash: #10202c;
+      --good: #4ec98d; --warn: #e0b45c; --bad: #f08a8a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0a0e14; --raised: #111821; --ink: #e4ecf4; --ink-2: #b3c2d0;
+    --muted: #8496a8; --rule: #1c242e; --rule-2: #2b3743;
+    --accent: #5cc6f5; --accent-wash: #10202c;
+    --good: #4ec98d; --warn: #e0b45c; --bad: #f08a8a;
+  }
+  :root[data-theme="light"] {
+    --ground: #f6f7f9; --raised: #ffffff; --ink: #101720; --ink-2: #3d4a58;
+    --muted: #5b6875; --rule: #dfe4ea; --rule-2: #c8d1db;
+    --accent: #0a6f9e; --accent-wash: #e8f2f8;
+    --good: #1a7f52; --warn: #9a6a06; --bad: #a83232;
+  }
+
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 15px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 40px 24px 96px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(26px, 3.4vw, 38px); line-height: 1.15; font-weight: 680;
+    letter-spacing: -0.02em; text-wrap: balance; margin: 0 0 14px;
+  }
+  .lede { max-width: 66ch; font-size: 16.5px; color: var(--ink-2); margin: 0; }
+  .lede strong { color: var(--ink); font-weight: 620; }
+  h2 { font-size: 21px; font-weight: 660; letter-spacing: -0.01em; margin: 0 0 6px; text-wrap: balance; }
+  h3 { font-size: 15px; font-weight: 650; margin: 0 0 3px; }
+  p { margin: 0 0 12px; max-width: 70ch; }
+  section { margin-top: 54px; }
+  .sec-head { border-top: 2px solid var(--ink); padding-top: 12px; margin-bottom: 20px; }
+  .sec-head .eyebrow { margin-bottom: 6px; }
+  .sec-head p { color: var(--muted); margin: 4px 0 0; font-size: 14.5px; }
+  code, .m { font-family: var(--mono); font-size: 0.88em; }
+  code { background: var(--accent-wash); color: var(--accent); padding: 1px 5px; border-radius: 3px; }
+
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--accent-wash);
+    padding: 14px 17px; border-radius: 0 5px 5px 0; font-size: 14.5px;
+    color: var(--ink-2); margin: 20px 0 0;
+  }
+  .callout strong { color: var(--ink); }
+  .callout p:last-child { margin-bottom: 0; }
+  .spec {
+    display: flex; gap: 22px; flex-wrap: wrap; margin: 0 0 16px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  }
+  .spec b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 22px; margin-top: 8px; }
+  .cols p { margin: 0; font-size: 14px; color: var(--ink-2); }
+  .cols .m { color: var(--muted); }
+
+  /* ═══════════ POPUP MOCK — the operator's real dark palette ═══════════ */
+  .stage { overflow-x: auto; padding-bottom: 4px; }
+  .pop {
+    --rail-bg: #081220;
+    --convo-bg: #142339;
+    --card: #1d3048;
+    --edge: #44708c;
+    --zrule: #5182a0;
+    --cap-bg: #38bdf8;
+    --cap-fg: #051827;
+    --fg: #e7f7ff; --fg-dim: #b9d4e8; --fg-mute: #7f9bb4;
+    --warn-sp: #fbbf24;
+    display: grid;
+    grid-template-columns: 196px minmax(300px, 1fr) 200px;
+    min-width: 880px;
+    border: 1px solid var(--zrule);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 10.5px; line-height: 1.5;
+    color: var(--fg); background: var(--convo-bg);
+  }
+  .pop-rail { background: var(--rail-bg); display: flex; flex-direction: column; gap: 6px; padding: 0 8px 8px; }
+  .pop-rail--l { border-right: 1px solid var(--zrule); }
+  .pop-rail--r { border-left: 1px solid var(--zrule); }
+  .pop-mid { display: flex; flex-direction: column; min-width: 0; background: var(--convo-bg); }
+
+  /* A VERTICAL zone's title: a full-width bar at the top of the column. */
+  .ztitle {
+    margin: 0 -8px 2px; padding: 3px 8px;
+    background: var(--zrule); color: var(--cap-fg);
+    font-size: 8.5px; text-transform: uppercase; font-weight: 700;
+  }
+  .ztitle i { font-style: normal; font-weight: 600; opacity: 0.72; }
+
+  /* A HORIZONTAL zone's title: an inline cap that shares the band's own row,
+     so naming the zone costs zero extra height. */
+  .zcap {
+    flex: none; padding: 2px 6px; border-radius: 3px;
+    background: var(--zrule); color: var(--cap-fg);
+    font-size: 8.5px; text-transform: uppercase; font-weight: 700;
+  }
+
+  .cluster { font-size: 8.5px; text-transform: uppercase; font-weight: 700; color: var(--fg-mute); margin: 3px 0 0; padding: 0 2px; }
+  .sec { border: 1px solid var(--edge); border-radius: 4px; background: var(--card); overflow: hidden; }
+  .sec-cap {
+    display: flex; align-items: center; gap: 5px; padding: 3px 8px; margin: 0;
+    background: var(--cap-bg); color: var(--cap-fg);
+    font-size: 9px; text-transform: uppercase; font-weight: 700;
+  }
+  .sec-n {
+    margin-left: auto; font-family: var(--mono); font-size: 8.5px; font-weight: 700;
+    font-variant-numeric: tabular-nums; padding: 0 4px; border-radius: 999px;
+    background: rgba(0,0,0,0.20);
+  }
+  .sec-body { padding: 5px 8px 6px; }
+  .kv { display: flex; gap: 6px; padding: 1px 0; }
+  .kv .k { flex: none; width: 52px; color: var(--fg-mute); }
+  .kv .v { min-width: 0; color: var(--fg-dim); }
+  .line { color: var(--fg-dim); margin: 0; padding: 1px 0; }
+  .quiet { display: flex; align-items: baseline; gap: 6px; padding: 1px 4px; font-size: 9.5px; color: var(--fg-mute); }
+  .quiet b { font-weight: 700; text-transform: uppercase; font-size: 8.5px; }
+  .quiet i { font-style: italic; }
+  .quiet::before {
+    content: ""; flex: none; width: 4px; height: 4px; border-radius: 50%;
+    background: currentColor; opacity: 0.5; transform: translateY(-1px);
+  }
+  .sec[data-attn] { border-color: var(--warn-sp); }
+  .sec[data-attn] .sec-cap { background: var(--warn-sp); color: #051827; }
+
+  .pop-top, .pop-band, .fleet {
+    display: flex; align-items: center; gap: 5px; flex-wrap: wrap; padding: 5px 9px;
+  }
+  .pop-top { border-bottom: 1px solid var(--zrule); }
+  .pop-band { border-top: 1px solid var(--zrule); }
+  .fleet { border-top: 1px solid var(--zrule); }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px;
+    border-radius: 999px; font-size: 9.5px;
+    background: rgba(255,255,255,0.07); color: var(--fg-dim);
+    max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chip--live { background: color-mix(in oklab, transparent, #34d399 15%); color: #b7f0d8; }
+  .chip--attn { background: color-mix(in oklab, transparent, #fbbf24 16%); color: #ffe4a3; }
+  .chip .dot { flex: none; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .tb-btn {
+    padding: 2px 7px; border: 1px solid var(--edge); border-radius: 3px;
+    font-size: 9.5px; color: var(--fg-dim); background: rgba(255,255,255,0.03);
+  }
+  .grow { flex: 1 1 auto; }
+
+  .pop-convo { flex: 1 1 auto; padding: 9px; display: flex; flex-direction: column; gap: 7px; min-height: 120px; }
+  .msg { display: flex; gap: 7px; }
+  .msg-gut { flex: none; width: 3px; border-radius: 2px; background: var(--edge); }
+  .msg-b { min-width: 0; color: var(--fg-dim); }
+  .msg-b b { color: var(--fg); font-weight: 650; }
+  .msg code { background: rgba(255,255,255,0.07); color: var(--fg); font-size: 9.5px; padding: 0 3px; border-radius: 2px; }
+
+  .pop-composer {
+    display: flex; align-items: center; gap: 6px; margin: 0 9px 8px; padding: 5px 8px;
+    border: 1px solid var(--edge); border-radius: 5px; background: rgba(0,0,0,0.34);
+  }
+  .pop-composer .ph { flex: 1 1 auto; color: var(--fg-mute); font-size: 10px; }
+  .send { padding: 2px 8px; border-radius: 3px; background: var(--cap-bg); color: var(--cap-fg); font-size: 9.5px; font-weight: 700; }
+
+  .pill { display: inline-flex; border-radius: 999px; overflow: hidden; font-size: 9.5px; }
+  .pill .cap { padding: 2px 6px; background: var(--cap-bg); color: var(--cap-fg); font-weight: 700; }
+  .pill .val { padding: 2px 6px; background: color-mix(in oklab, transparent, #38bdf8 14%); color: #bae6fd; }
+  .pill--off .cap { background: #24384f; color: var(--fg-dim); }
+  .pill--off .val { background: rgba(255,255,255,0.06); color: var(--fg-mute); }
+  .act { padding: 3px 7px; border: 1px solid var(--edge); border-radius: 3px; font-size: 9.5px; color: var(--fg); background: rgba(255,255,255,0.04); }
+  .sep { width: 1px; height: 14px; background: var(--edge); margin: 0 2px; }
+  .fl-f { display: flex; align-items: center; gap: 4px; }
+  .fl-f .c { font-size: 8.5px; text-transform: uppercase; color: var(--fg-mute); font-weight: 620; }
+  .fl-f .w { padding: 2px 6px; border: 1px solid var(--edge); border-radius: 3px; background: rgba(0,0,0,0.30); color: var(--fg-dim); font-size: 9.5px; }
+  .launch { margin-left: auto; padding: 3px 9px; border-radius: 3px; background: var(--cap-bg); color: var(--cap-fg); font-size: 9.5px; font-weight: 700; }
+
+  /* ── the glitch, before / after ── */
+  .ba { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; margin-top: 6px; }
+  .ba-c { border: 1px solid var(--rule); border-radius: 7px; overflow: hidden; background: var(--raised); }
+  .ba-h { padding: 9px 13px; border-bottom: 1px solid var(--rule); font-size: 12.5px; }
+  .ba-h b { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.07em; text-transform: uppercase; }
+  .ba-h .no { color: var(--bad); }
+  .ba-h .yes { color: var(--good); }
+  .ba-body { background: #0d1829; padding: 7px; overflow: hidden; }
+  .ba-band { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+  .ba-chip {
+    display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px;
+    border-radius: 999px; font-size: 9.5px; white-space: nowrap;
+    background: color-mix(in oklab, transparent, #fbbf24 16%); color: #ffe4a3;
+  }
+  .ba-chip--clipped { max-width: 210px; }
+  .ba-chip--clipped .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ba-small { display: inline-flex; padding: 3px 8px; border-radius: 999px; font-size: 9.5px; background: rgba(255,255,255,0.07); color: #b9d4e8; }
+
+  .foot { margin-top: 60px; padding-top: 16px; border-top: 1px solid var(--rule); font-size: 12.5px; color: var(--muted); }
+  .foot p { max-width: none; }
+</style>
+
+<div class="wrap">
+
+  <p class="eyebrow">Session chat popup · Framed spec · 2026-08-02</p>
+  <h1>Every zone named, every boundary drawn</h1>
+  <p class="lede">
+    Look 3 carried through to the top bar and the bottom panel, so all six regions of the popup are
+    named, ruled zones rather than three framed ones floating among unlabelled chrome. The one
+    decision worth arguing about is below: the horizontal zones are titled
+    <strong>without spending a single row of height</strong>.
+  </p>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The design decision</p>
+      <h2>Horizontal zones get an inline cap, not a header row</h2>
+    </div>
+    <p>
+      A rail is tall and narrow, so a full-width title bar across the top of it costs nothing you
+      care about. The top bar and the two bottom bands are the opposite shape — short and wide — and
+      giving each of them its own title row would add three rows to a popup we just spent this
+      session compacting from five rows down to two. That would be undoing one of your asks to
+      satisfy another.
+    </p>
+    <p>
+      So a horizontal zone is named by a small filled cap that sits <em>inside</em> the band's
+      existing row, at its leading edge, in the same accent-on-ink as the rails' titles. Same
+      vocabulary, same colour, zero added height. The <span class="m">FLEET</span> label already
+      worked this way — it just becomes a filled cap instead of grey text, and the pattern
+      generalises to the other two.
+    </p>
+    <div class="callout">
+      <p>
+        <strong>Net height change: zero.</strong> The top bar and both bottom bands keep exactly the
+        row count they have now. The only new pixels in the whole design are the two rail title bars,
+        which sit in columns that were already tall.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The whole popup</p>
+      <h2>Six zones: Status · Orders · Conversation · Controls · Fleet · Activity</h2>
+      <p>Real tokens, real content, real proportions.</p>
+    </div>
+    <div class="spec">
+      <span>zone rule <b>4.52:1</b></span><span>section cap <b>8.40:1</b></span>
+      <span>card edge <b>2.51:1</b></span><span>ladder <b>1.40× / 1.88×</b></span>
+      <span>added height <b>0px</b></span>
+    </div>
+
+    <div class="stage">
+      <div class="pop">
+
+        <div class="pop-rail pop-rail--l">
+          <p class="ztitle">Orders <i>— what it was told</i></p>
+          <p class="cluster">What it was told</p>
+          <div class="sec">
+            <p class="sec-cap">Mission</p>
+            <div class="sec-body">
+              <div class="kv"><span class="k">effective</span><span class="v">execute-owner-directed-scope</span></div>
+              <div class="kv"><span class="k">authority</span><span class="v">act-with-disclosure</span></div>
+              <div class="kv"><span class="k">route</span><span class="v">self</span></div>
+            </div>
+          </div>
+          <div class="sec">
+            <p class="sec-cap">Modes <span class="sec-n">2</span></p>
+            <div class="sec-body">
+              <p class="line">AUTO — act, don't ask</p>
+              <p class="line">GRADE — fleet-execution-health</p>
+            </div>
+          </div>
+          <p class="quiet"><b>Directives</b> <i>none open</i></p>
+          <p class="quiet"><b>Facts</b> <i>none in scope</i></p>
+          <p class="cluster">What it's carrying</p>
+          <div class="sec" data-attn>
+            <p class="sec-cap">Walls <span class="sec-n">1</span></p>
+            <div class="sec-body"><p class="line">P-006 — owner must settle</p></div>
+          </div>
+          <p class="quiet"><b>Carry</b> <i>no note written</i></p>
+        </div>
+
+        <div class="pop-mid">
+          <div class="pop-top">
+            <span class="zcap">Status</span>
+            <span class="chip chip--live"><span class="dot"></span>live · 2h</span>
+            <span class="chip">ctx 22%</span>
+            <span class="chip chip--attn">⏳ waiting on gate green…</span>
+            <span class="grow"></span>
+            <span class="chip chip--attn">19 unread ›</span>
+            <span class="tb-btn">‹ Orders</span>
+            <span class="tb-btn">⤢</span><span class="tb-btn">⛶</span>
+            <span class="tb-btn">Activity ›</span>
+          </div>
+
+          <div class="pop-convo">
+            <div class="msg"><span class="msg-gut"></span><div class="msg-b">
+              <b>desktop-window-fullscreen.ts</b> — drives the Tauri window: <code>setFullscreen</code>,
+              reads the result back to confirm it moved, and tracks ownership.
+            </div></div>
+            <div class="msg"><span class="msg-gut"></span><div class="msg-b">
+              <b>SessionChatModal.tsx</b> — <code>toggleScreen</code> picks the mechanism on the
+              conversation region, so maximize stays structural.
+            </div></div>
+          </div>
+
+          <div class="pop-composer">
+            <span class="ph">Type to wake su · su-4ef7f…</span>
+            <span class="send">Send</span>
+          </div>
+
+          <div class="pop-band">
+            <span class="zcap">Controls</span>
+            <span class="pill"><span class="cap">Auto</span><span class="val">on ▾</span></span>
+            <span class="pill pill--off"><span class="cap">Ideate</span><span class="val">off ▾</span></span>
+            <span class="pill pill--off"><span class="cap">Drain</span><span class="val">off ▾</span></span>
+            <span class="pill"><span class="cap">Grade</span><span class="val">on ▾</span></span>
+            <span class="sep"></span>
+            <span class="act">↻ Resume</span><span class="act">⑂ Fork</span>
+            <span class="act">Focus window</span><span class="act">Grade session…</span>
+          </div>
+
+          <div class="fleet">
+            <span class="zcap">Fleet</span>
+            <span class="fl-f"><span class="c">Name</span><span class="w">durable handle</span></span>
+            <span class="fl-f"><span class="c">Plan</span><span class="w">Select… ▾</span></span>
+            <span class="fl-f"><span class="c">Model</span><span class="w">Default ▾</span></span>
+            <span class="fl-f"><span class="c">Account</span><span class="w">Default ▾</span></span>
+            <span class="fl-f"><span class="c">Members</span><span class="w">1</span></span>
+            <span class="launch">+ Launch fleet</span>
+          </div>
+        </div>
+
+        <div class="pop-rail pop-rail--r">
+          <p class="ztitle">Activity <i>— what it's doing</i></p>
+          <p class="cluster">Right now</p>
+          <div class="sec">
+            <p class="sec-cap">Health</p>
+            <div class="sec-body">
+              <div class="kv"><span class="k">loop</span><span class="v">no loop</span></div>
+              <div class="kv"><span class="k">claim</span><span class="v">none held</span></div>
+              <div class="kv"><span class="k">context</span><span class="v">22%</span></div>
+            </div>
+          </div>
+          <p class="quiet"><b>Waiting on</b> <i>no event</i></p>
+          <div class="sec">
+            <p class="sec-cap">Gates <span class="sec-n">1</span></p>
+            <div class="sec-body"><p class="line">critical-bug-wave-complete</p></div>
+          </div>
+          <p class="quiet"><b>Locks</b> <i>none held</i></p>
+          <p class="cluster">Inbound</p>
+          <div class="sec" data-attn>
+            <p class="sec-cap">Coord <span class="sec-n">19</span></p>
+            <div class="sec-body">
+              <p class="line">Autonomous cron routines burning…</p>
+              <p class="line">WI-5756 → done: migration</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="cols">
+      <div>
+        <h3>Status</h3>
+        <p>Facts that change on their own, plus the window controls. Nothing here is a verb.
+        <span class="m">The rail toggles moved next to the maximize buttons — they act on the window, not the session.</span></p>
+      </div>
+      <div>
+        <h3>Controls</h3>
+        <p>Everything you can change about <em>this</em> session: the four mode pills, then the verbs.
+        <span class="m">Separated from Fleet by its own rule, because Fleet acts on something else entirely.</span></p>
+      </div>
+      <div>
+        <h3>Fleet</h3>
+        <p>The one band that does not act on this session — it launches new ones.
+        <span class="m">Its own zone is what makes that legible; it used to read as more session controls.</span></p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Also fixed</p>
+      <h2>The chip that ran off the edge</h2>
+      <p>Already implemented and tested — shown here because it changes what the Status zone can contain.</p>
+    </div>
+    <div class="ba">
+      <div class="ba-c">
+        <div class="ba-h"><b class="no">Before</b> — the chip grew to the width of its text and pushed the next chip onto a second row</div>
+        <div class="ba-body">
+          <div class="ba-band">
+            <span class="ba-chip">⏳ RE-ARM #3. Shipping EI-19361771982678588. STATE 20:50Z: gate is HEALTHY again (verdicts ~19min apart: 20:02Z, 20:21Z, 20:40Z) —</span>
+            <span class="ba-small">loop</span>
+          </div>
+        </div>
+      </div>
+      <div class="ba-c">
+        <div class="ba-h"><b class="yes">After</b> — one line, ellipsis, full text in the tooltip</div>
+        <div class="ba-body">
+          <div class="ba-band">
+            <span class="ba-chip ba-chip--clipped"><span>⏳</span><span class="t">RE-ARM #3. Shipping EI-19361771982678588. STATE 20:50Z: gate is HEALTHY again (verdicts ~19min apart)</span></span>
+            <span class="ba-small">loop</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p style="margin-top:16px">
+      The chip renders <span class="m">openAwait.note</span> — agent-authored free text with no
+      length bound. It was <span class="m">white-space: nowrap</span> with no ceiling, which means
+      "never wrap and never stop". The ceiling now lives on the base
+      <span class="m">.pc-ctl-state</span> class rather than on that one chip, because every chip in
+      the band renders an unvalidated string and was one long value away from the same defect.
+    </p>
+  </section>
+
+  <div class="foot">
+    <p>
+      Ratios are sRGB relative luminance per WCAG 2.1 against the surface each element sits on.
+      Zone rule <span class="m">#5182a0</span> on rail <span class="m">#081220</span>; card
+      <span class="m">#1d3048</span> with edge <span class="m">#44708c</span>; caps are
+      <span class="m">--accent</span> on <span class="m">--accent-ink</span>. The earlier
+      three-look comparison is still at its own link; this page supersedes its Look 3.
+    </p>
+  </div>
+
+</div>

@@ -1,0 +1,44 @@
+# Public CI for Papercusp/papercusp-app (open-source-release-2026-09-29 P-009).
+#
+# Published into the public repository by scripts/source-preview.mjs --target public;
+# the private development repo's own workflows never ship. Every step here was run on a
+# fresh copy of the public export before it was added — keep it that way: a check that
+# is red on a clean clone tells contributors nothing.
+#
+# Plain `pull_request` (not `pull_request_target`): pull request code runs with a
+# read-only token and no secrets.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      # No test step yet: the export does not carry the test suite (the release audit
+      # excludes *.test.* — some tests assert on identity literals that must not be
+      # scrubbed). Maintainers run the full suite on every ported change; publishing it
+      # here is tracked in plan open-source-release-2026-09-29 (D-017).
+      - name: Typecheck
+        run: npm run lint:tsc

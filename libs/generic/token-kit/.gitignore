@@ -1,0 +1,35 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+coverage-*/
+junit.xml
+.DS_Store
+
+# EI-14414 (2026-07-19): the base ignore lines above (node_modules/, dist/, etc.) were
+# missing from this submodule even though the WI-4419 block below was already added —
+# git-sync auto-commits every submodule on a schedule, so any `npm install`/test run
+# that creates node_modules/ here would get swept into this repo's history within
+# minutes. See packages/operator-core/lib/harness/gitmodules-invariants.test.ts's
+# "submodule .gitignore invariants" describe block for the recurrence guard.
+
+# WI-4419 (2026-07-12): agent state dirs (.papercusp/) appear inside submodules too,
+# and git-sync auto-commits the superproject AND every submodule — so any scratch a
+# gitignore does not cover is committed automatically and then swept into every
+# release bundle by the sidecar source-tar glob. The superproject .gitignore does NOT
+# reach inside a submodule, so the guard must be repeated here. Depth-matching (**/)
+# on purpose: a slash-bearing pattern is anchored to THIS file's directory.
+.papercusp/scratch/
+.papercusp/vitest-tmp/
+.papercusp/tmp/
+.papercusp/tmp-*/
+.papercusp/logs/
+.papercusp/bench-reports/
+.papercusp/pi-sessions/
+**/.papercusp/scratch/
+**/.papercusp/vitest-tmp/
+**/.papercusp/tmp/
+**/.papercusp/tmp-*/
+**/.papercusp/logs/
+**/.papercusp/bench-reports/
+**/.papercusp/pi-sessions/

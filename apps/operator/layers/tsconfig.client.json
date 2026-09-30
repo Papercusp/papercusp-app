@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "$comment": "Layer: client. Browser-only code — React components, hooks, transport-adapter polyfills, Zero client wiring. May import next/link, next/navigation (client APIs), DOM types, react. NOT permitted: node:fs, node:child_process, server-side cookies(), database clients. Imports core. Empty include in v1; client files migrate in as Phase 4 / Phase 6b enforcement land.",
+  "extends": "./tsconfig.base.json",
+  "include": [],
+  "exclude": ["node_modules", "../.next"],
+  "references": [
+    { "path": "./tsconfig.core.json" }
+  ]
+}

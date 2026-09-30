@@ -1,0 +1,70 @@
+# Box wedge / session leak → ended Claude or Codex session with a live wrapper
+URL: /internal/docs/agent-insights/session-leak-zombie-resume-procs
+
+How to distinguish resident live/parked agent stacks from true ended-session process leaks, join Claude and Codex wrappers to exact adv-session identities, and safely dry-run or execute the slice-3 zombie reaper.
+
+## Symptom
+
+The managed agent-process count climbs while far fewer agents are actively taking turns. The box burns CPU, the **papercup-bg-host DBOS ticker** can starve, and ticker-driven work such as git-sync, the green checkpoint, and agent loops slows or freezes. `dev:service_health` may still show `:3070 up`: the operator and the bg-host ticker are different services.
+
+Do not explain this from the active-agent counter alone. A resident Papercusp session is a process tree, and parked/warm sessions are intentionally resident. The defect class here is narrower: an agent wrapper remains alive after its exact `adv_sessions` row is ended.
+
+## Root cause (EI-1873 / EI-20982995405794565)
+
+The leak is **ended-session zombie processes**, not merely idle-but-open sessions.
+
+* Claude exposes a native identity in `claude --resume <uuid>`. A leaked process has no open `adv_sessions` row for that UUID, yet the OS process remains alive.
+* Codex does not expose its native session id on every launch. Papercusp therefore stamps `PAPERCUSP_ADV_SESSION_ID=<id>` on only the top-level `~/.papercusp/bin/codex` wrapper. A leaked Codex wrapper has that exact row ended while the wrapper and its native child remain alive.
+
+The session officially concluded, but the wrapper lingered, holding connections and polling the operator event loop. Slices 1 and 2 of `idle-session-reaper.ts` scan **open** rows, so a process whose row is already closed is structurally invisible to them.
+
+On 2026-08-20, 165 tracked Codex wrappers joined one-to-one to exact adv-session ids: 141 rows were open and 24 were ended. Another 28 markerless wrappers were intentional fork/task scopes and had no `PAPERCUSP_ADV_SESSION_ID`; they were correctly outside the cleanup cohort. The initial Codex implementation still found zero candidates because all 165 managed wrappers were foreground processes in their PTYs. The legacy Claude foreground spare had been applied too broadly and made the entire Codex lane inert.
+
+## Diagnose
+
+Read the identity writer before interpreting counts:
+
+1. Claude: join the UUID from `claude --resume <uuid>` to `adv_sessions.session_id`. The UUID is ended only when it has **no open row**.
+2. Codex: read `PAPERCUSP_ADV_SESSION_ID` from the exact top-level `~/.papercusp/bin/codex` wrapper and join it to `adv_sessions.id`. Do not infer from `PAPERCUSP_SID`, `CODEX_HOME`, the native Codex child, or a broad process-name match.
+3. Classify each exact row as open or ended. Open rows are never process-cleanup candidates, regardless of whether coordination currently projects them as live, parked, recorded, or ended.
+4. Separately enumerate markerless Codex wrappers. These are forks/untracked task scopes and must remain excluded.
+5. Run the staged source with `dryRun:true`, then compare every proposed PID to the independent proc↔DB join and both on-desktop guards before any signal.
+
+A high process count is not itself proof of a leak. The deterministic leak predicate is **live exact wrapper + ended exact session identity + not on desktop**.
+
+## Fix / shed
+
+`idle-session-reaper.ts` slice 3 — `reapZombieResumeProcs()` plus pure `planZombieReap()` and `/proc`-backed `discoverResumeProcs()` — runs first in `system:idle-session-reaper`. It discovers Claude resume processes and exact Codex wrappers, asks Postgres which identities are ended, and uses `SIGTERM` followed by a grace period and `SIGKILL` for survivors.
+
+Safety properties:
+
+* **Exact identity only.** Claude uses the native resume UUID. Codex accepts only the stable top-level Papercusp wrapper carrying a safe positive `PAPERCUSP_ADV_SESSION_ID`. The native Codex child inherits the environment but is excluded by its path; markerless forks are excluded.
+* **Open-row veto.** Claude's `defaultEndedSessionIds` uses `HAVING COUNT(*) FILTER (WHERE ended_at IS NULL) = 0`, so an older ended row cannot alias a current open resume. Codex queries the exact `adv_sessions.id` and requires `ended_at IS NOT NULL`.
+* **On-desktop spares.** Both identity sets from `gatherOnDesktopSessions()` are subtracted. Immediately before planning or signalling, PID ancestry is also checked against open windows; a visible session is never signalled even when its row reads ended.
+* **Foreground-TTY spare is Claude-only.** A native Claude resume process may be a human-owned foreground terminal. Papercusp's top-level Codex wrapper is always foreground in its managed PTY, including ended leaked sessions, so foreground status cannot distinguish Codex liveness. `shouldSpareForegroundSessionProc()` preserves the Claude guard and deliberately exempts exact-ID Codex wrappers; Codex remains protected by exact-row and dual on-desktop guards.
+* **PID-recycle guard.** The full identity is re-read immediately before `SIGTERM` and again before any `SIGKILL`, so a recycled PID is never signalled.
+* **Double gate and dry run.** Both `papercusp-idle-session-reaper` and `papercusp-idle-session-reaper-terminate` must be on. `dryRun:true` plans only.
+* **Bounded discovery.** `/proc` reads run in batches of 64, and `environ` is read only for exact wrapper-path candidates.
+
+Manual out-of-band shed during a wedge:
+
+```ts
+const m = await import('<repo>/packages/operator-core/lib/idle-session-reaper.ts');
+await m.reapZombieResumeProcs({ dryRun: true, deps: { isFlagOn: async () => true } });
+// Independently verify every proposed PID and exact identity before continuing.
+await m.reapZombieResumeProcs({ dryRun: false, deps: { isFlagOn: async () => true } });
+```
+
+The 2026-08-20 repair was verified with the focused operator-core typecheck, 86/86 focused tests, and a live dry-run. Two exact ended cohorts totalling 29 non-desktop wrappers were removed; every signalled PID disappeared. The protected result retained open live/parked/recorded wrappers, all markerless forks, and ended wrappers under open-window ancestry. A final dry-run proposed zero killable PIDs.
+
+## Slice 4 — dangling inbox-wake await GC (P-004)
+
+`reclaimDanglingInboxWakeAwaits()` rides the slice-1 master flag. Every idle psu-launched agent arms `coord:inbox-wake:<self>`. Clean session end cancels it, but a process that dies before hygiene can leave the await row behind. That false wakeability makes a dead session look parked and can protect its ghost row from other reaper slices.
+
+The sweep cancels an inbox-wake await only when its owner is neither genuinely live nor resumable. A parked session with a live host keeps its await; a dead owner with no live host loses it and converges to honest ended state.
+
+## Still open
+
+* No-owner open `adv_sessions` rows are a separate cohort because they have no liveness key.
+* Slice 3 is the recurrence safety net. The upstream reason a wrapper sometimes fails to exit after session completion remains separate work.
+* The zombie sweep still runs inside the ticker-driven routine; a fully starvation-independent deployment would also expose it through an out-of-band watchdog path.

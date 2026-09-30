@@ -1,0 +1,2906 @@
+# Agent E2E playbook — driving the operator like a user
+URL: /internal/docs/testing/agent-e2e
+
+How AI agents drive the Papercusp Tauri desktop end to end, including safe staging restarts and dedicated test webviews.
+
+> **Webapp retired (2026-05-14).** Any `localhost:3055` (Vite SPA) or `localhost:3270` (the dev shell's own working-tree Hono host) URL on this page is only reachable while the **Tauri dev shell** is running. Start it with `cd papercusp-desktop && npm run dev`. (`:3070` is the systemd-owned green release operator — a separate process the dev shell does not load.)
+
+import { Aside } from '@astrojs/starlight/components';
+
+This is **the manual every AI agent follows** when asked to verify the
+operator end-to-end. It is **not** the automated test suite. The agent
+must drive a real browser the way a user would: navigate routes, click
+buttons, fill forms, watch toasts, observe DOM mutations. Calling the
+backend with `curl` is **not** a substitute — many bugs are UI-only
+(handlers wired wrong, components unmounted, toast lost, popover
+mispositioned, focus stolen). If you only test the API layer you'll
+miss them.
+
+The standalone webapp was retired on 2026-05-14. The dev shell still
+binds ports (the Vite SPA on `:3055`, its own working-tree Hono host on
+`:3270` — `:3070` is the separate green release operator, not this
+session), so `localhost:3055` may render a page, but it is **only meant
+to be reached through the Tauri shell** — auth, workspace switching,
+embedded-PG discovery, and the IPC bridge all assume the Tauri host.
+Driving the bare SPA port skips that wiring and the bugs you'll find
+won't reproduce for users.
+
+Start the shell with `cd papercusp-desktop && npm run dev` (or attach
+to an already-running one — see §1) and drive that webview via the
+**`tauri-agent-tools`** CLI documented below. It speaks to a debug-only
+Rust bridge inside the webview, so DOM queries, `eval`, `click`,
+`type`, IPC monitoring, and DOM-targeted screenshots all work without
+focus-stealing or OCR.
+
+The shell **used to** also open a **second window** — a ghostty terminal
+running the zellij `pui` dock with the live agent TUIs. Since 2026-07-13 the
+dock is **testing-gated dark** (operator-chat-sidebar-revival-2026-07-13
+P-014/D-004): it stays fully bundled, but spawns only when `FLAGS.TESTING` is
+ON (the webview relays the flag to Rust's `native_terminal_set_enabled` — no
+boot-time spawn). With the flag off (the shipped default) there is **no dock
+window**, and the revived **operator chat sidebar** in the webview is the
+chat surface. When the flag is on and the dock is up, `tauri-agent-tools`
+**cannot** see that window; drive/observe it with `zellij action` +
+screenshots — see **§16**.
+
+Marketing/website surfaces (`/`, `/marketplace`, `/support`, `/docs`,
+auth pages) deliberately omit some app-side affordances (e.g. the
+Oracle dock); don't flag those as failures — see the route table for
+which surfaces each feature should appear on.
+
+## 0. Tools
+
+Before the first CLI call, run this **same-shell PATH preflight**. Coding-agent launchers can expose Node/npm while omitting npm's global executable directory; that makes every otherwise-correct command fail with exit 127. Resolve the active npm prefix rather than hard-coding a Node major, then verify the command before booting a desktop or spending time on a bridge diagnosis.
+
+```sh
+if ! command -v tauri-agent-tools >/dev/null 2>&1; then
+  npm_prefix="$(npm prefix -g 2>/dev/null || true)"
+  if [ -n "$npm_prefix" ] && [ -x "$npm_prefix/bin/tauri-agent-tools" ]; then
+    export PATH="$npm_prefix/bin:$PATH"
+  fi
+fi
+
+command -v tauri-agent-tools >/dev/null 2>&1 || {
+  echo "FATAL: tauri-agent-tools is not on PATH; install it with npm i -g tauri-agent-tools or set VERIFY_TAURI_AGENT_TOOLS_BIN for the packaged verifier." >&2
+  exit 127
+}
+tauri-agent-tools --version
+```
+
+On managed installs, the prefix is version-scoped (for example, `~/.local/node25`), so do not copy today's absolute path into a runbook. The packaged `scripts/verify-tauri-headless.sh` performs the same resolution before it creates any display, desktop, or sidecar resources and exports `VERIFY_TAURI_AGENT_TOOLS_BIN`/its directory for assertion and `--boot-only` callers.
+
+Primary stack — drives the operator UI inside the Tauri shell:
+
+* **`tauri-agent-tools`** (`npm i -g tauri-agent-tools`, currently 0.7.0)
+  — CLI that talks to a debug-only Rust dev-bridge inside
+  `papercusp-desktop`. Real DOM access, `eval`, `click`, `type`, IPC
+  monitor, console capture, Rust logs, DOM-targeted screenshots, and
+  `check`-style assertions. **This is the primary driver for every
+  operator-side test.** Source + full reference:
+  [github.com/cesarandreslopez/tauri-agent-tools](https://github.com/cesarandreslopez/tauri-agent-tools).
+* **`curl`** — corroborate backend state (PG row written, sidecar log
+  line, `/api/...` returns expected JSON) after a UI action. Never as
+  a primary verification — many bugs are UI-only and the API would
+  pass.
+* **Operator log tail** — `tail -200 /tmp/tauri-dev.log` (or whichever
+  log the dev shell prints to; `bin/dev` and `npm run dev` both write
+  here by convention) for sidecar-side errors after a failure.
+
+Before citing any `tauri-agent-tools` output as verification evidence, ask: *what
+input would have made this look different?* If nothing could, it measured nothing.
+Most of the CLI's subcommands **cannot report failure at all** — they exit 0
+unconditionally and write a normal-looking artifact even when nothing worked. This
+list is not exhaustive by design (new subcommands default to the non-falsifiable
+side until proven otherwise); when in doubt, treat it as observational.
+
+**FALSIFIABLE — exit-coded; safe to cite alone as evidence:**
+
+* **`check --selector/--text/--eval/--no-errors`** — exits **1** if the assertion is
+  false. `work_items:complete` accepts a recorded `check` invocation on its own; no
+  image required.
+* **`wait --selector/--eval --timeout`** — exits nonzero on timeout, so it *can* tell
+  you a condition never became true. Treat it as a **settle guard**, not a final
+  assertion: always follow a `wait` with a `check`/`eval` read of the now-settled
+  state (§1.4 shows why a `wait` alone can be satisfied by a stale/outgoing page).
+
+**NON-FALSIFIABLE — exit 0 no matter what actually happened; observational only,
+never sufficient alone as `verifiedHow:'live-drove-ui'` evidence:**
+
+* **`screenshot`, `capture`** — write a plausible, normal-sized file (PNG, or a
+  bundle) **even for a window that never painted**. On a host with a working
+  screenshot backend this is *silent*: no error, no warning, just blank-white
+  pixels in a file that looks exactly like a real one (§15's cookbook has the
+  blank-screenshot check — `npm run check:screenshot`). `capture`'s screenshot
+  component inherits the same blindness even though the bundle also carries
+  DOM/console/logs.
+* **`dom`, `eval`, `probe`, `console-monitor`, `ipc-monitor`, `rust-logs`,
+  `storage`** — return whatever they observe; a wrong, stale, or empty result
+  still exits 0.
+* **`click`, `type`, `press`** — dispatch a synthetic event; success means "the
+  event was dispatched," not "the UI reacted as intended."
+
+**The rule:** close on a `check` (or `wait` immediately followed by a `check`/`eval`
+read) whenever the DOM can express the assertion — see **§1.3**'s
+`verifiedHow:'live-drove-ui'` caution for the exact citable forms. Reach for
+`screenshot`/`capture` only for a genuinely *visual* signal (layout, paint order,
+font rendering) the DOM can't express, and even then open the image before citing
+it.
+
+⚠ **Two more traps in `check`, both bitten live on 2026-08-09 (EI-19968305204816665) — one
+in each direction, so neither a plain FAIL nor a plain PASS is safe to trust blind:**
+
+1. **Never click and assert in the SAME `--eval` — it races React's commit and reports a
+   FALSE FAIL on a working interaction.** A single `--eval` string is one synchronous
+   expression; a state update from `.click()` inside it is not committed until the current
+   task yields, so anything read later in that *same* expression still sees the pre-click
+   DOM. `check --eval "(()=>{el.click(); return /new text/.test(el2.textContent);})()"` can
+   FAIL even though the click genuinely worked. Splitting the click and the assertion across
+   **two separate `--eval` flags** (or a `click` + `check --eval`) fixes it — each bridge
+   round-trip yields, which is exactly what lets the commit land. This fails in the expensive
+   direction: it invites "fixing" code that was already correct, or downgrading a true claim.
+2. **For any control that can change or unmount itself on use, assert the TRANSITION
+   (click → assert new state → click back → assert old state), never mere PRESENCE.**
+   `check --selector '[data-testid=x]'` passes happily against a toggle that breaks or
+   unmounts itself the first time it's clicked — presence is satisfied by a control that
+   works exactly once and then disappears. Only driving the interaction end-to-end catches it.
+
+Other tools and when:
+
+* **`verdict`** — only for **arbitrary public web pages** (docs site
+  on the marketing domain, third-party links, render checks for the
+  `/docs` MDX renderer hitting an external URL). Do **not** drive the
+  operator with verdict; the operator only renders correctly inside
+  Tauri.
+* **Xvfb + VirtualGL + `xdotool` + `import` + `tesseract`** — fallback for
+  scenarios where the bridge can't help: macOS dev builds without
+  the bridge compiled in, **release/production builds** (the bridge is
+  `#[cfg(debug_assertions)]` only, so screenshots are your only signal),
+  forensics on a crashed app, or visual checks (animation timing, font
+  rendering) that the DOM can't express. **⚠ Use VirtualGL (`vglrun -d egl0`),
+  NOT bare `Xvfb` — a plain Xvfb has no GL so WebKitGTK never paints and every
+  screenshot is blank-white regardless of the DOM.** See §15.4 for the cookbook
+  (incl. the GL trap + the `vglrun` recipe).
+
+Forbidden:
+
+* Playwright MCP / `proxy_mcp_playwright_*` tools — superseded by
+  `tauri-agent-tools` for operator work and by the official
+  `tauri-driver` CLI for the automated suite.
+* Driving the user's live `:0`/`:1` (whichever display number the
+  owner's real desktop session actually uses on this box — check with
+  `who` / `w` before assuming `:0`) Tauri window with `xdotool` while
+  they are working — focus-stealing is unacceptable. Use the bridge (no
+  focus changes) or a second Tauri instance under Xvfb.
+
+  > ⚠ **Incident (WI-2648, fact `wi2648-xdotool-email-leak`):** `xdotool
+  > type "flag"` intended for the desktop docs-search palette leaked into
+  > the owner's REAL focused Missive email draft — `xdotool windowactivate --sync` did NOT reliably land focus on the target window first, so the
+  > synthetic characters went to whatever window actually had focus on the
+  > shared live session. **Durable guidance for anyone verifying Papercusp
+  > desktop UI on the owner's live GNOME session:**
+  >
+  > 1. **NEVER use `xdotool type` / any synthetic character input** on the
+  >    live session — there is no reliable way to guarantee focus landed
+  >    on the target window first. Use a **headless render** instead:
+  >    `google-chrome --headless=new --screenshot` against the served
+  >    operator port URL for a visual check, or the bridge / a second
+  >    Xvfb instance (§15.4) for interaction.
+  > 2. `wmctrl -l | grep '<window title>'` **window-count** is a SAFE,
+  >    non-intrusive functional signal (open/close/reopen) — it doesn't
+  >    touch focus or send input, just lists windows.
+  > 3. **Global hotkeys** (e.g. a bound `ctrl+/`) ARE safe to send even on
+  >    the live session, because a global-hotkey grab is focus-independent
+  >    by design — unlike `xdotool type`, it doesn't depend on which
+  >    window currently has focus.
+
+## 1. Pre-flight
+
+### 1.1 Tauri dev shell is running
+
+```sh
+pgrep -af papercusp-desktop | head -3
+ls /tmp/tauri-dev-bridge-*.token 2>/dev/null
+```
+
+If neither shows a process, start it from
+`papercupai-workspace/papercup/papercusp-desktop`:
+
+```sh
+cd papercupai-workspace/papercup/papercusp-desktop
+npm run dev    # foregrounds 'tauri dev'; cargo build first run is ~2 min
+```
+
+The first launch compiles the Rust shell; subsequent launches hot-load
+the operator sidecar (the Vite SPA `@papercusp/operator-vite` on `:3055`
+
+* this dev shell's own working-tree Hono host on `:3270` — Next.js is
+  retired). The webview's `devUrl` points at `:3270`, **not** `:3070`:
+  `:3070` is the green release operator (systemd-owned), a separate
+  process the dev shell does not load. The own-port split
+  (`release-pipeline-resilience` P-010, 2026-06-11) exists precisely so a
+  desktop dev session stops loading the green release — `tauri.conf.json`
+  sets `devUrl` to `http://127.0.0.1:3270` and `bin/dev-operator-ifneeded.sh`
+  spawns the operator with `PAPERCUSP_HONO_PORT` defaulting to `3270`
+  (`OPERATOR_DEV_PORT`). Wait for `dev bridge listening` to appear in the
+  log before driving.
+
+### 1.2 Bridge probe
+
+```sh
+tauri-agent-tools probe
+```
+
+Expected output:
+
+```
+Running bridges:  1
+  PID <pid>  port <port>
+Bridge alive:     yes
+Bridge version:   0.7.0
+Endpoints:        /eval, /logs, /describe, /version, /process, /capabilities, /devtools, /health
+Windows:          main
+Page:
+  URL:      http://127.0.0.1:<port>/adv?tab=<tab>&slug=<slug>
+  Title:    Papercusp
+  Viewport: 1280x800   # or whatever the user has resized to
+```
+
+`/harness` is no longer a landing surface — it `beforeLoad`-redirects to
+`/adv` (translating `?slug`/`?project`→`?slug` and `?panel`→`?tab`), so a
+probe of a running dev shell shows an `/adv` URL, not `/harness?slug=…`.
+The live product surface is `/adv` (see §13); §5–§8 below describe the
+legacy `/harness` etc. as historical reference only.
+
+If multiple bridges show up, several Tauri dev instances are running
+(stale token files do **not** mean stale bridges — `kill -0 <pid>`
+each one). Pass `--pid <pid>` to subsequent commands to disambiguate.
+
+### 1.3 Current + safe-to-drive shell
+
+Before a real verification run, prove the selected shell is both
+**current** (serving the code you intend to test) and **safe to disturb**.
+`tauri-agent-tools probe` only proves the bridge is reachable; it does
+not prove the webview loaded the newest SPA bundle, that the Hono host
+still answers, or that the shell isn't sitting in a self-recovering flap
+(EI-13218) — `probe`'s "Bridge alive: yes" is the Rust bridge's OWN tiny
+control-plane server answering, which stays true even when the origin the
+webview is displaying (the Hono+SPA host, `:3270` in dev) is refusing
+connections. Prefer **`tauri-agent-tools health`** (bridge v0.7.0+) over
+bare `probe` when you need to know the app itself is actually reachable:
+it live-checks the origin the main webview currently points at and folds
+that into `sidecars_alive` (`--json` exits non-zero on either
+`!webview_ready` or `!sidecars_alive`, so it's CI-gate-able). A connection-
+refused you hit right after a green `probe` is exactly this class — re-run
+`health` before concluding the app crashed.
+can still serve the SPA HTML, or that killing the shell would be safe.
+
+Run the health split first:
+
+```sh
+tauri-agent-tools eval "
+  Promise.all([
+    fetch('/api/health').then(r => r.status).catch(e => 'ERR:' + e.message),
+    fetch('/').then(r => r.status).catch(e => 'ERR:' + e.message),
+    location.href,
+    document.title
+  ]).then(v => JSON.stringify({ apiHealth: v[0], rootHtml: v[1], href: v[2], title: v[3] }))
+"
+```
+
+`apiHealth:200` with `rootHtml:"ERR:..."` means the sidecar API is alive
+but the SPA HTML path is wedged. A `location.reload()` will usually
+replay the same broken origin; do not treat that as a valid UI check.
+
+Then navigate to the route under test and assert route-specific content:
+
+```sh
+tauri-agent-tools eval "window.__TSR_ROUTER__?.navigate({ to: '/settings/p2p' })"
+tauri-agent-tools check --selector 'body' --text 'Peer' --no-errors
+```
+
+:::caution\[Closing with `verifiedHow:'live-drove-ui'`? Drive the ASSERTIONS with `check`, not `eval` — and know `capture`/`screenshot` are ACCEPTED but NOT FALSIFIABLE]
+Note which command carries the assertion above. `eval` is for **exploration** — it
+returns a value and exits 0 whether or not what you hoped was true, so no transcript of
+it is falsifiable. `work_items:complete` refuses a `verifiedHow:'live-drove-ui'` close
+whose `testsRun`/`testResult`/`filesChanged` cite no real artifact, and it accepts
+exactly these:
+
+* a recorded **`tauri-agent-tools capture` / `screenshot` / `check`** invocation,
+* an **image path** (`.png`/`.jpg`/`.webp`/`.gif`), or
+* for a web deploy, a **URL + HTTP status** (`https://…/about -> 200`).
+
+**Accepted is not the same as falsifiable — see §0's falsifiable/non-falsifiable
+split.** `check` is exit-coded (fails loudly on its own); a cited `capture`/
+`screenshot` is *structurally* accepted but writes a plausible file even for a
+window that never painted, so it proves nothing by itself unless you also open it
+and confirm it isn't blank (§15's cookbook). Prefer `check` whenever the DOM can
+express the assertion — it needs no such extra step.
+
+A thorough `eval` transcript is **not** accepted at all. Plan for this **now**, while
+the shell is up: the gate fires at CLOSE time, long after an isolated instance has
+been torn down, so discovering it there costs a second full boot (\~4 min) purely to
+re-run assertions you already ran.
+
+`--json` belongs to **`check`**, not `eval`, in `tauri-agent-tools` 0.7.0. Do not
+mechanically append it while converting an exploratory probe: `tauri-agent-tools eval --pid "$PID" "<expression>"` is valid, but `eval ... --json` exits with
+`unknown option '--json'`. Switch the verb to `check` when you need a falsifiable
+assertion and structured JSON output.
+
+Cheapest compliant form — falsifiable, and it needs no image on disk:
+
+```sh
+tauri-agent-tools check --pid "$PID" --eval "<assertion>" --json   # exits 1 if false
+```
+
+⚠ Repeated `--eval` flags are silently dropped (EI-19283160209828072) — combine several
+assertions into ONE expression with `&&`. Why a cited screenshot is the *weakest* of
+these, and how to validate one: [§15's screenshot-citation caution](#15-common-gotchas).
+:::
+
+If the URL changes but the DOM stays on an older component, the shell is
+running a stale bundle. That is an `INCONCLUSIVE` UI result, not a
+feature failure.
+
+Finally, check whether the desktop owns the live dock before restarting
+or killing it:
+
+```sh
+PID=<pid-from-tauri-agent-tools-probe>
+if tree=$(timeout --signal=TERM --kill-after=1s 3s pstree -ap "$PID" 2>/dev/null); then
+  printf '%s\n' "$tree" | rg 'ghostty|zellij|pui|psu|claude|codex|omp'
+else
+  echo "pstree timed out; using a bounded direct-child fallback" >&2
+  ps -o pid,ppid,stat,etime,args --forest -p "$PID" --ppid "$PID"
+fi
+```
+
+`pstree` can block while reading a live checkpoint process tree. Keep the timeout
+and fallback intact: a diagnostic that wedges is not evidence that the desktop is
+safe to restart.
+
+If that tree contains the Papercup/Mug dock or agent TUIs, do **not**
+kill or restart the shell for routine verification. Use an isolated,
+dock-suppressed second instance instead.
+
+**Prefer the packaged entrypoint over hand-deriving this** (EI-9005):
+`scripts/verify-tauri-headless.sh` boots exactly this isolated-instance +
+§15.4 Xvfb/VirtualGL recipe as one command — its own devUrl port
+(auto-picked, no collision with a peer's run), its own operator sidecar,
+`PAPERCUSP_NATIVE_TERMINAL=0` already set, the real-GPU GL check already
+done, and a scoped teardown (never leaks an Xvfb display — the WI-2115
+lesson). Live-verified 2026-07-10 (isolated bridge PID resolved distinct
+from the live fleet's own bridge; DOM check passed; clean teardown, no
+orphaned processes or display).
+
+```sh
+scripts/verify-tauri-headless.sh -- bash -c '
+  tauri-agent-tools check --pid "$VERIFY_TAURI_PID" \
+    --selector body --no-errors'
+```
+
+`scripts/verify-tauri-headless.sh --boot-only` prints one source command for a
+private, mode-600 per-run env file plus a stop script for a multi-step
+interactive session. Run that command in the same tracked agent shell that
+started the rig; sourcing the file re-checks the caller's `PAPERCUSP_SID` and
+the bridge's own `/proc/<pid>/environ` (`PAPERCUSP_SID`, display, port, and
+launch provenance) before exporting any drive variables. A copied or stale env
+file fails closed with `VERIFY_TAURI_ENV_FILE points at a verifier owned by
+another session`. Do not redirect raw export blocks from `--boot-only` into a
+shared log or source a log tail; the handoff is intentionally source-only.
+
+:::tip\[Multi-step drives are now watcher-proof (EI-10364, closing EI-10360)]
+On a busy tree, a bare isolated instance used to reuse the SHARED
+`apps/operator-vite/dist/` module server — the exact bundle the fleet's
+`vite build --watch` continuously rewrites/empties. Any peer's operator-vite
+edit could invalidate an already-open page's lazy chunks mid-drive
+(`Importing a module script failed`), turning a multi-step
+navigate→click→assert→click→assert sequence into a coin-flip.
+
+`scripts/verify-tauri-headless.sh` now **freezes a private per-run snapshot**
+of the shared dist (`PAPERCUSP_SPA_DIST`) before boot, so this instance's
+module graph is immutable for the whole run — a peer's concurrent edit can no
+longer touch it. The script logs `SPA snapshot frozen at … — IMMUTABLE for
+this run; restart to pick up a newer build.` when it engages.
+
+**The snapshot is immutable — it never re-reads the source after boot, and
+there is no ambient warning for that (EI-17134).** If you boot a `--boot-only`
+instance and THEN edit `apps/operator-vite` source (or rebuild it) expecting a
+later `reload()`/re-check against the SAME instance to pick it up, it silently
+keeps serving the pre-edit bundle forever — a real risk once you know the
+freeze exists, because nothing else in the drive tells you your edit isn't
+live. Before trusting a re-check against an already-booted instance, run the
+freshness helper the script exports:
+
+```bash
+bash "$VERIFY_TAURI_FRESHNESS_CHECK"
+```
+
+Silent + exit 0 = nothing changed since boot, the snapshot is still current.
+A loud warning + exit 1 = the shared dist changed after this instance froze —
+restart (`"$VERIFY_TAURI_STOP"` then re-run the boot script) before trusting
+any further checks; reloading the page will NOT pick up the edit.
+
+### Assertion (`--`) mode runs that guard FOR you — and can settle it decisively
+
+The above is the `--boot-only` workflow, where *you* drive an instance and so
+*you* must remember to check. In assertion mode
+(`verify-tauri-headless.sh -- <cmd>`) the script now runs the freshness check
+itself, just before exec'ing your command — you no longer have to remember it.
+(`$VERIFY_TAURI_FRESHNESS_CHECK` used to be exported **only** on the
+`--boot-only` path, so referencing it from an assertion command died with
+`VERIFY_TAURI_FRESHNESS_CHECK: unbound variable` — EI-19444780917356384. It and
+`$VERIFY_TAURI_SPA_DIST`, the frozen bundle's path, are now exported in both
+modes.)
+
+Two checks fire there, deliberately different in force — and the distinction
+matters, because only one of them can actually answer your question:
+
+* **Drift (advisory).** "The shared dist moved since we froze." On this box the
+  fleet's `vite build --watch` rebuilds constantly, so drift is near-permanent
+  and does **not** prove *your* change is missing — a peer's unrelated edit
+  moves it too. It warns and points at the decisive check rather than failing
+  your run.
+* **Containment (decisive).** Pass a string your change introduced:
+
+  ```bash
+  VERIFY_TAURI_ASSERT_SNAPSHOT_CONTAINS='myNewSymbol' \
+    bash scripts/verify-tauri-headless.sh -- bash my-assertions.sh
+  ```
+
+  The script greps the **frozen** bundle and, if the string is absent, exits
+  **3** *before running your command at all* — because a run that cannot
+  exercise your change can only produce a false negative about pre-edit code.
+  Exit 3 is distinct from 1 (your assertion failed) and 2 (usage), so a stale
+  snapshot is never mistaken for a broken feature.
+
+**Why this matters more than it sounds:** a verification against a stale
+snapshot produces a clean, well-formed, *confident* "your fix does not work" —
+indistinguishable in every observable respect from a genuine failure. Measured:
+an edit built at 10:58:00 against a snapshot frozen \~10:57 cost a full \~6-minute
+boot+drive cycle and came within one manual grep of sending an agent off to
+"re-fix" already-correct code. If you are verifying a change you just made,
+pass `VERIFY_TAURI_ASSERT_SNAPSHOT_CONTAINS`; treat a NEGATIVE result without it
+as unproven.
+
+**One residual gap:** if `apps/operator-vite/dist/` hasn't been built yet
+(fresh checkout / never ran `npm run build` there), the script logs a WARNING
+and falls through to the shared, watcher-exposed dist as before — build
+operator-vite first for a genuinely isolated run. If you ever land in that
+fallback (or are driving the shell manually per the "manual recipe" below,
+which has no snapshot at all), fall back to the pre-EI-10364 resilience
+pattern: structure the drive as **one assertion per fresh page load** (state
+via nuqs URL params, which the operator already supports for exactly this) and
+retry on `Importing a module script failed` — a fresh load always fetches
+current chunks, and that error must never be read as a failure of the feature
+under test.
+:::
+
+:::danger\[Default mode shares the LIVE database — writes are REAL (EI-10387)]
+"Isolated" by **default** (`VERIFY_TAURI_ISOLATED_DB` unset) means only the **X
+display, the devUrl port, the pty port, and the sidecar process**. It does
+**not** mean isolated state: the sidecar inherits the ambient env, so
+`DATABASE_URL` / `PAPERCUSP_HOME` / `PAPERCUSP_WORKSPACE` all point at the
+**live** system. (The script's header used to claim an "own embedded-PG, own
+workspace state" unconditionally — that claim was false in this default mode
+and has been corrected.)
+
+* **READ paths are safe.** Drive the UI, assert the DOM, read anything.
+* **WRITE paths are NOT.** A Mug steering click mutates the owner's real
+  steering *and* calls `requestUrgentHiveWake()` — waking the real Mug and
+  burning real tokens. A routine toggle really toggles it (git-sync included).
+
+**To exercise write paths safely, pass `VERIFY_TAURI_ISOLATED_DB=1`.** The
+script then boots a throwaway, fully-migrated, per-run embedded Postgres (its
+own datadir + port), scopes `PAPERCUSP_HOME`/`PAPERCUSP_WORKSPACE` to the run,
+and *asserts at boot* — reading the real sidecar's own `/proc/<pid>/environ`,
+not just its own env construction — that the resolved DB actually differs from
+the live one, refusing to proceed otherwise. Every write in that mode is safe:
+it lands in the throwaway DB (discarded at teardown), and the instance boots
+into the normal empty first-run onboarding flow rather than the owner's real
+pots/plans. Tradeoff: no pre-existing state to read/exercise, and boot is
+slower (a from-scratch `initdb` + full migration replay, \~10–30s). Stay on the
+shared default when you need to read/exercise real live state instead.
+
+For write-path testing when neither the isolated-DB boot cost nor its empty
+onboarding state fits, **intercept the write in the webview instead of letting
+it reach the backend** — the method used for the 2026-07-12 Mug/Kettle/Papercup
+button sweep:
+
+1. Stub `window.fetch` for `POST /api/agent-mcp/run-tool`; let reads through,
+   and for writes push the parsed body onto a capture array and return a
+   synthetic `{ ok:true, result:{ content:[{ text:'{"ok":true}' }] } }`.
+2. Click every control; assert zero `error` / `unhandledrejection` events.
+3. Dump the captured payloads and `safeParse` each one **against the tool's own
+   zod schema** in a vitest.
+
+Step 3 is the part that matters: it checks what the tool *accepts*, not merely
+what the UI *sent* — the exact gap that let the `hive`→`pot` rename regression
+(WI-4339) sit green in the unit tests while every steering write was broken.
+:::
+
+The manual recipe below is kept for reference / when the script doesn't
+fit (e.g. driving a **release build** with no dev bridge — §15.4 still
+applies directly for that case):
+
+```sh
+cd papercusp-desktop
+OPERATOR_DEV_PORT=3370 \
+OPERATOR_DEV_PTY_PORT=3374 \
+PAPERCUSP_DEV_API_TARGET=3370 \
+PAPERCUSP_NATIVE_TERMINAL=0 \
+npm run tauri -- dev --config '{"build":{"devUrl":"http://127.0.0.1:3370"}}'
+```
+
+Use a different free port pair for concurrent runs. On a headless
+display, launch that command under the §15.4 Xvfb + VirtualGL recipe;
+`PAPERCUSP_NATIVE_TERMINAL=0` is the load-bearing part that prevents a
+duplicate `pui chat`/Mug/Papercup dock from joining the live fleet.
+
+`npm run tauri -- dev` runs Tauri's `beforeDevCommand`
+(`papercusp-desktop/bin/dev-operator-ifneeded.sh`), which **already pins
+`PAPERCUSP_CLUSTER=0`** for exactly this reason (WI-3556): an agent shell
+inherits the release host's `PAPERCUSP_CLUSTER=16`-ish env, and without the
+wrapper's pin a `tauri dev` launch forks one HTTP request worker **per CPU
+core** — a dozen-plus extra Node processes each near 100% CPU, driving
+shared-box load past 1000 and knocking over the systemd-owned
+`papercup-dev-api`/`papercup-staging-api` services (they auto-restart, but
+it degrades the whole fleet, including tripping the live-federation-gate's
+load-based skip).
+
+⚠ **Do not "helpfully" pass `PAPERCUSP_CLUSTER_WORKERS=<anything>` in your
+own launch env.** `resolveClusterWorkers()` (`packages/operator-core/lib/cluster-fork.ts`)
+resolves `env.PAPERCUSP_CLUSTER_WORKERS ?? env.PAPERCUSP_CLUSTER` — so a
+`PAPERCUSP_CLUSTER_WORKERS` set in *your* shell (even to a value you intend
+as "off") is inherited into the child **before** the wrapper's own
+`PAPERCUSP_CLUSTER=0` runs, and because `??` checks `CLUSTER_WORKERS`
+first, it **silently shadows the wrapper's safety pin** — the wrapper never
+gets a chance to apply it. This is exactly how an earlier revision of this
+very doc, which added `PAPERCUSP_CLUSTER_WORKERS=1` "to fix it", instead
+**reproduced the incident within minutes** of the first fix landing (`=1`
+is additionally its own footgun — see below). The correct fix already
+lives in the wrapper script; this recipe needs **no cluster env var at
+all**. Verify after boot: `ss -tlnp | grep 3370` must show exactly **ONE**
+listener PID.
+
+(EI-8817, fixed 2026-07-09: `'1'` used to alias `'auto'`/`'on'`/`'true'`
+— clustering **ON** at the host's recommended, often worker-per-core, count
+— instead of "one worker", and that mismatch is what turned an earlier
+`PAPERCUSP_CLUSTER_WORKERS=1` fix attempt into the same-day recurrence
+above. `resolveClusterWorkers` now treats `'1'` as exactly one worker, same
+as any other explicit positive number; only `'auto'`/`'on'`/`'true'` mean
+"use the host's recommended count". The **shadowing** hazard above is
+unaffected by this fix — any nonzero `PAPERCUSP_CLUSTER_WORKERS` in your
+shell still bypasses the wrapper's `PAPERCUSP_CLUSTER=0` pin regardless of
+its value — so the advice stands: pass **no** cluster env var to this
+recipe at all.)
+
+`npm run tauri -- dev` (including the isolated §1.3 recipe above) has no
+"don't watch Rust" mode: it file-watches the whole `src-tauri` tree, and
+Tauri does not scope that watch per dev-port. On a shared multi-agent box,
+**any peer's edit under `src-tauri` — even one targeting a totally
+different port** — triggers a cargo rebuild + restart of every live `tauri
+dev` process reading that tree, yours included. Mid-litmus this looks like
+your app vanishing (`tauri-agent-tools probe` → `No bridge found for PID <n>`), and the rebuild can then **stall for minutes** if it loses a race
+for cargo's package-cache lock against another peer's concurrent cargo job
+(a `release-local.sh` build, a `cargo test` run) — per-job `CARGO_TARGET_DIR`
+isolation does not isolate the *shared* package cache, so two independent
+cargo invocations still serialize on it.
+
+**Recovery loop**, don't just re-probe the dead PID:
+
+1. Re-discover the new binary's PID by its dev port (matching on `comm` does
+   **not** work — `pgrep -x papercusp-desktop` never matches because `comm`
+   truncates at 15 chars):
+   ```sh
+   for P in $(pgrep -f debug/papercusp-desktop); do
+     tr '\0' '\n' < /proc/$P/environ | grep -q '^OPERATOR_DEV_PORT=3370$' && echo $P
+   done
+   ```
+2. If nothing turns up yet, the rebuild is still blocked on the cargo
+   package-cache lock — wait and retry rather than concluding the shell is
+   dead; it can take several minutes when contending with a peer's cargo job.
+3. Re-`probe`/`check` against the freshly discovered PID once found.
+
+**Also watch for a first-read-transient right after the restart**: the
+webview can briefly compute `background: 'none'` (or similarly blank/unset
+styles) for elements while the CSS chunk is still parsing post-reload. A
+`check`/`eval` run in that window can read as a false negative — re-evaluate
+once more after a short beat before trusting the first read.
+
+If you need a litmus run immune to a peer's `src-tauri` edit entirely, run
+the already-built binary directly instead of `tauri -- dev` (no file-watch),
+at the cost of not picking up your own Rust-side edits without a manual
+rebuild.
+
+`eval`/`dom`/`check` are **bridge-native** — they always execute inside the
+correct webview once `--pid`/`--title` resolves the right bridge. The
+**native `screenshot`/`info`/`list-windows` OS-level window capture is
+NOT the same code path**: `info`/`list-windows` only accept `--title <regex>` (no `--pid`), so on a box with several windows sharing a similar
+title (multiple dev shells, a glued native terminal, a stale
+already-closed window whose X11 handle briefly lingers), the title-match
+can resolve to the wrong toplevel and `screenshot --selector` silently
+captures **unrelated pixels** — e.g. terminal content — while reporting
+success. This is a distinct failure mode from
+[GNOME/Mutter iconifying new windows](/internal/docs/agent-insights/gnome-mutter-iconifies-new-x11-windows)
+(that doc covers a *missing* window; this one covers a *wrong* window),
+and it can happen even after DOM/eval already correctly targeted the
+intended bridge PID for everything else.
+
+**Do not trust a `screenshot --selector` PNG as sole evidence** on a box
+that may have more than one Papercusp/terminal window open. Cross-check
+before relying on it:
+
+```sh
+# Confirm which X11 window the bridge PID actually owns before trusting
+# a screenshot taken against the same --title/--pid.
+wmctrl -lxp | awk -v pid="$PID" '$3 == pid'
+```
+
+If the screenshot output doesn't match what `wmctrl`/`xwininfo` (for that
+PID) shows, prefer the DOM-native path instead — `check --selector ...`,
+`dom <selector>`, or `eval` geometry/content assertions are resolved
+through the bridge itself and cannot be fooled by an occluding window.
+Reserve `screenshot`/`snapshot`/`capture` for a *visual* signal DOM can't
+express (layout, animation, font rendering), and treat it as
+corroborating evidence, not the primary assertion, whenever multiple
+windows might be present.
+
+Even with a single window, `screenshot --selector` (with no `--title`)
+resolves the OS window by the webview's `document.title` and runs
+`xdotool search --name "<that title>"` to get the window geometry. On a
+shell you spawned yourself (`npm run dev`), that lookup **fails outright**:
+
+```
+xdotool failed: Command failed: xdotool search --name Papercusp Operator
+```
+
+The reason is a title mismatch: the webview's `document.title` is
+`"Papercusp Operator"`, but the Tauri **X11 window title** is `"Papercusp"`
+(`papercusp-desktop/src-tauri/tauri.conf.json` → `windows[0].title`), so
+the `--name "Papercusp Operator"` regex matches no window. `eval`/`dom`/
+`describe` over the same `--pid` keep working — only the screenshot's
+window-geometry step breaks. Two fixes:
+
+1. **Pass the real X11 window title explicitly:**
+   `screenshot --selector ... --title Papercusp -o out.png` (the tool takes
+   `-t, --title <regex>`; `Papercusp` matches the X11 title regardless of
+   the dynamic `document.title`).
+   * **Or just pass `--pid` and nothing else** (EI-18662939265185207): a
+     local patch now resolves the window by PID (`xdotool search --pid`,
+     on the target's own DISPLAY) automatically whenever `--title`/
+     `--window-id` are both omitted — no more title guessing. See
+     [tauri-agent-tools-screenshot-resolves-window-by-pid](/internal/docs/agent-insights/tauri-agent-tools-screenshot-resolves-window-by-pid)
+     for the fix and why it's a **local, reinstall-losable** patch (the
+     `--help` output names the EI if you need to reapply it).
+2. **Prefer the bridge-based layout check** — it does no window lookup at
+   all, so it cannot hit this trap. `@papercusp/tauri-verify`'s
+   `verify.layout()` measures the same facts a layout screenshot proves
+   (page horizontal overflow, per-selector right-edge vs. viewport, an
+   overflow:auto container scrolling its own content) over the bridge:
+
+   ```ts
+   import { createVerifier } from '@papercusp/tauri-verify';
+   const verify = createVerifier({ tauriPID: PID });
+   // page must not scroll horizontally; the rubrics panel may scroll internally
+   const r = await verify.layout({ scrollContainer: '.pc-rubrics' });
+   if (!r.ok) throw new Error(r.error); // e.g. code 'horizontal_overflow'
+   ```
+
+   Or inline the equivalent one-off assertion via `eval`:
+   `document.documentElement.scrollWidth <= document.documentElement.clientWidth`
+   for the page, and `el.getBoundingClientRect().right <= documentElement.clientWidth`
+   for a specific element.
+
+### 1.4 Stale Vite cache
+
+If the Tauri sidecar log shows a JSX parse error referencing a line
+that doesn't match the on-disk file, the Vite dependency cache is
+stale — `rm -rf apps/operator-vite/node_modules/.vite` and restart the
+Tauri dev shell. (Next.js is retired; there is no longer an
+`apps/operator/.next` cache.)
+
+**Source edits don't hot-reload into the shell — the webview serves a
+BUILT bundle.** The dev-operator Hono host serves operator-vite's build
+output (`/assets/index-*.css|js`), not a live Vite dev server, so an
+edit to e.g. `apps/operator/app/globals.css` is invisible to the
+running shell no matter how many times you `location.reload()`. To see
+a frontend edit: `cd apps/operator-vite && npm run build` (\~30s), then
+reload the webview. Symptom that bit a real verification (2026-07-09):
+a freshly added CSS custom property read back as empty from
+`getComputedStyle` while the on-disk file plainly had it. Check which
+stylesheet the page actually loaded (`[...document.styleSheets]` hrefs)
+before doubting your edit.
+
+### 1.5 First-run paths — clear stored state
+
+Onboarding tests need a clean slate:
+
+```sh
+tauri-agent-tools eval "localStorage.clear(); sessionStorage.clear(); 'cleared'"
+tauri-agent-tools eval "location.reload()"
+```
+
+`localStorage.clear()` works because the bridge runs inside the
+webview — unlike pure-Rust IPC, it has full DOM access including
+storage APIs.
+
+The root gateway (`apps/operator-vite/src/routes/index.tsx` `beforeLoad`)
+decides `/onboarding` vs `/adv` by fetching `GET
+/api/desktop/setup-wizard-state` and checking `finished_at` — a row in
+`harness_shared.setup_wizard_state` keyed by **`workspace_id`**, resolved
+server-side by `activeWorkspaceId()` (`packages/operator-core/lib/workspace-registry.ts`).
+Clearing `localStorage`/`sessionStorage`, or launching with a genuinely
+fresh `$HOME` (a fresh `.papercusp-workspaces/registry.json`), changes
+none of that: the workspace id it resolves to (almost always `default`)
+still points at the **same row in the same Postgres**, because —
+per [repo-conventions § two-port model](/internal/docs/system/repo-conventions) —
+**this dev box's `tauri dev` uses native PG on `:5432`, not per-launch
+embedded-pg**, so no isolated instance actually gets an isolated database.
+Verified 2026-07-09 (WI-3134): `harness_shared.setup_wizard_state` for
+`workspace_id='default'` already carries `finished_at` (set 2026-05-22,
+this box's own everyday-use onboarding) — so *any* "fresh" instance that
+resolves to workspace `default` will correctly, and misleadingly, land on
+`/adv` straight away. **This is not an app bug** — `dev:pg_query` against
+an unused workspace (e.g. one with no `setup_wizard_state` row) confirms
+the gateway logic is correct; it's a gap in the isolation recipe.
+
+**To genuinely exercise first-run/onboarding on this dev box**, force a
+workspace id that has no `setup_wizard_state` row at all (pick a fresh
+random slug — `dev:pg_query { sql: "SELECT workspace_id FROM
+harness_shared.setup_wizard_state" }` shows which ids are already
+onboarded) and pass it as `PAPERCUSP_WORKSPACE_ID=<fresh-slug>` in the
+launch env (`activeWorkspaceId()` precedence #2 — a process-pin,
+overridable per-request only by an explicit `x-papercusp-workspace`
+header, which the desktop webview doesn't send). Confirm with an
+API-only check before touching the UI:
+
+```sh
+curl -s -H "x-papercusp-workspace: <fresh-slug>" \
+  http://127.0.0.1:<port>/api/desktop/setup-wizard-state
+# expect: no "finished_at" key at all
+```
+
+⚠ **This curl check alone does NOT prove the UI will land on `/onboarding` —
+it only proves the *server* is first-run-eligible.** The Tauri webview's own
+`/api/*` calls are routed by a separate Rust-side mechanism
+(`env_switch.rs` / `main.rs`'s `SELECTED_API_PORT`, default `:3070`) that is
+**not** derived from `devUrl` in your `--config` override and does **not**
+automatically follow `OPERATOR_DEV_PORT`. If you launch a non-default-port
+instance (as this recipe requires, to get an isolated operator) without also
+pinning `PAPERCUSP_DEV_API_TARGET=<same port>`, the webview's in-app fetch to
+`setup-wizard-state` silently hits a *different*, already-onboarded operator
+and lands on `/adv` — even though the curl check above passed. Confirmed
+2026-08-03 (WI-3134 round 3, EI-19412290906822408): add
+`PAPERCUSP_DEV_API_TARGET=<port>` (same value as `OPERATOR_DEV_PORT`) to the
+launch env alongside `PAPERCUSP_WORKSPACE_ID` — this pins both content and
+`/api` (see the isolated-stack-for-mutation-e2e recipe, which already sets it
+for its own separate-DB stack) and is required here too. Verify from
+*inside* the webview, not just via curl:
+
+```sh
+tauri-agent-tools eval --pid <pid> \
+  "fetch('/api/desktop/setup-wizard-state').then(r=>r.text())"
+# must match the curl output above — a mismatch means /api is not pinned
+```
+
+**`<port>` above must be the instance YOU launched with that
+`PAPERCUSP_WORKSPACE_ID=<fresh-slug>` env pin — not some other
+already-running dev server.** `isKnownWorkspace()`
+(`packages/operator-core/lib/workspace-registry.ts`) accepts a workspace id
+only when it's the special `default`, when it matches *that process's own*
+`PAPERCUSP_WORKSPACE_ID` pin, or when it's already in the on-disk workspace
+registry — a freshly-invented slug is none of those for any *other* running
+instance (the everyday `:3070`/`:3170` dev servers, a peer's own pinned
+launch, …). Curl that header at the wrong port and you always get **400
+`unknown_workspace`**, no matter how plausible the slug looks — the
+middleware (`packages/operator-core/lib/workspace-context-middleware.ts`)
+rejects loudly rather than silently falling back. Registration is
+per-process, not global: there is no separate "register a workspace" step to
+run first, but the header only works against the one process that was
+actually launched with that pin.
+
+### 1.6 Robust navigation, blocked `sleep`, and the token file format (EI-9161)
+
+Three frictions that cost real time driving the operator webview
+headlessly for a visual verification — none was documented anywhere in
+this playbook, all are repeatable for the next agent.
+
+**Prefer `ui:dispatch set_url` over `location.replace` for route changes.**
+Full-reload navigation via
+`tauri-agent-tools eval "location.replace('http://127.0.0.1:<port>/<route>')"`
+is unreliable in the dev shell: it can (a) trip the SPA's "this view hit
+an error / app was rebuilt underneath the page" boundary whenever `vite
+build --watch` rewrote the dist mid-load, and (b) even with Vite idle,
+land one route behind or stick on a prior route — so an audit run
+silently measures the **wrong page**. A
+`tauri-agent-tools wait --eval "location.pathname==='<path>'"` guard does
+**not** reliably catch this. The robust alternative is the sanctioned
+agent→UI surface: `ui:dispatch { client_id, intent:'set_url', args:{
+path:'/route' } }` navigates client-side via nuqs (no reload), so it
+never hits the dist-swap boundary and lands deterministically. Pick the
+target tab with `ui:list_clients` (match your own shell by
+`opened_at`/`url`), then read the DOM through the bridge as usual — same
+webview. Treat `location.replace` full-reload as a fallback only, with
+the dist-swap caveat above; `ui:dispatch set_url` is the primary
+route-change for operator verification.
+
+**Foreground `sleep` is blocked by the Claude Code harness.** A drive
+script with a bare `sleep` between steps hangs the whole command until
+timeout. Use `tauri-agent-tools wait --eval/--selector --timeout` to
+settle instead of sleeping.
+
+**The dev-bridge token file is JSON, not a bare token.**
+`/tmp/tauri-dev-bridge-<pid>.token` contains
+`{"port":N,"token":"...","pid":N}` — not a raw token string. `--port`
+and `--token` are **per-subcommand** options, not global flags. On a box
+with a peer's shell also running, pass your **own** `--port`/`--token`
+(read from your shell's log line `Token file: ...`) explicitly —
+auto-discovery can otherwise attach to the peer's shell instead of yours.
+
+⚠️ **`--port` ALONE (no matching `--token`) authenticates by LUCK, not by
+the port you named (EI-18881979191079014).** `--port` selects the
+ENDPOINT, but with no `--pid`/`--token` the CLI still resolves its auth
+TOKEN independently, by an arbitrary `/tmp` readdir order — so `--port`
+only "works" when the arbitrarily-chosen token happens to belong to the
+app on that port. With one bridge alive (nobody else on the box) this is
+invisible; the instant a peer's shell (or your own second boot) has a
+bridge up too, the SAME command that worked a moment ago either fails
+with a confusing `Bridge authentication failed — check your token` (you
+never supplied one) or, worse, silently authenticates against SOMEONE
+ELSE'S app. This is exactly the failure mode a resolved-but-unmatched
+`--port` (e.g. read back from `tauri-agent-tools probe`'s listing rather
+than from your OWN token file) walks into. **Prefer `--pid <pid>` for
+every subcommand** — it selects the token AND the target together, and
+is what `scripts/verify-tauri-headless.sh` exports as `$VERIFY_TAURI_PID`
+for exactly this reason. If you must use `--port`, pair it with the
+`--token` read from that SAME port's token file — never a bare `--port`
+value on its own.
+
+Net: with `ui:dispatch set_url` + `wait` (no `sleep`) + explicit
+port/token, a multi-route drive is deterministic; without them it
+flakes and can produce false-green audits (e.g. "verifying" N routes
+that were all secretly the same page because navigation silently
+no-opped).
+
+**When you DO fall back to a full reload (`location.href=`), pin the wait
+to the incoming page — never to the view's own selector alone
+(EI-18812301452864060).** The natural-looking idiom
+
+```
+tauri-agent-tools eval --pid $P "location.href='…?lview=X'; 'go'"
+tauri-agent-tools wait --pid $P --selector '.pc-learning__viewpane' --timeout 45000
+tauri-agent-tools eval --pid $P "<measure the DOM>"
+```
+
+is wrong and **fails silently**. `location.href=` is a full reload, and for
+a moment after it fires the OUTGOING page is still the live document — so a
+`wait` on a selector the outgoing page also matches (the same view class,
+or any earlier navigation's leftover pane) is satisfied immediately, and the
+measurement lands on a half-torn-down or half-loaded document. This is not
+theoretical: probing the same view twice in a row returned a clean verdict
+and then a blank one — same view, same instance, same bundle — and a
+screenshot captured at the end of one such drive was a blank frame later
+cited as live-verification evidence in a `work_items:complete` (the
+completion gate correctly rejected it).
+
+The fix is one clause: put a navigation NONCE (not the view id — some views
+rewrite their own `?lview=` param to a resolved value, which evaporates a
+pin keyed on the id) in the URL and require it to already be live before
+you'll trust anything else in the settle condition:
+
+```
+--eval "location.href.indexOf('vnonce=N')>=0 && (!!document.querySelector('.pc-learning__viewpane') || /hit an error/.test(document.body.innerText))"
+```
+
+`scripts/verify-learning-tab-views.sh` does exactly this and carries the
+full rationale inline — copy its `SETTLED` construction rather than
+re-deriving it. And separately: **never cite a screenshot you have not
+opened.** A capture taken after a mis-settled wait looks exactly like a
+legitimate artifact until a human (or the completion gate) actually looks
+at it.
+
+### 1.7 The bridge `eval` round-trip dies at 5 s — on BOTH sides, and no CLI flag can raise it (EI-15751)
+
+**The trap.** You `await` something real inside one `tauri-agent-tools eval` — an
+agent-chats SSE reply, a fetch that hits an LLM, any operation with network-plus-
+inference latency — and it dies at \~5 s with
+
+```
+TypeError: The operation was aborted due to timeout
+```
+
+or, depending on which side loses the race, `Bridge error (504): Eval timeout`.
+Your own in-script deadline is irrelevant — a 55 s `Promise.race` never gets to
+fire. Both messages read like the *app* timed out, so the natural next move is to
+raise a timeout you control, and there isn't one.
+
+**Two caps, both 5 s, neither reachable from the CLI:**
+
+| side              | where                                                                                                                             | what it does                                                      |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| bridge (ours)     | `papercusp-desktop/src-tauri/src/dev_bridge.rs` — the `/eval` handler waits on a Condvar with `Duration::from_secs(5)`            | responds **HTTP 504 `Eval timeout`** and drops the pending result |
+| CLI (third-party) | `tauri-agent-tools` 0.7.0, `dist/bridge/client.js` — `async eval(js, timeout = 5000)` then `signal: AbortSignal.timeout(timeout)` | aborts the POST                                                   |
+
+`eval` registers only `--file` plus the shared `--port/--token/--pid/--window-label`
+options (`dist/commands/eval.js` + `shared.js`) and calls `bridge.eval(js)` with no
+timeout argument, so the 5000 ms default always applies.
+
+⚠ **Adding a `--timeout` flag upstream would NOT fix this** — the obvious first
+hypothesis, and the one this was originally filed as. The Rust side still 504s at
+5 s, so the reachable budget stays 5 s whatever the client sends. In practice keep
+a single eval under **\~2.5 s**: a live SSE stream on the webview's main thread
+starves the eval and eats the rest of the budget.
+
+`wait --timeout` is not an escape either. `wait` POLLS (`--interval`, default 500 ms;
+`--timeout` default 10000) and **each poll is its own `bridge.eval`**, capped at the
+same 5 s. Its timeout bounds the LOOP, never the operation.
+
+**The recipe: fire-and-forget into a page global, then poll a cheap predicate.**
+The bridge runs your JS as `await eval(<your js>)`, so a bare `async` IIFE is *not*
+awaited — the call returns immediately and the work keeps running in the page.
+
+```bash
+# 1. start it — returns at once, far inside the 5 s cap
+tauri-agent-tools eval --pid "$VERIFY_TAURI_PID" '
+  window.__probe = { done: false };
+  (async () => {
+    try {
+      const res = await fetch("/api/...", { method: "POST", body: "..." });
+      const text = await res.text();
+      window.__probe = { done: true, ok: res.ok, status: res.status, body: text.slice(0, 4000) };
+    } catch (e) {
+      window.__probe = { done: true, ok: false, error: String(e) };
+    }
+  })();
+  "started"'
+
+# 2. poll a CHEAP, NON-THROWING predicate — the ?. and the === true are load-bearing
+tauri-agent-tools wait --pid "$VERIFY_TAURI_PID" \
+  --eval 'window.__probe?.done === true' --timeout 60000 --interval 1000
+
+# 3. read the payload back in its own eval
+tauri-agent-tools eval --pid "$VERIFY_TAURI_PID" 'JSON.stringify(window.__probe)'
+```
+
+⚠⚠ **Dropping the `?.` in step 2 produces a FALSE GREEN, not an error.** An in-page
+exception is caught by the bridge and returned as a **200** whose result is the
+STRING `"ERROR: <message>"` (`build_eval_callback_js` in `dev_bridge.rs`). The CLI's
+truthiness helper (`isBridgeResultTruthy`) tries `JSON.parse` on a string result and,
+when that throws, falls back to `result.length > 0` — so **`"ERROR: ..."` is TRUTHY**.
+An unguarded `window.__probe.done` therefore throws `Cannot read properties of
+undefined` on the very first poll, `wait` prints `matched: true` and exits **0**, and
+the drive script proceeds as though the operation had completed — before it even
+started. Bare `eval` has the same shape: a throwing expression prints `ERROR: ...`
+and still exits 0, so never read exit status alone as success. Compare to a literal
+(`=== true`) and re-assert the payload in step 3.
+
+`window.__probe` lives on the page, so a full reload (`location.href=`,
+`location.replace`) wipes it — start the probe only after the navigation has
+settled (§1.6).
+
+## 2. Reporting format
+
+```
+[<route>] <feature>: PASS | FAIL | INCONCLUSIVE — <one sentence of evidence>
+```
+
+On `FAIL`, capture (one bundle command does most of this):
+
+```sh
+tauri-agent-tools capture -o /tmp/fail-<route>-<feature>
+```
+
+That writes screenshot + DOM snapshot + storage + console errors +
+recent Rust logs to one directory. The flag is **`-o`/`--output <dir>`** — it takes a
+DIRECTORY, not a file, and there is no `--out`.
+
+⚠ **Under Xvfb/X11 the bundle contains NO screenshot PNG** — you get `dom.json`,
+`page-state.json`, `console-errors.json`, `rust-logs.json`, `storage.json` and
+`manifest.json`, and those carry the evidence. This is the Wayland-only screenshot
+limitation (EI-576), *not* a failed capture — so do not go hunting for an image or
+conclude the command broke. It matters here because
+`scripts/verify-tauri-headless.sh` — this doc's own recommended entrypoint — always
+runs under Xvfb. (Reading `capture --help` to check a flag is itself blocked when two
+bridges are live; use `tauri-agent-tools help capture`, which needs no target.)
+
+For the report, include:
+
+* The capture-bundle path (or the `screenshot --selector` PNG if
+  zooming on one element).
+* The relevant DOM excerpt (`tauri-agent-tools dom <selector>` or the
+  `dom.json` file from the capture bundle).
+* Console errors (`tauri-agent-tools console-monitor --duration 100`
+  during the failing action).
+* Sidecar log tail (`tail -200 /tmp/tauri-dev.log`).
+
+`PASS` requires positive evidence. **Silence is not success.** A test
+that "looks fine" without a DOM/screenshot/log assertion is
+`INCONCLUSIVE`.
+
+**Incident (gui-chat-session-controls-2026-07-25 P-001, WI-5581/WI-5874):**
+the HUD board's `.hud__card` (and `.hud__count`/`.hud__fleet`) buttons set
+`display: flex` directly on a `<button>` element. WebKitGTK (the Tauri
+desktop webview's actual rendering engine) **ignores** `display: flex`/`grid`
+set on a `<button>` — Chromium honors it. The bug was "verified" by
+querying the DOM for element counts, classes, and computed style tokens —
+every one of those checks passed, because the *structure* was correct. The
+*pixels* were not: the rail and card body silently collapsed on top of each
+other in the real desktop app. Structure-only verification shipped a visibly
+broken UI, and it shipped again the first time (the class itself was already
+a known hazard — see the WebKitGTK Aside on `unexpectedFlexOrGridOnButtonSelectors`
+in `design-primitives.test.ts` — before this incident gave it a second, live,
+owner-screenshotted occurrence).
+
+**The rule this incident makes durable:** whenever the change under
+verification can affect rendered **geometry** — layout (flex/grid/position/
+float), sizing, overflow/clipping, z-index/stacking, or anything CSS that a
+`getComputedStyle()`/`getBoundingClientRect()` read might not fully capture —
+a DOM-only check (element exists, class applied, computed style property
+reads the expected token, child count matches) **does not count as
+verification** and must not be reported `PASS`. Take an actual screenshot
+(`tauri-agent-tools screenshot` for the whole window, or `capture` for the
+full bundle) and **look at the rendered image** before claiming the layout is
+correct — the same rule as any other visual check in this playbook, stated
+explicitly here because a DOM assertion can look like a complete check and
+silently isn't one for this whole class of bug. This applies **on every
+verification pass**, not only after a reported regression — the WebKitGTK
+button-flex hazard in particular reproduces ONLY in the real Tauri/WebKitGTK
+webview, never in jsdom/Chromium-run unit tests, so a green unit-test suite
+is not a substitute either.
+
+For CI-style assertions inline in a script, prefer `check` — it
+exits 0/1 and prints a structured failure:
+
+```sh
+tauri-agent-tools check \
+  --selector 'aside.op-chat-sidebar [data-message]' \
+  --text 'Generate Ideas' \
+  --no-errors    # console must be clean
+```
+
+## 2.5 Verdict → tauri-agent-tools cheatsheet
+
+The §3–§13 route tests below were written for verdict; the same
+intent maps 1:1 to tauri-agent-tools. When you read `verdict <verb>`,
+substitute the right column.
+
+| Verdict (legacy)              | tauri-agent-tools                                                          | Notes                                                                                                                                                                                                                                                           |
+| ----------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `verdict snapshot`            | `tauri-agent-tools dom --depth 4`                                          | Returns DOM tree, not ARIA. Add `--text "..."` to filter.                                                                                                                                                                                                       |
+| `verdict js "<expr>"`         | `tauri-agent-tools eval "<expr>"`                                          | Returns JSON. Wrap in `JSON.stringify(...)` if the value is an object.                                                                                                                                                                                          |
+| `verdict click <selector>`    | `tauri-agent-tools click <selector>`                                       | Real synthetic event inside the webview; no focus-steal.                                                                                                                                                                                                        |
+| `verdict type <sel> <text>`   | `tauri-agent-tools type <sel> <text>`                                      | Sets value + dispatches `input` event.                                                                                                                                                                                                                          |
+| `verdict press <sel> <key>`   | `tauri-agent-tools press <sel> <key>`                                      | e.g. `press input Enter`.                                                                                                                                                                                                                                       |
+| `verdict screenshot <path>`   | `tauri-agent-tools screenshot --title Papercusp -o <path>`                 | Full window. `--selector` crop is currently flaky on this build (returns 1×1 PNG occasionally — fall back to full + crop in ImageMagick if it bites you). **NON-FALSIFIABLE** (§0) — exits 0 even for a blank/unpainted window; open the file before citing it. |
+| `verdict console error`       | `tauri-agent-tools console-monitor --duration 200`                         | Window must be in scope; pass `--pid` if multiple bridges.                                                                                                                                                                                                      |
+| `verdict reload`              | `tauri-agent-tools eval "location.reload()"`                               | No dedicated `reload` verb.                                                                                                                                                                                                                                     |
+| `verdict newtab`              | (not applicable)                                                           | Tauri has one webview. For isolation, launch a second `tauri dev` against a different `PAPERCUSP_WORKSPACE_ROOT`.                                                                                                                                               |
+| `verdict status`              | `tauri-agent-tools probe`                                                  | Lists running bridges + page state.                                                                                                                                                                                                                             |
+| `localStorage.clear()` via JS | `tauri-agent-tools eval "localStorage.clear()"`                            | Works only because bridge is in-webview (Tauri's IPC alone can't).                                                                                                                                                                                              |
+| (n/a)                         | `tauri-agent-tools storage --json`                                         | Dump localStorage / sessionStorage / cookies.                                                                                                                                                                                                                   |
+| (n/a)                         | `tauri-agent-tools ipc-monitor --duration 5000`                            | Capture every `__TAURI__.core.invoke` call — uniquely useful for debugging plugin/host wiring.                                                                                                                                                                  |
+| (n/a)                         | `tauri-agent-tools rust-logs --tail 200`                                   | Sidecar Rust log without rooting through `/tmp`.                                                                                                                                                                                                                |
+| (n/a)                         | `tauri-agent-tools check --selector ... --text ... --eval ... --no-errors` | One-shot CI assertion; exits 0/1. **FALSIFIABLE** (§0) — prefer this for `verifiedHow:'live-drove-ui'` evidence.                                                                                                                                                |
+| (n/a)                         | `tauri-agent-tools capture -o <dir>`                                       | Bundle: screenshot + DOM + storage + console + Rust logs. Use on every FAIL. **NON-FALSIFIABLE** (§0) — its screenshot component exits 0 even when blank; the DOM/console files in the bundle are the load-bearing evidence, not the PNG.                       |
+
+## 3. Global elements (every page except auth)
+
+The `.pc-header` mascot/wordmark **brand pair** (§3.1) and the entire **Oracle
+dock** (§3.2, `.oracle-fab` / `OracleDock`) were **not** carried into the live
+`operator-vite` `/adv` Tauri shell (confirmed by source grep + live DOM, E2E
+sweep 2026-06-23). The `/adv` header is `.pc-advshell__header` with a text
+kicker, and `WorkspaceSwitcher` (`.pc-workspace-trigger`) is the live header
+control. The live conversational surface is the **Conversations tab** agent
+chat, not a global "Reply to Papercup…" composer. See the §13 retired-surfaces
+note. Treat the rest of §3.1/§3.2 below as historical reference.
+
+### 3.1 Header bar
+
+Selectors: `header.pc-header`, `.pc-header .brand`, `.pc-header nav`.
+
+| Element                                | Expected                                                                                                                                                                                                            |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.pc-header .brand` link               | href `"/"`                                                                                                                                                                                                          |
+| `.pc-header .brand img:nth-of-type(1)` | `src="/mascot.svg"`, 28×28                                                                                                                                                                                          |
+| `.pc-header .brand img:nth-of-type(2)` | `src="/wordmark.svg"`, height 22                                                                                                                                                                                    |
+| `.pc-header-quote` text                | "Nothing is so painful…" (decorative)                                                                                                                                                                               |
+| nav link "Marketplace"                 | navigates to `/marketplace/` (then redirects to `/marketplace/templates`… or shows the Overview tab)                                                                                                                |
+| nav link "Support"                     | `/support`                                                                                                                                                                                                          |
+| nav link "Settings"                    | `/settings/api-keys`                                                                                                                                                                                                |
+| `WorkspaceSwitcher`                    | trigger button shows the current workspace; click toggles a dropdown with: per-workspace `Switch` button, `Rename` (inline), `Delete` (per row); a `Create workspace` action at the bottom; outside-click closes it |
+| `SessionIndicator`                     | logged-out: `<a href="/login">Sign in</a>`; logged-in: user-email/name + a `Sign out` button calling `signOut()` (POST `/api/auth/logout`, then redirect to `/`)                                                    |
+
+Verify both `/mascot.svg` and `/wordmark.svg` return 200 via `curl`.
+
+### 3.1.1 Chatwoot widget (third-party)
+
+Selector: `#cw-bubble-holder` (the launcher), `#cw-widget-holder`
+(the panel).
+
+| Element                          | Behavior                                                                                                                                                                 |                                                                |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| Bubble launcher                  | always present (bottom-right when not occluded by Oracle FAB); click toggles widget                                                                                      |                                                                |
+| Widget panel                     | when open, shows Chatwoot conversation UI loaded from `https://chat.papercupai.com` (`NEXT_PUBLIC_CHATWOOT_BASE_URL` overrideable); `launcherTitle: "Papercusp Support"` |                                                                |
+| \`window.$chatwoot.toggle('open' | 'close')\`                                                                                                                                                               | programmatic open/close (used by `/support` "Talk to a human") |
+
+If `NEXT_PUBLIC_CHATWOOT_WEBSITE_TOKEN` is unset, the widget is
+suppressed entirely (no script tag injected). Verify via
+`!!document.querySelector('#cw-widget-holder')`.
+
+### 3.2 Oracle dock
+
+Selectors: `.oracle-fab` (closed state), `.oracle-dock` (open),
+`.oracle-form input` (chat input), `.oracle-msg-assistant`,
+`.oracle-msg-user`, `.oracle-msg-content`, `.oracle-tool-chip`.
+
+#### 3.2.1 First-visit auto-popup
+
+```
+verdict js "localStorage.removeItem('oracle_seen_v1'); sessionStorage.removeItem('oracle_history_v1');"
+verdict reload
+sleep 2
+```
+
+Assert: `dock=true`, `localStorage.oracle_seen_v1='1'`, the welcome
+message ("Hi, I'm the Oracle…") is the first `.oracle-msg-content`.
+
+Reload again — `dock=false`, `fab=true`. The popup must NOT re-fire.
+
+#### 3.2.2 Open / close
+
+| Action                      | Expected                                                                        |
+| --------------------------- | ------------------------------------------------------------------------------- |
+| Click `.oracle-fab`         | dock opens, input focusable, fab disappears                                     |
+| Click `×` close button      | dock closes, fab reappears                                                      |
+| Click `＋` "New chat" button | message list resets to welcome-only; `sessionStorage.oracle_history_v1` is null |
+| Click `⚙` link              | `/settings/oracle` opens in same tab                                            |
+
+#### 3.2.3 Text-only chat (no tool)
+
+Type "What is Papercusp?" and submit. Within 30s:
+
+* `.oracle-form input` becomes `disabled=false` (busy ends)
+* A `.oracle-msg-assistant` exists with non-empty content
+* No `.oracle-tool-chip` elements
+* No URL change
+
+#### 3.2.4 Tool: `navigate`
+
+Type "Take me to /marketplace/snapshots." Within 8s:
+
+* Tool chip with text starting `🔧 navigate` and arg
+  `path: /marketplace/snapshots`
+* `location.pathname === '/marketplace/snapshots'`
+* Snapshots tab is selected (active state on the marketplace tabs)
+
+#### 3.2.5 Tool: `listHarnesses`
+
+Type "List my harnesses briefly." Within 15s:
+
+* Tool chip `🔧 listHarnesses` (no args)
+* Assistant message lists at least the registered harness slugs
+  visible via `curl /api/harness/projects`
+
+#### 3.2.6 Tool: `getHarnessStatus`
+
+Type "What is the state of the sheets harness?" Within 25s:
+
+* Tool chip `🔧 getHarnessStatus(slug: sheets)`
+* Assistant message includes feature counts (passed/todo/blocked)
+  and a recent-features hint or summary excerpt
+
+#### 3.2.7 Tool: `dispatchToAgent`
+
+Type "In sheets, ask the architect to write the word hello." Within
+40s:
+
+* Tool chips include `dispatchToAgent(slug: sheets, role: architect,
+  message: …)`
+* `location.pathname` becomes `/pi` with `?harness=sheets`
+* A Dockview tab labeled `architect` (or with the chat title)
+  appears in the tab strip
+* `curl /api/harness/sheets/agent-chats` lists a new chat with
+  `role: "architect"` and the user's message in `transcript`
+
+#### 3.2.8 Tool: `listChats`
+
+After §3.2.7. Type "What recent chats do I have in sheets?" Within
+15s: tool chip `listChats(slug: sheets)` and assistant lists chats
+including the one just created.
+
+#### 3.2.9 Tool: `resumeChat`
+
+Type "Resume the most recent architect chat." Within 25s:
+
+* Tool chips include `listChats(slug: sheets, role: architect)` then
+  `resumeChat(slug: sheets, chatId: <uuid>)`
+* URL becomes `/pi?harness=sheets`
+* The same chat tab is opened (no NEW chat row created — count via
+  curl is unchanged)
+
+#### 3.2.10 Persistence + new-chat
+
+* Send a message, reload — assistant + user messages restored from
+  `sessionStorage.oracle_history_v1`.
+* Click `＋` New chat — sessionStorage entry is removed; messages
+  reset to welcome only.
+
+### 3.3 Keyboard shortcuts
+
+The authoritative, always-current list is the **in-app cheat-sheet** —
+`Ctrl+/` (or `?`) — and the remap editor at `/settings/shortcuts`; both
+render live from `packages/operator-core/lib/shortcut-registry.ts`, so
+prefer those over this table when they disagree. The high-traffic
+defaults after the Discord-parity pass (discord-shortcuts 2026-06-06;
+`⌘` on macOS = `Ctrl` elsewhere):
+
+| Keys                             | Where                                        | Action                                                                                                            |
+| -------------------------------- | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `Ctrl+K` (alt `Ctrl+P`)          | everywhere                                   | open Command Palette (quick switcher)                                                                             |
+| `Ctrl+/` (alt `?`)               | everywhere                                   | keyboard-shortcut cheat-sheet (`?shortcuts=1`)                                                                    |
+| `Ctrl+,`                         | everywhere                                   | open Settings                                                                                                     |
+| `Ctrl+I`                         | everywhere                                   | go to Conversations (inbox)                                                                                       |
+| `Ctrl+Shift+N`                   | everywhere                                   | create a new harness (`?create=true` on /adv)                                                                     |
+| `Ctrl+Shift+F`                   | everywhere                                   | global content search overlay (`?gsearch=1&gq=…`); hits are clickable → route to the harness view / conversations |
+| `↑`                              | empty chat composer                          | recall your last sent message into the input (Discord ↑-to-edit analog)                                           |
+| `Ctrl+U`                         | everywhere                                   | live-agents rail / member list (`?members=1`)                                                                     |
+| `Ctrl+Shift+M`                   | everywhere                                   | toggle mic mute on the shared voice session (bus control)                                                         |
+| `Ctrl+Shift+D`                   | everywhere                                   | toggle local deafen (playout off, transcripts continue)                                                           |
+| `Ctrl+Shift+V`                   | video pane mounted                           | toggle camera (`?vcam=1`, VIDEO\_CHANNELS-gated)                                                                  |
+| `Alt+↑` / `Alt+↓`                | `/adv`                                       | previous / next tab in the visible strip                                                                          |
+| `Ctrl+Alt+←` / `Ctrl+Alt+→`      | `/adv`                                       | previous / next harness (pot)                                                                                     |
+| `Alt+←` / `Alt+→`                | everywhere                                   | history back / forward                                                                                            |
+| `Ctrl+F`                         | everywhere                                   | in-app find in page                                                                                               |
+| `g` then `d`/`s`/`c`/`b`/`p`/`i` | harness tabs                                 | go-to tab (Linear-style sequence)                                                                                 |
+| `Esc`                            | any modal/popover/dock                       | close (popover, modal, dock if open)                                                                              |
+| `Esc`                            | feature search box                           | clear filter                                                                                                      |
+| `↑` / `↓`                        | open command palette / inbox / proposal list | navigate selection                                                                                                |
+| `Enter`                          | open command palette                         | execute selected command                                                                                          |
+| `⌘+Enter` / `Ctrl+Enter`         | proposal goal editor textarea                | save edit                                                                                                         |
+| `Tab` / `Shift+Tab`              | every form                                   | normal tab order through controls                                                                                 |
+| Drag (mouse)                     | `/pi` dockview tabs                          | rearrange tabs / split groups                                                                                     |
+
+## 4. Home (`/`)
+
+Interactive inventory:
+
+| Selector / role                 | Behavior                                                     |
+| ------------------------------- | ------------------------------------------------------------ |
+| (header)                        | per §3.1                                                     |
+| `link "Start setup"`            | → `/setup`                                                   |
+| `link "Browse marketplace"` ×2  | → `/marketplace`                                             |
+| `link "Open settings"`          | → `/settings/api-keys`                                       |
+| `link "Open mission control"`   | → `/harness`                                                 |
+| `link "Open marketplace"`       | → `/marketplace`                                             |
+| `link "Open setup guide"`       | → `/setup`                                                   |
+| `link "Why Papercusp exists →"` | → `/docs/spec` (or equivalent)                               |
+| `<h1>`                          | contains `<img src="/wordmark.svg">` (no text)               |
+| `ApiKeyStatus` block            | shows configured / unconfigured state for Anthropic / OpenAI |
+
+Each link's destination resolves to 200 (`curl` head check).
+
+## 5. Harness dashboard (`/harness` and `/harness/<slug>`)
+
+Test on at least one of each kind:
+
+* **Coding** flavor: `sheets` (has features, state, spec)
+* **Org** flavor: `org` (department-style — top-level page may
+  render `DepartmentHarnessDashboard`)
+
+### 5.1 Top toolbar
+
+| Selector                                           | Behavior                                                                                                                                                                                                                                                        |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `button "Collapse top section"`                    | toggles `body.h-harness-top-collapsed`; second click expands                                                                                                                                                                                                    |
+| `button "Set up phases"`                           | opens phase setup modal/panel                                                                                                                                                                                                                                   |
+| `combobox "Select harness project"` (`.h-project`) | opens a Radix select listing projects grouped by kind (org / department / coding); selecting one updates `location.pathname` to `/harness/<slug>` via history.replaceState                                                                                      |
+| `button "spent <amount>"`                          | opens the cost/usage detail panel (`?usage=true`) — same panel as `UsagePanel`                                                                                                                                                                                  |
+| `button "Mission focus"`                           | the focus card on the phase-plan row; class `h-focus-card`; clicking calls `setPeekFeature(focusFeature)` → opens `FeaturePeekPanel` for the focus feature; visible only when `status` is loaded, the active panel isn't brainstorm, and a focus feature exists |
+| `button "Review N issues"`                         | warn-styled button next to mission focus when `triageCount > 0`; opens `?triage=true`                                                                                                                                                                           |
+| `button "⌘K"`                                      | opens the command palette (`CommandPalette` modal)                                                                                                                                                                                                              |
+| `button "triage"`                                  | toggles `?triage=true`                                                                                                                                                                                                                                          |
+| `button "save snapshot"`                           | opens the save-snapshot modal                                                                                                                                                                                                                                   |
+| `button "start"`                                   | starts the autonomous run for the active harness; spinner replaces the button while in flight                                                                                                                                                                   |
+
+### 5.2 Plugin actions toolbar
+
+Per active harness, plugins that contribute toolbar actions appear
+as buttons (one per `actions[].surfaces:[harness-toolbar]`):
+
+* `Publish to Cloudflare` — opens action params form, then POSTs to
+  `/api/plugins/invoke?slug=…&action=publish`. On success, toast
+  with the deployment URL.
+* `Run pending migrations` — postgres-manager
+* `Inspect schema` — postgres-manager
+* `Publish website` — cloudflare-pages-hosted
+* `Create Linear issue` — linear-sync
+
+For each: an `enable plugin` chip appears next to disabled actions
+when the plugin isn't enabled in the active harness. Clicking the
+chip enables the plugin and reveals the action.
+
+### 5.3 Main tabs
+
+Selectors: `tab[value=...]` via Radix Tabs.
+
+| Tab            | Active condition | Body component                                                                                                                      |
+| -------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `brainstorm`   | activeSlug set   | `BrainstormPanel` — sub-tab nav (Canvas / Map / Write) + chat toggle (right-rail `BrainstormChat`); see §5.16.4 for sub-tab details |
+| `🪄 proposals` | activeSlug set   | `ProposalsPanel` — list + filters                                                                                                   |
+| `dashboard`    | always           | feature lanes + status filters (default)                                                                                            |
+| `summary`      | activeSlug set   | `SummaryPanel` — markdown rendered from `/api/harness/<slug>/summary`                                                               |
+| `docs`         | activeSlug set   | docs iframe (fumadocs plugin)                                                                                                       |
+| `vscode`       | activeSlug set   | code-server iframe (8082)                                                                                                           |
+| `consoles`     | activeSlug set   | `<PiTerminalsDock>` mounted (dockview)                                                                                              |
+| `insights`     | activeSlug set   | `InsightsPanel` charts                                                                                                              |
+| `config`       | activeSlug set   | `ManifestSpecEditor` — edit the project's `papercusp.json` / spec                                                                   |
+
+Tabs with `disabled` styling when no harness is selected — clicking
+must be a no-op. Switching tabs updates `?panel=<id>`.
+
+### 5.4 Add plugin
+
+| Action                                                 | Expected                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Click `.h-add-plugin-tab`                              | popover renders at `[data-add-plugin-popover][style*='position: fixed']`, lists installed-but-not-enabled plugins                                                                                                                                                        |
+| Empty popover state                                    | "All installed plugins are already enabled here" with a Browse-marketplace link                                                                                                                                                                                          |
+| Error state                                            | "Couldn't load plugins" with Retry button (when `/api/plugins/global` errored)                                                                                                                                                                                           |
+| Click a candidate                                      | request goes out to `/api/plugins/enable`; popover stays open with disabled buttons during the 3–9s round-trip; on success, toast `"<plugin-name> enabled in <slug>"`, popover closes, dashboard refetches enabled list; `curl /api/plugins/enabled` reflects the change |
+| Plugin requires templateKinds=\[coding] enabled on org | response is `{ok:false, error: "...templateKinds=[coding]; got org"}`; `toast.error` shows the error                                                                                                                                                                     |
+| Press `Escape` while popover is open                   | popover closes                                                                                                                                                                                                                                                           |
+| Click outside the popover                              | popover closes                                                                                                                                                                                                                                                           |
+
+### 5.5 Left pane (inbox / git)
+
+| Selector         | Behavior                                        |
+| ---------------- | ----------------------------------------------- |
+| `button "inbox"` | sets `?left=inbox`, shows triage inbox sub-pane |
+| `button "git"`   | sets `?left=git`, shows the git graph           |
+
+Inbox sub-pane:
+
+| Element                       | Behavior                                                       |
+| ----------------------------- | -------------------------------------------------------------- |
+| `tab "All <n>"`               | unfiltered                                                     |
+| `tab "Decisions <n>"`         | filter to decisions                                            |
+| `tab "Threads <n>"`           | filter to threads                                              |
+| `tab "Pinned <n>"`            | filter to pinned items                                         |
+| `textbox "Search inbox"`      | live filter                                                    |
+| `button "+ idea"`             | inline create new inbox idea row                               |
+| `button "+ draft idea"`       | open `OperatorNoteForm` modal for a richer draft               |
+| `button "syncing" [disabled]` | live indicator (becomes enabled when manual sync is available) |
+| `button "latest" [disabled]`  | jump-to-latest inbox item                                      |
+
+### 5.6 Status / phase filters (above feature list)
+
+| Selector                                          | Behavior                              |
+| ------------------------------------------------- | ------------------------------------- |
+| `button "All <n>"`                                | clear status filter                   |
+| `button "Running <n>"`                            | filter status=running                 |
+| `button "Stuck <n>"`                              | filter status=stuck                   |
+| `button "Blocked <n>"`                            | filter status=blocked                 |
+| `button "Todo <n>"`                               | filter status=todo                    |
+| `button "Passed <n>"`                             | filter status=passed                  |
+| Phase tabs (`staging` / `testing` / `production`) | sets `?phase=`; feature lanes refetch |
+
+### 5.7 Feature filter row
+
+| Selector                       | Behavior                                           |
+| ------------------------------ | -------------------------------------------------- |
+| `combobox "Filter by project"` | restricts feature list to a single project         |
+| `textbox "Filter by tag"`      | live tag filter                                    |
+| `textbox "Search features"`    | live text search across feature titles             |
+| `button "list" [pressed]`      | list view (default)                                |
+| `button "board"`               | switch to board (kanban) view                      |
+| `button "+ new"`               | open `FeatureEditor` modal to create a new feature |
+
+### 5.8 Per-feature row actions
+
+Each row exposes:
+
+| Selector                 | Behavior                                                                                                                                            |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `checkbox "Select <id>"` | toggle row selection (enables bulk ops)                                                                                                             |
+| `button "steer"`         | opens an `InterventionPanel` for steering this feature                                                                                              |
+| `button "chat"`          | calls `openFeatureChat({slug, role:'architect', featureId})` → custom event `papercusp:open-chat`, dock chat panel mounts on /pi or in consoles tab |
+| `button "open in pi"`    | navigates to `/pi?harness=<slug>&lane=<id>`                                                                                                         |
+| `button "edit"`          | opens `FeatureEditor` modal preloaded                                                                                                               |
+| `button "reset"`         | confirmation modal, then POST `/api/harness/<slug>/features/<id>/reset`                                                                             |
+
+Feature title click → opens `FeaturePeekPanel` on the right side.
+
+### 5.9 Footer
+
+| Selector                        | Behavior                                                                      |
+| ------------------------------- | ----------------------------------------------------------------------------- |
+| `button "issues <n>"`           | navigates to / opens issues view (`?issues=true` or `/harness/<slug>/issues`) |
+| `button "tests"`                | opens TestsTab                                                                |
+| `button "report" / "report md"` | opens promotion report panel                                                  |
+
+### 5.10 Command palette (⌘K)
+
+Open with `⌘K` / `Ctrl+K`. Type to filter. Sections + commands:
+
+**Projects** — one entry per registered harness:
+
+| Title                   | Action                                     |
+| ----------------------- | ------------------------------------------ |
+| `<slug>`                | switches `activeSlug` to that project      |
+| Open `<slug>` in VSCode | calls `openInVSCode(<path>)` (file:// URI) |
+
+**Control** — visible when a harness is active:
+
+| Title                                   | Icon   | Action                                                |
+| --------------------------------------- | ------ | ----------------------------------------------------- |
+| Stop harness                            | `■`    | sends stop signal; visible only when running          |
+| Pause harness (SIGSTOP)                 | (none) | suspends the running orchestrator process             |
+| Unpause harness (SIGCONT)               | (none) | resumes the suspended orchestrator                    |
+| Start harness                           | `▶`    | launches the orchestrator (visible only when stopped) |
+| Edit config / spec                      | `✎`    | switches main panel to `config`                       |
+| Open current project in VSCode          | `</>`  | open VSCode at project root                           |
+| Triage — stuck/blocked/failing features | `🔺`   | sets `?triage=true`                                   |
+| Insights — analytics                    | `📊`   | switches main panel to `insights`                     |
+| Hooks — edit pre/post lifecycle scripts | `⚡`    | sets `?hooks=true`                                    |
+| Intervene — send note to orchestrator   | `💬`   | sets `?intervene=true`                                |
+| Usage — per-role cost breakdown         | `💵`   | sets `?usage=true`                                    |
+| Snapshots — rollback mission state      | `⟲`    | sets `?snapshots=true`                                |
+| Decisions — orchestrator verb timeline  | `🧠`   | sets `?decisions=true`                                |
+| Smoke test — service gate               | `💨`   | sets `?smoke=true`                                    |
+| Identity — cross-mission role memory    | `🧬`   | sets `?identity=true`                                 |
+| Request checkpoint                      | (none) | POSTs to checkpoint endpoint                          |
+| Screenshots — visual history            | `📸`   | sets `?screenshots=true`                              |
+| Create new feature                      | `＋`    | opens `FeatureEditor` modal in 'new' mode             |
+
+For each: open palette → type/scroll → activate → URL or panel state
+matches the listed effect.
+
+### 5.11 Query-param toggles (modal/side panels)
+
+Each is a header-toolbar toggle (or command-palette action) that
+flips a `parseAsBoolean` query param. Verify each one renders its
+corresponding panel:
+
+| Param               | Panel                               |
+| ------------------- | ----------------------------------- |
+| `?triage=true`      | `TriageQueue`                       |
+| `?hooks=true`       | `HooksPanel`                        |
+| `?intervene=true`   | `InterventionPanel`                 |
+| `?usage=true`       | `UsagePanel`                        |
+| `?snapshots=true`   | `SnapshotsPanel` (in-harness)       |
+| `?screenshots=true` | `ScreenshotsPanel`                  |
+| `?decisions=true`   | `DecisionsPanel`                    |
+| `?smoke=true`       | `SmokeTestPanel`                    |
+| `?identity=true`    | `IdentityPanel`                     |
+| `?templates=true`   | `TemplatesModal`                    |
+| `?archives=true`    | `ArchivesPanel`                     |
+| `?diff=<id>`        | `FeatureDiffModal` for that feature |
+
+For each: query param appears, panel renders, `Esc` or close-button
+removes the param + closes panel.
+
+### 5.12 Modal / panel internals
+
+#### 5.12.1 `FeatureEditor` (`+ new` button or `edit` per-row)
+
+| Field / control    | Behavior                                                                      |
+| ------------------ | ----------------------------------------------------------------------------- |
+| ID                 | text input; for new features, server assigns; for edit, read-only             |
+| Title              | textarea, multiline, required                                                 |
+| Summary            | textarea, longer-form description                                             |
+| Status             | select: `todo`, `running`, `passed`, `failed`, `blocked`, `stuck`             |
+| Attempts           | number input                                                                  |
+| Save               | POSTs to `/api/harness/<slug>/features` (new) or PUT (edit); toast on success |
+| Cancel / Close     | discards changes                                                              |
+| Delete (edit mode) | confirmation → `DELETE /api/harness/<slug>/features/<id>`                     |
+
+#### 5.12.2 `FeaturePeekPanel` (right-rail when feature title clicked)
+
+Shows the feature's full transcript, linked claims, recent activity.
+
+| Action                       | Behavior                                                     |
+| ---------------------------- | ------------------------------------------------------------ |
+| Open architect chat          | calls `openFeatureChat({slug, role:'architect', featureId})` |
+| Open worker chat             | same with `role:'worker'`                                    |
+| Reset feature                | confirmation → reset endpoint                                |
+| Close (`×` or click outside) | closes peek panel                                            |
+
+#### 5.12.3 `FeatureDiffModal` (`?diff=<id>`)
+
+Side-by-side diff vs prior version.
+
+| Action                     | Behavior                                        |
+| -------------------------- | ----------------------------------------------- |
+| Toggle inline / split view | layout swap                                     |
+| Apply / revert             | (when applicable) calls feature-update endpoint |
+| Close                      | removes `?diff=`                                |
+
+#### 5.12.4 `ProposalsPanel` (proposals tab)
+
+Sidebar (`Proposal list`):
+
+| Element                         | Behavior                                                                           |
+| ------------------------------- | ---------------------------------------------------------------------------------- |
+| Search box                      | live filter on visible proposals                                                   |
+| Status filter tabs (Radix Tabs) | filter by status (pending/accepted/rejected)                                       |
+| `next` button                   | focus the next pending proposal                                                    |
+| `shortlist only` toggle         | filter to shortlisted only                                                         |
+| Each row                        | click selects + loads detail panel                                                 |
+| Shortlist star toggle           | adds/removes from shortlist (`aria-label="Add to/Remove from proposal shortlist"`) |
+
+Detail pane:
+
+| Element                   | Behavior                                           |
+| ------------------------- | -------------------------------------------------- |
+| `edit goal` button        | switches to edit mode                              |
+| Spec textarea (edit mode) | editable; aria-label `"Edit SPEC.md"`              |
+| `save` button             | persists goal change                               |
+| `cancel` button           | discards                                           |
+| `replan now`              | POSTs replan; busy spinner during 3–10s round-trip |
+| `dismiss` (replan prompt) | hides the replan prompt                            |
+| Product review action     | runs review against the active goal                |
+
+#### 5.12.5 `SummaryPanel`
+
+Renders the markdown summary from `/api/harness/<slug>/summary`. No
+controls beyond the rendered links (which navigate per the source
+markdown).
+
+#### 5.12.6 `InsightsPanel`
+
+Charts: feature throughput, role-time histogram, cost over time. No
+write controls — read-only analytics. Verify charts render (look for
+`<canvas>` or `<svg>` elements) and labels are non-empty.
+
+#### 5.12.7 `ManifestSpecEditor` (config tab)
+
+| Element            | Behavior                                |
+| ------------------ | --------------------------------------- |
+| YAML / JSON editor | edits `papercusp.json` and/or `SPEC.md` |
+| Save               | persists; toast on success              |
+| Discard            | reverts unsaved changes                 |
+| Close              | exits edit mode                         |
+
+#### 5.12.8 `HooksPanel` (`?hooks=true`)
+
+| Element                                                                 | Behavior                  |
+| ----------------------------------------------------------------------- | ------------------------- |
+| List of lifecycle stages (pre-worker, post-worker, pre-validator, etc.) | each row shows the script |
+| Edit button per row                                                     | opens an inline editor    |
+| Save                                                                    | persists script content   |
+| Test run                                                                | dry-runs the script       |
+| Add new hook                                                            | append a new row          |
+
+#### 5.12.9 `InterventionPanel` (`?intervene=true`)
+
+| Element       | Behavior                                                     |
+| ------------- | ------------------------------------------------------------ |
+| Note textarea | message to send to the orchestrator                          |
+| Send button   | POST to `/api/harness/<slug>/operator-notes`; toast confirms |
+
+#### 5.12.10 `UsagePanel` (`?usage=true`)
+
+Shows per-role cost + token breakdown for the current run window.
+Read-only with a `close` action.
+
+#### 5.12.11 `SnapshotsPanel` (in-harness, `?snapshots=true`)
+
+| Element       | Behavior                                            |
+| ------------- | --------------------------------------------------- |
+| Save snapshot | invokes `papercusp snapshot save`; toast on success |
+| Each row      | shows date, size, description                       |
+| Restore       | confirmation → `papercusp snapshot restore`         |
+| Delete        | confirmation → delete snapshot                      |
+
+#### 5.12.12 `ScreenshotsPanel` (`?screenshots=true`)
+
+Read-only image grid of captured screenshots. Click to expand.
+
+#### 5.12.13 `DecisionsPanel` (`?decisions=true`)
+
+Timeline of orchestrator decisions (verb log). Filter by verb /
+role. No write actions.
+
+#### 5.12.14 `SmokeTestPanel` (`?smoke=true`)
+
+| Element         | Behavior                                                              |
+| --------------- | --------------------------------------------------------------------- |
+| `Run smoke`     | invokes the smoke gate; spinner during run; result badge: pass / fail |
+| Per-step expand | shows logs                                                            |
+| Re-run failed   | re-runs only failures                                                 |
+
+#### 5.12.15 `IdentityPanel` (`?identity=true`)
+
+Cross-mission role memory. Read-mostly with an "edit" affordance per
+role.
+
+#### 5.12.16 `TemplatesModal` (`?templates=true`)
+
+Apply a harness template to the active project. Wizard-style:
+
+| Step             | Element             | Action                                  |
+| ---------------- | ------------------- | --------------------------------------- |
+| 1. Pick template | template card grid  | select                                  |
+| 2. Configure     | per-template params | fill                                    |
+| 3. Confirm       | `Apply` button      | POST to install; close modal on success |
+
+#### 5.12.17 `ArchivesPanel` (`?archives=true`)
+
+Lists archived chats / features. Each row exposes a `restore` action.
+
+#### 5.12.18 `OperatorNoteForm` (inbox `+ draft idea`)
+
+| Element       | Behavior           |
+| ------------- | ------------------ |
+| Title input   | required           |
+| Body textarea | markdown supported |
+| Tags input    | comma-separated    |
+| Save          | POST to inbox      |
+
+### 5.13 Conditional banners
+
+These render at the top of the dashboard only when their guard fires.
+Test by triggering the underlying state.
+
+| Banner             | Renders when                                                          | Actions                                                                       |
+| ------------------ | --------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `PlanReviewBanner` | `/api/harness/<slug>/plan-review` returns content + not yet dismissed | `Approve`, `Dismiss` (sets local state)                                       |
+| `CheckpointBanner` | `/api/harness/<slug>/checkpoints` has at least one entry              | per-row: `Restore`, `Promote` (or similar)                                    |
+| `EscalationBanner` | live status payload includes `escalation` and `escalated=true`        | `Acknowledge`, `Resolve`, `Open chat` (architect), `Open chat` (orchestrator) |
+| `PromotionCard`    | a feature is queued for promotion                                     | `Promote`, `Reject`                                                           |
+
+For each: simulate the trigger (or pick a harness in the right state),
+verify banner appears, click each action, verify state mutation
+(banner dismisses, status changes, chat opens, etc.).
+
+### 5.14 Issues view (`button "issues <n>"`)
+
+Selectors: `IssuesList` toolbar + per-row action buttons.
+
+| Element                                                             | Behavior                                                                     |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Toolbar filter buttons                                              | filter by status (`open` / `acknowledged` / `fixing` / `closed` / `wontfix`) |
+| Per-row `aria-label="Open <severity> <status> issue <id>: <title>"` | opens `IssueDetail`                                                          |
+| Per-row `promote` button                                            | POST promote action; row updates or moves                                    |
+| Per-row `ack` (acknowledge)                                         | POST ack action; status → `acknowledged`                                     |
+| Per-row `close` (success styling)                                   | confirms then closes; status → `closed`                                      |
+| Per-row `won't fix` (danger styling)                                | confirms then sets status → `wontfix`                                        |
+
+`IssueDetail`:
+
+| Element                               | Behavior                                         |
+| ------------------------------------- | ------------------------------------------------ |
+| `×` close button                      | back to list                                     |
+| Note textarea                         | add a note                                       |
+| `Add note` button                     | enabled only when text non-empty; POST adds note |
+| Linked feature link (when applicable) | navigates to feature peek                        |
+
+### 5.15 Tests / report sub-views
+
+`button "tests"` opens `TestsTab`:
+
+| Element        | Behavior                                             |
+| -------------- | ---------------------------------------------------- |
+| Test run list  | each row: status badge, duration, last-run timestamp |
+| Run all        | invokes test run for the active phase                |
+| Per-row `Run`  | re-runs that single test                             |
+| Per-row expand | shows stdout / stderr                                |
+
+`button "report"` (or `report md`) opens promotion-report view —
+markdown summary of what's promotable; copy to clipboard, download
+as MD.
+
+### 5.16 Per-harness sub-tabs (selected via main tab nav)
+
+Several plugin-mounted or built-in tabs are reachable as
+`?panel=<id>` once the user enables them. Cover each:
+
+#### 5.16.1 `CollectionTab` (collections of files)
+
+| Element             | Behavior                                            |
+| ------------------- | --------------------------------------------------- |
+| File list           | each row clickable → loads contents into editor     |
+| Editor              | textarea / code editor; `dirty` flag enables `save` |
+| `save` button       | persists; toast on success                          |
+| `delete` (per file) | confirmation → DELETE; toast on success             |
+
+#### 5.16.2 `MemoryBrowser`
+
+| Element                                           | Behavior                       |
+| ------------------------------------------------- | ------------------------------ |
+| Tree of memory entries (per role / cross-mission) | click expands                  |
+| Search / filter                                   | live filter                    |
+| Edit per entry                                    | inline editor; `save` persists |
+
+#### 5.16.3 `BrainstormPanel`
+
+Top-level wrapper for the `brainstorm` tab.
+
+| Element                                | Behavior                                                                    |
+| -------------------------------------- | --------------------------------------------------------------------------- |
+| Sub-tab nav (`Canvas`, `Map`, `Write`) | per-tab views; only one renders at a time                                   |
+| `Canvas` view                          | freeform whiteboard; idea nodes draggable; double-click to edit             |
+| `Map` view                             | tree / mind-map of related ideas                                            |
+| `Write` view                           | long-form draft mode (textarea / editor)                                    |
+| Chat toggle button                     | opens / closes the right-rail `BrainstormChat` panel                        |
+| `BrainstormChat`                       | mini chat with the brainstorm agent; same SSE stream pattern as agent chats |
+
+#### 5.16.4 `PromptsTab`
+
+| Element                    | Behavior                                            |
+| -------------------------- | --------------------------------------------------- |
+| Per-role prompt rows       | click loads the role's prompt into editor           |
+| Editor (per-role override) | textarea; `dirty` flag                              |
+| `save override`            | POST to `/api/harness/<slug>/prompts/<role>`; toast |
+| `delete override`          | reverts to default; toast                           |
+
+## 5.17 Org-flavor harness (`DepartmentHarnessDashboard`)
+
+When `harness_kind === 'department'`, `/harness/<slug>` mounts
+`DepartmentHarnessDashboard` instead of `HarnessDashboard`. The UI
+is structured around departmental flow rather than feature lanes.
+
+| Selector                             | Behavior                                                     |
+| ------------------------------------ | ------------------------------------------------------------ |
+| `button "Inbox"`                     | shows incoming briefings/decisions                           |
+| `button "Outbox"`                    | shows outgoing items the department has produced             |
+| `button "Compose"`                   | opens compose form (briefing / decision)                     |
+| `button "Decisions"`                 | filters / shows decisions log                                |
+| `button "Charter"`                   | renders the department's charter doc (read-only or editable) |
+| `button "Director notes"`            | shows / edits notes from the department's director role      |
+| `button "Memory"`                    | shows long-term department memory                            |
+| `button "Director agent"`            | opens a chat with the Director role                          |
+| `button "full stdout"` (in run logs) | toggle to show full stdout for a run                         |
+| `<input>` (Compose form)             | title input                                                  |
+| `<textarea>` (Compose form)          | body, markdown                                               |
+| `button "Send"`                      | POSTs the message; toast on success                          |
+| `button "Reload"` (`onClick={load}`) | refetches data                                               |
+
+For each: click → inner content swaps; verify expected list/form
+renders. The header bar and Oracle dock remain as in §3.
+
+## 6. Pi route (`/pi?harness=<slug>`)
+
+Selectors: `.dv-dockview`, `.dv-tab`, `.dv-default-tab-content`.
+
+| Action                                                          | Expected                                                                                                       |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Open `/pi?harness=sheets`                                       | dockview mounts; default tab `terminal 1` (PTY connected to project root)                                      |
+| Drag a tab into a split                                         | layout updates; persists in `localStorage.dockview.layout.<slug>`                                              |
+| Trigger `papercusp:open-chat` event with `{slug, chatId, role}` | new tab appears for the chat (if not already open); panel renders `<ChatPanel>`                                |
+| Archive a chat (DELETE) then revisit                            | corresponding tab is auto-pruned via `pruneStaleChatPanels`                                                    |
+| `?lane=<id>` query param                                        | initial PTY cwd = the feature's worktree, not the project root                                                 |
+| Send a message in the chat panel                                | streams from `/api/harness/<slug>/agent-chats/<chatId>/messages` (SSE); transcript scrolls; cost meter updates |
+| Click tab `×` close button                                      | tab closes; layout updates                                                                                     |
+| Right-click on tab                                              | context menu (rename / move to new group / close others) where supported                                       |
+| Drop a tab onto an edge                                         | splits the active group into two                                                                               |
+| Resize split via drag                                           | sash position persists                                                                                         |
+| `?lane=<id>` is set                                             | terminal opens with the feature's branch checked out                                                           |
+
+`<ChatPanel>` (each agent chat tab) interactive elements:
+
+| Selector                   | Behavior                                                  |
+| -------------------------- | --------------------------------------------------------- |
+| Transcript list            | renders user/assistant turns with role labels             |
+| Token counter / cost meter | updates after each turn                                   |
+| Input textarea             | message input                                             |
+| `Send` button              | POST `/messages`; transcript appends; SSE stream consumed |
+| `Archive` / `×`            | DELETE the chat; tab closes after pruning                 |
+
+## 7. Marketplace (`/marketplace*`)
+
+`/marketplace` itself renders the **Overview** tab. The shared
+layout shows tabs nav (`.pc-tabs`) with four tabs:
+
+| Tab       | Path                     | Description                                          |
+| --------- | ------------------------ | ---------------------------------------------------- |
+| Overview  | `/marketplace`           | how-it-works hero with category links + search       |
+| Harnesses | `/marketplace/templates` | ready workflows (label was "Templates" historically) |
+| Plugins   | `/marketplace/plugins`   | extra tools                                          |
+| Snapshots | `/marketplace/snapshots` | saved setups                                         |
+
+For each: clicking the tab navigates correctly; active tab gets
+`pc-tab active` class with cyan underline.
+
+### 7.1 Overview tab (`/marketplace`)
+
+| Selector                                                        | Behavior                                     |
+| --------------------------------------------------------------- | -------------------------------------------- |
+| `link "Search the marketplace"`                                 | scrolls to / focuses search box              |
+| `link "Browse templates"`                                       | → `/marketplace/templates`                   |
+| `link "Add plugins"`                                            | → `/marketplace/plugins`                     |
+| `searchbox "Search templates or plugins"`                       | live filter; submitting routes to results    |
+| `button "Search templates"`                                     | filter scope = templates only                |
+| `button "Search plugins"`                                       | filter scope = plugins only                  |
+| Category links (`coding`, `research`, `cloudflare`, `postgres`) | filter by category                           |
+| "Add tools later" / "Save progress" cards                       | jump to /plugins and /snapshots respectively |
+
+### 7.2 Templates tab (`/marketplace/templates`)
+
+| Selector                                      | Behavior                                                                                               |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `searchbox`                                   | live filter on visible templates                                                                       |
+| Each template `link` (e.g. `papercup-coding`) | → `/marketplace/templates/<slug>` detail page                                                          |
+| `button "Fresh project"`                      | opens install modal for "create new directory" install path                                            |
+| `button "Attach existing…"`                   | opens install modal for "use existing dir" path                                                        |
+| `button "Install (N sub-harnesses)"`          | for templates with subprojects, installs N harnesses with the parent's suffixes                        |
+| Detail page `Install` button                  | POSTs to `/api/marketplace/install`; toast on success; "Installed" badge replaces button after refetch |
+
+### 7.3 Plugins tab (`/marketplace/plugins`)
+
+| Selector                                         | Behavior                                                            |
+| ------------------------------------------------ | ------------------------------------------------------------------- |
+| `searchbox`                                      | live filter                                                         |
+| Each plugin `link` (e.g. `@papercupai/fumadocs`) | → detail page                                                       |
+| `button "Install plugin"`                        | POSTs to `/api/marketplace/install` (kind=plugin); toast on success |
+
+### 7.4 Detail page (`/marketplace/<encoded-slug>`)
+
+Routes for individual templates / plugins. Slug is URL-encoded
+(e.g. `@papercupai/fumadocs` → `%40papercupai%2Ffumadocs`). The
+list-page links produce these URLs automatically.
+
+| Element                        | Behavior                                                                                                            |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| Tabs nav                       | still visible (Overview / Templates / Plugins / Snapshots)                                                          |
+| `link "← back to marketplace"` | → `/marketplace`                                                                                                    |
+| `<h1>`                         | plugin/template name                                                                                                |
+| Meta line                      | version · license · author                                                                                          |
+| Description                    | full markdown description                                                                                           |
+| Install commands block         | static shell snippets (`papercusp install <slug>` and friends); not clickable buttons today — copy via OS clipboard |
+| Versions list                  | every published version                                                                                             |
+
+For an unknown slug, the page currently renders a placeholder showing
+the slug name (returns 200, not 404). Verify the page structure for a
+real slug; for an unknown one, expect 200 with the literal slug as a
+fallback heading. (Historical behaviour was 404; the catch-all route
+was made permissive — track whether this should be tightened.)
+
+### 7.5 Snapshots tab (`/marketplace/snapshots`)
+
+| Selector                | Behavior              |
+| ----------------------- | --------------------- |
+| Each snapshot `link`    | → snapshot detail     |
+| `button "Refresh"`      | refetches the catalog |
+| `link "Open harnesses"` | → `/harness`          |
+
+## 8. Snapshots top-level (`/snapshots`)
+
+| Selector                       | Behavior                                                                                                                                                                                                                                              |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `button "Refresh"`             | refetches `/api/snapshots` list                                                                                                                                                                                                                       |
+| `link "Harnesses"`             | → `/harness`                                                                                                                                                                                                                                          |
+| Each row                       | shows harness slug, name, description, size, created date, files count, plugins count, license, redaction tier                                                                                                                                        |
+| Row expand                     | shows redaction summary + verified/highRecallHits                                                                                                                                                                                                     |
+| (per-row) `Instantiate` button | opens fork-from-snapshot modal — picks a destination harness slug; calls `papercusp snapshot fork`                                                                                                                                                    |
+| (per-row) `Publish` button     | calls `papercusp snapshot publish`; toast with new snapshot id; "published" badge                                                                                                                                                                     |
+| (per-row) `Retract` button     | reverses publish — POST `/api/snapshots/<id>/retract` with `{marketplaceSlug: "<slug-returned-by-publish>"}`. The marketplaceSlug is required; without it the server returns 400 "marketplaceSlug required". Removes from `/api/marketplace/catalog`. |
+| (per-row) `Delete` button      | confirmation modal → `DELETE /api/snapshots/<id>`                                                                                                                                                                                                     |
+
+## 9. Settings (`/settings/<section>`)
+
+Sidebar (`.pc-settings-nav`):
+
+| Link           | Path                       |
+| -------------- | -------------------------- |
+| API keys       | `/settings/api-keys`       |
+| Oracle         | `/settings/oracle`         |
+| Profile        | `/settings/profile`        |
+| Publishing     | `/settings/publishing`     |
+| Plugin runtime | `/settings/plugin-runtime` |
+
+Each link click: URL updates, sidebar `active` class moves, body
+swaps to new form.
+
+### 9.1 API keys (`/settings/api-keys`)
+
+| Selector                                 | Behavior                                                                                                                                          |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `textbox "Anthropic API key"`            | placeholder shows masked existing value (`sk-…1234`)                                                                                              |
+| `textbox "OpenAI API key"`               | same                                                                                                                                              |
+| `textbox "GitHub personal access token"` | same                                                                                                                                              |
+| `button "Save"`                          | empty fields are skipped; non-empty fields POST to `/api/credentials`; toast `"Saved to ~/.papercusp/credentials.json"`; reloading shows new mask |
+
+### 9.2 Oracle (`/settings/oracle`)
+
+| Selector           | Behavior                                                                                        |
+| ------------------ | ----------------------------------------------------------------------------------------------- |
+| `textbox` (prompt) | renders contents of `~/.papercusp/oracle/prompt.md`                                             |
+| `textbox` (memory) | renders contents of `~/.papercusp/oracle/memory.md`                                             |
+| `button "Save"`    | PUTs `/api/oracle/config`; toast on success; file on disk reflects new value (verify via `cat`) |
+
+### 9.3 Profile (`/settings/profile`)
+
+| Selector                                                                  | Behavior                                                                                    |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `textbox "Email (optional)"`                                              | persists to profile.json                                                                    |
+| `textbox "Display name"`                                                  | same                                                                                        |
+| `textbox "Default project directory"`                                     | path validation; persists                                                                   |
+| `textbox "scoper" / "worker" / "validator" / "reviewer" / "orchestrator"` | per-role model overrides (e.g. `claude-sonnet-4-6`); persists in `profile.preferred_models` |
+| `button "Save"`                                                           | toast on success                                                                            |
+
+### 9.4 Publishing (`/settings/publishing`)
+
+Backed by `/api/publish-credentials`. Fields are fetched on mount; UI
+shows current registration + credentials masked.
+
+| Element                          | Behavior                                                                                                                                                                                                    |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tenantId` (read-only display)   | the tenant id assigned at registration                                                                                                                                                                      |
+| `tenantSecretMasked` (read-only) | masked secret (`pcs_…1234`)                                                                                                                                                                                 |
+| `registeredAt`                   | ISO timestamp                                                                                                                                                                                               |
+| `publishHost`                    | host used for publishes (e.g. `publish.papercupai.com`)                                                                                                                                                     |
+| `Rotate secret` button           | confirmation dialog "Rotate the publish secret? The old secret stops working immediately."; on confirm, POST `/api/publish-credentials/rotate`; toast `"Secret rotated."`; new masked value appears         |
+| `Forget credentials` button      | confirmation "Delete local publish credentials? Future publishes will register a fresh tenant."; on confirm, DELETE `/api/publish-credentials`; toast `"Credentials cleared."`; UI shows unregistered state |
+
+### 9.5 Plugin runtime (`/settings/plugin-runtime`)
+
+| Selector               | Behavior                                                                                                                      |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `button "Reset cache"` | clears the in-process plugin host cache + `require.cache`; toast on completion; subsequent plugin invocations recompile fresh |
+
+## 10. Support (`/support`)
+
+| Selector                           | Behavior                                                                                                                                                            |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `button "💬 Start support chat"`   | opens Chatwoot widget (`window.$chatwoot.toggle('open')`)                                                                                                           |
+| `link "🐛 Open a GitHub issue"`    | → repo issues page                                                                                                                                                  |
+| `link "📚 Browse the docs"`        | → `/docs`                                                                                                                                                           |
+| `link "full documentation"`        | → `/docs`                                                                                                                                                           |
+| `link "marketing site"`            | → marketing url                                                                                                                                                     |
+| `link "issue tracker"`             | → repo issues                                                                                                                                                       |
+| `link "5-step setup"`              | → `/setup`                                                                                                                                                          |
+| `SupportAgentPanel` (when present) | budget cap UI + chat input + SSE stream from `https://api.papercuspai.com/v1/support/chat`; cap-exceeded warning banner + "Talk to a human" button when over budget |
+
+## 11. Auth pages
+
+### 11.1 `/login`
+
+| Selector                   | Behavior                                                                 |
+| -------------------------- | ------------------------------------------------------------------------ |
+| `textbox "Email"`          | email input                                                              |
+| `button "Send magic link"` | POSTs to auth-magic-link endpoint; on success "Check your email" message |
+| `link "settings"`          | → `/settings/api-keys`                                                   |
+
+### 11.2 `/signup`
+
+Currently redirects to `/login` (single magic-link flow handles both
+signin and signup).
+
+### 11.3 `/setup`
+
+A linkified setup guide (not a wizard with form steps in the current
+build). Verify each link routes correctly:
+
+| Link                    | Destination                |
+| ----------------------- | -------------------------- |
+| `← back to home`        | `/`                        |
+| `/harness`              | `/harness`                 |
+| `home page`             | `/`                        |
+| `Settings → API keys`   | `/settings/api-keys`       |
+| `Anthropic API key`     | external Anthropic console |
+| `Marketplace`           | `/marketplace`             |
+| `issue`                 | github issues              |
+| `papercusp.com/support` | external support site      |
+
+## 12. Docs (`/docs`)
+
+| Selector                                                                     | Behavior                                                                  |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `link "Papercusp Spec"`                                                      | header link                                                               |
+| `button "Collapse Sidebar"`                                                  | hides the left nav                                                        |
+| `button "Search ⌘ K"`                                                        | opens Fumadocs search palette; type to filter                             |
+| Sidebar buttons (`Data Sync`, `Design`, `Implementation`, `Spec`, `Testing`) | expand the section, listing pages                                         |
+| `button "Toggle Theme"`                                                      | flips light/dark                                                          |
+| `button "Open Search"`                                                       | same as `Search ⌘ K`                                                      |
+| Body links                                                                   | navigate within docs; page renders MDX (callouts, code, tables) correctly |
+| `Testing` → `Agent E2E playbook`                                             | opens this page                                                           |
+
+Full sidebar enumeration (verify each page renders 200):
+
+| Section        | Pages                                                                          |
+| -------------- | ------------------------------------------------------------------------------ |
+| Top-level      | `index`, `branding`                                                            |
+| Data Sync      | `index`, `cookbook`, `named-queries`, `schema`, `zero`, `pitfalls`, `richgrid` |
+| Design         | (per `content/internal-docs/design/meta.json`)                                 |
+| Implementation | `status`, `orchestrator-port`, `marketplace`, `pi-integration`                 |
+| Spec           | `capabilities`, `open-questions`, plus other `spec/*.mdx` files                |
+| Testing        | `index` (testing strategy), `agent-e2e` (this page)                            |
+
+For each page: load it, verify h1 renders, no parse errors in
+operator log, body has at least one heading and one prose paragraph.
+
+Search box (`⌘K`):
+
+| Action                              | Expected                                                    |
+| ----------------------------------- | ----------------------------------------------------------- |
+| Open palette                        | input focused, suggestion list shows recent / popular pages |
+| Type a heading word (e.g. "Oracle") | results match across all docs pages                         |
+| Click a result                      | navigates to that doc with hash anchor scrolled             |
+| `Esc`                               | closes palette without navigating                           |
+
+## 12.5 Auth state matrix
+
+Every page may render slightly differently when logged out vs
+logged in. Verify both states (or at least cover the deltas):
+
+| State      | Header                                          | Pages requiring auth                                       |
+| ---------- | ----------------------------------------------- | ---------------------------------------------------------- |
+| Logged out | "Sign in" link in nav (from `SessionIndicator`) | `/login` accessible; protected routes redirect to `/login` |
+| Logged in  | user email / avatar; Sign-out menu item         | full nav, all routes accessible                            |
+
+`WorkspaceSwitcher` may show a default workspace logged out and the
+authenticated user's workspaces logged in.
+
+## 12.6 Empty states
+
+The following empty states should each render gracefully (not throw,
+not show a console error). Trigger by exercising on a fresh
+machine / new workspace:
+
+| Surface                                  | Empty-state copy / hint                                                |
+| ---------------------------------------- | ---------------------------------------------------------------------- |
+| `/harness` no projects registered        | "No harnesses yet" + link to `/setup` or "+ register harness"          |
+| Add-plugin popover, all enabled          | "All installed plugins are already enabled here. Browse marketplace →" |
+| Add-plugin popover, none installed       | "No plugins installed. Browse plugins →"                               |
+| `/snapshots` empty                       | "No snapshots yet" + link to harness                                   |
+| `/marketplace/snapshots` no published    | empty list state                                                       |
+| Inbox `All 0`                            | empty list with "+ idea" prompt                                        |
+| Feature list `All 5` (or whatever count) | rows; if count is 0, an empty-state row                                |
+| Issues view `<n>=0`                      | empty state                                                            |
+| Tests tab no tests configured            | empty state with link to TESTING.md                                    |
+| Per-role chat with no messages           | empty transcript with input                                            |
+
+## 12.7 Error states
+
+**Server-error legs on desktop — use the built-in fault injection (EI-297).**
+The Tauri webview's API traffic rides the IPC-first path, so an HTTP fault
+proxy in front of `/api` never sees it. Instead, start the operator under test
+with `PAPERCUSP_FAULT_INJECTION=1` and drive faults through the loopback-only
+control plane (inert without the env gate; rules are in-memory and vanish on
+restart):
+
+```sh
+# fault the next profile save with a 500, then auto-expire
+curl -X POST http://127.0.0.1:<port>/api/admin/fault-injection \
+  -H 'content-type: application/json' \
+  -d '{"pathPrefix":"/api/profile","method":"POST","status":500,"times":1}'
+# delay-only rule (latency testing): {"pathPrefix":"/api/...","delayMs":3000}
+# inspect / clear:  GET … | DELETE …?id=fault-1 | DELETE … (all)
+```
+
+Implementation + tests: `apps/operator/bin/host-fault-injection.ts`.
+
+Trigger each by stopping the relevant backend / passing a bad
+parameter:
+
+| Surface                            | Trigger                                       | Expected                                                          |   |            |
+| ---------------------------------- | --------------------------------------------- | ----------------------------------------------------------------- | - | ---------- |
+| `/api/oracle/chat`                 | malformed body                                | 400 with `{error: "messages required"}`; dock shows `⚠ <message>` |   |            |
+| Add-plugin popover                 | `/api/plugins/global` returns non-200         | popover shows "Couldn't load plugins" + Retry                     |   |            |
+| Plugin enable                      | server returns `{ok:false, error:"..."}`      | `toast.error` with description \`(d.results?.\[0]?.log            |   | d.error)\` |
+| `/marketplace/<slug>` unknown slug | path doesn't match registered template/plugin | 404 page "This page could not be found."                          |   |            |
+| `/harness/<slug>` unknown slug     | not in registry                               | `notFound()` triggers Next.js 404                                 |   |            |
+| `/pi` without `?harness=<slug>`    | missing query param                           | inline message: "Missing `?harness=<slug>` query parameter."      |   |            |
+| Settings save                      | `/api/credentials` 500                        | `toast.error("save failed: …")`                                   |   |            |
+
+## 13. Coverage checklist (paste into report)
+
+The checklist mirrors the **live `/adv` shell** (the Vite SPA — `ADV_TABS` in
+`apps/operator-vite/src/components/adv/AdvShell.tsx` is the source of truth for
+the tab strip). Rows are deliberately coarse for tabs whose internals churn;
+the per-panel detail lives in the panels themselves, not here.
+
+```
+[ /adv]                 shell mounts, tab strip renders all tabs, pot selector works
+[ /adv — Overview]      tab=overview mounts, workspace summary renders
+[ /adv — Brainstorm]    tab=brainstorm mounts (per-pot)
+[ /adv — Create]        tab=plans: plan list, plan editor, launch path
+[ /adv — Calendar]      tab=calendar mounts (workspace-scoped scheduled/recurring plans)
+[ /adv — Working]       tab=harnesses: dock mounts; Work-items grid (filter/search/row-select)
+[ /adv — Health]        tab=health mounts (flag SYSTEM_HEALTH_TAB, default on; read-only system dashboard)
+[ /adv — Working dock]  Add panel catalog (work-items/detail/overview/agents/logs/contributors/insights/chat), layout reset, per-slug layout persistence
+[ /adv — Detail]        ?sel=WI-*/F-* drives Detail pane; Actions incl. Chat (wi-detail-chat)
+[ /adv — Chat panel]    free slot picker (adv-chat-pick/adv-chat-start) → worker chat; repeat opens FOCUS the existing chat (no duplicate agent_chats row); archive frees the slot
+[ /adv — Git]           tab=git: git-graph + PRs panels
+[ /adv — Tests]         tab=testing: domains tree, per-file status, run affordances
+[ /adv — Docs]          tab=docs (per-pot docs tree)
+[ /adv — Insights]      tab=insights mounts
+[ /adv — Evaluation]    tab=evals mounts (impartial-benchmark suite, workspace-scoped)
+[ /adv — Conversations] tab=conversations: all 5 views (threads/deliberations/agentchats/messages/feed); threads reply/accept/promote; LIVE agent chat shows the interactive composer (advconv-live-chat), archived stays read-only
+[ /adv — Learning]      tab=learning: papercusp-improvement backlog renders
+[ /adv — Frames]        tab=frames mounts (workspace live view)
+[ /adv — Settings]      tab=settings mounts, sections save
+[ /adv — Sessions]      /adv/sessions: roster, session detail, launch controls
+[ /admin]               /admin/{plans,git,features,tables,dbos,run}: each mounts; /admin/git pipeline view renders
+[ /cupboard]            list + detail render; error state shows friendly copy + Retry
+[ /coord]               coordination view mounts
+[ Conversations chat]   Conversations tab → live agent-chat composer present and sends (replaces the old global "Operator chat" / "Reply to Papercup…" surface — see retired note)
+[ Keyboard]             ⌘K palette, Esc closes modals/popovers, Mod+I → conversations
+[ Header]               WorkspaceSwitcher present; the /adv header uses a text kicker ("Advanced orchestration"), NOT a mascot/wordmark brand pair (legacy — see retired note)
+[ Empty states]         no work items, empty conversations views, empty Tests domains
+[ Error states]         API 500 on a panel fetch → friendly error + retry (no crash); dead-origin recovery page
+```
+
+:::note\[Retired surfaces — do NOT e2e these]
+Rows the old checklist carried for surfaces that are now retired or
+transitional (EI-301): the `/harness` page's **add-plugin popover**, the
+**DepartmentHarnessDashboard** ("dept"), the **PlanReview / Checkpoint /
+Promotion / Escalation banners**, the **staging/testing/production phase
+switcher**, and everything under the **harness-snapshot system**
+(`/snapshots`, marketplace snapshots tab, in-harness SnapshotsPanel).
+§5–§8 below describe the legacy Next-era `/harness`, `/pi`, and
+`/marketplace` pages — treat them as historical reference, not coverage
+targets; the live product surface is `/adv` inside the Tauri shell.
+
+**Also confirmed ABSENT from the live `operator-vite` `/adv` shell** (E2E sweep
+2026-06-23, verified by source grep + live DOM): the **Oracle dock** (`.oracle-fab` /
+`OracleDock` — §3.2; only a polyfill comment remains in operator-vite), the
+**global "Operator chat" / "Reply to Papercup…" composer** (the live conversational
+surface is the **Conversations tab** agent-chat composer), and the marketing-style
+**`.pc-header` mascot/wordmark brand pair** (§3.1 — the `/adv` shell header is
+`.pc-advshell__header` with a text kicker). Treat §3.1's brand row and all of §3.2
+as historical; the global `.pc-header`/`.oracle-fab` selectors do not exist on `/adv`.
+:::
+
+## 14. What "PASS" means
+
+PASS only if **all of**:
+
+1. The action was performed via verdict (clicks/fills, not curl).
+2. The DOM after the action matches the documented expectation.
+3. Backend state (where applicable) is corroborated via `curl` or
+   the operator log.
+4. No console errors with severity ≥ `error` were emitted by the
+   action (run `verdict console error`).
+5. Every NEGATIVE assertion in the run was paired with a positive
+   presence guard (§14.2) — an absence proves nothing about a DOM
+   that never loaded.
+
+Anything else → `FAIL` or `INCONCLUSIVE`. Don't report PASS without
+positive evidence — silence is not success.
+
+### 14.1 Performance grading on the shared box (standing rule)
+
+Adopted by the owner 2026-06-11 from the load-sensitivity characterization
+(`papercup:e2e/perf-load-sensitivity-2026-06-11.md`, sampled over
+loadavg 9.5–48.6):
+
+1. **Grade on medians (≥5 samples) at any load.** Medians proved
+   load-insensitive (≤0.2ms shift quiet→heavy) — a median-based
+   PASS/WARN/FAIL needs no loadavg gate.
+2. **Never grade tails or single samples under load.** p90/max degrade
+   up to \~25× under fleet load; any tail-based or single-sample FAIL
+   taken at `load1 > ~24` must be re-sampled in a quiet window before
+   filing.
+3. **Record loadavg per sample** so grades are auditable.
+4. Chat TTFT: grade the app-side split only (under 50ms); provider
+   first-token inside the accepted 6.5–12.2s band is infra, not an app
+   regression.
+
+### 14.2 Guard every negative assertion (EI-18781011720418569)
+
+A NEGATIVE assertion — "the old copy is gone", "no `undefined` leaked", "no
+error banner" — is **trivially true of an empty document**. It therefore passes
+before the sync-backed rows have reached the DOM, and the run exits 0 having
+verified nothing:
+
+```text
+"$VERIFY_TAURI_POLL" --selector '[data-testid="automation-pane-system"]'   # PASSED
+T check --eval '!document.body.innerHTML.includes("paused from its own subsystem")'  # PASSED
+T check --eval '!rows.some(e => e.getAttribute("aria-label").includes("undefined"))'  # PASSED
+# -> "ALL ASSERTIONS PASSED", exit 0 — against ZERO rows
+```
+
+That needs no carelessness. Three things line up:
+
+1. **Pane-level readiness is not data-level readiness.** The container renders
+   immediately; the rows arrive over a sync query. Polling for the container
+   and then asserting is a race that usually loses on a loaded box.
+2. **UI regression checks are naturally phrased as negatives** — every one of
+   them passes against an empty DOM.
+3. **A negative assertion has nothing obvious to poll FOR**, so it silently
+   never gets a guard.
+
+**The convention: name the subject that must be PRESENT.** `VERIFY_TAURI_POLL`
+takes `--require <css>` (and `--require-min N`) and FUSES that guard into the
+*same* evaluation as your assertion, so nothing can slip between "rows present"
+and "string absent":
+
+```text
+"$VERIFY_TAURI_POLL" --require '[data-testid="schedule-row"]' \
+  --eval '!document.body.innerHTML.includes("paused from its own subsystem")'
+```
+
+An unguarded negative `--eval` is **refused** (exit 2), not run. The escape
+hatch `--allow-unguarded-negative` is only for a subject an earlier assertion in
+the same run already proved renders. When the guard never matches, the failure
+says so — *presence guard never matched ... the assertion never saw data* —
+instead of the generic timeout, because "the subject never rendered" and "the
+subject rendered and the claim was false" are different results.
+
+Driving `tauri-agent-tools check` directly bypasses that rail, so the same rule
+applies by hand: assert `document.querySelectorAll(sel).length >= N` before you
+assert an absence.
+
+**This generalizes past the DOM.** It is the UI form of the empty-set trap that
+makes `assertEquals(0, results.length)` pass when the query is broken. Anywhere
+you verify an ABSENCE, the presence of the thing being searched is part of the
+assertion — and in async UI it is the part most likely to be missing.
+
+### 14.3 Prove the path EXECUTED before you believe a null result (EI-19296830787454501)
+
+§14.2 guards a negative *assertion*. This guards a negative *measurement* - the
+same trap wearing a stopwatch. **A null A/B result is trivially true of a workload
+that never ran the code under test.**
+
+Measured end to end on 2026-08-01 (WI-6560). A landed React render optimisation was
+measured three ways: 8 paired idle rounds, 10 paired typing rounds, and 10 three-arm
+rounds with an interleaved sham - 28 paired rounds in total. All three agreed: no
+effect. Median paired deltas +2ms, -6.5ms, +0.5ms, with coin-flip signs.
+
+All three were VOID. Not "the fix does nothing" - the fix was NEVER EXECUTED. Neither
+idling nor typing into the surface's own search box re-renders the board at all, so the
+ablation arm and the shipped arm ran byte-identical code and the frame numbers were
+measuring the box's background stalls twice. A workload that DOES re-render the board (a
+tab switch) then gave a median paired delta of -78.5ms, 9 of 10 rounds agreeing on sign.
+
+**A sham does not catch this.** The in-run sham required by
+[measuring per-keystroke input latency](/internal/docs/agent-insights/measuring-per-keystroke-input-latency)
+worked exactly as designed - it showed 57-59ms worst frames with ZERO keystrokes,
+correctly proving those stalls were background. But a sham separates interaction-cost
+from background-cost. It CANNOT separate "no effect" from "not exercised": in a dead
+workload the sham looks healthy and the null result looks clean.
+
+**The convention: count the path, in the seam itself.** When you add a runtime ablation
+seam to measure a fix, increment a counter BEFORE the ablation branch, so it counts the
+path regardless of which arm is live:
+
+```ts
+hudRenderStabilitySwitch.compares++;              // counted BEFORE the branch
+if (hudRenderStabilitySwitch.off) return false;   // <- the ablation
+```
+
+Then `compares === 0` is an unambiguous **"this row is VOID"** - discard the row, never
+average it in. The worked reference is `hudRenderStabilitySwitch` in
+`apps/operator/app/adv/hud/hud-board-model.ts` (`off` plus
+`compares`/`skips`/`reconciles`/`reuses`), exposed on `window` for the harness to read.
+Its tests pin BOTH that the seam defaults to `off:false` - so the fix cannot ship
+ablated - AND that flipping it genuinely ablates the comparator. A dead switch produces
+the identical false negative, so a switch never proven live is not a control.
+
+**No harness enforces this for you.** `experiment:*` runs replay/gym/instance/hive
+subjects, not webview frames; `VERIFY_TAURI_POLL --require` guards DOM presence (§14.2)
+and a perf A/B driving `tauri-agent-tools` directly bypasses it anyway. So it falls to
+the author of each run: **report the counter beside the delta, or the delta is not
+evidence.**
+
+**Three instrument traps specific to this webview**, each of which reads as a clean
+number rather than an error:
+
+* **`longtask` never fires here.** This WebKitGTK webview emits ZERO `longtask`
+  `PerformanceObserver` entries - `observe()` succeeds, throws nothing, and yields
+  nothing forever, so any metric built on it silently reads as "no long tasks". Use rAF
+  frame gaps instead.
+* **`worst` (max frame) is an extreme-value statistic** and is close to useless for a
+  sub-10ms effect over a short window. Grade medians (§14.1).
+* **Frame timings drift enough that a 10-round median cannot call a 5-10ms effect.** A
+  -6.5ms result was retracted 20 minutes later when the next run gave +0.5ms. Size the
+  sample to the effect, or report the interval rather than a point estimate.
+
+**The same trap, third costume.** §14.2: an absence is trivially true of an empty DOM.
+The empty-set trap: `assertEquals(0, results.length)` passes when the query is broken.
+Here: a null delta is trivially true of a workload that never ran the path. Each one is
+a verdict reported without the population it was computed over - so state the
+population, every time.
+
+### 14.4 Settle before you measure — a guarded component's absence is not a missing feature (EI-19385008818210514)
+
+§14.2 guards a negative *assertion*; §14.3 guards a negative *measurement*. This is
+the fourth costume, and the most expensive one, because **nothing about it looks like
+a failure**. You take a perfectly correct measurement:
+
+```text
+zoneCaps: 2, zoneCapLabels: ["Controls", "Fleet"]
+```
+
+Three band caps were expected. Status is missing. Nothing errored, nothing timed out,
+the number is real — and the natural conclusion is *"the Status cap was never wired
+up; the checkpoint claiming it overstated the work."* That conclusion is wrong, and it
+is wrong in the one direction that costs someone else their afternoon.
+
+**Why it happens.** Most non-trivial components here are GUARDED on async data. The
+two shapes are everywhere:
+
+```tsx
+{entry && <ZoneCap entry={entry} />}   // renders nothing until `entry` lands
+if (!harness) return null;             // same, one level up
+```
+
+Before that data arrives the component is *legitimately* absent from the DOM, so a
+measurement taken during the hydration wave reads the guard, not the feature.
+
+**Why no existing rail catches it.** `VERIFY_TAURI_POLL` retries until an ASSERTION
+succeeds. Here nothing is being asserted — a value is being read as DATA — so there is
+nothing for the helper to retry. And the failure is asymmetric: a race that HIDES an
+element reads as a real finding worth filing, while a race that SHOWS one just reads
+as success. The error therefore only ever fires against someone's finished work.
+
+**The rail: settle first, then measure.**
+
+```bash
+bash "$VERIFY_TAURI_SETTLE"                       # blocks until the page is idle
+tauri-agent-tools eval --pid "$VERIFY_TAURI_PID" '<your measurement>'
+```
+
+`VERIFY_TAURI_SETTLE` reads `window.__sync_metrics__.snapshot().transport` — installed
+by the PRODUCTION SSE transport — plus DOM quiescence, and is deliberately
+**three-state**:
+
+| exit | verdict   | what it means                                                                        |
+| ---- | --------- | ------------------------------------------------------------------------------------ |
+| 0    | `settled` | no sync requests in flight or queued, and the DOM was unchanged for the quiet window |
+| 1    | `busy`    | still loading when the timeout expired                                               |
+| 3    | `unknown` | the metrics global was absent, or the gate reported `null`                           |
+
+**`null` is UNKNOWN, never zero.** `transport.inFlight` is `number | null`, and `null`
+means "no concurrency gate is registered" or "the gate probe threw" — `metrics.ts`
+reports it that way on purpose ("A throwing probe must never break the snapshot —
+report unknown instead"). A settle check that read `null` as "0 in flight ⇒ settled"
+would rebuild this exact confident false-negative inside the tool built to prevent it.
+So an `unknown` is not permission to conclude anything from an absence.
+
+**You do not have to remember any of this.** The same probe runs automatically, in
+`--note-only` form, on every `VERIFY_TAURI_POLL` timeout and attaches the loading
+context to the failure — naming the wrong conclusion and its falsifier rather than
+restating the measurement:
+
+```text
+FATAL: DOM assertion did not pass within 4s (pid=1476757)
+[FAIL] selector: [data-testid="no-such-thing"]
+⚠ SETTLE: the page was STILL LOADING when this ran — 2 sync request(s) in flight, 1 queued.
+   Do NOT conclude from a missing element that the feature is missing. Most components here
+   are guarded on async data (`entry && <Thing entry={entry}/>`, `if (!x) return null`), so they
+   are legitimately absent until that data lands.
+   Falsifier: re-run this same assertion after `bash "$VERIFY_TAURI_SETTLE"`. If the element
+   then appears, what you measured was a RACE, not a defect.
+```
+
+It prints **nothing at all** when the page really was settled. That silence is
+deliberate, and is kept as a permanent negative control in
+`packages/operator-core/lib/__tests__/settle-probe.test.ts`: a caveat attached to
+every failure is a caveat readers learn to skip, and this one has to be believed on
+the run where it matters.
+
+**Two live-measured gotchas if you drive `tauri-agent-tools eval` yourself** (both cost
+a false `unknown` before they were fixed in `scripts/settle-probe.mjs`):
+
+* **`--pid` and `--port` are alternatives, not complements.** Sending both makes the
+  tool reach for the port and answer `Bridge error (404)`. And `$VERIFY_TAURI_PORT` is
+  the webview's own Hono+SPA origin, *not* the agent-tools bridge port, so it is the
+  wrong number to volunteer. Pass the pid.
+* **`eval` pretty-prints an object result across many lines** even when your expression
+  returns `JSON.stringify(...)` — the same trap that makes a literal
+  `grep '"ok":true'` never match. Parse the whole output as one document; a
+  line-at-a-time reader finds valid JSON on no line and reports "no reading", which
+  reads as a defect on a perfectly healthy page.
+
+**The generalization worth carrying.** A warning already existed here — the poll
+helper's guards, the freshness check — and the mistake kept happening anyway. Adding
+precision to those warnings would have bought nothing, because they were addressed to
+the wrong VERB: they told you how to CITE and how to ASSERT, and the mistake was an
+INFERENCE. When a caveat already exists and the error persists, ask which verb the
+reader is about to perform — cite, infer, decide, report — and check the caveat is
+aimed at that one.
+
+## 15. Common gotchas
+
+* **Verdict shares chromium with the human user.** Long
+  click-and-wait sequences fail when the user is browsing. Run
+  `verdict status` first.
+* **Sonner Toasts are lazy.** `[data-sonner-toaster]` only mounts
+  when at least one toast is active. The empty
+  `<section aria-label="Notifications alt+T">` is just the
+  accessibility announcer. To assert a toast appeared, query
+  `[data-sonner-toaster] li` *during* the action, not after the
+  toast has timed out.
+* **Add-plugin enable is slow (3–9s).** No spinner. Wait for
+  `curl /api/plugins/enabled` to reflect the change; don't time out
+  early.
+* **`/marketplace` URL behavior changed.** It now renders the
+  Overview tab directly (4 tabs total: Overview, Templates,
+  Plugins, Snapshots) — not a redirect to `/templates`.
+* **Stream parser unwrap.** Oracle stream events arrive as
+  `{type:"stream_event", event:{type:"content_block_delta",
+  delta:{...}}}` — parsing top-level `content_block_delta` silently
+  drops every text token. (Already handled server-side; relevant
+  if you're writing a new SSE consumer.)
+* **Stale Vite parse cache.** If a JSX parse error references a
+  line that doesn't match the on-disk file, the cache is stale.
+  `rm -rf apps/operator-vite/node_modules/.vite` and restart. (Next.js
+  is retired — there is no `.next` cache anymore.)
+* **Harness tab nav uses `?panel=`.** `panel=plugin:<id>` selects a
+  plugin-contributed tab. Test these the same way as built-in tabs.
+* **`tauri-agent-tools screenshot --selector` is flaky on tiny
+  elements.** A short input (e.g. the operator composer at \~187×42
+  px) sometimes returns a 1×1 PNG. Workaround: `screenshot --title Papercusp -o full.png` then crop in ImageMagick using the
+  rect from `eval "JSON.stringify($('input').getBoundingClientRect())"`.
+* **`ipc-monitor` is silent for the operator chat.** The composer
+  sends via HTTP/SSE to `/api/agent-mcp/operator-converse`, not via
+  Tauri IPC. Use `console-monitor`, `rust-logs`, or
+  `curl /api/operator/conversations/<id>` to corroborate.
+  `ipc-monitor` *is* the right tool for plugin/host wiring,
+  workspace switching, and shell-sidecar calls.
+* **Bridge port is per-process.** `tauri-agent-tools probe` reports
+  the live port (e.g. `34875`); restart the dev shell and the port
+  changes. Always `probe` before scripting a sequence.
+* **Radix tabs (and other pointerdown-activated Radix widgets) ignore
+  plain `click`.** A programmatic `el.click()` (or the bridge `click`
+  verb) dispatches only a `click` event; Radix `Tabs` activate on
+  *pointerdown*, so the tab looks clicked but selection and the nuqs
+  `?tab=` param never change — and your test silently measures nothing.
+  Dispatch the full sequence:
+  `for (const t of ['pointerdown','mousedown','pointerup','mouseup','click']) el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}))`.
+  Plain anchors are fine with `click`. (Found 2026-06-10; cost a full
+  battery round of invalid tab numbers.)
+* **Harness-panel tabs need a WARM single-pot context — and the PRs panel
+  is NOT a standalone tab.** The per-pot tabs (`git`/`insights`/`docs`/
+  `testing`/`brainstorm`/`settings`, and the strip-hidden `prs`) render
+  `AdvHarnessPanelPage` keyed on `?slug=<pot>` + `?scope=expanded` (NOT
+  `all`). A COLD `location.href` straight to `?tab=git&slug=X` races the
+  mount-time slug-restore and bounces you to `?tab=harnesses`. Two-step it:
+  first load `?tab=harnesses&slug=X&scope=expanded` (warm projects + let the
+  restore run), THEN switch to `?tab=git`. Critically, **`prs` is excluded
+  from the visible tab strip** — there is no standalone PRs tab to deep-link
+  or click. The live PR-review surface (PrsTab → recommendation chip, report
+  panel, owner-gated auto-toggle) is auto-opened as a dock panel INSIDE the
+  **Git tab** (`AdvGitDock` seeds git-graph + `adv:prs`). So to e2e the PR
+  GUI, navigate to `tab=git` (a real strip tab), not `tab=prs`. (Found
+  2026-06-20 verifying PR-3; cost \~an hour targeting the vestigial `?tab=prs`
+  route that the router never honors.)
+* **Close the Web Inspector before ANY memory or perf measurement.**
+  All Tauri instances share one webview profile
+  (`~/.local/share/com.papercusp.desktop`), and it restores the
+  inspector OPEN from the last session. The inspector's record buffers
+  (its Network tab logs every SSE/API frame) grew \~1.9 GB across two
+  nav batteries on 2026-06-10 and looked exactly like an app leak —
+  closing it dropped RSS from 2.7 GB to 819 MB instantly. Latency
+  numbers were unaffected; memory numbers with it open are garbage.
+* **Don't measure under `tauri dev` on the shared dev box — launch the
+  bare debug binary.** `tauri dev` watches `src-tauri/**`, and the
+  fleet edits that tree continuously: a peer's mid-flight Rust edit
+  kills and rebuilds your app mid-test (and a peer's compile error
+  leaves you appless). Launch
+  `./src-tauri/target/debug/papercusp-desktop` directly (the dev
+  wrapper + bridge are compiled in) and pick the target via the
+  build-switcher rail or a devUrl-restored URL.
+* **Wayland trap: a bare `DISPLAY=:9X` launch can land on the owner's
+  desktop.** GTK prefers Wayland when `WAYLAND_DISPLAY` is set, so the
+  isolated-Xvfb recipe silently opens the window on the live seat
+  (focus-steal). Always launch with
+  `env -u WAYLAND_DISPLAY GDK_BACKEND=x11 DISPLAY=:9X …`.
+* **`screenshot` verb may demand sway/grim** (it probes the host
+  platform, not your X11 instance). Fallback that always works on an
+  Xvfb display: `WID=$(DISPLAY=:9X xdotool search --name Papercusp |
+  tail -1); DISPLAY=:9X import -window $WID shot.png`.
+* **`operator-converse` trigger enum.** When poking
+  `/api/agent-mcp/operator-converse` directly, `trigger` must be one of
+  `user_message | quiet_wait_resume | open_canvas | user_says_ready |
+  user_welcomed | continue` — anything else streams a single
+  `event: error` frame (`invalid_args`) and closes.
+* **A relaunched Tauri shell does NOT prove your server-side edit is live —
+  its sidecar can be days old, and the env switcher's chrome can lie about
+  which one you're hitting.** (EI-18796530017868774, 2026-07-27; cost a full
+  verify cycle.) Two compounding traps:
+
+  1. **The sidecar isn't per-shell and isn't refreshed by a shell relaunch.**
+     `tsx bin/hono-host.ts` sidecars sit under a bash supervisor
+     (`while :; do eval "$1"; done`) that outlives the shell that spawned
+     them — this box routinely has 30+ of these processes, some **8+ days
+     old**. `tsx` loads modules once at process start, so an old sidecar
+     serves old resolver code forever; killing and relaunching your Tauri
+     shell just re-attaches to the same stale process. Relaunching is the
+     obvious move and it does not help.
+  2. **The env switcher (Ctrl+Alt+1–4) changes the page origin, not where
+     `/api` actually goes.** The desktop webview proxies `/api/*` over Tauri
+     IPC to the shell's OWN spawned sidecar regardless of which origin the
+     chrome shows — switching to "staging :3170" makes the URL bar say
+     127.0.0.1:3170 while `fetch('/api/...')` from that page still answers
+     from the shell's local (possibly stale) sidecar. Verifiable: compare
+     the shell's in-page fetch result against a terminal `curl` to the same
+     URL at the same moment — a genuinely fresh sidecar matches; a stale one
+     silently diverges. (Related, same underlying proxy-not-origin behavior:
+     `ipc-monitor` above, and the frozen-SPA-snapshot trap in §15.4's
+     verify-tauri-headless notes.)
+
+  **The failure is silent and reads exactly like "my fix doesn't work"** — the
+  natural next move is to go re-edit already-correct code. The inverse is
+  worse: a stale sidecar that happens to still exhibit the OLD-but-passing
+  behavior reports a real regression as green.
+
+  **To verify a SERVER-SIDE change (a resolver, an API route, anything not
+  purely rendering), don't trust the shell — curl `:3170` directly** after
+  `dev:restart { target: 'staging', confirm: true, authorize: true, reason: 'reload the staging operator with updated code' }` (see the two-port model
+  in `/internal/docs/system/repo-conventions`). Use the Tauri shell only for
+  what it actually proves: rendering and interaction. If you must confirm
+  which code a given shell's sidecar is running, fetch the same query from
+  inside the page and diff it against a curl to `:3170` — a match means that
+  shell's sidecar is current; a mismatch means it predates your edit and no
+  amount of UI-level retrying will pick up the fix.
+* **Teardown hygiene: `pkill -f <pattern>` self-matches your own shell,
+  and over-kills a shared WM.** `pkill -f "openbox"` / `pgrep -f 'Xvfb
+  :96'` match against `/proc/<pid>/cmdline` for EVERY process — including
+  the very shell invoking the command, if that command's own text
+  contains the pattern (it will; you just typed it). SIGTERM'ing your own
+  cleanup shell mid-teardown shows up as an unexplained exit 144. Worse,
+  `pkill -f openbox` is not scoped to *your* Xvfb session — it kills every
+  openbox WM on the box, including a peer e2e agent's. Kill by the
+  **recorded PID** instead (per §15.4's own `/tmp/tauri-xvfb.pid` /
+  `/tmp/openbox90.pid` / `/tmp/xvfb90.pid` convention —
+  `kill $(cat /tmp/tauri-xvfb.pid /tmp/openbox90.pid /tmp/xvfb90.pid)
+  2>/dev/null`), or match the exact process by name + cmdline instead of
+  a substring:
+  `for p in $(pgrep -x Xvfb); do tr '\0' ' ' </proc/$p/cmdline | grep -q
+  ' :96 ' && kill -TERM $p; done`. Never `pkill -f <pattern>` from a
+  command whose own text contains `<pattern>`; never broad-match a
+  shared WM/binary by bare name. (EI-606, 2026-06-14.)
+
+### 15.4 Xvfb / xdotool / OCR fallback cookbook
+
+The bridge covers 99% of cases. Reach for this stack only when:
+
+* You're on a **release build** (the bridge is `#[cfg(debug_assertions)]`).
+* You're on **macOS** and the bridge isn't compiled in for that
+  target yet.
+* You need to verify **visual** behavior the DOM can't express
+  (animation timing, font rendering, paint-order glitches).
+* The Tauri process **crashed** and you need forensics on the dead
+  window (use `tauri-agent-tools diagnose` first; this is a deeper
+  fallback).
+
+:::danger\[Bare `Xvfb` has no GPU/GL — WebKitGTK won't paint → every screenshot is blank]
+A plain `Xvfb` is a **software framebuffer with no DRI3/GL** (you'll see
+`libEGL warning: DRI3 error: Could not get DRI3 device` in the app log).
+WebKitGTK's accelerated compositor then **never paints the webview to that
+framebuffer, so every screenshot comes back uniformly blank white regardless
+of what the DOM actually contains** — a render-environment artifact that looks
+exactly like a broken/blank app. The DOM is fine; the pixels just never render.
+(This burned \~hours in the desktop-ipc Phase-4 smoke before it was spotted: the
+"blank window" was the GL-less Xvfb, not the app.)
+
+**Get real GPU GL one of two ways:**
+
+1. **Run on `:0`** (the real GPU X server): `DISPLAY=:0 …`. Simplest, but puts a
+   window on the operator's actual screen (focus-steal — see §0).
+2. **VirtualGL on an isolated Xvfb** (no focus-steal, real GPU) — *recommended.*
+   `vglrun` routes GL to the GPU's EGL render node while the app displays to the
+   isolated Xvfb. **Always confirm real GL first** — it must report the GPU, not
+   `llvmpipe`/`swrast`:
+   ```sh
+   DISPLAY=:90 vglrun -d egl0 glxinfo | grep -i "OpenGL renderer"
+   # → OpenGL renderer string: NVIDIA GeForce RTX 3090/...   (good)
+   # → ...llvmpipe / swrast                                  (still software — wrong)
+   ```
+   VirtualGL isn't in Ubuntu apt; install the GitHub release once:
+   ```sh
+   curl -sSL -o /tmp/vgl.deb \
+     https://github.com/VirtualGL/virtualgl/releases/download/3.1.4/virtualgl_3.1.4_amd64.deb
+   sudo dpkg -i /tmp/vgl.deb
+   ```
+   Use `-d egl0` — the EGL **device index**. Do NOT pass the
+   `/dev/dri/renderD128` path; VGL rejects it ("Invalid EGL device").
+   :::
+
+:::caution\[Check every screenshot you intend to CITE — a blank one exits 0 and looks like proof]
+This is the general case of §0's falsifiable/non-falsifiable split, worked through in
+full: `tauri-agent-tools screenshot` (and `capture`'s screenshot component) writes a
+valid PNG, prints the path and **exits 0 whether or not the window painted**, so its
+exit code tells you nothing about the thing you care about. The file is not obviously
+wrong either: the real one found on this box was 91KB at 1280x800 — a dark gradient and
+nothing else. File size is not a tell.
+
+That makes it worse than useless, because it is *citable*. `work_items:complete` requires
+a `verifiedHow:'live-drove-ui'` close to cite an artifact, and an agent who ran the
+capture, never opened it, and cited the path would have closed the item having verified
+no pixels at all — with a paper trail that reads as rigorous. (Two such captures were
+already sitting on this host when EI-18797014705631713 was filed.)
+
+**One command, the moment you take it** — exits 1 if the capture is blank:
+
+```sh
+npm run check:screenshot -- /tmp/my-shot.png
+```
+
+`work_items:complete` now runs the same check on whatever you cite and **rejects a close
+backed only by blank or missing captures** — so an unchecked screenshot costs you a
+rejected close rather than shipping a false claim.
+
+**Prefer the assertion anyway.** A `check` run is falsifiable, records *what* you
+asserted, and needs no image on disk — the completion gate accepts it on its own:
+
+```sh
+tauri-agent-tools check --pid <pid> --eval "<assertion>" --json   # exit 1 if it fails
+```
+
+Use a screenshot when you need to see *pixels* (layout, paint order, font rendering);
+use `check`/`dom` for anything the DOM can express. On a GL-less display the DOM path
+keeps working perfectly while every screenshot comes back empty.
+:::
+
+:::caution\[An element-scoped crop can paint a phantom artifact that is absent from the page]
+Even with a correctly targeted, GPU-painted window, `screenshot -s` /
+`screenshot --selector` can introduce a thin bar or other plausible-looking
+pixels into the crop. The same region can be absent from a full-window capture
+of the identical render, while `elementFromPoint`, computed styles, and the
+element's pseudo-elements show no corresponding page content. Treat a
+suspicious pixel that only appears in the selector crop as a capture artifact,
+not as a CSS defect.
+
+Before reporting a visual defect found with an element crop, take a
+full-window capture at the same instant and inspect the corresponding absolute
+region. For reliable visual evidence, crop that full-window image using the
+element rectangle from a bridge `eval`/`getBoundingClientRect()` result; when
+the assertion is expressible in the DOM, prefer `check` or
+`@papercusp/tauri-verify`'s `layout()` instead.
+:::
+
+Recipe — isolated **GPU-accelerated** instance via VirtualGL (no focus-steal):
+
+```sh
+Xvfb :90 -screen 0 1920x1080x24 -nolisten tcp &  echo $! > /tmp/xvfb90.pid
+DISPLAY=:90 openbox &                            echo $! > /tmp/openbox90.pid
+# Sanity — must be the real GPU, not llvmpipe:
+DISPLAY=:90 vglrun -d egl0 glxinfo | grep -i "OpenGL renderer"
+# Launch the app UNDER vglrun so WebKitGTK composites on the GPU:
+( cd papercusp-desktop && env -u WAYLAND_DISPLAY GDK_BACKEND=x11 DISPLAY=:90 \
+    vglrun -d egl0 npm run dev ) > /tmp/tauri-xvfb.log 2>&1 &  echo $! > /tmp/tauri-xvfb.pid
+# ⚠ Wayland trap: without `env -u WAYLAND_DISPLAY GDK_BACKEND=x11` GTK may pick
+# the live Wayland seat and open the window on the OWNER'S desktop, ignoring :90.
+# ⚠ Do NOT add PAPERCUSP_CLUSTER_WORKERS=<anything> to this env block (WI-3556,
+# 2026-07-09 + its same-day recurrence). `npm run dev` runs Tauri's
+# beforeDevCommand (dev-operator-ifneeded.sh), which ALREADY pins
+# PAPERCUSP_CLUSTER=0 for exactly this reason: an agent shell inherits the
+# release host's PAPERCUSP_CLUSTER=16-ish env, and without that pin the launch
+# forks one HTTP worker PER CPU CORE, driving shared-box load past 1000 and
+# knocking over the systemd-owned papercup-dev-api/papercup-staging-api
+# services. Setting PAPERCUSP_CLUSTER_WORKERS yourself (to ANY value, even 0)
+# SHADOWS that wrapper pin (resolveClusterWorkers checks CLUSTER_WORKERS
+# before CLUSTER) — an earlier revision of this doc added =1 "to fix it" and
+# reproduced the incident within minutes ('1' also isn't "one worker" — it
+# means clustering ON at the recommended multi-core count, same as 'auto').
+# Verify after boot: `ss -tlnp | grep 3370` must show exactly ONE listener.
+# ⚠ On the shared dev box prefer the BARE binary over `npm run dev` — the tauri-dev
+# watcher restarts/kills your app whenever the fleet edits src-tauri/** (see §15):
+#   env -u WAYLAND_DISPLAY GDK_BACKEND=x11 DISPLAY=:90 vglrun -d egl0 \
+#     ./src-tauri/target/debug/papercusp-desktop > /tmp/tauri-xvfb.log 2>&1 &
+# wait for window
+until DISPLAY=:90 xdotool search --name Papercusp > /dev/null 2>&1; do sleep 1; done
+# The bridge binds an EPHEMERAL port (Server::http("127.0.0.1:0") in
+# src-tauri/src/dev_bridge.rs) — there is NO PAPERCUSP_BRIDGE_PORT env var.
+# Read the real port/token from /tmp/tauri-dev-bridge-<pid>.token, or just
+# `tauri-agent-tools probe` (pass --pid to disambiguate this instance).
+WID=$(DISPLAY=:90 xdotool search --name Papercusp | head -1)
+DISPLAY=:90 xdotool type --window $WID "hello"; DISPLAY=:90 xdotool key --window $WID Return
+DISPLAY=:90 import -window $WID /tmp/shot.png    # ← now shows REAL content, not blank
+convert /tmp/shot.png -crop 1280x80+0+460 /tmp/band.png; tesseract /tmp/band.png - 2>/dev/null
+```
+
+Cleanup: `kill $(cat /tmp/tauri-xvfb.pid /tmp/openbox90.pid /tmp/xvfb90.pid) 2>/dev/null`.
+
+For a **release build** (no dev bridge) screenshots are your *only* window
+introspection — so GPU GL via VirtualGL is **mandatory** there, or the
+screenshot tells you nothing. On a **debug** build the bridge is still up on the
+isolated instance — find it with `tauri-agent-tools probe --pid <pid>` or the
+`/tmp/tauri-dev-bridge-<pid>.token` file (the port is ephemeral; there is **no**
+`PAPERCUSP_BRIDGE_PORT` env var). Prefer the
+bridge for DOM/JS (it reads the DOM, not pixels, so it works even GL-less) and
+use this VirtualGL stack only for the pixels.
+
+### 15.5 Driving React-controlled inputs via the bridge
+
+Setting a controlled `<select>`/`<input>` value through `eval` with the classic
+native-setter + `dispatchEvent(new Event('change'))` trick **silently fails**
+on this app (React 19: there is no `_valueTracker` on the node to reset, so
+React's value tracking dedupes the event and the controlled value snaps back).
+No error, no state change — your "Start" button stays disabled and the test
+looks like an app bug.
+
+What works: call the component's own handler through the React props expando
+on the DOM node (verified live, WI-125 verification 2026-06-11):
+
+```js
+// the expando key carries a per-bundle hash — discover it, don't hardcode it
+const el = document.querySelector('[data-testid="adv-chat-pick"]');
+const propsKey = Object.keys(el).find((k) => k.startsWith('__reactProps$'));
+el[propsKey].onChange({ target: { value: 'WI-62' } });   // updates React state
+// then drive the dependent control the same way:
+const btn = document.querySelector('[data-testid="adv-chat-start"]');
+btn[Object.keys(btn).find((k) => k.startsWith('__reactProps$'))].onClick();
+```
+
+Plain `.click()` on buttons works fine (React listens natively for clicks) —
+the expando path is only needed for **value-tracked** inputs. Also remember a
+value injected this way bypasses UI constraints: only pass values the real
+control could produce (e.g. an option that exists in the select), or you are
+testing a state the user can never reach.
+
+### 15.6 Verifying a terminal/PTY-hosted pane (e.g. the brain pane)
+
+Found during WI-198 (Tauri-verifying the Queen brain pane — the `♛ queen`
+zellij pane running `psu --brain`). The §15.4 Xvfb/VirtualGL cookbook only
+covers screenshotting the Tauri **webview**; a pane whose surface is a
+**terminal/PTY** (brain/sentinel/overwatch panes, any `psu` pane) hits two
+traps that recipe doesn't warn about:
+
+1. **No working GUI terminal emulator under an isolated Xvfb on the dev box.**
+   Only `gnome-terminal` is installed (no xterm/alacritty/foot/st), and it
+   renders as a broken 10×10 stub window under Xvfb (portal/VTE/pipewire
+   failures) — `import -window` then captures blank. A "screenshot the pane"
+   task has no straightforward terminal to screenshot.
+2. **The desktop chat-dock is a NAMED zellij session**
+   (`~/.papercusp/pui-chat-dock.kdl`, §16). Launching a second desktop to open
+   the dock risks zellij **ATTACHing to the owner's LIVE dock session** —
+   disrupting real funded Queen/overwatch/sentinel sessions. If you genuinely
+   need to observe a live pane, use §16's `zellij ls` / `dump-screen` path
+   (read-only, always safe) rather than opening a fresh desktop.
+
+**What works instead: verify the pane's COMMAND directly**, without a GUI
+terminal at all. The brain pane's command is `psu --brain`; run it with a
+PATH-shim stub `claude` (a script that prints its argv + `cat`s the
+`--append-system-prompt-file`, then exits) and `PAPERCUSP_PSU_NO_PTY=1`. This
+exercises the entire real launch chain (`psu` brainFlow → `bootstrap-su`
+fresh-mint → the exact `claude` argv + injected brief) with **zero API spend**
+and no GUI flakiness:
+
+```sh
+# a stub `claude` on PATH that just proves what psu would have launched
+cat > /tmp/claude-stub.sh <<'EOF'
+#!/usr/bin/env bash
+echo "ARGV: $@"
+for a in "$@"; do
+  [ -f "$a" ] && echo "--- $a ---" && cat "$a"
+done
+EOF
+chmod +x /tmp/claude-stub.sh
+PATH="/tmp:$PATH" PAPERCUSP_PSU_NO_PTY=1 \
+  PAPERCUSP_OPERATOR_URL=http://localhost:3070 \
+  psu --brain
+```
+
+* `claude-stub.sh` must be named `claude` on `PATH` (symlink or `cp`) for
+  `psu` to exec it.
+* **`PAPERCUSP_OPERATOR_URL` must be the bare `:3070` origin**, not
+  `.../api/mcp` — the session env sometimes has the MCP suffix baked in,
+  which 404s `psu`'s own `api()` calls.
+* Pair this with a plain `curl` GET/POST of the bootstrap-su brain endpoints
+  to verify the server seam independently of the client launch chain.
+* For a pixel artifact from the captured output, render it to PNG with
+  ImageMagick: `convert -background black -fill white label:"$(cat out.txt)" out.png`
+  — note `label:@file` is blocked by the default IM security policy; inline
+  the content via `$(cat …)` instead.
+
+This "stub the launched command" technique generalizes to any `psu`-hosted
+pane (sentinel/overwatch/any role) — swap `--brain` for the pane's real
+launch args and read the stub's captured argv + prompt file to confirm the
+pane would have booted correctly, without needing a terminal emulator, Xvfb,
+or a live zellij session at all.
+
+## 16. Driving the zellij `pui` chat dock (the Papercup / Mug TUIs)
+
+> **⚠ Testing-gated since 2026-07-13** (operator-chat-sidebar-revival-2026-07-13
+> P-014/D-004): the dock no longer spawns by default. It stays fully bundled
+> (all code + `pui`/`zellij` binaries ship), but the desktop opens it ONLY when
+> `FLAGS.TESTING` is on — the webview relays the resolved flag to Rust's
+> `native_terminal_set_enabled` (`NativeTerminalGate`); there is no boot-time
+> spawn. Flag off ⇒ no dock window; the revived **operator chat sidebar** is
+> the user-facing chat surface. Everything below applies when the flag is ON
+> (or when you launch `pui chat` manually from any terminal — that path is
+> unaffected by the gate).
+
+Everything above drives the **Tauri webview**. With `FLAGS.TESTING` on, the
+desktop ALSO opens a *second* window: a **ghostty terminal running a zellij
+`pui` dock** — the live agent TUIs. `tauri-agent-tools` **cannot see it**
+(it's not the webview) — drive it with `zellij action` + window screenshots
+instead.
+
+### 16.1 What's in the dock
+
+Launched by `ghostty … -e pui chat`, which starts a zellij session from
+`~/.papercusp/pui-chat-dock.kdl` (three tabs: `this pot` / `network` / `plans`).
+The `this pot` tab stacks:
+
+| Pane                                  | Command it runs                                      | What it is                                                                                  |
+| ------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| 👁 overwatch                          | `pui brain-view --overwatch`                         | read-only live transcript                                                                   |
+| ♛ mug                                 | `pui brain-view --mug`                               | the Mug's brain transcript (read-only)                                                      |
+| ♛✉ prompt / ⏸ wakes / ✉ mail / ☑ work | `pui {prompt,wake,mail,work}-pane --mug`             | Mug control panes                                                                           |
+| **🛡 papercup**                       | **`psu --no-picker --agent=claude --role=operator`** | **the Papercup chat — a Claude Code session acting as the operator, voiced via ElevenLabs** |
+| colony                                | `pui dock-driver`                                    | reactively appends one `claude --resume` TUI per live cup                                   |
+| ⏸ wakes                               | `pui wake-pane`                                      | fleet-wide wake board                                                                       |
+
+> ⚠ **The Papercup chat is a `psu`/Claude-Code TUI — NOT the `apps/tui` (`pui`)
+> ratatui converse client.** They are different surfaces; don't conflate "the TUI
+> chat" with `apps/tui`. (The `apps/tui` ratatui is a separate interactive
+> converse client; it is not what this dock's papercup pane runs.)
+
+### 16.2 Find the session + window
+
+```sh
+zellij ls                                    # → pui-dock-<pid> (the live one; ignore "EXITED")
+DISPLAY=:0 wmctrl -l | grep pui-dock         # → ghostty window id (title "pui-dock-… | 🛡 papercup")
+```
+
+### 16.3 Observe — read-only, always safe
+
+```sh
+# text of the FOCUSED pane (strip ANSI for grepping):
+zellij -s pui-dock-<pid> action dump-screen | sed 's/\x1b\[[0-9;]*m//g'
+# the whole dock (all panes) as the faithful "what the user sees":
+DISPLAY=:0 import -window <window-id> /tmp/dock.png
+```
+
+`dump-screen` captures only the **focused** pane (no path arg in this zellij —
+it writes to stdout). To read another pane, focus it (16.4) first, or use the
+window screenshot (which shows the whole stack).
+
+### 16.4 Interact — ⚠ these are LIVE agents
+
+```sh
+zellij -s pui-dock-<pid> action write-chars "your message"  # types into the FOCUSED pane's composer
+zellij -s pui-dock-<pid> action write 13                    # Enter (submit)
+zellij -s pui-dock-<pid> action write 127                   # Backspace
+zellij -s pui-dock-<pid> action move-focus down             # move focus between panes
+```
+
+* **Writes hit the FOCUSED pane** — confirm focus with `dump-screen` before
+  typing (the 🛡 papercup pane is `focus=true` in the layout, so it's usually it).
+* **Render race:** a `write-chars` immediately followed by `dump-screen` often
+  doesn't show the text yet (the terminal hasn't repainted). Re-dump, or space
+  the `zellij action` calls out (each CLI call is a round-trip, which usually
+  suffices). For a non-destructive smoke test, type a marker and delete it with
+  `write 127` — **without** Enter — then confirm via `dump-screen`.
+* **Enter submits a real turn** to a real Claude-Code operator/Mug — it will
+  act on it. Never drive the user's live panes while they're working without
+  permission.
+* Dock keybinds differ from stock zellij (set in the layout): **Tab** =
+  fullscreen the focused pane (not prompt-complete), **Alt+↑/↓** = scroll the
+  agent stack, **↑/↓** = forwarded to the pane as cursor up/down.
+
+### 16.5 What you can't verify headlessly right now
+
+* A **brain reply** (Papercup/Mug) needs LLM capacity. If the account pool is
+  rate-starved (every account in a 429 cooldown — surfaced as `[infra-liveness]
+  all N LLM pool account(s) paused` escalations in the operator conversation),
+  the panes render but won't answer. Verify *rendering* now; defer
+  *reply*-verification until capacity returns.
+* A pane only shows the Phase-2 `apps/tui` cards if it's running the `apps/tui`
+  ratatui (and a freshly-built `pui` binary) — **not** the `psu`/Claude-Code
+  papercup pane above. Check the running binary's mtime vs the build, and the
+  pane's launch command, before concluding "cards work in the TUI."
+
+### 17.1 Real X11 clicks: client origin, Radix pointerdown, and bridge liveness (EI-19481468061988626)
+
+The verifier prints a click recipe after the isolated Tauri instance is ready. Use
+`xwininfo` to obtain the WebView's **client origin** before converting a control's
+coordinates to screen coordinates. `xdotool getwindowgeometry Position` reports the
+window-manager frame origin; on GNOME/X11 the frame can be 22px taller, so using it
+shifts the click onto the control below the one you intended. The helper printed by
+`scripts/verify-tauri-headless.sh` computes `OX`/`OY` from `Absolute upper-left X/Y`
+and then runs `xdotool mousemove --sync` + `xdotool click 1`. After every click,
+assert the intended target (for example, `document.activeElement` or a `focusin`
+log); a focus change without the expected target is a coordinate error, not a
+broken component.
+
+Radix Popover, Select, Tabs, and similar widgets activate on `pointerdown`. The
+bridge/DOM `click` verb and `element.click()` dispatch only a click and can leave
+`aria-haspopup=dialog` triggers closed with no error. For these controls use the
+real X11 click recipe, then verify `data-state`/`aria-expanded` and the popover
+content. Synthetic events are useful for non-pointer controls but are not proof
+that a Radix interaction worked.
+
+The dev-bridge token file is JSON (`{"port":N,"token":"…","pid":N}`), not a
+bearer string. Parse its `token` field, or pass `--pid <pid>` so the CLI selects the
+matching endpoint and token together. A bare `--port` can pair with a different
+temporary bridge when peers are running. Before any DOM assertion, probe `GET
+/version` on that same bridge and require a 200 response whose version is present;
+a dead or stale bridge otherwise produces plausible empty DOM and misleading
+verification results.

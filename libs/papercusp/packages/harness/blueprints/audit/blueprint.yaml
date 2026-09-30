@@ -1,0 +1,80 @@
+# The `audit` launch blueprint — unify-agent-launches-as-blueprints-2026-06-04 (P1, D-003 / D-006).
+#
+# A SINGLE-ROLE LAUNCH BLUEPRINT (D-007), EVENT-fired. The G2 user-protection gate
+# (papercusp-user-protection-gate-2026-05-31): a read-only adversarial auditor
+# screens a remote-authored feature before it reaches the orchestrator pick loop —
+# it emits a JSON verdict (admit / reject + reasons); a reject opens a `blocker`
+# escalation and quarantines the feature until a human resolves it.
+#
+# Before this plan the launch was a hand-wired invoke-caller: `auditor-lane-wiring.
+# ts` hardcoded the `auditor` role in `spawnInvokeOnce`. Now the role is resolved
+# from THIS blueprint (`spine.decider`), so the launch is declarative. The auditor's
+# JSON-verdict-parse + escalation is the blueprint's OUTPUT-CONTRACT + GATE (D-006),
+# declared in `knobs` below.
+#
+# D-006 (behavior-preserving): the auditor is LIVE + load-bearing — its verdict
+# SYNCHRONOUSLY gates feature admission (it is a blocking user-protection gate, not
+# a fire-and-forget launch). So the lane keeps its synchronous spawn + verdict-parse
+# + escalate behavior; only the role resolution becomes declarative here. Converging
+# this onto `review`'s multi-dimension loop (D-003's "reuse the review blueprint")
+# is a behavior change deferred for the gate owner's sign-off.
+id: audit
+extends: base
+version: 0.1.0
+description: >-
+  The G2 user-protection gate: a read-only adversarial auditor screens a
+  remote-authored feature and emits an admit/reject verdict; a reject quarantines
+  the feature behind a blocker escalation until a human resolves it.
+
+workItem:
+  kind: audit-task
+  idPrefix: AUD
+
+spine:
+  decider: auditor
+  maxTurns: 10
+  default:
+    to: idle
+  edges:
+    DONE: { to: done }
+    ESCALATE: { to: escalate, reasonFrom: arg }
+    IDLE: { to: idle }
+
+planner:
+  kind: inline
+
+roles:
+  - id: auditor
+    description: >-
+      Read-only adversarial judgment: screen a remote-authored feature and emit a
+      structured admit/reject verdict with reasons. No execution capability.
+
+knobs:
+  harnessKind: audit
+  requiresRepo: true
+  # The output contract (D-006): the auditor emits a JSON verdict the lane parses
+  # (parseAuditorOutput). A `reject` is the gate — it opens a blocker escalation and
+  # quarantines the feature until a human resolves (admit override / confirm reject).
+  verdict: { admit: proceed, reject: escalate-blocker-and-quarantine }
+  # D-003 convergence (plan D-011): the audit adopts `review`'s multi-DIMENSION
+  # adversarial discipline WITHIN its single synchronous pass — the declared
+  # roster below is what the auditor persona sweeps, refute-by-default, and a
+  # reject names its dimension(s). Full runtime convergence (running the
+  # 40-turn review pipeline AT the gate) was evaluated and rejected: this is a
+  # blocking ≤120s fail-safe admission screen, and the deep loop runs AFTER
+  # quarantine instead (the reject escalation carries the review-launch bridge).
+  dimensions: [injection, exfiltration, destruction, network, prompt-hijack, supply-chain]
+
+# Event-rule trigger (D-004): fired when a remote feature reaches the auditor lane.
+# Declared as the firing seam; the lane (a synchronous user-protection gate, D-006)
+# resolves the role from here and keeps its blocking verdict behavior.
+triggers:
+  event: feature:reaches-auditor-lane
+
+# Dependencies (official-blueprints-cupboard-publish D-002): NONE by design —
+# the auditor is read-only adversarial judgment; it emits a JSON verdict the
+# lane parses and calls no agent tools (verified against the auditor persona,
+# scripts/derive-blueprint-deps.mjs).
+dependencies:
+  tools: []
+  plugins: []

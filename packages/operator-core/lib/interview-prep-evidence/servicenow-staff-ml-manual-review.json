@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "planSlug": "servicenow-staff-ml-interview-prep-2026-09-07",
+  "planItemId": "P-002",
+  "workItemId": "WI-10000630",
+  "specRevision": "SERVICENOW-P002-CONTENT@2",
+  "reviewedAt": "2026-09-08T02:33:25Z",
+  "reviewStale": true,
+  "reviewStaleReason": "sourceSha256 was re-pinned after the recorded manual review; the owner must re-review the source and update reviewedAt before this record can return to pass.",
+  "sourcePath": "interview-prep/servicenow-staff-ml-interview-prep.html",
+  "sourceSha256": "3ef5b4dcedc0a3fb3fdbbae19359d21a18d1c0a8d51eb1abe8837d082f812ed5",
+  "answerBankPath": "interview-prep/papercusp-answer-bank.html",
+  "answerBankSha256": "23390c8caae10bf5c44d6754199f3849af015bbf7d47fa8fb1afa9127a71a5fd",
+  "privacy": "Owner-supplied participant names, meeting time, and meeting URL are represented only by one-way digests in this tracked record.",
+  "expectedDigests": {
+    "meetingTimeTextSha256": "0c9c821b67fe641c5476ecad8d08aec7ed36560fe701034a2325decb8011f2c6",
+    "participantsTextSha256": "4566c9346e66a916de7058dc7fbc5197ed8a1afc15ec957b2b9d21afea719525",
+    "meetingUrlSha256": "69359947f1223a9597be3056d1dcf70c0f9c52ff702704299696cf0c46efb5c0",
+    "interviewerQuestionHeadingSha256": [
+      "67fb28b1818e884b95ee60525d9b231eef4657651d5a2498b7013980236e359b",
+      "cc9a025c76d8bf507cc134174fdf3ed78eacadfc300deb4ae58a4e1962f8c10b"
+    ]
+  },
+  "manualReview": {
+    "result": "stale",
+    "scope": [
+      "Supplied meeting time, participant names, and meeting URL match the owner-provided values byte-for-byte after whitespace normalization.",
+      "The page explicitly says the interview date was not supplied and does not invent one in the meeting card or facts panel.",
+      "The owner-confirmed role requisition is labeled as owner-supplied fact; team assignment and crowd-sourced coding-question patterns retain explicit inference labels.",
+      "Both concise and expanded motivation scripts are specific to ServiceNow, its agent-runtime work, and CPQ constraints.",
+      "The two interviewer question banks are separate and tailored to technical/team versus role/process discovery.",
+      "First-person draft language was reviewed against the current answer bank; the page directs the reader to verified stories and does not invent projects, metrics, CPQ expertise, interviewer roles, or employment outcomes.",
+      "The live CodePair format is separated from the inferred question profile, and the 45-minute strategy is written for a coding round rather than a generic conversation.",
+      "The posting-specific stack census covers the three concurrent agent architectures, async/runtime stack, classical-ML stack, Java/frontend stack, retrieval stack, MCP-server qualification, A2A third-party interoperability, prefix caching, compensation, and experience bar.",
+      "The Harness-versus-MCP drill states the published internal-primary/external-interoperability direction before asking about implementation judgment, rather than presenting the boundary as unknown."
+    ],
+    "falsifierCoverage": [
+      "Changing any supplied meeting value breaks a digest assertion.",
+      "Adding an interview date or removing the explicit unknown-date label breaks the meeting assertions.",
+      "Removing either motivation script, either interviewer question bank, the role matrix, the technical drills, or answer-bank links breaks structural assertions.",
+      "Adding an unsupported quantified first-person achievement or a prohibited fabricated-experience phrase breaks editorial-integrity assertions.",
+      "Restoring the stale requisition, unconfirmed-role language, or the already-answered Harness/MCP drill title breaks provenance assertions."
+    ]
+  }
+}

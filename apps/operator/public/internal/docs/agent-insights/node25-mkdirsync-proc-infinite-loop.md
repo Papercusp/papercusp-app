@@ -1,0 +1,72 @@
+# Node 25 mkdirSync on /proc spins forever — never use /proc as an "unwritable dir" in tests
+URL: /internal/docs/agent-insights/node25-mkdirsync-proc-infinite-loop
+
+fs.mkdirSync('/proc/anything', { recursive:true }) on node 25.9 retries /proc's EPERM in an infinite loop (90% CPU, no throw, no exit). Two fail-soft tests using '/proc/definitely-unwritable' wedged EVERY vitest gate — test:affected, other sessions' gates, and the green-checkpoint suite — for ~4 hours on 2026-07-11. Use a file-as-parent ENOTDIR path instead.
+
+## What this page covers
+
+* the failure signature (vitest fork worker pinned \~90% CPU, R-state, no children, no output)
+* the gdb one-liner that convicts it and the bounded node repro
+* the safe ENOTDIR replacement pattern for "unwritable dir" fail-soft tests
+
+## The trap
+
+A fail-soft test wants an **unwritable directory** to prove a write path degrades
+gracefully. `/proc/definitely-unwritable` looks perfect — guaranteed to exist-not,
+guaranteed unwritable, no setup. On **node 25.9 it is a tarpit**: the recursive
+mkdirp implementation (`node::fs::MKDirpSync`) handles `/proc`'s `EPERM` by
+retrying the same `mkdir(2)` **forever** — no throw, no exit, one core pinned at
+\~90% CPU. Verify it yourself, bounded:
+
+```bash
+timeout 5 node -e "require('fs').mkdirSync('/proc/x',{recursive:true})"; echo $?   # → 124
+```
+
+Coreutils `mkdir -p /proc/x` fails fast — this is node-specific, so a bash script
+fed a `/proc` path is fine while the same path in `mkdirSync(..., {recursive:true})`
+hangs.
+
+## Why one bad test wedges EVERYTHING
+
+The 2026-07-11 incident: two provenance tests used `'/proc/definitely-unwritable'`
+(`packages/operator-core/lib/turn-provenance/turn-provenance.test.ts`,
+`apps/operator/lib/psu-launcher.test.ts`). Once committed, **every** vitest run
+that collected either file hung until killed: this session's `test:affected`
+(3h35m), two other sessions' gates (2h32m/2h59m), and the **green-checkpoint
+suite** in the checkpoint tree — so `main` stopped fast-forwarding and the whole
+release pipeline sat stale for \~4 hours. A spinning test doesn't fail a gate; it
+**holds it open forever**, which is strictly worse.
+
+## Failure signature (how to recognize it live)
+
+* A vitest **fork worker** (`vitest/dist/workers/forks.js`) at \~90% CPU for
+  minutes-to-hours; main thread state `R (running)`; **no child processes**
+  (so not a blocked spawn); no test output (reporters flush per-file).
+* Convict it without guessing (needs sudo on a `ptrace_scope=1` box):
+
+```bash
+sudo gdb -p <worker-pid> -batch -ex "bt 10" 2>/dev/null | head
+#0  __GI___mkdir (path="/proc/definitely-unwritable", ...)
+#3  node::fs::MKDirpSync(...)
+```
+
+## The safe pattern — ENOTDIR via file-as-parent
+
+Create a plain **file** in the test tmpdir and use it as a path *parent*:
+`mkdirSync` throws `ENOTDIR` instantly, even as root (unlike chmod-based
+unwritability), on every platform.
+
+```ts
+const plainFile = join(dir, 'plain-file');
+writeFileSync(plainFile, 'x');
+expect(appendLedgerRow(row(), { dir: join(plainFile, 'sub') })).toBe(false); // ENOTDIR, instant
+```
+
+## Rules of thumb
+
+* **Never** feed a `/proc`/`/sys` path to `mkdirSync`/`mkdir` with
+  `recursive: true` — in any code, but especially tests.
+* An "unwritable dir" fixture = **file-as-parent ENOTDIR**, not a magic
+  system path and not chmod (root ignores chmod).
+* A gate that *hangs* (vs fails) is a spinning test until proven otherwise:
+  find the 90%-CPU fork worker, `gdb -batch -ex bt` it, kill it, fix the test.

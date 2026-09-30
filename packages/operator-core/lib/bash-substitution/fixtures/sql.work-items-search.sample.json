@@ -1,0 +1,108 @@
+{
+  "evidenceRef": "EI-20285223214931386, follow-on to plan sql-escape-tool-routing-2026-08-12 — buildSqlFixture(pair) over agent-authored dev:pg_query calls, 14d window, status=ok",
+  "extractedAt": "2026-08-12",
+  "totalAtoms": 40,
+  "totalSessions": 25,
+  "sample": [
+    {
+      "sid": "su-ae348e33-2987-4686-85ae-5e80606fe77b",
+      "ts": "2026-08-03 12:15:33.847-04",
+      "atom": "SELECT feature_id FROM harness_shared.work_items WHERE title ILIKE '%DEGENERATED to pure TTL-ordering%' ORDER BY created_ts DESC LIMIT 1"
+    },
+    {
+      "sid": "su-bb5d513f-c15c-4bc7-8a68-edf9430a523a",
+      "ts": "2026-08-03 13:36:51.793-04",
+      "atom": "SELECT feature_id, item_kind, to_char(to_timestamp(created_ts/1000),'YYYY-MM-DD') AS created, to_char(to_timestamp(updated_ts/1000),'YYYY-MM-DD') AS updated, left(title,52) AS title FROM harness_shared.work_items WHERE workspace_id='papercusp-workspace' AND status='todo' ORDER BY updated_ts DESC LIMIT 6"
+    },
+    {
+      "sid": "su-70b6af5b-161b-4f48-a660-bf0e05a1af44",
+      "ts": "2026-08-10 07:16:22.741-04",
+      "atom": "SELECT feature_id, left(title, 105) AS title, taken_by FROM harness_shared.work_items WHERE title LIKE 'Standing tsc red%' AND status = 'open' AND workspace_id = 'papercusp-workspace' ORDER BY created_ts"
+    },
+    {
+      "sid": "su-373a9b5c-c505-40e2-8591-5204c62712f2",
+      "ts": "2026-08-03 12:05:56.276-04",
+      "atom": "SELECT feature_id, state, title FROM harness_shared.work_items WHERE title LIKE 'P-028%' AND harness_slug='papercusp' ORDER BY created_ts DESC LIMIT 5"
+    },
+    {
+      "sid": "su-7854d874-9f02-425e-9ea4-5cf88a5ef9d8",
+      "ts": "2026-08-03 13:14:07.836-04",
+      "atom": "SELECT feature_id, status, assignee, to_char(to_timestamp(created_ts/1000),'YYYY-MM-DD') AS created, left(title,95) AS title FROM harness_shared.work_items WHERE workspace_id='papercusp-workspace' AND harness_slug='papercusp' AND title ILIKE '%doc-steward%' ORDER BY created_ts DESC LIMIT 60"
+    },
+    {
+      "sid": "su-89beac53-25ef-4a62-83b5-fb245c527cfb",
+      "ts": "2026-08-11 18:56:06.102-04",
+      "atom": "SELECT feature_id, status, goal_id IS NOT NULL AS stamped, left(title,44) AS title FROM harness_shared.work_items WHERE workspace_id='papercusp-workspace' AND title LIKE '[E-00%' ORDER BY feature_id"
+    },
+    {
+      "sid": "su-7854d874-9f02-425e-9ea4-5cf88a5ef9d8",
+      "ts": "2026-08-03 08:57:39.051-04",
+      "atom": "SELECT feature_id, status, item_kind, left(title, 95) AS title, to_timestamp(created_ts/1000)::date AS created FROM harness_shared.work_items WHERE workspace_id = 'papercusp-workspace' AND title ILIKE 'STAGE %' ORDER BY created_ts LIMIT 20"
+    },
+    {
+      "sid": "su-373a9b5c-c505-40e2-8591-5204c62712f2",
+      "ts": "2026-08-03 12:06:07.989-04",
+      "atom": "SELECT feature_id, status, taken_by, left(title,60) AS title FROM harness_shared.work_items WHERE title LIKE 'P-028%' AND harness_slug='papercusp' ORDER BY created_ts DESC LIMIT 5"
+    },
+    {
+      "sid": "su-7854d874-9f02-425e-9ea4-5cf88a5ef9d8",
+      "ts": "2026-08-03 13:14:17.477-04",
+      "atom": "SELECT feature_id, status, taken_by, to_char(to_timestamp(created_ts/1000),'YYYY-MM-DD') AS created, left(title,90) AS title FROM harness_shared.work_items WHERE workspace_id='papercusp-workspace' AND harness_slug='papercusp' AND title ILIKE '%doc-steward%' ORDER BY created_ts DESC LIMIT 60"
+    },
+    {
+      "sid": "su-1f7ee244-2982-409e-9e7c-0af6184b6763",
+      "ts": "2026-08-08 15:16:21.849-04",
+      "atom": "SELECT feature_id, status, to_timestamp(created_ts/1000) AS created FROM harness_shared.work_items WHERE title LIKE '%postmaster.opts%' ORDER BY created_ts"
+    },
+    {
+      "sid": "su-1f7ee244-2982-409e-9e7c-0af6184b6763",
+      "ts": "2026-08-03 12:16:19.664-04",
+      "atom": "SELECT feature_id, status, to_timestamp(created_ts/1000.0) AS created, left(title, 55) AS title FROM harness_shared.work_items WHERE title ILIKE '%plan-events is never physically GC%' ORDER BY created_ts DESC"
+    },
+    {
+      "sid": "su-ae348e33-2987-4686-85ae-5e80606fe77b",
+      "ts": "2026-08-03 11:56:06.802-04",
+      "atom": "SELECT feature_id, title, created_ts FROM harness_shared.work_items WHERE title ILIKE '%pg_read_all_stats is ASSUMED%' ORDER BY created_ts DESC LIMIT 3"
+    },
+    {
+      "sid": "su-3792ff4b-fb8f-4f72-9c94-4e2efa4c743e",
+      "ts": "2026-08-02 05:30:42.083-04",
+      "atom": "SELECT feature_id, title, status FROM harness_shared.work_items WHERE title ILIKE '%scope-class%' AND harness_slug = 'papercusp' ORDER BY updated_ts DESC LIMIT 10"
+    },
+    {
+      "sid": "su-3a33606f-6d5a-4cf0-9af7-7948d869eb7b",
+      "ts": "2026-08-12 06:32:54.819-04",
+      "atom": "SELECT feature_id, title, status, created_ts, taken_by FROM harness_shared.work_items WHERE workspace_id = 'papercusp-workspace' AND harness_slug = 'papercusp' AND title ILIKE '%loop:arm%' ORDER BY created_ts DESC LIMIT 5"
+    },
+    {
+      "sid": "su-4b77dc98-6a16-4eb0-9761-ea00bab89e73",
+      "ts": "2026-08-12 03:53:19.152-04",
+      "atom": "SELECT feature_id,status,created_ts, md5(regexp_replace(regexp_replace(summary,'su[-_][0-9a-f_-]{20,}','su-<owner>','g'),'''rt_[^'']+''','''<loop>''','g')) normalized_hash, title,left(summary,180) summary_head FROM harness_shared.work_items WHERE workspace_id='papercusp-workspace' AND harness_slug='papercusp' AND title LIKE 'LOOP WEDGED:%' AND summary LIKE '%Prompt is too long%' ORDER BY created_ts"
+    },
+    {
+      "sid": "su-4ca244e4-540e-4acc-bb67-9335192fc85f",
+      "ts": "2026-08-03 13:08:34.84-04",
+      "atom": "SELECT id, kind, state, assignee, left(title,120) AS title, created_at FROM harness_shared.work_items WHERE title ILIKE '%dbos-executor-reaper%' ORDER BY created_at DESC LIMIT 10"
+    },
+    {
+      "sid": "su-a0e1afb5-a7f3-4885-b9eb-8b38df5104e3",
+      "ts": "2026-08-02 03:28:45.293-04",
+      "atom": "SELECT id, state, assignee, created_at FROM harness_shared.work_items WHERE title LIKE '%delivery-ladder-sweep%' ORDER BY created_at DESC LIMIT 3"
+    },
+    {
+      "sid": "su-e15fb42f-6686-41e7-8368-37f5ec26ef3c",
+      "ts": "2026-08-02 04:12:04.889-04",
+      "atom": "SELECT id, state, assignee, left(title,110) AS title FROM harness_shared.work_items WHERE state='wip' ORDER BY updated_at DESC LIMIT 15"
+    },
+    {
+      "sid": "su-373a9b5c-c505-40e2-8591-5204c62712f2",
+      "ts": "2026-08-08 20:00:32.8-04",
+      "atom": "SELECT id, state, left(title, 70) AS title FROM harness_shared.work_items WHERE scope = 'harness:papercusp' AND title ILIKE '%embedding space%' ORDER BY created_at DESC LIMIT 5"
+    },
+    {
+      "sid": "su-70b6af5b-161b-4f48-a660-bf0e05a1af44",
+      "ts": "2026-08-10 07:15:49.226-04",
+      "atom": "SELECT substring(title from 'no owner: ([^ ]+) ') AS file, to_timestamp(created_ts/1000) AS filed FROM harness_shared.work_items WHERE title LIKE 'Standing tsc red%' AND status = 'open' AND workspace_id = 'papercusp-workspace' ORDER BY created_ts"
+    }
+  ]
+}

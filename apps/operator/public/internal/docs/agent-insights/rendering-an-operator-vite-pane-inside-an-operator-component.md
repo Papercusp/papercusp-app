@@ -1,0 +1,160 @@
+# Rendering an operator-vite pane inside an apps/operator component
+URL: /internal/docs/agent-insights/rendering-an-operator-vite-pane-inside-an-operator-component
+
+The import direction between apps/operator and apps/operator-vite is one-way. When an operator-side shell must host a vite-side pane, invert the composition with a descriptor slot — plus the two things a moved left-rail pane silently loses.
+
+import { Aside } from '@astrojs/starlight/components';
+
+You want to render a pane that lives in `apps/operator-vite/src` — a left-rail
+tab, an `/adv` panel, a voice surface — from a component that lives in
+`apps/operator`. The obvious import doesn't work, and the reason isn't visible
+at the import site.
+
+## The constraint: the import direction is one-way
+
+In `apps/operator-vite/vite.config.ts` the `@` alias resolves to
+`../operator` — **it points at a different app**:
+
+```ts
+{ find: '@', replacement: operatorRoot },   // operatorRoot = apps/operator
+```
+
+So:
+
+* `apps/operator-vite` → `apps/operator` — **fine**, that's what `@/app/...`
+  means from inside operator-vite.
+* `apps/operator` → `apps/operator-vite` — **impossible**. There is no alias
+  pointing that way, and adding one would make the Next tree depend on the SPA
+  shell that hosts it.
+
+This is the same trap [AGENT-ENV.md](/internal/docs/system/repo-conventions)
+records as the *cross-tree alias trap* (intra-app imports inside operator-vite
+must be relative, because `@/…` silently leaves the app). Here it bites from the
+other direction: the import you want simply cannot exist.
+
+The panes that trigger this are the ones importing operator-vite-local modules —
+`../adv/AgentsRunningPill`, `../voice-video/VideoGrid`, `@tanstack/react-router`.
+Moving the *file* into `apps/operator` doesn't help: its imports come with it.
+
+## The pattern: invert the composition with a descriptor slot
+
+**The operator side exposes a slot. The operator-vite route fills it.** The
+operator component never learns what's inside.
+
+This is the established convention, not a new invention:
+
+| Slot                                                            | Filled by                                                   | Introduced                                |
+| --------------------------------------------------------------- | ----------------------------------------------------------- | ----------------------------------------- |
+| `QuickPanelPage({ headerSlot })`                                | `operator-vite/src/routes/quick-panel.tsx`                  | quick-panel-status-pills-2026-07-13 D-001 |
+| `OperatorChatSidebar({ faces })` → `ChromeShell({ chatFaces })` | `operator-vite/src/components/chat-faces/ChatFacesHost.tsx` | WI-5162                                   |
+
+A worked descriptor (`apps/operator/app/_components/op-chat-faces.ts`):
+
+```ts
+export type OpChatFace = {
+  id: string;                 // keys the ?opcv URL enum
+  label: string;              // already lexicon-resolved by the provider
+  tip: string;
+  icon: ReactNode;
+  render: () => ReactNode;    // a FUNCTION, not a node — see below
+};
+```
+
+Three things that made it work:
+
+1. **`render` is a function, not a node.** A node prop would mount every pane
+   eagerly. These sidebars are boot-critical and the panes open live
+   `useSyncQuery`s, so an unpicked pane must not mount at all. Assert this in a
+   test — `expect(render).not.toHaveBeenCalled()` — it's the kind of regression
+   that costs boot latency silently.
+2. **The host owns the state, the provider owns the identity.** URL state, pill
+   chrome, lit/pressed state, the body swap: all host. The provider supplies
+   only the id/label/icon/pane. Anything else and the two trees start
+   negotiating.
+3. **Guard id collisions when the id keys a URL enum.** `dedupeChatFaces` drops
+   a face whose id shadows a built-in view (`chat`/`pot`/`inbox`) or an earlier
+   face — otherwise `?opcv` goes ambiguous and two pills light at once.
+
+The rule of thumb: if you're reaching for an import that crosses from
+`apps/operator` into `apps/operator-vite`, you want a slot. Pass data down, not
+components up.
+
+## The gotcha: a moved left-rail pane loses two invisible inheritances
+
+The `pclsb-*` panes (`SwarmTab`, `VoiceTab`, …) were written assuming a `.pclsb`
+ancestor. Re-host them somewhere else and they render *almost* right — which is
+worse than obviously broken. They lose exactly two things:
+
+1. **`--pclsb-current-accent`** — declared on `.pclsb` and overridden per
+   `[data-tab="…"]`. Without it the pane's accent falls back to the raw
+   `#38bdf8` default. Note `swarm` and `voice` both resolve to
+   `var(--accent)` (blue-frost) and **not** green — that's WI-4789, an explicit
+   owner correction ("the Fleet tab looks off"). Re-deriving the accent by eye
+   silently reverts it.
+2. **`.pclsb__body`'s scroll box** — `flex: 1; min-height: 0; overflow: auto;
+   padding: 4px 0 10px`. Without it the pane doesn't scroll and grows its
+   container.
+
+Re-supply both in a host wrapper and the panes need **zero** rewrite:
+
+```tsx
+function ChatFacePane({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="pclsb-face-host">
+      <style>{LEFT_SIDEBAR_CSS}</style>
+      <style>{CHAT_FACE_PANE_CSS}</style>
+      {children}
+    </div>
+  );
+}
+```
+
+```css
+.pclsb-face-host {
+  --pclsb-current-accent: var(--accent, #38bdf8); /* from .pclsb */
+  flex: 1; min-height: 0; overflow: auto;         /* from .pclsb__body */
+  padding: 4px 0 10px;
+  display: flex; flex-direction: column;
+}
+```
+
+Re-injecting `LEFT_SIDEBAR_CSS` while the rail is *also* mounted is harmless —
+same rules, same cascade, and `<style>` dedupes nothing but costs nothing.
+
+## Unrelated but adjacent: never put backticks in a CSS template literal
+
+The styles in this area live in tagged template literals
+(`OP_CHAT_SIDEBAR_CSS`, `LEFT_SIDEBAR_CSS`). Writing a markdown-style
+`` `code` `` span in a comment **inside** one terminates the literal:
+
+```
+ERROR: Expected ";" but found "potLabel"
+  Label widths by sidebar width, `potLabel:wordmark:fleetLabel`:
+                                  ^
+```
+
+The whole file fails to parse and `test:file` reports it as *unmatched* rather
+than failed. In WI-5162 this landed **after** the per-file suite had already gone
+green (the comment was a later edit), so only `npm run test:affected` caught it —
+a reminder that a green from before your last edit is not a green.
+
+## Testing the seam
+
+* Test the **slot** on the operator side with stand-in descriptors — no
+  operator-vite import needed, which is the point of the seam.
+* Test the **removal** on the vite side, and delete the `vi.mock` for the panes
+  you moved out. In `LeftSidebar.test.tsx` the stubs for `SwarmTab`/`VoiceTab`
+  were removed deliberately: a stub would let a regression that re-mounts them
+  pass silently.
+* Assert the **stale deep-link**. A bookmarked `?lst=swarm` must fall back to
+  the default tab, not wedge the rail on a tab that no longer exists (nuqs'
+  `parseAsStringLiteral` does this for free once the id leaves the list — but
+  assert it, because the list is what changed).
+
+## See also
+
+* [repo-conventions](/internal/docs/system/repo-conventions) — the deployment
+  model and why the SPA is the desktop's content layer, not a separable app.
+* [agent-e2e](/internal/docs/testing/agent-e2e) — verifying the result in the
+  Tauri shell (§1.3 for your own isolated instance; never drive the owner's
+  window).

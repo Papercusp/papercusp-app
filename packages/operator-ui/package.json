@@ -1,0 +1,123 @@
+{
+  "name": "@papercusp/operator-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Operator SURFACES as importable React components — the panels that used to live only inside the operator SPA, moved here so a second app (the cloud portal) can mount them natively instead of framing them in an iframe. Host-specific concerns (router Link, toast, API reachability) are injected through configureOperatorUi(); everything else is the operator's own component, unchanged. Each panel ships its own CSS string so a host needs no build-time stylesheet wiring.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./seam": {
+      "types": "./src/seam.tsx",
+      "import": "./src/seam.tsx",
+      "default": "./src/seam.tsx"
+    },
+    "./settings-slots": {
+      "types": "./src/settings-slots.tsx",
+      "import": "./src/settings-slots.tsx",
+      "default": "./src/settings-slots.tsx"
+    },
+    "./surfaces": {
+      "types": "./src/surfaces/surfaces.d.ts",
+      "import": "./src/surfaces/index.tsx",
+      "default": "./src/surfaces/index.tsx"
+    },
+    "./shortcuts": {
+      "types": "./src/shortcuts/shortcuts.d.ts",
+      "import": "./src/shortcuts/index.tsx",
+      "default": "./src/shortcuts/index.tsx"
+    },
+    "./grid-theme-bridge": {
+      "types": "./src/grid-theme-bridge.ts",
+      "import": "./src/grid-theme-bridge.ts",
+      "default": "./src/grid-theme-bridge.ts"
+    },
+    "./adv-navigation": {
+      "types": "./src/adv-navigation.ts",
+      "import": "./src/adv-navigation.ts",
+      "default": "./src/adv-navigation.ts"
+    },
+    "./popover": {
+      "types": "./src/popover.ts",
+      "import": "./src/popover.ts",
+      "default": "./src/popover.ts"
+    },
+    "./accounts/AccountsTab": {
+      "types": "./src/accounts/AccountsTab.tsx",
+      "import": "./src/accounts/AccountsTab.tsx",
+      "default": "./src/accounts/AccountsTab.tsx"
+    },
+    "./accounts/use-account-override": {
+      "types": "./src/accounts/use-account-override.ts",
+      "import": "./src/accounts/use-account-override.ts",
+      "default": "./src/accounts/use-account-override.ts"
+    },
+    "./papercup-chat": {
+      "types": "./src/papercup-chat/index.ts",
+      "import": "./src/papercup-chat/index.ts",
+      "default": "./src/papercup-chat/index.ts"
+    },
+    "./papercup-chat/parse-work-refs": {
+      "types": "./src/papercup-chat/parse-work-refs.ts",
+      "import": "./src/papercup-chat/parse-work-refs.ts",
+      "default": "./src/papercup-chat/parse-work-refs.ts"
+    },
+    "./papercup-chat/remark-work-refs": {
+      "types": "./src/papercup-chat/remark-work-refs.ts",
+      "import": "./src/papercup-chat/remark-work-refs.ts",
+      "default": "./src/papercup-chat/remark-work-refs.ts"
+    },
+    "./papercup-chat/message-timestamp": {
+      "types": "./src/papercup-chat/message-timestamp.tsx",
+      "import": "./src/papercup-chat/message-timestamp.tsx",
+      "default": "./src/papercup-chat/message-timestamp.tsx"
+    },
+    "./papercup-chat/chat-ref-popup-params": {
+      "types": "./src/papercup-chat/chat-ref-popup-params.ts",
+      "import": "./src/papercup-chat/chat-ref-popup-params.ts",
+      "default": "./src/papercup-chat/chat-ref-popup-params.ts"
+    },
+    "./chat-ref-popup-host": {
+      "types": "./src/chat-ref-popup-host.d.ts",
+      "import": "./src/chat-ref-popup-host.tsx",
+      "default": "./src/chat-ref-popup-host.tsx"
+    }
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "bash ../../scripts/pc-heavy.sh tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "@testing-library/react": "^16.3.2",
+    "@types/mdast": "^4.0.4",
+    "@types/react": "^19.2.15",
+    "jsdom": "^29.1.1",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "vitest": "^4.1.4"
+  },
+  "dependencies": {
+    "@papercusp/chat-cards": "file:../../libs/generic/chat-cards",
+    "@papercusp/chat-protocol": "file:../../libs/generic/chat-protocol",
+    "@papercusp/grid-core": "file:../../libs/generic/papergrid/grid-core",
+    "@papercusp/module-singleton": "file:../../libs/generic/module-singleton",
+    "@papercusp/sync": "file:../../libs/generic/sync",
+    "@radix-ui/react-collapsible": "^1.1.12",
+    "@tanstack/react-virtual": "^3.13.23",
+    "lucide-react": "^0.544.0",
+    "nuqs": "^2.7.2",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "peerDependencies": {
+    "react": ">=19",
+    "react-dom": ">=19"
+  }
+}

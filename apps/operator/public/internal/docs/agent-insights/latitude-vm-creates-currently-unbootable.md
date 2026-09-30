@@ -1,0 +1,44 @@
+# Latitude VM creates are currently unbootable — and an OS-less create is silently accepted
+URL: /internal/docs/agent-insights/latitude-vm-creates-currently-unbootable
+
+As of 2026-06-12 a POST /virtual_machines WITHOUT operating_system is ACCEPTED and yields a Running VM with no image and no ssh (the API used to default the OS — the 06-06 driver verification predates the change). Worse: even a CORRECT create (vm-compatible OS + site + ssh key) comes up Running but unreachable on every port from multiple vantages. Driver now defaults ubuntu_24_04_x64_lts + passes site (both pinned by tests); until Latitude fixes the platform leg, provision bench/fleet VMs on Hetzner (caps 2 servers/project — fan peers per frame and separate same-host pairs in any latency fold).
+
+## The mistake this prevents
+
+WI-101's bench fleet (10× `vm.small`) wedged at `ssh not ready (attempt N/120)`
+on its very first frame — 30 minutes of retry budget per frame against VMs
+that can never come up. Two stacked causes, one platform residue:
+
+1. **The API accepts an OS-less VM create and builds a husk.** The driver's VM
+   path passed `operating_system: undefined` (the metal path defaults it; the
+   VM path relied on an API-side default that existed on 2026-06-06 — the
+   "live-verified, Running in \~16s" comment — and is gone). Result:
+   `status: Running`, `operating_system: null`, no image, no sshd, port 22
+   a TCP timeout forever. **Fixed:** `latitude-driver.ts` now defaults
+   `DEFAULT_VM_OS = 'ubuntu_24_04_x64_lts'` — the only plain Ubuntu image
+   with `vm.small` in its `provisionable_on` (the metal default
+   `ubuntu_22_04_x64_lts` is rejected as plan-incompatible). Pinned by a
+   driver unit test.
+2. **VM creates ignored region.** The create call never passed `site`, so an
+   ASH request landed in DAL — "co-located" fleets were placement-luck.
+   **Fixed:** the driver passes `site: config.region` (API honors it;
+   verified live).
+3. **Platform residue (NOT fixed — retest before relying on Latitude VMs):**
+   even a fully-correct create (OS attached, site honored, ssh key injected,
+   `status: Running`) stayed unreachable on 22 AND 443 from two independent
+   vantages (home + a Hetzner box) for 10+ minutes. Tracked as an EI; until
+   it clears, **use Hetzner for bench fleets**.
+
+## The Hetzner constraint that shapes fleet design
+
+The papercusp Hetzner project caps at **2 servers** (`resource_limit_exceeded`
+on the third create — the bench fleet's anti-leak teardown destroyed the two
+live frames correctly). For an N-peer measurement on 2 hosts, fan
+`VOICE_MESH_PEERS_PER_FRAME` children per frame and **separate same-host pairs
+out of the headline latency** (they ride an intra-machine path): the voice-mesh
+fold classifies pairs by `slot.host` into `mouthToEarMs` (cross-host) vs
+`mouthToEarSameHostMs`. Interleave fanned slots across frames so a prefix
+slice (mesh size 2) is one peer per physical host.
+
+Worked end-to-end on 2026-06-12: 2× cpx31 ash, 2/5/10-peer voice mesh, results
+in holepunch-voice-channels-2026-06-05 D-017.

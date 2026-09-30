@@ -1,0 +1,93 @@
+# Lazy UI silently dies on a long-open desktop window — the dev:nohmr chunk-invalidation trap
+URL: /internal/docs/agent-insights/stale-webview-chunk-invalidation
+
+A desktop window that's been open across a build sees Ctrl+P (and other lazy-loaded UI) do nothing — and shortcuts can look dead too. Cause: the webview loads the static dist from :3070, but the background `vite build --watch` (dev:nohmr) rebuilds it and deletes the chunk hashes the open window references, so dynamic imports 404. It's silent because DevReloadGate suppresses auto-reload and lazyWithRetry opts out of reload on the desktop. Fix: reload (Ctrl+R) — and force a fresh load before any agent-e2e test.
+
+import { Aside } from '@astrojs/starlight/components';
+
+## Symptom
+
+In a desktop window that has been open for a while, **Ctrl+P opens nothing** —
+no palette, no error, no console warning. Sometimes it looks worse: *every*
+keyboard shortcut seems dead. Reload the window and everything works. The code
+on disk is correct; the running window is not.
+
+This bites agents hardest: you `tauri-agent-tools eval` a synthetic Ctrl+P,
+nothing happens, and you start "fixing" a keyboard bug that does not exist.
+
+## Root cause: the open window references deleted chunks
+
+The desktop webview loads the operator UI as a **static build** served by
+`:3070` (`apps/operator-vite/dist/`), not a live HMR server — see
+[operator-3070-host-no-hot-reload](/internal/docs/agent-insights/operator-3070-host-no-hot-reload).
+The dev box also runs `dev:nohmr` = `vite build --watch --mode development`,
+which **rebuilds that `dist/` on every `operator-vite` source change** (any
+agent editing a watched file triggers it). Each rebuild emits new
+content-hashed chunks (`index-<hash>.js`, `CommandPalette-<hash>.js`, …) and
+**deletes the previous ones**.
+
+A window that loaded `index-A.js` keeps a code-split graph pointing at the
+`A`-era chunk hashes. After a rebuild those files are gone, so any
+**dynamic import** the open window makes (lazy components, on-open palette
+chunk) **404s**.
+
+## Why it's *silent* (two deliberate policies compound)
+
+1. **`DevReloadGate`** (`app/_components/DevReloadGate.tsx`) intentionally
+   **suppresses auto-reload** in dev — it kills the HMR socket and no-ops
+   `location.reload` so concurrent agents saving files don't thrash your page.
+   The intended recovery has always been a manual **Ctrl/⌘R**.
+2. **`lazyWithRetry`** (`packages/operator-core/lib/lazy-with-retry.ts`, re-exported
+   from `@papercusp/sync`) retries a failed chunk import,
+   but `shouldAutoReloadChunkFailure` returns **false on the desktop and the
+   `:3070`/`:4173` origins** — so on a chunk 404 it retries then *rejects*; it
+   never force-reloads (that would violate policy #1).
+
+So a stale-window dynamic import fails with no recovery and, if the failing
+component had a `<Suspense fallback={null}>` and no error boundary, **no visible
+signal**. Worse: if a chunk failure happens in the *initial* render tree, the
+root effect tree can tear, so `GlobalShortcutDispatcher`'s `window` keydown
+listener never attaches — which is why **all** shortcuts can look dead, not just
+the lazy one.
+
+## Confirm it in ten seconds
+
+```sh
+# bridge token: cat /tmp/tauri-dev-bridge-<pid>.token  → { port, token }
+tauri-agent-tools eval \
+  "[...document.querySelectorAll('script[src]')].map(s=>s.getAttribute('src')).filter(s=>/index-/.test(s))" \
+  --port <port> --token <token>
+# → what the window loaded, e.g. /assets/index-LXg_VT-e.js
+
+curl -s http://127.0.0.1:3070/ | grep -oE 'index-[A-Za-z0-9_-]+\.js'
+# → what :3070 serves now, e.g. index-R6GULhAL.js
+```
+
+**Different hashes ⇒ the window is stale.** Everything you test against it is
+suspect.
+
+## Fix / workflow
+
+* **As a user:** press **Ctrl/⌘R** in the desktop window. (This is also why
+  the only honest answer to "I added a lazy component but don't see it" is
+  *reload*, not *more code*.)
+* **As an agent doing agent-e2e:** force a fresh load *before* you test —
+  `tauri-agent-tools navigate "<same url>"` reloads onto the current bundle —
+  then verify the loaded `index-*` hash matches `:3070` before trusting any DOM
+  probe. Do not drive the user's focused window for this; use a secondary
+  window or your own.
+
+## What we changed (so the failure isn't silent)
+
+`GlobalCommandPalette` now imports the palette via `lazyWithRetry` **and** wraps
+it in a small `PaletteChunkBoundary`. On a chunk-load rejection it closes the
+palette and toasts *"Command palette updated — reload (Ctrl/⌘R) to use it."* —
+turning a silent no-op into an actionable hint. Production never hits this (no
+mid-session rebuilds); it's purely a dev-ergonomics net.
+
+This is distinct from the registry architecture (see
+[capability-contract-and-palette-catalog](/internal/docs/agent-insights/capability-contract-and-palette-catalog))
+and from `:3070` *server-side* staleness (see
+[operator-3070-host-no-hot-reload](/internal/docs/agent-insights/operator-3070-host-no-hot-reload)).
+Same root family — "the running thing predates your work" — three different
+layers: server host, static client bundle, and now per-window chunk graph.

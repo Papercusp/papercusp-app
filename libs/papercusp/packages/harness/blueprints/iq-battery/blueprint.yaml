@@ -1,0 +1,57 @@
+# The `iq-battery` blueprint — deterministic-blueprints-migration-2026-06-13 (bucket A / D-013).
+#
+# The monthly benchmark pulse, as a HYBRID deterministic blueprint: per cadence,
+# decide (owner-budget gate → code-SHA identity → generation dedupe) and run ONE
+# budget-capped gen-0 IQ-battery — solver/judge bees spawned via the GOVERNED launch
+# chokepoint (spawnAgentInHarness → fleet:spawn → spawnInvokeOnce, so D-005 holds) —
+# persisting beside gen-0 in the beekeeper_* tables (the Learning tab's Benchmark
+# trend reads them). The bee spawn stays INTERNAL to the `iq-battery:gen` op (bees
+# take a corpus-case brief, not a harness role — so NOT a spawn-roles step; D-013).
+#
+# Behavior-neutral (D-004): the op runs the SAME cadence-tick + gen-0 runner the
+# bespoke `system:iq-battery-gen` routine did. NOT a flag/governor loop — the gate is
+# the owner-set budgetUsd (absent ⇒ refuse; the gym's unattended-spend precedent).
+id: iq-battery
+extends: base
+version: 0.1.0
+description: >-
+  Monthly IQ-battery benchmark: when the code SHA changed, run one owner-budget-capped
+  generation (solver/judge bees through the governed chokepoint) beside gen-0 in the
+  beekeeper trend — the "is the system improving" yardstick.
+
+workItem:
+  kind: benchmark-run
+  idPrefix: IQB
+
+# Program-mode spine: one step, NO gate ⇒ deterministic pipeline (the op's internal
+# cadence gate decides refuse/skip/run). `payload.*` are the routine's cadence knobs.
+spine:
+  steps:
+    - id: gen
+      op: iq-battery:gen
+      args:
+        budgetUsd: "{{ payload.budgetUsd }}"
+        casesPerVariant: "{{ payload.casesPerVariant }}"
+        repeats: "{{ payload.repeats }}"
+        dryRun: "{{ payload.dryRun }}"
+      bind: gen
+
+knobs:
+  harnessKind: learning
+  # The benchmark derives the generation identity from git (the code SHA) + spawns
+  # solver bees into the harness, so it needs a repo.
+  requiresRepo: true
+
+# Scheduled trigger: byte-identical to the bespoke routine (monthly, 1st @ 06:20).
+# The routine fires `system:blueprint-run { blueprintId: iq-battery, payload: { budgetUsd } }`;
+# the handler detects program-mode and runs the step inline. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 20 6 1 * *"
+      action: system:blueprint-run
+      singleton: true        # P-144/D-018: workspace-singleton cadence
+      singletonActive: true  # D-024: monthly benchmark — seeds ACTIVE (self-gates on owner budgetUsd in payload)
+
+dependencies:
+  tools: []
+  plugins: []

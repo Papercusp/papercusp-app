@@ -1,0 +1,201 @@
+# Telemetry
+URL: /internal/docs/endpoint-system/telemetry
+
+Every tool call lands in `harness_shared.tool_invocations`. Schema, queries, and the Phase 9 spawn-lineage forward-look.
+
+## The single table
+
+`harness_shared.tool_invocations` is where every projected-tool call goes. One row per dispatch attempt, regardless of transport, regardless of outcome. The table originally shipped in migration 046 (now folded into the squashed `000-baseline.sql`, with the original at `libs/papercusp/libs/db/sql/archive/046-tool-invocations.sql`); later migrations added the `args_json` / `transport` / `event_count` / `metadata_json` / `principal_*` columns and two views (below).
+
+```sql
+CREATE TABLE harness_shared.tool_invocations (
+  id              BIGSERIAL PRIMARY KEY,
+  workspace_id    TEXT NOT NULL,
+  harness_slug    TEXT NOT NULL,
+  plugin_name     TEXT NOT NULL,
+  tool_name       TEXT NOT NULL,
+  role            TEXT NOT NULL,
+  feature_id      TEXT NULL,
+  chunk_id        TEXT NULL,
+  run_id          TEXT NULL,
+  spawn_id        TEXT NOT NULL,
+  parent_spawn_id TEXT NULL,                 -- Phase 9 lineage
+  window_key      TEXT NOT NULL,             -- 'chunk:<id>' or 'run:<id>'
+  invoked_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  duration_ms     INT NULL,
+  status          TEXT NOT NULL,             -- enum below
+  output_ref      TEXT NULL,                 -- papercusp://scratch/... URI for large outputs
+  output_size     BIGINT NULL,
+  error_message   TEXT NULL,
+  args_json       JSONB NULL,                -- the call's input args (truncated past 32 KB)
+  transport       TEXT NULL,                 -- 'http' | 'mcp' | 'ipc' | 'in_process'
+  event_count     INT NULL,                  -- number of ctx.emit calls during the run
+  metadata_json   JSONB NULL,                -- ctx.metadata() payload + reaction cause-chain
+  error_code      TEXT NULL,                 -- dispatcher error CLASS (NULL on success); see below
+  principal_kind        TEXT NULL,           -- Principal audit fields (bearer/MCP path only;
+  principal_auth_method TEXT NULL,           -- NULL → surfaces as 'unknown' in /dev)
+  principal_trust       TEXT NULL
+);
+```
+
+The squashed schema also ships two views over the table: `tool_invocations_artifacts` (successful calls that wrote a scratch `output_ref` — feeds the Intel Pack/Diff sub-tabs) and `tool_invocations_spawn_tree` (recursive `parent_spawn_id` lineage, `depth=0` for roots). The spawn-tree view **caps recursion at depth 16** — the recursive join stops at `c.depth < 16`, so a runaway spawn-of-spawn chain can't blow up the CTE.
+
+Four indexes:
+
+* `tool_invocations_quota_idx` on `(workspace_id, tool_name, role, window_key) WHERE status='ok'` — partial index, makes the dispatcher's quota read O(log n) per call.
+* `tool_invocations_telemetry_idx` on `(workspace_id, harness_slug, invoked_at DESC)` — feed for Intel UI's recent-activity panel.
+* `tool_invocations_error_code_idx` on `(error_code, invoked_at) WHERE error_code IS NOT NULL` (migration 205) — partial index over *failing* rows only, backing the improvement-watchdog's grouped-by-`error_code` scan; success rows (the vast majority, `error_code IS NULL`) are excluded.
+* `tool_invocations_invoked_at_cov_idx` on `(invoked_at DESC) INCLUDE (tool_name, duration_ms, status)` (migration 315) — covering index leading on `invoked_at` so `dev:telemetry`'s **cross-workspace** 24h rollup runs as an Index-Only Scan instead of broad-scanning the whole table (the quota index leads on `workspace_id`, so it can't range-scan `invoked_at` across workspaces).
+
+## The status enum
+
+| Status             | Meaning                                                                                                                                                                                                                                   |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ok`               | Function returned successfully. Counts against quota.                                                                                                                                                                                     |
+| `error`            | Function threw. Doesn't count against quota. `error_message` populated.                                                                                                                                                                   |
+| `timeout`          | Dispatcher's AbortController fired before function returned.                                                                                                                                                                              |
+| `quota-exceeded`   | Pre-dispatch quota check rejected. Function never ran.                                                                                                                                                                                    |
+| `role-not-allowed` | Pre-dispatch authorization rejected. Function never ran. Three dispatcher error codes collapse into this status: `role_not_allowed`, `missing_capability`, and `capability_denied` (the resource-authorize / capability-envelope denial). |
+| `invalid-input`    | Function threw a typed input-validation error (`invalid_input`).                                                                                                                                                                          |
+
+Add a new status only by editing the dispatcher; do not let tool functions return arbitrary status values.
+
+### `error_code` — the un-collapsed error class
+
+`status` is a *lossy* collapse: three codes fold into `role-not-allowed`, a handful of distinct failure modes fold into `error`. The `error_code` column (migration 205, `watchdog-robustness`) preserves the dispatcher's full error CLASS that `status` throws away. It's a low-cardinality string, `NULL` on success rows (and on legacy rows written before migration 205):
+
+`unauthorized` · `handler_error` · `harness_required` · `role_not_allowed` · `missing_capability` · `quota_exceeded` · `timeout` · `invalid_input` · `invalid_args`
+
+`recordTelemetry` already computes this code to pick the `status`; persisting it means the **improvement-watchdog** can separate a deterministic config bug (an `unauthorized` that recurs identically — a real bug, fire on few) from a transient crash (`timeout` under load — volume-gated) without fragile `error_message LIKE` matching. The watchdog scans `error_code` grouped by tool, backed by the partial `tool_invocations_error_code_idx`.
+
+## Reading the table
+
+The table has RLS — every read needs `app.workspace_id` set first:
+
+```sql
+SELECT set_config('app.workspace_id', 'default', false);
+SELECT tool_name, role, status, duration_ms, error_message
+FROM harness_shared.tool_invocations
+WHERE invoked_at > now() - interval '1 hour'
+ORDER BY invoked_at DESC;
+```
+
+`harness_admin` is `BYPASSRLS` and sees every workspace; `harness_app` is RLS-bound and sees only the configured workspace.
+
+## Useful queries
+
+### Per-tool success rate this run
+
+```sql
+SET app.workspace_id = 'default';
+SELECT
+  tool_name,
+  count(*) FILTER (WHERE status='ok') AS ok,
+  count(*) FILTER (WHERE status='error') AS errors,
+  count(*) FILTER (WHERE status='timeout') AS timeouts,
+  count(*) FILTER (WHERE status='quota-exceeded') AS quota_hits
+FROM harness_shared.tool_invocations
+WHERE run_id = 'r-2026-05-10-001'
+GROUP BY tool_name
+ORDER BY count(*) DESC;
+```
+
+### What did role X do in this run
+
+```sql
+SELECT invoked_at, plugin_name, tool_name, status, duration_ms
+FROM harness_shared.tool_invocations
+WHERE run_id = 'r-2026-05-10-001' AND role = 'architect'
+ORDER BY invoked_at;
+```
+
+### Quota near-limits (architect at 4/5)
+
+```sql
+SELECT tool_name, role, window_key, count(*) AS used
+FROM harness_shared.tool_invocations
+WHERE status = 'ok' AND window_key LIKE 'run:%'
+GROUP BY tool_name, role, window_key
+HAVING count(*) >= 4;
+```
+
+### Slowest calls
+
+```sql
+SELECT tool_name, role, duration_ms, output_size, invoked_at
+FROM harness_shared.tool_invocations
+WHERE status = 'ok' AND duration_ms > 5000
+ORDER BY duration_ms DESC
+LIMIT 20;
+```
+
+### Failed calls with messages
+
+```sql
+SELECT invoked_at, tool_name, role, status, substring(error_message, 1, 200)
+FROM harness_shared.tool_invocations
+WHERE status IN ('error', 'timeout')
+ORDER BY invoked_at DESC
+LIMIT 20;
+```
+
+## Output reference for large results
+
+Tools that produce a large result write it to the scratch tree at `~/.papercusp/scratch/<workspace>/<toolName>/<runId>/<basename>` and return `outputRef` as a `papercusp://scratch/<workspace>/<toolName>/<runId>/<basename>` URI (see `scratch-uri.ts`); the dispatcher persists it to the `output_ref` column. The body of the tool result still includes a small sample + the ref. Repomix uses this pattern; expect code2prompt and any future packing tools to do the same.
+
+This keeps the table queryable without bloating it with 1MB+ payloads.
+
+## `parent_spawn_id` lineage
+
+`parent_spawn_id` captures the spawn-of-spawn relationship: a child call's rows reference the parent's `spawn_id`. It is **now populated** (not the always-`null` placeholder it once was) on two paths:
+
+* The `parent_spawn` spawn-URL param, parsed into `ctx.parentSpawnId` by the MCP transport (`routes/transport/_mcp-handler.ts`). The fleet spawner (`fleet/operator-spawn.ts` + `fleet/parent-wake.ts`) is what threads it through — superseding the never-installed, now-retired `@papercupai/orchestrator-spawn` plugin.
+* The event-reaction cause chain (`lib/events/dispatch-reaction.ts` sets `parentSpawnId` to the triggering call's `spawnId`).
+
+The `harness_shared.tool_invocations_spawn_tree` view (recursive CTE over `parent_spawn_id`, `depth=0` for roots) already exists for querying this lineage.
+
+## How the row is written
+
+`recordTelemetry` runs in the `finally` of `runDispatchStack` (`dispatch-stack.ts`) on every termination path and calls the host-injected `deps.recordInvocation` — whose Papercusp implementation is `recordInvocationImpl` in `packages/operator-core/lib/projected-tool-deps.ts`. Each terminal path produces a row:
+
+* After every successful tool execution: `(status='ok', duration_ms, output_size, ...)`.
+* After every thrown error: `(status='error', duration_ms, error_message, error_code)`.
+* After a quota check rejection: `(status='quota-exceeded')` with `error_message` of the form `Tool "<toolName>" exceeded quota (<count>/<limit>) in window "<windowKey>"` (and `error_code='quota_exceeded'`). Function did not run.
+* After an authorization rejection: `(status='role-not-allowed')` with the dispatcher's `error_code` (`role_not_allowed` / `missing_capability` / `capability_denied`). Function did not run.
+
+### Deferred, batched writes (P-003)
+
+`recordInvocationImpl` does **not** `INSERT` synchronously. `recordTelemetry` is *awaited* in the dispatcher's `finally`, so a per-call PG round-trip (\~10–50ms) was the dominant overhead on a tight `capability:bash` loop. Since `route-everything-through-definetool` P-003 the write moves off the hot path:
+
+* **Snapshot + enqueue.** `recordInvocationImpl` calls `buildTelemetryRow` to snapshot the row synchronously (just a `JSON.stringify` of args), pushes it onto an in-process `telemetryQueue`, and returns in microseconds. No `await` of PG on the dispatch path.
+* **Debounced background flush.** A 10ms-debounced flusher (`flushPendingTelemetry`) drains the queue in **batched, per-workspace transactions** of up to 200 rows each: it groups the batch by `workspace_id`, then runs one `BEGIN` / `set_config('app.workspace_id', …)` / many-`INSERT`s / `COMMIT` per workspace group. So the GUC is set **once per batch transaction grouped by workspace** — not once per row.
+* **Bounded queue.** The queue is hard-capped at 5000 rows (`TELEMETRY_MAX_PENDING`); if the producer outruns PG (a stall), it sheds **oldest** rows so a PG outage can never OOM the host.
+* **Quota correctness.** `readQuotaState` calls `flushPendingTelemetry()` *first*, draining any queued `ok` rows before counting — so a quota'd tool never under-counts despite the deferral. Tests and telemetry consumers needing synchronous visibility can `await flushPendingTelemetry()`.
+
+Best-effort throughout. `recordTelemetry`'s own `catch` in `dispatch-stack.ts` is silent — a snapshot/enqueue failure never breaks the dispatcher. The warnings come from the background flusher, not any HTTP catch-all: a failed batch logs `[projected-tool-deps] telemetry flush batch failed (<n> rows): …` and the row is dropped; queue overflow logs `[projected-tool-deps] telemetry queue overflow — dropped <n> row(s)` (rate-limited to the first drop and every 1000th after).
+
+The `app.workspace_id` GUC inside each batch transaction is set via `SELECT set_config('app.workspace_id', $1, true)` (the local/`true` form) — never `SET LOCAL = $1` (PG doesn't accept binds in `SET`, audit-2 silently broke this for two days before we caught it).
+
+### `args_json` / `metadata_json` serialization gotchas
+
+* **NUL bytes are stripped.** Both JSONB columns are serialized through `jsonbSafeStringify`, which removes NUL bytes (`U+0000`) from every string value. Postgres `jsonb` cannot represent `U+0000` and rejects the whole `::jsonb` cast — before this fix a single NUL in a tool's args (binary-ish payloads, truncated file reads, terminal output) silently dropped that call's *entire* telemetry row.
+* **Large `args_json` becomes a papercup.** When the serialized args exceed 32768 bytes (32 KB), `args_json` is replaced with the papercup object `{"_truncated": true, "_size": <byteLen>}` — not a truncated string. Queries against `args_json` on large calls should expect that shape, not the original args.
+* **`metadata_json` reaction chain.** On a reaction-triggered call, `metadata_json` carries `metadata.reaction = { depth, chain, ruleId, rootRunId }` (the cause-chain from `event-reaction-system` D-010, so "why did this fire?" is answerable). When `ctx.uiClientId` is present it is also injected into `metadata_json` (via `finalizeMetadata`).
+
+## Where to read in code
+
+* Schema: `libs/papercusp/libs/db/sql/000-baseline.sql` (original at `archive/046-tool-invocations.sql`)
+* Quota read + insert (shared across all three transports): `packages/operator-core/lib/projected-tool-deps.ts` — the single `PROJECTED_DEPS` object (`readQuotaStateImpl` + `recordInvocationImpl`), passed to the plugins / agent-tools / transport Hono routes under `packages/operator-core/lib/endpoint-route/routes/` (and the IPC server `libs/generic/ipc-endpoint-server/src/server.ts`)
+* Telemetry orchestration: `recordTelemetry` in `libs/generic/tooldef/src/dispatch-stack.ts`
+* Window-key + ceiling computation: host-injected `computeQuotaWindow` (engine default `libs/generic/tooldef/src/dispatch-types.ts:defaultComputeQuotaWindow`; Papercusp policy `packages/agent-mcp/src/quota-policy.ts:papercuspComputeQuotaWindow`)
+
+## Future Intel-tab queries
+
+The planned `/harness/<slug>?tab=intel` page reads `tool_invocations` for the four sub-tabs:
+
+* **Spawns** — tree of `spawn_id → parent_spawn_id` to visualize agent lineage
+* **Pack** — recent `repomix.pack` / `code2prompt.pack` calls per feature
+* **Diff** — `code2prompt.diff` results linked from feature panel
+* **Graph** — gitnexus query/context/impact (when the GitNexus bridge ships)
+
+The current schema supports all of these without modification — and some already shipped: the `tool_invocations_spawn_tree` and `tool_invocations_artifacts` views back the Spawns / Pack / Diff data, with read routes under `packages/operator-core/lib/endpoint-route/routes/harness/` (`intel-spawn-tree.ts`, `intel-artifacts.ts`). The remaining work is query views, not new tables.

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wsl-finalize-ready"
+description = "Enables the wsl_finalize_ready command without any pre-configured scope."
+commands.allow = ["wsl_finalize_ready"]
+
+[[permission]]
+identifier = "deny-wsl-finalize-ready"
+description = "Denies the wsl_finalize_ready command without any pre-configured scope."
+commands.deny = ["wsl_finalize_ready"]

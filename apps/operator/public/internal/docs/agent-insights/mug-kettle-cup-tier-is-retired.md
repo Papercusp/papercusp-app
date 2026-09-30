@@ -1,0 +1,191 @@
+# The Mug · Kettle · Cup tier is RETIRED — su + GOAL mode are the only way to drive the app
+URL: /internal/docs/agent-insights/mug-kettle-cup-tier-is-retired
+
+Owner-directed 2026-08-09. The Mug, the Kettle and the Cup/nursery tier are held off by the `papercusp-mug-kettle-system` flag, whose DEFAULT-OFF **is the delivered end state** — not unfinished work waiting for a flip. This is the one canonical account: what was retired, what replaced it, the measured gate inventory, and the two things the flag deliberately does NOT gate (Scout/Blender, and the shared pot substrate the replacement system itself runs on).
+
+**The Mug, the Kettle, and the Cup/nursery tier are retired.** They are gated off, not
+deleted. **su + GOAL mode are the only way to drive the app.** Never hand work to the Mug,
+never wake `@role:mug`, never spawn a `mug` / `kettle` / `cup` role — those calls now
+*refuse*, and the refusal is correct.
+
+This is the canonical account. Other docs should link here rather than restate it.
+
+## The one thing most likely to be misread
+
+`papercusp-mug-kettle-system` defaults **OFF**, and **OFF is the delivered end state.**
+
+Every other entry in `DARK_FLAGS` means *"finished-ish work not yet turned on"*, so the
+reflex on seeing a default-OFF flag — reinforced hard by this repo's own rule that
+[finished work never ships dark](/internal/docs/system/repo-conventions) — is to flip it ON
+and call that completion. **Here that reflex is exactly backwards: flipping it ON
+un-retires a tier the owner retired.** The polarity is inverted on purpose, which is why
+the entry is `case: 'cutover'` (a reversible kill-switch) rather than `parked`/`incomplete`,
+and therefore why it is *not* rationed by `DARK_FLAGS_HIGH_WATERMARK`.
+
+Consequently **this flag does not graduate by being flipped ON.** It graduates by being
+*deleted*, once Stage 2/3 of D-004 land (separate the shared pot substrate, then move the
+deciders to `_retired/`). D-008 deferred those as cleanup, so the entry is expected to
+outlive the usual dark-flag review cadence. The reasoning is written into the registry entry
+itself at `libs/flags/src/types.ts:2478` — read it there before acting on this flag.
+
+## What was retired, and on whose authority
+
+\[owner 2026-08-09], verbatim:
+
+> scout/blender system should fully stay, and I think it can be decoupled from the
+> mug/kettle/cup system... But the rest of the cup/mug/kettle system should be retired.
+
+Recorded as `retire-mug-kettle-su-only-2026-08-09#D-001` (scope) and `#D-004` (mechanism).
+The plan is the audit trail; its 30 decisions carry the per-surface reasoning and are worth
+reading before you extend any gate.
+
+Canonical retired roles — `mug`, `kettle`, `cup` — are declared once, in
+`pot/retired-tier-roles.ts`.
+
+## What replaced each duty
+
+Taken from the Mug's own contract, not from memory (D-005):
+
+| Mug duty                         | replacement                                   |
+| -------------------------------- | --------------------------------------------- |
+| cadence wake + precomputed brief | `loop:arm` + `coord:orient`                   |
+| owner steering (pause / scope)   | the mode registry + owner directive           |
+| priority / frontier ranking      | `work_items:set_priority` + DRAIN-mode triage |
+| place work on cups               | `fleet:launch-on-plan` + claim specs          |
+| drive placements to terminal     | the fleet-leader monitor loop                 |
+| `facts:assert` conclusions       | the identical tool                            |
+| carry-note (`pot:declare-wake`)  | `loop:checkpoint`                             |
+
+su fleet members are a **superset** of cups — they carry presence, locks, claims, and are
+steerable. Cups were only cheaper.
+
+## What the flag deliberately does NOT gate
+
+Two exclusions, both load-bearing. Gating either would be a regression, and one of them
+would break the replacement system with the very flag that retires the old one.
+
+**1. Scout and Blender survive INTACT** (D-001) — not as a gated remnant. There is no
+`lib/blender/`; the grading half lives inside Scout (`agent-tools/scout/`), so it is one
+subsystem, not two. `curation:state-of-pot` is Scout's corpus-synthesis step and is the
+grounding read the su persona directs every ideation pass to make — gating the `curation`
+namespace would contradict D-001 (D-017).
+
+**2. The shared pot substrate survives** (D-003). `lib/pot/` is a *mixed* module: alongside
+the Mug/Cup deciders it holds substrate the su system itself imports —
+`agent-tools/loop/arm.ts` and `agent-tools/loop/checkpoint.ts` both import
+`resolvePotHomeSlug` from `pot/wake`. `loop:arm` and `loop:checkpoint` *are* the su engine
+loop. This is why "just move `lib/pot/` to `_retired/`" was not available as a first step,
+and why the retirement is a flag rather than a code move.
+
+A **gate is not a `_retired/` move.** The code stays live, tested and extendable; it simply
+does not mount. Do not add gated files to the retired-surfaces table.
+
+## The measured gate inventory
+
+Measured 2026-08-10 — file:line, non-test, non-generated. Seven surfaces; more than seven
+call sites, because the UI and settings surfaces each gate several components.
+
+| surface  | site                                                                                      | what it stops                                          |
+| -------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| engine   | `pot/started.ts:117` (`getPotStarted`)                                                    | every mug-engine arming seam, via `armFallbackPotWake` |
+| engine   | `pot/watchdog.ts:782, 848, 1032`; `pot/placement-watchdog.ts:1014`                        | the recovery + placement sweeps                        |
+| tool     | `agent-tools/_mug-kettle-gate.ts:85`                                                      | the 5 actuator tools (below)                           |
+| spawn    | `fleet/operator-spawn.ts:889`                                                             | the central role-admission chokepoint                  |
+| console  | `endpoint-route/routes/harness/spawn.ts:274`                                              | the HTTP spawn route                                   |
+| spawn    | `endpoint-route/routes/agent-mcp/bootstrap-role.ts:210`                                   | `psu --role` (the third door, D-022)                   |
+| delivery | `scout/nudge-recipient.ts:201`                                                            | the Mug rung of the Scout nudge ladder                 |
+| UI       | `LeftSidebar.tsx:292`; `adv/LearningTab.tsx:585`; `admin/plans/PlanOtherList.tsx:158,436` | the tabs and panels for a tier that cannot run         |
+| settings | `settings/layout.tsx:165`; `settings/autonomy/page.tsx:144`                               | the Queen autonomy ceiling + its master switch         |
+
+D-017 covered five actuator tools at the time — `cup:spawn`, `pot:start`, `pot:wake`,
+`overwatch:start` and `overwatch:declare_wake`. Read that as HISTORICAL membership, never
+as current disposition: `cup:spawn` was deleted outright afterwards, along with the whole
+`overwatch:` namespace (P-059). For what each verb does TODAY, read
+`packages/operator-core/lib/agent-tools/_mug-kettle-gate-population.ts` — the row-set every
+prose surface is now pinned to by `doc-claims/mug-kettle-verb-dispositions.test.ts`, which
+is what stops this paragraph going stale again as a present-tense claim.
+
+**None of these gates implies another.** They were each measured and landed separately, and
+in most cases the plan item's *stated* file list turned out wrong in both directions — see
+D-017 through D-022. If you are adding a gate, derive membership from the **consumer**, never
+from a filename token scan: that heuristic is what nearly gated `RedQueenPanel` (the
+self-healing drill, unrelated to the Mug) and the whole `Hive*` family ("hive" is the old
+lexicon for *pot*, which survives).
+
+`console-spawn.ts` carries **no gate of its own** and needs none — it routes through the
+doors above. Covered by construction, like the routine handlers (D-019) and `MugHeartbeat`
+(D-020). Adding a redundant second gate is machinery a later reader has to re-justify.
+
+### The role-alias trap
+
+`isRetiredTierRole` **canonicalizes before testing**, and that is load-bearing. The pot
+rename left live aliases in `coordination/roles.ts` — `bee`→`cup`, `queen`→`mug`,
+`overwatch`→`kettle` — and real callers still use the old spellings (the `/invoke` route
+records `?role=queen` as the production convention for Mug wakes). Matching the raw string
+would leave all three roles reachable under their former names: **a gate that looks closed
+and is open.** Note `scout` also maps through that table (→ `blender`) and is deliberately
+*not* in the retired set.
+
+## Flipping it ON for testing
+
+It is a reversible cutover switch; ON is the supported escape hatch.
+
+Flip it at **`/admin/features`** — not by editing JSON and not in PostHog. The key is
+`papercusp-mug-kettle-system` (`FLAGS.MUG_KETTLE_SYSTEM`).
+
+The predicate every gate shares is `mugKettleSystemEnabled()` (`pot/started.ts:51`), which
+**fails CLOSED** — its `catch` resolves `false`. That asymmetry is deliberate: a false `true`
+silently restarts an autonomous loop the owner retired, while a false `false` merely leaves a
+retired tier retired.
+
+Two consequences worth knowing before you test:
+
+* The tier is modelled as a **permanent PAUSE** at `getPotStarted`, not as a new special
+  case (D-016). Pause is the one state every downstream seam already handles correctly.
+* Because of that, **every `./started` `vi.mock` in the tree must now supply
+  `mugKettleSystemEnabled`** — a mock that omits it silently retires the tier under the test,
+  which will quietly invert what your test asserts.
+
+## What we gave up (and what is still open)
+
+Three verified gaps at the time of the decision (D-005):
+
+1. **Idea grading had no trigger.** su *can* grade, but nothing *made* it —
+   `ungraded-filings-watchdog` existed to wake the Mug. Closed by P-034, which retargets the
+   watchdog recipient through the nudge ladder.
+2. **Scout draft plans had no reviewer.** `draft-review-watchdog`'s reviewer *was* the Mug, so
+   Scout's output rail dead-ended. Same seam, same fix.
+3. **Cold-start autonomy — RESOLVED by `work-on-everything-goal-2026-08-23` (was: a genuine
+   boundary change, open).** The Mug was minted by the system (a pot wake →
+   `defaultFireHiveWake` → `fireLaunchBlueprint`), with no human needed. Nothing mints an su.
+   Steady state is safe, because an armed su loop is self-sustaining (a dead su with an armed
+   loop comes back via `claude --resume`). What was lost is **recovery from the su population
+   reaching zero** — a fresh box, or every loop ended. The standing-goal system now makes that
+   an explicit choice rather than a discovery: a started package goal carries holder policy
+   `{ requireLive: true, onLoss: 'respawn' }` (its P-010, e2e-verified — kill the session and
+   it comes back), and recovery from zero is the **operator-boot arm** (its P-011), which
+   ships DARK behind explicit owner arming — `FLAGS.STANDING_GOAL_BOOT_ARM`
+   (`papercusp-standing-goal-boot-arm`), owner-authority by design, so the owner decides
+   whether the system may restart itself: arming it makes operator boot respawn a holder
+   for any active, un-paused standing goal with no live holder (a bounded boot window
+   that self-stops after \~10 one-minute passes, so warm-dead presence is still caught),
+   and the boot pass defers whenever the runtime respawner `FLAGS.GOAL_HOLDER_RESPAWN`
+   is armed, which then owns recovery. See
+   [standing-goals-and-goal-packages](/internal/docs/agent-insights/standing-goals-and-goal-packages).
+
+⚠ **Do not read the loss audit as exhaustive.** The Cup tier's transcript-cap,
+claim-integrity and co-location machinery, and cross-pot placement sovereignty, were **not
+audited** at the time of the decision. They are gated-not-deleted, so a miss there is
+recoverable by flipping the flag — which is a large part of why Stage 1 is a flag at all.
+**That residual audit has since been run** (2026-08-23):
+`work-on-everything-goal-2026-08-23#D-009` verdicts all six previously-un-audited areas —
+five covered by live machinery, one port filed (WI-41149: a live writer for the `cursed`
+N-strikes breaker). The un-audited set is closed.
+
+## If you find a doc, prompt, or memory that still teaches the Mug
+
+Expect to. The standing fact `mug-kettle-cup-tier-retired` folds this into every
+`coord:orient`, but older prose does not self-correct. When you find one, fix it and link
+here rather than restating the argument — and prefer *surgical* edits: roughly 120 docs
+document mechanism correctly and are deliberately left alone, because **a doc wrongly marked
+retired diverts work away from live code**, which is the expensive direction.

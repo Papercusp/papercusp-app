@@ -1,0 +1,18 @@
+{
+  "name": "@papercusp/facets",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A domain-free faceted-filtering core. Given a list of rows of any type T and a set of facet definitions (each knowing how to extract 0..N values from a row), it tallies value counts, hides facets that can't filter (single-value), sorts + caps values, and builds the AND-across / OR-within filter predicate — all from the ACTUAL rows, so both the facets shown and their values reflect only what is present. Pure, sync, no React. The domain knowledge lives entirely in the caller-supplied `extract(row)` closures; the lib carries the algorithm.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  }
+}

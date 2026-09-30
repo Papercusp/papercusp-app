@@ -1,0 +1,117 @@
+# Authoring a bulk agent tool — the keyed-array dual-arity contract (_bulk)
+URL: /internal/docs/agent-insights/bulk-tool-contract-2026-06-22
+
+How to give a repeated-call agent tool an items[] bulk arity without breaking n=1, using the shared _bulk helpers. The house contract from bulk-endpoint-standardization-2026-06-21, plus the import + relocation gotchas (leaf subpath, not the barrel).
+
+## When
+
+A tool an agent calls many times in a row (per id, per file, per row) should accept a BULK
+arity so the agent pays one inference round-trip instead of N. The shared contract lives in
+`packages/agent-mcp/src/_bulk.ts`; every bulk verb routes through it so an agent learns the shape
+once. (Plan: `bulk-endpoint-standardization-2026-06-21`, D-001.)
+
+## The contract (D-001)
+
+* **Input — scalar OR array on the logical id field**, so the single call is just n=1:
+  expose both `id` and `ids` and merge with `mergeIds(args.id, args.ids)`. Heterogeneous
+  per-item fields (or a compound key like `{slug, feature_id}`) ride `items: [{ … }]`.
+  `scalarOrArray(z.string())` is the Zod seam for the `id|ids` union.
+* **Output — the self-describing keyed-array envelope:**
+  `{ ok: true, results: [{ ok, <keyfields>, …data | error }], counts: { ok, failed } }`.
+  Each result EMBEDS its own correlation key — the agent reads the key, NEVER the array index
+  (robust to reordering / partial failure / truncation; LLMs mis-count indices).
+* **Failure is per-item, never a throw:** wrap the per-item work in `runBulk(items, op)` — a
+  thrown error (or a returned `{ ok:false }`) becomes that item's `{ ok:false, <key>, error }`;
+  top-level `ok:true` means "the batch ran", `counts.failed` is the truth signal. Cap items at
+  \~100–200 (D-005).
+* **Serialize with `bulkContent(envelope)`.** It now returns the framework's canonical
+  `{ data: payload }` `ToolResponse` shape (the same a `defineTool` handler returns;
+  `_bulk.ts:135-136`) — not the old raw `{ content:[{ text }] }` body. The single
+  `serializeToolResponse` path re-encodes the object-with-an-array-field to TOON on the agent
+  (MCP) transport — so every bulk envelope is \~18-38% smaller for free, with a lossless JSON
+  fallback and a size-guard that keeps a HETEROGENEOUS envelope on JSON when TOON would be
+  larger (`definetool-token-optimization-adoption-2026-06-22` P-002/D-005).
+
+## Skeleton
+
+```ts
+import { mergeIds, runBulk, bulkContent } from '@papercusp/agent-mcp/_bulk';
+// …
+args: z.object({ id: z.string().optional(), ids: z.array(z.string()).optional() }),
+async handler(args, ctx) {
+  const ids = mergeIds(args.id, args.ids);
+  return bulkContent(await runBulk(ids, async (id) => {
+    const row = await load(id, ctx);
+    if (!row) return { ok: false as const, id, error: 'not found' };
+    return { ok: true as const, id, ...row };
+  }, { keyOf: (id) => ({ id }) }));
+}
+```
+
+## Real-world example: work\_items:get
+
+The production exemplar includes SWR caching (cache-expensive-tool-reads-2026-06-22 P-005) and work-item checkpoints (EI-7252). Checkpoints surface resumable state left by `work_items:checkpoint` on work items in progress — a cold successor (after compaction) must know if in-flight work was checkpointed before assuming state was lost. Since EI-8885, the checkpoint's write recency (`checkpointAgeMs`/`checkpointUpdatedAtMs`) rides alongside it — a checkpoint with no age signal reads as current even when it's several wakes stale:
+
+```ts
+// SWR backstop for work_items:get: per-id entry tagged with harness_features_consolidated
+// and harness_features_consolidated:<id>, so data-model generic-notify invalidates exactly
+// that item on a write. Not on the claim hot path (D-004-safe).
+const WORK_ITEMS_GET_SOFT_TTL_MS = 20_000;
+
+async handler(args, ctx) {
+  const ids = mergeIds(args.id, args.ids);
+  const env = await runBulk(ids, async (id) => {
+    const workItem = await cachedRead(
+      ctx as CachedReadCtx,
+      {
+        tool: "work_items:get",
+        key: { id, harness: args.harness ?? null, detail: args.detail === true },
+        tags: ["harness_features_consolidated", `harness_features_consolidated:${id}`],
+        softTtlMs: WORK_ITEMS_GET_SOFT_TTL_MS,
+      },
+      () => args.detail ? getWorkItemDetail(id, args.harness) : getWorkItem(id, args.harness),
+    );
+    if (!workItem) {
+      return { ok: false as const, id, error: `work_item '${id}' not found` };
+    }
+    // Surface checkpoint (EI-7252): in-flight carry-note scope `workitem:<harness>:<id>`.
+    // Read-only, uncached (checkpoints change out-of-band), cheap (single indexed row lookup).
+    // EI-8885: also surface the checkpoint's write recency, via *WithMeta — a stale
+    // checkpoint must be re-verified against ground truth, not trusted as current.
+    const { checkpoint, updatedAtMs: checkpointUpdatedAtMs } = await getWorkItemCheckpointWithMeta({
+      harness: workItem.harness,
+      workItemId: workItem.id,
+    }).catch(() => ({ checkpoint: null, updatedAtMs: null }));
+    const checkpointAgeMs = checkpointUpdatedAtMs != null ? Math.max(0, Date.now() - checkpointUpdatedAtMs) : null;
+    return { ok: true as const, id, workItem, checkpoint, checkpointAgeMs, checkpointUpdatedAtMs };
+  }, { keyOf: (id) => ({ id }) });
+  return bulkContent(env);
+}
+```
+
+## Import gotcha (learned the hard way, EI-2549-adjacent)
+
+`_bulk` lives in `@papercusp/agent-mcp` (the lowest package both operator-core's tools AND
+agent-mcp's read-side tools can reach — agent-mcp can't import up into operator-core). Import it:
+
+* **agent-mcp tools (`packages/agent-mcp/src/tools/**`):** use the RELATIVE leaf `'../../_bulk'`.
+  NOT the package self-reference `'@papercusp/agent-mcp/_bulk'` — that fails the production `node`
+  moduleResolution self-ref.
+* **operator-core tools:** import from `'@papercusp/agent-mcp/_bulk'` (the leaf subpath, exported
+  in agent-mcp's package.json). `operator-core/lib/agent-tools/_bulk.ts` already re-exports it,
+  so existing `'../_bulk'` importers are unchanged.
+* **NEVER import the bulk helpers from the agent-mcp BARREL (`'@papercusp/agent-mcp'`):** the
+  barrel pulls the whole index, and through some import graphs (the memory tools) that forms an
+  ESM circular init where the re-exports are still `undefined` when the consumer's module body
+  runs (`mergeIds is not a function`). The leaf imports only `zod` → cycle-free.
+
+## Carve-outs (do NOT collapse to bulk-of-single)
+
+`cup:spawn`/`fleet:place_batch` (affinity ranking + warm-inject + overflow) and
+`deploy:harness`/`deploy:pot` (pot carries mug/swarm topology) are composites, not pure
+bulk-of-one — keep them distinct (D-002).
+
+## Pointers
+
+* Contract + helpers: `packages/agent-mcp/src/_bulk.ts`. Exemplars: `work_items/get.ts`,
+  `rubrics/get.ts`, `features/get.ts` (compound key). Plan: bulk-endpoint-standardization-2026-06-21.

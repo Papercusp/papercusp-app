@@ -1,0 +1,10 @@
+{
+  "ref": "experiment-instance-quality",
+  "id": "experiment-instance-quality",
+  "title": "Experiment instance quality",
+  "description": "Scorecard for whole-instance experiments using the selected arm composite outcome.",
+  "category": "experiment",
+  "scope": "rubric",
+  "version": "0.1.0",
+  "source": "first-party"
+}

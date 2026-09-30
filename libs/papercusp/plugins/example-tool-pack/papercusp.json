@@ -1,0 +1,39 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "pack",
+  "name": "example-tool-pack",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Reference code-tool pack (tool-distribution-granularity D-001/D-004): a runtime-less distribution unit whose only contribution is in-process tools. Two self-contained text utilities, no runtime surfaces.",
+  "capabilities": [
+    "tools:text:word_count",
+    "tools:text:slugify"
+  ],
+  "tools": [
+    {
+      "name": "word_count",
+      "description": "Count words, lines, and characters in a text. Self-contained — no network, no filesystem.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "The text to measure." }
+        },
+        "required": ["text"]
+      },
+      "capabilities": ["tools:text:word_count"]
+    },
+    {
+      "name": "slugify",
+      "description": "Turn a title into a kebab-case slug (lowercase, alphanumeric + dashes). Self-contained.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "The title to slugify." },
+          "maxLength": { "type": "integer", "minimum": 1, "default": 80, "description": "Truncate the slug to this many characters." }
+        },
+        "required": ["text"]
+      },
+      "capabilities": ["tools:text:slugify"]
+    }
+  ]
+}

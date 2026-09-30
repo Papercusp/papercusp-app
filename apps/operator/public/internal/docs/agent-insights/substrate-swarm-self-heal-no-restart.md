@@ -1,0 +1,124 @@
+# Substrate federation self-heals without an operator restart (the two re-peer loops)
+URL: /internal/docs/agent-insights/substrate-swarm-self-heal-no-restart
+
+The per-harness substrate swarm (joinHarnessSwarm) used to join its DHT topic ONCE and never re-announce/re-lookup, so a dropped peer or aged-out announce left federation DEAD until an operator RESTART (fed-a↔fed-b sat dead ~7h; WI-559/WI-752/FED-2). Two self-heal loops fix the whole class with no restart: (1) a two-speed discovery.refresh() loop in joinHarnessSwarm (fast post-join/post-peer-loss window + slow keepalive), mirroring the pot-directory gossip; (2) a bounded-backoff JOIN-retry in boot.ts for when the boot-time join itself failed (DHT/identity/gh-auth/keychain blip → local-only). Found + fixed 2026-06-24.
+
+import { Aside } from '@astrojs/starlight/components';
+
+## Symptom
+
+Cross-machine federation (fed-a ↔ fed-b) goes **dead and stays dead** — peers
+stop seeing each other's content/presence (e.g. `shared_presence` cross-rows go
+hours stale) — and the **only** thing that brings it back is an **operator
+restart**. WI-559 finding #1 / WI-752 / FED-2: the link sat dead \~7h with no
+self-heal.
+
+## Root cause — the substrate swarm never re-announced
+
+`joinHarnessSwarm` (`swarm.ts`) is the per-harness **content-replication** swarm
+(`corestore.replicate` + the `papercusp/announce` channel). Pre-fix it called
+`swarm.join(topic, …)` **once**, fired the legacy `discovery.flushed()`, and
+**never re-ran `discovery.refresh()`**. On the current hyperswarm/hyperdht the
+first announce/lookup round reliably misses and nothing internal retries for
+minutes (see [standalone-hyperswarm-discovery-driver](/internal/docs/agent-insights/standalone-hyperswarm-discovery-driver)),
+so when an established peer connection died (idle / timeout / reset /
+mid-replication death) or the topic's DHT announce aged out, the peer was
+**never rediscovered**. The `swarm-chaos` test only "proved" recovery because the
+**test harness** called `refresh()` itself (`forceReconnectAll`) — production had
+no such driver. The pot-**directory** gossip (`directory-swarm.ts`) already
+self-healed via a two-speed refresh loop; the substrate path was just never given
+the same loop.
+
+A **second**, distinct failure mode: the boot-time join is also one-shot. If
+`resolveLocalAnnounceIdentity` throws (gh-unauthed / keychain / DHT blip), boot's
+catch keeps the harness **local-only** (`handle.swarm === null`) — and pre-fix it
+stayed local-only **forever until a restart**. (This was the live fed-a/fed-b
+dead-link cause: both VMs gh-unauthed → never announced.)
+
+## The fix — two self-heal loops, both ON by default, no restart
+
+Not flag-gated and not env-gated: this is a resilience bug fix that mirrors the
+already-shipped directory-gossip refresh loop (also unflagged). Each loop is
+disable-able via a boot/join option (`refreshMs: 0` / `swarmJoinRetryMs: 0`) for
+tests; production uses the proven defaults.
+
+1. **Re-peer loop** (`joinHarnessSwarm`, `swarm.ts`) — a two-speed
+   `discovery.refresh({ client: true, server: true })` loop:
+   * **FAST** (`DEFAULT_SUBSTRATE_REFRESH_MS` = 2.5s) inside the post-join window
+     (`DEFAULT_SUBSTRATE_FAST_WINDOW_MS` = **120s**, widened from the original 30s —
+     see "Update" below), **re-armed** whenever a peer socket `close`s (snappy
+     reconnect — a fresh node needs several rounds);
+   * **SLOW** keepalive (`DEFAULT_SUBSTRATE_SLOW_REFRESH_MS` = 60s) otherwise, so
+     the topic stays announced (a *future* drop can always re-pair) without
+     hammering the public DHT.
+   * `unref()`'d; cleared in `close()`.
+
+2. **Join-retry loop** (`bootHarnessSubstrate`, `boot.ts`) — when the boot-time
+   join FAILED (`swarmHandle === null`), retry `joinForBinding` on a bounded
+   exponential backoff (`DEFAULT_SWARM_JOIN_RETRY_MS` = 15s → `SWARM_JOIN_RETRY_CAP_MS`
+   \= 5m) until it succeeds, then stop. A **permanent** cause just backs off at the
+   cap and self-heals the instant the cause clears (e.g. a gh token is restored —
+   no restart). Self-rearming `setTimeout` chain (the P-022 pattern), `unref()`'d,
+   cleared in `close()`.
+
+## Why a dropped connection re-pairs
+
+Hyperswarm dedups one socket per peer across all shared topics. The substrate's
+`connection` handler is registered on the shared swarm, so when `refresh()`
+re-runs the DHT round and a new connection forms, the handler fires again →
+`corestore.replicate(newSocket)` re-replicates and the announce channel
+re-exchanges (a fresh per-connection announce, WI-559 issue-2) → the next
+`mergeNow()` picks up everything written while the link was down.
+
+## Tests (the durable proof)
+
+* `swarm-self-heal.test.ts` — fake swarm + fake timers: fast cadence, slow
+  keepalive, peer-`close` re-arm, `close()` stops the loop, `refreshMs: 0`
+  disables.
+* `__tests__/swarm-self-heal-reconnect.test.ts` — REAL Hyperswarm over an offline
+  testnet: federate a write, **kill the live connection with NO manual refresh**,
+  and a post-drop write still crosses once the production loop reconnects (\~1s).
+* `__tests__/swarm-join-retry.test.ts` — a transient identity failure at boot →
+  the retry loop joins on its own (no restart); `swarmJoinRetryMs: 0` disables.
+
+## Update (D-045, shared-pot-member-content-federation): fast window widened 30s → 120s
+
+The original 30s fast window (above) turned out too short: a **freshly-spawned
+sidecar process** joining over the public DHT reliably misses the first several
+announce/lookup rounds (cold start), so the next re-announce after 30s fell
+straight to the 60s SLOW cadence — a \~90s dead zone where two genuinely-separate
+machines never `peer_connected` (seen live: run-12 "no peer in \~90s"; invisible
+to tests because local-testnet peers instantly). `DEFAULT_SUBSTRATE_FAST_WINDOW_MS`
+is now **120s** — 2.5s re-announces keep a cold node aggressively discoverable
+until it pairs, then it drops to the bounded SLOW keepalive. Still re-armed on
+last-peer-loss; still bounded (no forever-hammering).
+
+## Update (2026-07-02, cross-machine-coord-parity-and-trust-2026-07-01 P-004/D-008): directory-swarm.ts is now a thin instantiation of the generic `topic-gossip.ts` chassis
+
+The pot-**directory** gossip's two-speed refresh loop referenced throughout this
+doc no longer lives inline in `directory-swarm.ts` — it moved to a generic
+`createTopicGossip<Frame>()` chassis in the new `topic-gossip.ts`, which
+`directory-swarm.ts` now calls as a thin instantiation (`createDirectoryGossip`
+→ `createTopicGossip({ protocol: HIVE_DIRECTORY_PROTOCOL, ... })`); the
+presence-gossip transport is the chassis's second instantiation. The refresh
+defaults for the directory path are unchanged and still live as constants
+re-exported from `topic-gossip.ts` (`DEFAULT_REFRESH_MS` = 2.5s,
+`DEFAULT_FAST_WINDOW_MS` = **30s** — not widened, unlike the substrate path
+below — `DEFAULT_SLOW_REFRESH_MS` = 60s). Public API and existing callers/tests
+(`pot-directory-boot.ts`) are unchanged.
+
+The **substrate** swarm (`joinHarnessSwarm` in `swarm.ts`, the subject of the
+fix below) has **not** been migrated onto this chassis — it still runs its own
+bespoke `managedSetInterval`-based refresh loop with its own
+`DEFAULT_SUBSTRATE_*` constants (verified current as of 2026-07-04). Don't
+assume "the same loop" means "the same source file" anymore: for the
+pot-directory side, read `topic-gossip.ts`; for the per-harness substrate
+side, read `swarm.ts` directly.
+
+## Gotcha
+
+`admission-pending-retry.test.ts > "…announce was built >5 min before retry
+fires (behavioral)"` is a **pre-existing flaky/broken** fake-timer test (fails on
+`vitest-fail-on-console` / nondeterministic teardown on the parent commit, with
+zero FED-2 code) — **not** caused by these loops. Don't chase it as a
+self-heal regression.

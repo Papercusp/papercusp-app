@@ -1,0 +1,5 @@
+ornith edit-competence fixture — safe to overwrite between test runs.
+
+STATUS: BROKEN
+
+(The task is to change the STATUS line above from BROKEN to FIXED. Nothing else.)

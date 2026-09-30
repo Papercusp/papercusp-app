@@ -1,0 +1,179 @@
+# DBOS durable execution — the nine gotchas that bite on first integration
+URL: /internal/docs/agent-insights/dbos-durable-execution-gotchas
+
+Hard-won findings from wiring DBOS Transact into the operator (dbos-durable-jobs-2026-05-31) — boot path, PG connect-probe, version pinning, scheduled-workflow registration, dedup vs concurrency, interrupted-step re-execution, why the durable pipeline is sequential-only, and how to durably spawn a child workflow from inside a routine step.
+
+import { Aside } from '@astrojs/starlight/components';
+
+DBOS Transact (`@dbos-inc/dbos-sdk`) gives us Postgres-backed durable execution:
+a workflow checkpoints each step, so a crash resumes mid-flight without re-running
+completed work. Wiring it into the operator (`dbos-durable-jobs-2026-05-31`) surfaced
+eight non-obvious traps. Each cost real debugging time; none is in the SDK's quickstart.
+
+The bootstrap lives at `packages/operator-core/lib/dbos/bootstrap.ts` (`startDbos()`), gated by
+`PAPERCUSP_DBOS_ENABLE=1` (default off). Read that file alongside this page — the
+comments there cross-reference the plan's decision IDs.
+
+## 1. Boot from the live host path, not the retired instrumentation hook
+
+The instinct is to launch DBOS from the Next.js instrumentation hook — **it's
+retired.** The operator is served by the `operator-vite` + Hono host
+(`apps/operator/bin/hono-host.ts` → `apps/operator/bin/host-bootstrap.ts`), not by Next any more.
+
+`startDbos()` must be called from **`apps/operator/bin/host-bootstrap.ts`** (the live boot path).
+The tell that you got this wrong: the `dbos` schema never appears in the embedded PG
+even though `PAPERCUSP_DBOS_ENABLE=1`. See also `operator-next-is-retired`.
+
+## 2. Probe the resolved PG — the source label can't tell dead from live
+
+`getHarnessAdminUrlWithSource()` returns a `source` label (`native-fallback`,
+`embedded`, …). The first instinct is to **refuse to launch on `native-fallback`** —
+on the desktop product `:5432` is the retired `papercusp_legacy` and connecting there
+is a bug (`embedded-pg-discovery`). But on a **dev box**, `:5432/papercusp` IS the
+live operator DB, and `source==='native-fallback'` there is correct. A label check
+blocks DBOS on exactly the box you're developing on.
+
+The fix is a **connect-probe**, not a label check: open the resolved DSN, run
+`SELECT 1`, launch if it succeeds, skip cleanly if it doesn't. Reachability is the
+real signal; the label is advisory.
+
+```ts
+const probe = postgres(url, { max: 1, connect_timeout: 5, prepare: false });
+try { await probe`SELECT 1`; } catch { /* skip launch */ return; }
+finally { await probe.end({ timeout: 2 }).catch(() => {}); }
+```
+
+## 3. Turn off the admin server — it defaults to :3001 and EADDRINUSE-es
+
+DBOS starts an HTTP admin server on **:3001** by default. This box also runs an internal
+reference app, whose shop-api binds :3001 — so `DBOS.launch()` dies with `EADDRINUSE` before any
+workflow runs. We don't use the admin server. Set `runAdminServer: false` in
+`DBOS.setConfig`. (Even without a port clash, leave it off unless you're using it.)
+
+## 4. Pin `applicationVersion` or recovery silently stops across app updates
+
+DBOS tags every workflow with the running `applicationVersion`, and on restart it
+**only recovers workflows whose version matches the current process.** The default
+version is content-derived, so any code change bumps it — and after a deploy, every
+in-flight workflow from the previous version is left `PENDING`, never resumed. For an
+always-on operator with long-lived scheduled workflows, that's silent data loss.
+
+Pin it: `applicationVersion: process.env.DBOS__APPVERSION || 'papercusp-jobs-v1'`.
+Bump the constant deliberately only when you intend to orphan old workflows. This was
+proven in the Phase-0 gate: an unpinned version change left the prior workflow stuck.
+
+## 5. A scheduled function must ALSO be registered as a workflow
+
+`DBOS.registerScheduled(fn, { crontab })` is not enough on its own — the scheduled
+function has to be a **registered workflow** too, or the scheduler has nothing durable
+to bind to. Register the workflow first, then schedule it.
+
+Also note the default firing semantics: DBOS **skips missed intervals** by default
+(if the process was down over a scheduled tick, that tick is dropped). Backfill is
+opt-in via `ExactlyOncePerInterval` / `automaticBackfill`. For our timers
+(telemetry flush, scratch GC, …) skip-missed is the right default — don't add
+backfill reflexively, or a process that was off for a day will stampede a day's worth
+of ticks on boot.
+
+## 6. Single-fire dedup is `deduplicationID`, not `concurrency: 1`
+
+To guarantee a feature/slug isn't double-dispatched, the reach is for a queue with
+`concurrency: 1`. Wrong tool: concurrency throttles *parallelism*, it doesn't dedup —
+two enqueues of the same logical job still both run, just one-at-a-time. The dedup
+primitive is per-enqueue:
+
+```ts
+await DBOS.startWorkflow(wf, {
+  workflowID,
+  queueName: q.name,
+  enqueueOptions: { deduplicationID: workflowID }, // ← this is the single-fire guard
+})(input);
+```
+
+Combined with a **deterministic `workflowID`** (we use `pipeline:<slug>:<feature>`), a
+re-dispatch resumes the same workflow instead of starting a second one.
+
+## 7. An *interrupted* step re-executes on resume; a *completed* one does not
+
+This is the one that looks like a bug. Crash a workflow mid-step and resume: that step
+runs **again** (we observed the agent spawn count go to 2). That's correct — DBOS only
+checkpoints a step's *result* when it **completes**; an interrupted step has no
+checkpoint, so resume re-runs it. Completed steps are never re-run (their result is
+replayed from the checkpoint).
+
+The consequence for agent steps: a crash mid-`worker` re-spawns the worker. We make
+that safe two ways — (a) DBOS's own checkpoint prevents re-running *completed* roles,
+which is the primary resume mechanism; (b) for the interrupted-but-side-effecting
+case, `invoke()` takes an `idempotencyKey` (the durable pipeline passes
+`<slug>:<feature>:<role>:t<turn>`) and reuses a prior *completed* run row from
+`harness_shared.harness_run_output` instead of re-spawning.
+
+Don't over-rely on the `harness_run_output` reuse as the resume mechanism — DBOS
+checkpointing already handles completed steps. The idempotency key is the **belt** for
+re-dispatch / non-DBOS callers and for a run that finished but crashed before its
+checkpoint landed. The braces-and-belt is intentional; the checkpoint is primary.
+Agents also re-read live git state on a fresh spawn (parent D-003), so a re-run worker
+converges rather than duplicating work.
+
+## 8. Keep workflow code deterministic — and the pipeline sequential-only
+
+DBOS replays a workflow's orchestration code from the checkpoint log on resume, so
+**all non-determinism (agent spawns, the LLM decision, clocks, randomness) must live
+inside steps**, never in the workflow body. Our dispatch loop calls `parseDecision`
+(a *pure* function — see `pure-decision-functions-pulled-from-daemons`) on a
+checkpointed step output, so replay is deterministic.
+
+That purity is also why the durable pipeline is **sequential-only**. The moment a
+decision is a parallel fan-out (`NEXT_WORKER` with `N=k`, branch isolation, the
+synthesizer), the clean per-feature workflow-ID claim and the linear checkpoint chain
+stop modelling the work. The durable workflow handles the common sequential pipeline
+(scoper → worker → validator → …) and **stops** on any parallel/branch verb, leaving
+that feature to the legacy main loop. Don't try to model parallel lanes as nested
+DBOS workflows without first redesigning the ownership/claim model — that's the
+live-integration boundary the plan stops at, not a quick extension.
+
+## 9. To durably spawn a child workflow from a routine step, RETURN the request — don't fire it in the step
+
+`DBOS.startWorkflow` is **illegal from inside a step** (a step is not a workflow
+context). A routine `system:<action>` runs as ONE step inside `routineFireWorkflow`,
+so its handler cannot durably spawn a child: `durableSpawnFire` catches the rejection
+and silently falls back to fire-and-forget, which a host crash loses. This was EI-403
+— every auto-implement dispatch ran non-durably for two days, surfacing only as a
+"could not enqueue durable fire (...); falling back to fire-and-forget: Invalid call
+to a 'workflow' function from within a 'step'" log line.
+
+The fix (EI-403-A) is a generic seam, not a one-off: the action **returns** its spawn
+requests as `SystemActionResult.durableSpawns`; `routineFireImpl` drains them via
+`startDurableSpawns` **after** the step returns — back in the workflow body, where
+`startWorkflow` is legal. Recovery-safe by construction (ties to #7): the step's
+return value is checkpointed, so a replay re-drains the SAME requests, and each fire
+is idempotency-keyed — but ONLY if the key is **stable**. Derive it from durable
+state (`implement:<itemId>:<attempt>`), NEVER from `Date.now()`: a clock-derived key
+gets a new value on replay and double-dispatches. Wired in `routines-workflow.ts`
+(the post-step drain), `system-actions.ts` (the `SystemActionResult` contract),
+`durable-spawn.ts` (`startDurableSpawns` + `durableSpawnFire`), first consumer in
+`harness/routines/improvement-actions.ts`. The cadence/orphan-collector recovery
+(EI-403 Option B) stays as the belt-and-suspenders net for worker death; this seam
+makes the *fire enqueue* itself durable.
+
+***
+
+**Where this is wired:** `packages/operator-core/lib/dbos/` — `bootstrap.ts` (launch +
+probe + flags), `orchestrator-workflow.ts` (the durable pipeline), `orchestrator-runner.ts`
+(spawns `invoke-once` with the idempotency key), `periodic-workflows.ts` (the timers).
+Bootstrapping happens from `apps/operator/bin/host-bootstrap.ts`.
+Full design + decision log: the plans
+`dbos-durable-jobs-2026-05-31` and `dbos-orchestrator-durability-2026-05-31`.
+
+**Update (2026-06-06):** Two things in this footer drifted. (1) The DBOS dir moved
+from `apps/operator/lib/dbos/` to `packages/operator-core/lib/dbos/`. (2) The
+`autoloop-workflow.ts` (AutoLoop as scheduled + dedup-keyed) is **retired**
+(`autoloop-pot-operator-rebuild-2026-06-05` P-010/D-009 — it read a
+`director-config.json` enablement surface nothing wrote). (3) The Phase-3 durable
+pipeline is now the **default** orchestrator (on unless `PAPERCUSP_DBOS_ORCHESTRATOR=0`),
+and the **legacy main loop is retired** — archived to
+`libs/papercusp/_retired/orchestrator-run-loop/` on 2026-06-06; setting
+`PAPERCUSP_DBOS_ORCHESTRATOR=0` no longer reverts to it (there is no legacy loop
+left), it just registers no DBOS orchestrator at all. Gotcha #8's "leaving that
+feature to the legacy main loop" no longer applies — a parallel/branch verb now
+simply stops the durable pipeline.

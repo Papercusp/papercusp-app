@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "$comment": "Layer: core. Host-clean code only. Imports allowed from /libs and /packages; NOT from next/*, NOT from node:fs/node:child_process directly (use @papercusp/host-platform). Empty include in v1 — files migrate in here as Phase 4 audits them out of apps/operator/lib/.",
+  "extends": "./tsconfig.base.json",
+  "include": [],
+  "exclude": ["node_modules", "../.next"],
+  "references": []
+}

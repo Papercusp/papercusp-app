@@ -1,0 +1,209 @@
+# VM federation harness — cross-machine swarm-join works; same-host holepunch does not (any topology)
+URL: /internal/docs/agent-insights/vm-federation-separate-machine-proof
+
+bin/vm-federation.sh stands up pristine Ubuntu VMs over a host bridge with distinct GitHub identities and a host-run testnet DHT, reusing the one-box smokes' federation-asserts.sh core. What it PROVES (fresh-install, clean embedded-PG boot, share, cross-machine swarm-join — in --vms=2 AND --vms=1) and the wall: hyperdht holepunch does not complete between ANY two endpoints on one physical host — VM↔VM and host↔VM both sit at conns=0 at the raw hyperswarm level (single/dual-NIC, single/multi-node-DHT, and the host's no-NAT position all refuted); --dht=public is INCONCLUSIVE by NAT hairpin. The bidirectional-merge acceptance needs truly separate machines.
+
+import { Aside } from '@astrojs/starlight/components';
+
+The in-process [p079 live test](/internal/docs/testing/p079-bidirectional-federation)
+proves the federation *logic* over a loopback testnet DHT; the
+[packaged two-instance merge](/internal/docs/agent-insights/packaged-two-instance-federation-merge)
+proves it between two `.deb` processes **on one box (loopback)**. The last rung
+was meant to be two **separate machines** over a real network hop, each a pristine
+VM. `papercusp-desktop/bin/vm-federation.sh` is that harness. It is built and
+works through **cross-machine swarm-join** — but it surfaced a hard wall at the
+holepunch step that this page documents so the next person doesn't re-discover it
+the slow way. Plan: `linux-test-vm-and-federation-2026-06-04` (Phase 2, P-009..P-013).
+
+## What it does
+
+```bash
+cd papercusp-desktop
+bin/vm-federation.sh --vms=2 --dht=testnet --net=bridge   # the primary run
+bin/vm-federation.sh --vms=1                              # host instance ↔ fed-a VM
+bin/vm-federation.sh --vms=2 --dht=public                 # Mode-B stretch (INCONCLUSIVE on one box)
+```
+
+Each VM (`fed-a`, `fed-b`) is a `vmctl` overlay off the golden image. The driver
+resets each to pristine, boots it with a **second NIC** on the host bridge,
+installs the `.deb` (the fresh-install dep test, for free), launches the packaged
+app headless under the VM's own `:0`, then runs the **same**
+`bin/lib/federation-asserts.sh` assertions the one-box smokes use (D-003 — one
+assert core, no drift): only the driver primitives (`drv_exec`/`drv_applog`/
+`drv_psql`) differ, `ssh`-ing into the VM instead of running locally.
+
+## What it PROVES (verified 2026-06-05, rebuilt `.deb`)
+
+Run end-to-end against a `.deb` rebuilt from current main, both VMs reach:
+
+* **Fresh-install** — `apt install ./Papercusp.deb` resolves the WebKitGTK runtime
+  from scratch on a pristine Ubuntu.
+* **Clean embedded-PG boot** on a genuinely fresh `initdb` — *both* VMs
+  (`A: PG=… sc=…  B: PG=… sc=…`). This required the current-main migrations (see
+  the stale-`.deb` trap below).
+* **Isolation** — separate VMs, by construction.
+* **Share write-free** — `share/finalize` returns `state:"booted"` on a synthetic
+  repo id on both.
+* **Cross-machine swarm-join** — both peers announce on the **same topic + same
+  testnet DHT** across a real bridge hop:
+  `[swarm] joined topic … announcing as github_user_id=279242982` (papercupai) /
+  `=1567022` (ownerhandle).
+
+## The wall: holepunch does not complete between two same-host bridged VMs
+
+After both peers join, **`peer_connected` never fires** → no bidirectional merge.
+This is **not** a harness or packaged-app defect:
+
+A minimal raw **hyperswarm** test (`server+client` join on the same topic, same
+testnet bootstrap, hyperswarm installed straight from npm inside the VMs) **also**
+sits at `conns=0` between the two VMs — both `joined+flushed`, neither connects.
+So hyperdht holepunch itself does not complete in this topology; the packaged app
+does exactly the right thing and hits the same wall. UDP between the VMs works
+(verified directly), and both reach the DHT (they announce) — yet the
+DHT-coordinated holepunch never establishes a connection.
+
+It is **not** the dual-NIC local-address theory (the obvious suspect): downing the
+slirp NIC so each VM has **only** the bridge NIC and re-running the raw hyperswarm
+test still sits at `conns=0`. So a single-bridge-NIC + NAT rework would **not**
+fix it — that candidate is **refuted**, don't spend time on it. The failure is
+intrinsic to hyperdht's holepunch between two **same-host** VMs: even with one
+clean bridge address each, verified direct UDP between them, and both reaching +
+announcing on the DHT, the DHT-coordinated punch never establishes a connection.
+This is the degenerate case the plan's **D-004** flagged as "best-effort … may
+still hairpin."
+
+The remaining hope was that the **host's** network position — directly on the
+bridge at `10.77.0.1`, real network stack, no NAT on its side — would let the
+punch complete where VM↔VM could not. It does not. The packaged `--vms=1` run
+(host instance under its own Xvfb + a pristine `fed-a`) reaches share +
+swarm-join on both sides and then stalls identically, and the **raw hyperswarm
+host↔VM test** (same methodology) sits at `host_conns=0 vm_conns=0` after 60s —
+both `joined+flushed`, the VM's own DHT announce proving VM→host UDP works. So
+the wall is intrinsic to hyperdht holepunch between **any two endpoints on one
+physical host**, in every topology this harness can stand up (plan D-018).
+
+Things ruled out (all retested, all still `conns=0`): dual-NIC vs single-NIC;
+multi-node vs single-node testnet; identical-vs-distinct slirp subnets (distinct
+is necessary but not sufficient); UDP-blocked (UDP works directly);
+DHT-unreachable (both peers announce); **host↔VM instead of VM↔VM** (the
+host's no-NAT position doesn't rescue it). The packaged app and the raw library
+fail identically — it is not an app-config gap.
+
+`--dht=public` (P-012, the Mode-B stretch) is **INCONCLUSIVE** rather than
+refuted: both packaged instances announce on the **real public DHT** through
+slirp (so the Mode-B announce path works), but same-host NAT hairpin blocks the
+punch — exactly D-004's caveat. Exit code 7 marks this mode's result explicitly.
+
+**Consequence:** the bidirectional-merge acceptance (a write on A appearing in B's
+PG as `origin='remote'`, and the reverse) is **not achievable on one physical
+host in any topology** — VM↔VM, host↔VM, testnet or public DHT. It needs
+**truly separate machines** — two physical hosts, or VMs on two different
+hosts. The harness is correct and complete up to that boundary; the boundary is a
+hyperdht holepunch property, not a harness defect.
+
+You don't need to source a second physical box: the cloud-deployment layer
+already provisions genuinely-separate cloud VMs, and that closes this gate. Ran
+the **Tier-3 p2p-perf suite on two separate Hetzner cpx31 VMs** (`@ash`, distinct
+public IPs, the 2nd firewalled NAT-like), both joining the **public DHT**:
+
+* **`[swarm] peer_connected` fired on BOTH peers** across the two machines — the
+  exact event two same-host VMs never produce (`conns=0` above).
+* **cross-region-replication append→visible p95 = 950.5 ms** — the bidirectional
+  merge that no single-host topology could reach (matches the prior Latitude
+  Tier-3 \~974 ms).
+* **dht-discovery p95 ≈ 3.0 s**; **nat-holepunch: 1/1 readers connected,
+  `punches=1 relaySuccess=0`** — a real DHT-coordinated holepunch across the
+  firewalled frame, not a relay fallback.
+
+So the wall above is *positively confirmed* a same-host artifact, and the
+cross-machine path is reproducible on-demand:
+`HETZNER_SSH_KEY_ID=… HETZNER_SSH_IDENTITY_FILE=… npx vitest run --config
+vitest.integration.config.ts -t "REAL Hetzner frames"
+.../p2p-perf-tier3.integration.test.ts` (cred-gated, destroy-always, \~cents/run).
+Also confirmed **cross-region** (ash↔hil transcontinental WAN, D-020):
+append→visible p95 = 1115.5 ms, real holepunch — the \~165 ms WAN premium over
+co-located. See `linux-test-vm-and-federation` D-019/D-020 + `p2p-performance-suite` Tier-3.
+
+The Tier-3 run above proves the **substrate runtime**. To prove the **packaged
+`.deb`** specifically, `bin/deb-hetzner-federation.sh` provisions two separate
+Hetzner VMs, installs the `.deb` on each, and launches its federating **sidecar**
+(`serve.mjs` + bundled embedded-pg + swarm) **headless as a non-root user** —
+no Tauri GUI / no Xvfb, since the GUI is irrelevant to federation — then runs the
+same `federation-asserts.sh` over the public DHT. **PASS: `peer_connected` +
+A→B + B→A merge (`origin=remote` both ways).** Two clean-machine gotchas it
+surfaced, both faithful to real desktop usage (not federation defects):
+
+* embedded-postgres **refuses to run as root** → launch the sidecar as a normal user.
+* the `.deb`'s bundled **`pgvector` (`vector.so`) loads on Ubuntu 24.04 but NOT
+  22.04** (the baseline schema needs `public.vector`) — frames must match the
+  24.04 golden-VM toolchain. A real `.deb` portability note worth tracking.
+
+## Networking: dual-NIC, no DHCP/NAT (D-016)
+
+Every fed VM keeps its Phase-1 **slirp** NIC (internet + SSH-hostfwd + SPICE) and
+gets the federation network as a **second** NIC:
+
+* **`--net=bridge` (primary, needs sudo):** host bridge `pcusp-fedbr0`
+  (`10.77.0.0/24`, host `10.77.0.1`; the plan's `papercusp-fedbr0` exceeds the
+  kernel IFNAMSIZ 15-char cap). Each VM gets a host tap and a **static** guest IP
+  (`10.77.0.2`/`.3`) by deterministic MAC — no dnsmasq, no DHCP race, no iptables.
+  The host runs `hyperdht/testnet` advertised on `10.77.0.1` (a **single** node —
+  a multi-node testnet's secondary nodes advertise host-internal `127.0.0.1`
+  addresses the VMs can't reach over the bridge).
+* **`--net=socket` (rootless fallback, exactly two VMs):** a qemu `-netdev socket`
+  point-to-point L2 link (static `10.99.0.1/2`); the DHT bootstrap runs *inside*
+  `fed-a`.
+
+## Three traps fixed on the way (all real clean-machine bugs)
+
+With qemu's **default** user-net every VM is `10.0.2.15`. Hyperswarm's holepunch
+exchanges *local-address candidates*, so a peer dialing the other's `10.0.2.15`
+reaches **itself**. Fix: a **distinct** slirp subnet per VM (`boot-vm.sh`
+`SLIRP_NET`; the driver sets `10.31.<idx>.0/24`). (Necessary but, per the wall
+above, not sufficient for same-host holepunch.)
+
+The packaged app hosts **multiple** HTTP listeners: code-server logs a generic
+`HTTP server listening on http://127.0.0.1:N/` well **before** the sidecar's
+`[serve] listening on http://127.0.0.1:N (UI ON)`. A bare `'listening on'` grep
+in the boot-wait returns as soon as the PG-ready line lands — inside the
+PG-ready→serve-listening window the **only** match is code-server, so the
+harness records the wrong sidecar port and every API call (register,
+`share/finalize`) hits code-server → 405 → masked as an empty response. Seen
+live 2026-06-07: instance B grabbed code-server's port two runs in a row while
+A won the race both times — it *looks* identity-specific and is pure timing.
+Fix: anchor the grep to `[serve] listening` (legacy fallbacks `hono-host]` /
+`operator|sidecar ready on`); never the bare generic
+(`bin/lib/federation-asserts.sh` `fed_wait_boot`).
+
+On a pristine machine the desktop can lose the embedded-PG-vs-sidecar startup race
+(sidecar up first → `readOperatorState` hits the default `127.0.0.1:5432` → no
+embedded-pg discovery file yet → `ECONNREFUSED` → "sidecar did not start within
+30s") when a fresh `initdb` (\~20-30s) overruns the 30s budget under concurrent
+2-VM load. `vm-federation.sh` recovers with a **bounded relaunch retry**
+(`ensure_booted`, up to 3) that passes `wipe=0` so it PRESERVES the now-initialised
+data dir → a fast PG restart wins. The data dir is at
+`~/.papercusp-workspaces/.shared/embedded-pg-data` (NOT `~/.papercusp`).
+
+## Two `.deb`/build issues the harness flushed out
+
+A `.deb` whose bundled `000-baseline` predates the live schema can fail a fresh
+`initdb` mid-migration (`ALTER … ADD COLUMN cannot be performed on relation
+"harness_features"` — it's a view post `unify-work-items`). It hides on a *reused*
+data dir (no re-apply). Rebuild from current main; the gating
+`fresh-migrate.integration.test.ts` (empty→head, zero skips) is the green signal.
+The harness `--reinstall`s a same-version `.deb` so a code-only rebuild actually
+lands on a `--no-reset` overlay.
+
+`embedded-postgres/dist/binary.js` dynamic-imports **every** platform's native PG
+subpackage, but only `linux-x64` is installed → the host esbuild step fails
+`Could not resolve "@embedded-postgres/{darwin,linux-arm,…}"`. Externalize the 7
+**non-x64** platforms only — `linux-x64` MUST stay bundled (`host.mjs` imports it
+at runtime for embedded-PG discovery; externalizing it crashes the sidecar at boot
+with `ERR_MODULE_NOT_FOUND`). The wildcard `--external:@embedded-postgres/*` is
+wrong for exactly that reason.
+
+Teardown is scoped to the run's `$WORK` mktemp dir, never a broad
+`pkill -f papercusp-desktop`; the host-side testnet DHT node carries `$WORK` on
+its argv so the scoped cleanup catches it (the one-box smokes used to leak it).
+The `--dht=testnet` host node binds `0.0.0.0` and *advertises* the bridge IP so
+the VMs can reach it; a loopback-only `127.0.0.1` testnet would be unreachable.

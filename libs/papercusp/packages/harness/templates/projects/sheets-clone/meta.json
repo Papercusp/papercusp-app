@@ -1,0 +1,6 @@
+{
+  "id": "sheets-clone",
+  "name": "Sheets Clone (Phase 1)",
+  "description": "Single-page spreadsheet web app: 100×26 grid, formulas (=SUM, cell refs, ranges), SQLite persistence. React+Vite+Zustand frontend, FastAPI backend, Playwright e2e.",
+  "tags": ["web-app", "react", "python", "ui"]
+}

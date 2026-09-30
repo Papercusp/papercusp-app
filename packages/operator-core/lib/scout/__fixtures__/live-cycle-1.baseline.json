@@ -1,0 +1,195 @@
+{
+  "meta": {
+    "capturedAt": "2026-06-11T16:15:35.383Z",
+    "cycleId": "scout-live-cycle-1",
+    "rubric": {
+      "version": "scout-quality-baseline-v1",
+      "model": "claude-sonnet-4-6",
+      "temperature": 1,
+      "thinkingBudgetTokens": 1024,
+      "weights": {
+        "d1": 1,
+        "d2": 1,
+        "d3": 1
+      },
+      "dimensions": {
+        "d1": "GROUNDEDNESS — does the proposal genuinely address the cited Hive corpus patterns (listed in the trace as \"Digest patterns cited\"), or is it free-floating cleverness with refs stapled on?",
+        "d2": "NOVELTY VS CORPUS — is the mechanism a real conceptual leap relative to the \"Nearest priors\" the search-first pass surfaced, or a re-wording of something the Hive already has/tried?",
+        "d3": "BETTABILITY — is the cheap experiment genuinely cheap, concrete, and FALSIFIABLE (its falsifiableSignal names an observable that would prove the bet wrong), not a vague \"try it and see\"?"
+      }
+    },
+    "panelSize": 3,
+    "scale": "0-10 per axis (eval-battery judge scale); axisMeans aggregated via judgeAxisScorer",
+    "thresholds": "NONE asserted (plan D-002) — baseline only"
+  },
+  "judgePanel": [
+    {
+      "proposalId": "SP-001",
+      "title": "In multi-agent coding platforms, 'needs-human' deferrals block downstream work because agents surface abstract questions",
+      "judges": [
+        {
+          "d1": 6,
+          "d2": 8,
+          "d3": 7,
+          "composite": 7,
+          "rationale": "D1: The grounding is real but uneven. P-019 ('Owner ratifies four proposed decisions before execution') and mac-P-004 ('Decide the Tahoe question') directly instantiate the deferral-blocking pattern the proposal targets. But P-004-bee (invoke-once headless engine) and P-007 (scout-loop live harness) are tangentially cited — they describe orchestration mechanics, not human-deferral dynamics. The '$65k+ blocked work' figure from the source idea never surfaces in the digest evidence shown, so the scale claim floats unanchored. Solid conceptual fit to ~3 of 5 cited items; the other two feel grafted. D2: The 'nothing above the similarity floor' return from a 1359-item corpus is strong prima facie evidence of genuine novelty. The mechanism — pre-executing N downstream slices in parallel worktrees and presenting rendered outcome diffs rather than abstract questions — is a real epistemic reframe, not a re-labeling. The closest analogues (speculative execution, shadow deploys, A/B) exist in hardware and product contexts but not in agentic human-unblock workflows. The 'ratify an observation vs. reason about a future' framing is a meaningful conceptual leap, not cosmetic. D3: The experiment is genuinely cheap (manually authored world summaries, no real worktree execution), within-subjects with counterbalancing is methodologically sound, and the falsifiable signal is specific: three named observables (40% time reduction, higher confidence, ground-truth alignment) any one of which failing kills the premise. Weaknesses: N=5 evaluators × 10 items gives negligible statistical power for the effect sizes claimed; the 40% threshold is asserted rather than derived from any baseline; the conjunction structure means the test is easy to falsify but the confirmatory bar (all three must hold) is also high enough that a real but modest effect could be incorrectly rejected. Concreteness is high; rigor of the threshold choice is low.",
+          "costUsd": 0.0559827
+        },
+        {
+          "d1": 5,
+          "d2": 8,
+          "d3": 7,
+          "composite": 6.666666666666667,
+          "rationale": "D1: The five cited patterns do demonstrate real needs-human ratification moments (P-019's owner ratifying four decisions before execution and the Tahoe question in mac-desktop P-004 are genuinely on-point), but the proposal's severity framing — 'chronic deferral pile,' 'compounding blockage' — is not grounded by these items. They read as routine pre-ship sign-offs, not evidence of a systemic throughput crisis. The mechanism is coherent with the pattern type but the scale claims are extrapolated, not evidenced. D2: Nothing surfaced above the similarity floor across 1,359 plans — that's a meaningful signal. The specific synthesis of needs-human interception + isolated worktree execution + bounded downstream cost + rendered outcome cards for human ratification is a genuine combination not present in the corpus. The epistemic reframe ('ratify an observed outcome vs. reason about an imagined future') is a real conceptual move, not a relabeling. Some antecedents exist outside the Hive (speculative execution, multiverse testing), but those aren't in the corpus and the application is novel in context. D3: The experiment is genuinely cheap — no infrastructure required, just hand-authored canned summaries against real historical deferrals. The falsifiable signal is specific (median decision time NOT ≥40% faster) and the within-subjects counterbalanced design is sound. Ground-truth alignment via known historical outcomes is an unusually strong quality signal. Weaknesses: n=5 evaluators is underpowered for the secondary metrics; the 40% threshold is asserted without calibration; hand-crafted summaries may be cleaner than real fan output, biasing the result optimistically. These are surmountable but real.",
+          "costUsd": 0.0424124
+        },
+        {
+          "d1": 7,
+          "d2": 8,
+          "d3": 7,
+          "composite": 7.333333333333333,
+          "rationale": "D1: Grounding is real but uneven. Three of five cited patterns (P-019 Windows ratification, P-004 Tahoe decision, P-020 pre-ship sign-off) are genuine instances of the described friction — abstract human-ratification deferrals blocking downstream work. The other two (bee/TUI architecture, scout-loop live harness) are tangential. The '$65k+ blocked work' figure and '10× faster' claim appear in the source-ideas text but are not derivable from any cited pattern, slightly overstating the evidential base. D2: The nearest-priors field is empty (nothing above the floor in 1,359 plans), which is the strongest possible novelty signal the harness can return. The epistemic reframe — shift from 'answer an abstract question' to 'ratify an already-executed outcome' — is a genuine conceptual distinction, not a rewording. Pre-executing speculative worktrees as a decision interface rather than for automation or audit is meaningfully different from block-and-ask, auto-resolve, or text multiple-choice. D3: The experiment is genuinely cheap (canned world summaries, no real worktree execution), within-subjects counterbalanced (controls individual variation), and has three concrete falsifiable signals with a specific threshold (40% faster, higher confidence, better ground-truth alignment). The critical unacknowledged validity threat: manually-authored summaries can be unconsciously biased toward the historically-correct answer, inflating ground-truth alignment scores and potentially decision speed — the mechanism being tested is the presentation format, but the content fidelity confound is not controlled. The 40% threshold is also stipulated rather than derived from any cost-of-build model.",
+          "costUsd": 0.0366574
+        }
+      ],
+      "axisMeans": {
+        "groundedness": 6,
+        "noveltyVsCorpus": 8,
+        "bettability": 7
+      },
+      "compositeMean": 7
+    },
+    {
+      "proposalId": "SP-002",
+      "title": "Token budgets are decoupled from value delivery: sessions receive fixed allotments and spend them regardless of whether ",
+      "judges": [
+        {
+          "d1": 8,
+          "d2": 8,
+          "d3": 7,
+          "composite": 7.666666666666667,
+          "rationale": "D1: Proposal is tightly anchored — the $65,893 unattributed sink drives the starter-ceiling cap, and EI-236/EI-263/EI-167 specifically motivate the 'second identical failure signature' cap. The only grounding gap is that the unattributed/interactive category likely consists of ad-hoc human sessions where enforcing structured intent declarations is operationally awkward; the proposal doesn't address that friction. D2: Nearest-priors search hit nothing above the similarity floor in 1,359 corpus entries, which is a strong signal. The closed-loop controller framing — intent declaration as a precondition for budget expansion, elastic ceiling driven by progress velocity rather than time-boxed allotment — is a genuine conceptual step beyond static quotas plus post-hoc dashboards. Elements exist in adjacent domains (credit-based flow control, SLO-gated resource allocation) but the composition applied to LLM session governance is novel within this corpus. D3: The retroactive log study is concretely scoped (30 days, four named proxy dimensions, 20-minute window), the falsifiable threshold is precise (AUC < 0.55), and the experiment requires no new infrastructure. Deductions: (1) the experiment assumes those session logs already contain machine-readable proxy signals — if test counts or file-churn deltas aren't captured per-session today, the study can't run as described; (2) even a passing AUC only validates the precondition (early signals exist) not the control loop itself, so a positive result doesn't falsify the harder claim that elastic ceilings will redirect spend.",
+          "costUsd": 0.049420399999999996
+        },
+        {
+          "d1": 8,
+          "d2": 9,
+          "d3": 7,
+          "composite": 8,
+          "rationale": "D1: The mechanism is tightly tethered to both cited friction archetypes — the $65k unattributed spend sink directly motivates the starter-ceiling cap for intent-free sessions, and EI-236/263/167 are named explicitly in the stall-after-second-identical-failure-signature rule. This isn't post-hoc reference-stapling; the mechanism is *shaped by* the two observed failure modes. Slight deduction because the delivery-credit accumulation idea is not grounded in any cited pattern (it's forward extrapolation). D2: The nearest-priors search returning nothing above the similarity floor across 1359 plans is the strongest possible within-corpus novelty signal. The conceptual leap — making token ceiling elasticity a real-time function of declared-intent fulfillment rather than a static pre-assignment with post-hoc dashboards — is a genuine closed-loop controller framing applied to a domain (session resource governance) that the Hive has not touched. General adaptive resource allocation exists in systems literature, but the specific composition of intent-declaration → proxy polling → elastic ceiling → delivery credit → stall signal to coord layer is not a rephrase of anything in the corpus. D3: The experiment is genuinely cheap (existing 30-day logs, no new instrumentation) and the falsifiable signal is operationally precise (AUC < 0.55 on 'produced value' vs 'no value' session classification using early proxy change). The 20-minute window is calibrated to the mechanism's own polling cadence, which is good design. Deductions: 'retroactively annotate' is underspecified — if session logs aren't already structured around the four proxy dimensions, annotation cost could be non-trivial and is not acknowledged. More importantly, the experiment validates only *one* assumption (early proxy signals exist and are predictive) while the mechanism rests on at least two additional assumptions (elastic ceiling actually changes session behavior, stall signals lead to productive reassignment) that go untested by this bet.",
+          "costUsd": 0.040685
+        },
+        {
+          "d1": 8,
+          "d2": 8,
+          "d3": 7,
+          "composite": 7.666666666666667,
+          "rationale": "D1: Grounding is genuine and specific — the mechanism has named clauses that map 1:1 to cited patterns: the $65k unattributed sink is addressed by the 'no declared intent → starter ceiling only' rule, and EI-236/263/167 retry loops are called out by name as the trigger for stall detection after the second identical failure. Minor deduction: the bulk of the spend is tagged 'interactive', and it is unclear how a human-driven interactive session would emit a structured intent declaration, leaving the primary spend category somewhat underserved by the mechanism. D2: The nearest-priors search found nothing above the similarity floor in 1,359 corpus entries, giving strong empirical backing. The conceptual advance is real: existing tooling is post-hoc attribution (dashboard, tagging); this proposes a closed-loop controller where the token ceiling is a direct, real-time function of progress velocity. The combination of (a) structured intent-as-contract, (b) elastic ceiling with a polling governor, and (c) stall signal emitted to the coordination layer for reassignment is a recognisable architectural leap, not a relabelling. D3: The experiment is genuinely cheap — it requires only retroactive log annotation on data that should already exist (30 days of sessions). The falsifiable signal is crisp and observer-independent: AUC < 0.55 for early-proxy-signal vs value-produced means the controller has nothing to act on and the whole mechanism collapses. Four proxy dimensions are named. Deductions: (1) it is unverified that all four dimensions (especially file-churn byte-delta and issue/PR state) are actually logged per-session with the granularity needed — if they are not, the experiment is not as cheap as claimed; (2) classifying sessions as 'produced value' vs 'no value' for interactive sessions requires a definition the proposal does not give, introducing annotation ambiguity; (3) the experiment tests observational predictive lift, but the mechanism also introduces incentive effects (sessions will game signals once the controller is live), so the retroactive study answers a slightly different question than deployment would surface.",
+          "costUsd": 0.034755
+        }
+      ],
+      "axisMeans": {
+        "groundedness": 8,
+        "noveltyVsCorpus": 8.333333333333334,
+        "bettability": 7
+      },
+      "compositeMean": 7.777777777777779
+    },
+    {
+      "proposalId": "SP-003",
+      "title": "A $65k unattributed interactive token sink (8266 runs, 642M tokens) is not a session-count problem — individual sessions",
+      "judges": [
+        {
+          "d1": 7,
+          "d2": 8,
+          "d3": 7,
+          "composite": 7.333333333333333,
+          "rationale": "D1: Grounding to the $65k unattributed interactive sink is tight and specific — the proportional, identity-aware mechanism is directly derived from the pattern (unattributed vs attributed workflows, aggregate vs per-session blindness). EI-86 is cited to establish that existing governors have gaps, but the proposal routes around the subprocess-blindness problem rather than fixing it directly, so the second citation is supporting color rather than a structural driver. Solid but not perfect grounding. D2: 'Nothing above the similarity floor' in 1359 prior plans is a strong empirical signal. Binary quota-to-kill is the documented prior art; the combination of proportional sigma-deviation trigger + self-healing decay + system-prompt-injection actuation + self/non-self workflow attenuation is a coherent package that does not appear in the corpus. The underlying adaptive-control pattern (measure deviation, respond proportionally, decay to homeostasis) is well-known in TCP congestion and thermal management, but applying it to LLM token governance via graduated system-prompt compression is a non-trivial conceptual transfer. D3: The experiment is genuinely cheap (1 engineer-hour + 40 benchmark runs), concrete (20 treatment vs 20 control sessions, fixed 10-task benchmark, 30-minute window), and the falsifiable signal names specific observable thresholds (≥15% token-output drop, ≤10pp task-completion delta). The bet tests exactly the load-bearing assumption — whether soft compression instructions actually compress without task breakage — before building infrastructure. One yellow flag: the hypothesis states ≥25% reduction but the falsifiable-signal floor drops to ≥15%, a quiet threshold shift that weakens precision. Also, the experiment validates actuation but not detection (the governor's ability to correctly identify and broadcast spike signals is untested), leaving a second critical assumption unchecked.",
+          "costUsd": 0.060073400000000006
+        },
+        {
+          "d1": 7,
+          "d2": 8,
+          "d3": 7,
+          "composite": 7.333333333333333,
+          "rationale": "D1: The primary grounding is genuine and specific — the $65k/642M-token unattributed interactive pattern directly motivates every design choice, and the 'not a session-count problem' framing is an earned reading of the 8266-run data. The EI-86 cite is looser: that work item is about AIMD blindness to subprocess 429s, whereas this proposal routes around it via attribution attenuation rather than fixing the blind spot. Honest 7 rather than 8. D2: The 'nothing above similarity floor' result across 1359 items is the strongest available signal of novelty. The mechanism is a genuine recombination — rolling-σ deviation trigger × graduated system-prompt compression × self-healing decay × identity-aware attenuation — none of whose individual parts is new, but whose conjunction as a unified soft governor is not present in corpus. Not a 10 because proportional feedback control and system-prompt steering are each well-known; the novelty is the synthesis. D3: The experiment is genuinely lean (1 engineer-hour + cost of ~40 benchmark runs), operationally concrete (20 sessions hardcoded at L2, simultaneous control at L0, fixed 10-task benchmark), and names two observable thresholds that would falsify the core premise. Falsification logic is sound — if compression instructions don't move the output distribution, the whole broadcast-signal architecture is moot. Docked from 8 because the experiment validates only the compression-instruction component; the rolling-σ detector, broadcast mechanism, and attribution logic are untested by this bet, meaning a pass could still precede a broken governor in production.",
+          "costUsd": 0.05706339999999999
+        },
+        {
+          "d1": 7,
+          "d2": 7,
+          "d3": 8,
+          "composite": 7.333333333333333,
+          "rationale": "D1: Both cited patterns map cleanly onto design choices — the $65k unattributed interactive sink drives the aggregate-not-per-session framing, and EI-86's governor blindspot directly motivates moving control to the system-prompt layer rather than the penalize() path. The mechanism is tightly fitted to these two grounding points. Mild deduction: only two data points anchor it, and the specific numerical parameters (1.5σ, 15-min window, 5-min decay, half-attenuation for known workflows) have no corpus validation — they are plausible but free-floating. D2: Zero priors above the similarity floor in 1359 plans is strong empirical support for novelty. The conceptual leap is real: using system-prompt injection as the proportional throttle surface, driven by a system-wide aggregate rolling baseline rather than a per-session fixed ceiling, with a self/non-self identity distinction for attenuation, is not a re-wording of existing quota/kill governors. Individual components (rolling baselines, graduated throttling) exist in network congestion control (AIMD is even cited in EI-86), but their synthesis here — particularly the identity-aware attenuation and soft-instruction compression tier — is a domain-specific leap. Scored 7 rather than higher because the underlying control-theory primitives are well-known; the novelty is in the application surface, not the theory. D3: The experiment is genuinely cheap (1 engineer-hour + 40 benchmark runs), concrete (20 sessions, hardcoded THERMAL_LEVEL=2 vs. 0, fixed 10-task benchmark, 30-min window), and falsifiable with named observables and explicit thresholds (≥15% token reduction, <10pp task-completion degradation). The falsifiable signal would actually invalidate the mechanism if triggered. One noted gap: the experimental gate (≥15% reduction) is meaningfully below the deployment target (≥40% reduction during spikes) — a pass doesn't prove the full bet, only that the mechanism has signal. But for a cheap bettability gate this scope reduction is appropriate and honest.",
+          "costUsd": 0.0405437
+        }
+      ],
+      "axisMeans": {
+        "groundedness": 7,
+        "noveltyVsCorpus": 7.666666666666667,
+        "bettability": 7.333333333333333
+      },
+      "compositeMean": 7.333333333333333
+    },
+    {
+      "proposalId": "SP-004",
+      "title": "Hand-maintained registries, Zod schemas, and rate-governor hooks in a multi-agent system drift silently from reality: ar",
+      "judges": [
+        {
+          "d1": 7,
+          "d2": 8,
+          "d3": 8,
+          "composite": 7.666666666666667,
+          "rationale": "D1: Three of five cited friction items are genuinely integrated — EI-72's silent stripping of 'brief' becomes the primary worked illustration, EI-66's triple-registry burden maps directly to the auto-registration trigger, and EI-86's blind governor maps to the PID-range auto-PR. But EI-103 (plans:promote scope) and EI-211 (memory workspace arg inconsistency) appear only in the cited list; neither appears in the mechanism. The memory:* wrapping gesture could theoretically surface EI-211 patterns but the proposal doesn't argue this. 40% non-integration rate in the cited grounding drops D1 from potential 9 to 7. D2: 'Nothing above the similarity floor' in 1359-item corpus is a strong empirical signal. The core inversion — treating canonical registries and schemas as *generated outputs* of continuous observation rather than *maintained inputs* — is a genuine conceptual leap. Individual components (schema inference, observability middleware, auto-PR) are well-known in isolation; the novelty is the composition targeted at a live multi-agent capability graph where the schema is itself an emergent product of behavior. D3: The falsifiable signal is precisely specified in both directions (≥95% fidelity; no field present in >5% of calls missing from schema; no schema field absent in >95% of calls), correctly framing what would prove the bet *wrong*. Scope is appropriately minimal — one boundary, 24h, thin logging middleware, one-off diff script. Data structure and analysis method fully specified. Two small weaknesses: the experiment validates the *premise* (drift exists) but not the *mechanism* (auto-PR generation works) — appropriate for a bettability gate but worth noting; and 24h may yield insufficient call volume for statistical confidence if fleet:spawn throughput is low, which the proposal doesn't bound.",
+          "costUsd": 0.0718144
+        },
+        {
+          "d1": 7,
+          "d2": 7,
+          "d3": 8,
+          "composite": 7.333333333333333,
+          "rationale": "D1: Three of five cited patterns are tightly addressed — EI-72's `brief` stripping appears verbatim in the mechanism, EI-66's three-registry problem is the stated motivation for auto-generated registrations, and EI-86's subprocess-bee PID blindness maps directly to the governor auto-wiring example. EI-103 (plans:promote scope) and EI-211 (memory workspace arg) are listed in the digest but receive no treatment in the mechanism, suggesting citation padding rather than genuine integration. D2: The '(nothing above similarity floor)' result is the strongest possible intra-Hive novelty signal. The core inversion — canonical artifacts as *generated outputs* of an observation pipeline rather than hand-maintained inputs — is a real conceptual move, not a rewording. Runtime schema inference from static structure (Prisma, OpenAPI) is acknowledged and distinguished: the claim that applying it to a live call graph where the schema *is the product of emergent agent behavior* is new. That distinction is meaningful in the Hive context even if not CS-novel globally. D3: The experiment is genuinely minimal — single boundary, thin logging middleware, no generation, no PRs, 24-hour window, one diff script. The falsifiable signal is precise and bidirectional (≥95% fidelity in both directions would falsify the drift premise). Mild weakness: EI-72 already documents that `brief` was silently stripped, so the bet is nearly pre-confirmed by corpus evidence — the experiment will almost certainly succeed, making it confirmatory rather than exploratory. That's not a flaw in the gate design, but it means the signal will almost certainly fire rather than actually test an uncertain claim.",
+          "costUsd": 0.041385099999999994
+        },
+        {
+          "d1": 8,
+          "d2": 7,
+          "d3": 8,
+          "composite": 7.666666666666667,
+          "rationale": "D1: The mechanism is tightly coupled to the three sharpest corpus patterns — EI-72 (brief arg stripped by Zod strip-default) is literally re-enacted in both the mechanism description and the cheap experiment; EI-86 (governor blind to subprocess PIDs) is specifically closed by the auto-PR wiring step; EI-66 (three-registry hand-maintenance) is structurally dissolved by making COORD_ROLES a generated output. EI-103 and EI-211 are cited but only superficially touched — the harness would detect their drift but the mechanism doesn't specifically address plans:promote scope resolution or the memory workspace-arg asymmetry. Docked one point for that partial coverage. D2: The nearest-priors section returns nothing above the similarity floor across 1359 items, which is the strongest available signal. The conceptual move — flipping canonical artifacts from hand-maintained inputs into observation-pipeline outputs — is a real inversion, not just vocabulary substitution. The cited analogues (Prisma introspection, OpenAPI generators) are correctly scoped as operating on static structure, whereas this targets live emergent behavior. However, the constituent pieces (call-envelope logging, statistical field-presence analysis, auto-PRs from drift signals) are individually well-known patterns; the novelty is in the combination and the closing of the loop back into authoritative sources in a multi-agent context. D3: The experiment is genuinely cheap (one boundary, no generation, no schema changes), concrete (24-hour window, specific field-presence counts, one-off diff script), and the falsifiable signal is precisely quantified in both directions (>5% received but missing from schema; >95% schema fields absent from real calls). The thresholds are operationalizable without interpretation. Minor weakness: it tests only fleet:spawn rather than the coord-verb or rate-governor boundaries, but that is appropriate scoping for a premise-validation bet and the EI-72 documentation makes a positive result nearly certain — which actually strengthens falsifiability by showing the bar is set somewhere real, not impossibly high.",
+          "costUsd": 0.05414939999999999
+        }
+      ],
+      "axisMeans": {
+        "groundedness": 7.333333333333333,
+        "noveltyVsCorpus": 7.333333333333333,
+        "bettability": 8
+      },
+      "compositeMean": 7.555555555555556
+    }
+  ],
+  "duplicateRate": {
+    "corpusSize": 1359,
+    "noveltyFloor": 0.34,
+    "preCriticIdeas": {
+      "n": 6,
+      "duplicates": 0,
+      "rate": 0
+    },
+    "postCriticSurvivors": {
+      "n": 5,
+      "duplicates": 0,
+      "rate": 0
+    },
+    "postCriticProposals": {
+      "n": 4,
+      "duplicates": 0,
+      "rate": 0
+    }
+  },
+  "spend": {
+    "cycleUsd": 0.5907676,
+    "judgesUsd": 0.5849423,
+    "totalUsd": 1.1757099
+  }
+}

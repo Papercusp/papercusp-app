@@ -1,0 +1,55 @@
+-- Cupboard migration 012 — provides_events: the event half of the dependency axis.
+-- (cupboard-public-release-2026-07-12 P-007 / D-003; manifest schema from P-005.)
+--
+-- WHY
+-- ---
+-- D-003: "what good is an event without a tool" — events are a DEPENDENCY AXIS,
+-- exactly like tools. A unit can declare the awaitable event-key families it
+-- PROVIDES (`provides.events` in its manifest) and the ones it DEPENDS ON. The
+-- operator's resolver (pack-model.ts `resolveEventProvider`) answers "who
+-- provides family X?" with the same three-valued ladder the tool resolver uses:
+--   available (builtin registry / an installed unit) → installable (a Cupboard
+--   listing declares it) → unknown.
+--
+-- The `installable` rung is the one that needs THIS column: without a stored
+-- declaration on the listing, the Cupboard cannot tell an operator "install unit
+-- Y and your `foo:done` dep resolves", so a required event dep could only ever
+-- come back `unknown` — the install-closure loop would be blind on this axis.
+--
+-- WHAT CHANGES
+-- ------------
+--   provides_events — NEW nullable TEXT: a JSON array of the event-key FAMILIES
+--                     the unit registers when installed, each
+--                       { family, keyTemplate, describe? }
+--                     e.g. [{"family":"canary:flipped",
+--                            "keyTemplate":"canary:flipped:<flag>",
+--                            "describe":"a canary flag flipped"}]
+--                     Meaningful for the installable kinds (plugin|pack) only —
+--                     POST-validated, same as provides_tools (migration 006).
+--                     NULL elsewhere and for every listing published before this
+--                     migration, which reads correctly as "declares no events".
+--
+-- WHY NOT A TABLE REBUILD (deliberate departure from 006/008/010/011)
+-- -------------------------------------------------------------------
+-- Those migrations rebuilt the table because each CHANGED THE listing_kind CHECK
+-- CONSTRAINT, and SQLite/D1 cannot ALTER a CHECK — the 12-step rebuild was the
+-- only way. This migration changes NO constraint; it only adds a nullable column,
+-- which SQLite supports natively and atomically. Doing a rebuild anyway would be
+-- strictly worse: it re-opens the column-list reconciliation hazard that 011's
+-- own header warns about (the live prod schema is NOT guaranteed to match this
+-- repo's migration history 1:1 — the 'template' CHECK gap proved that), and it
+-- would DROP + recreate a production table to add one nullable field. Use the
+-- cheap, non-destructive form when it is available.
+--
+-- ⚠ NOT IDEMPOTENT: SQLite has no `ADD COLUMN IF NOT EXISTS`. Re-applying this
+--   file errors with "duplicate column name: provides_events" — which is a SAFE
+--   failure (nothing is mutated), not a corruption. If you hit it, the column is
+--   already there; verify and move on:
+--     wrangler d1 execute papercusp-cupboard --remote \
+--       --command "SELECT sql FROM sqlite_master WHERE name='harnesses';"
+--
+-- Apply once (release plan P-013 owns the prod apply):
+--     wrangler d1 execute papercusp-cupboard --remote \
+--       --file migrations/012_provides_events.sql
+
+ALTER TABLE harnesses ADD COLUMN provides_events TEXT;

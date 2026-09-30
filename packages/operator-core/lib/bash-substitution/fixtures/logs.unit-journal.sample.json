@@ -1,0 +1,128 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 / pair logs.unit-journal (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T13:34:00Z",
+  "totalAtoms": 475,
+  "totalSessions": 37,
+  "sample": [
+    {
+      "sid": "su-e7df908e-b996-4da8-967c-0d655e68c8c8",
+      "ts": "2026-07-20T10:46:16.790Z",
+      "atom": "journalctl --no-pager -u pgbouncer 2>/dev/null"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-20T09:01:18.962Z",
+      "atom": "journalctl --user --since \"2026-07-14\" 2>/dev/null"
+    },
+    {
+      "sid": "su-707029ce-300a-469b-8fca-4cd393f5a0d2",
+      "ts": "2026-07-26T03:04:26.782Z",
+      "atom": "journalctl --user --since '2026-07-25 22:54:00' --until '2026-07-25 22:57:30' --no-pager 2>/dev/null"
+    },
+    {
+      "sid": "su-a8ea9aff-9469-4a8f-90bf-f09c6a383ca3",
+      "ts": "2026-07-25T21:48:44.958Z",
+      "atom": "journalctl --user -u papercup-bg-host.service --since \"-100s\" --no-pager 2>/dev/null"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-21T01:24:54.513Z",
+      "atom": "journalctl --user -u papercup-bg-host.service --since \"-6 min\" --no-pager"
+    },
+    {
+      "sid": "su-8df7b4c1-3bda-4589-80e7-af54a3f4d18c",
+      "ts": "2026-07-17T04:34:04.516Z",
+      "atom": "journalctl --user -u papercup-bg-host.service --since \"2026-07-16 18:00:00\" -o short-iso 2>&1"
+    },
+    {
+      "sid": "su-38101f27-bf18-4044-9ca1-bd66bcf0b411",
+      "ts": "2026-07-25T21:17:46.228Z",
+      "atom": "journalctl --user -u papercup-bg-host.service --since '-3 min' 2>/dev/null"
+    },
+    {
+      "sid": "su-707029ce-300a-469b-8fca-4cd393f5a0d2",
+      "ts": "2026-07-26T04:01:40.879Z",
+      "atom": "journalctl --user -u papercup-dev-api --since '30 min ago' --no-pager 2>/dev/null"
+    },
+    {
+      "sid": "su-707029ce-300a-469b-8fca-4cd393f5a0d2",
+      "ts": "2026-07-26T15:25:45.815Z",
+      "atom": "journalctl --user -u papercup-dev-api.service --since '-15min' --no-pager 2>&1"
+    },
+    {
+      "sid": "su-9d726f46-c7bc-4986-8700-62340b58689d",
+      "ts": "2026-07-26T03:09:48.957Z",
+      "atom": "journalctl --user -u papercup-dev-api.service -n 30 --no-pager 2>&1"
+    },
+    {
+      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
+      "ts": "2026-07-25T20:59:42.986Z",
+      "atom": "journalctl --user -u papercup-live-federation-gate.service --no-pager --since \"15:30\" 2>/dev/null"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-19T21:47:10.097Z",
+      "atom": "journalctl --user -u papercup-live-federation-gate.service --since \"-2 hours\" 2>/dev/null"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-19T16:49:32.647Z",
+      "atom": "journalctl --user -u papercup-live-federation-gate.service --since \"12:40\" -o short-iso 2>&1"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-19T19:11:52.113Z",
+      "atom": "journalctl --user -u papercup-live-federation-gate.service --since \"2026-07-19 14:48\" --no-pager 2>/dev/null"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T02:14:04.718Z",
+      "atom": "journalctl --user -u papercup-live-federation-gate.service --since \"2026-07-20 22:02:00\" --no-pager 2>&1"
+    },
+    {
+      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
+      "ts": "2026-07-25T22:30:29.452Z",
+      "atom": "journalctl --user -u papercup-live-federation-gate.service --since '35 min ago' --no-pager 2>/dev/null"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T10:00:18.486Z",
+      "atom": "journalctl --user -u papercup-oddsmith-sidecar --since \"06:00:00\" --no-pager 2>/dev/null"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T07:32:37.880Z",
+      "atom": "journalctl --user -u papercup-oddsmith-sidecar --since \"2 min ago\" --no-pager 2>/dev/null"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T09:45:41.210Z",
+      "atom": "journalctl --user -u papercup-oddsmith-sidecar --since \"90 sec ago\" --no-pager 2>/dev/null"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T01:31:54.702Z",
+      "atom": "journalctl --user -u papercup-oddsmith-sidecar --since '2026-07-25 20:00' 2>/dev/null"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T16:37:47.167Z",
+      "atom": "journalctl --user -u papercup-oddsmith-sidecar --since '60 min ago' --no-pager 2>/dev/null"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T19:51:40.254Z",
+      "atom": "journalctl --user -u papercup-oddsmith-sidecar.service --since \"10 min ago\" --no-pager -o cat 2>/dev/null"
+    },
+    {
+      "sid": "su-fd41c149-504a-4421-9b10-3f9a6d94faa2",
+      "ts": "2026-07-20T09:23:08.759Z",
+      "atom": "journalctl --user -u papercup-staging-api.service --since \"-30 min\" --no-pager 2>/dev/null"
+    },
+    {
+      "sid": "su-63f9b336-5b17-461a-b12e-a8421de9a09b",
+      "ts": "2026-07-26T06:23:52.744Z",
+      "atom": "journalctl --user -u papercup-vitest-orphan-reaper.service --no-pager -n 20"
+    }
+  ]
+}

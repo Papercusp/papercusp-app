@@ -1,0 +1,56 @@
+# GTK tree surgery during Tauri setup() wedges VTE's grid geometry — defer until the window is mapped
+URL: /internal/docs/agent-insights/gtk-surgery-mid-realization-wedges-vte
+
+Re-parenting the webview / inserting native-windowed widgets (VTE) into the Tauri window's GTK tree during setup() runs mid-realization and permanently wedges VTE's internal grid (it latches a boot-time inset while every GTK allocation reports correct). Defer the surgery until the window is mapped + ~2s settled.
+
+## The trap
+
+The D-009 embedded native terminal (`native-terminal-desktop-2026-06-06`)
+packs a **VTE widget beside the WebKitWebView** inside the Tauri window's
+default GTK vbox (a `GtkPaned` split — one window, Wayland-safe). The obvious
+place to do that surgery is `start_native_terminal()` from Tauri's `setup()`
+hook, via `window.run_on_main_thread`.
+
+Doing it there **silently breaks VTE's geometry forever**: the terminal's
+grid computes rows against a latched boot-time inset (e.g. a constant 540px
+subtracted from every height), so zellij renders a \~67×15 strip pinned to the
+pane's bottom corner while the rest stays black. The failure is maddening to
+diagnose because **every GTK-side observation reports correct**:
+
+* `widget.allocation()` → full pane (`538x800+0+0`)
+* `translate_coordinates(toplevel)` → `(0,0)`
+* the widget's `GdkWindow` position/size → correct
+* the webview half works (its JS `innerWidth` matches the pane)
+
+Forcing the grid by hand (`vte_terminal_set_size` on every `size-allocate`)
+does **not** recover it; nor does `unrealize()` + `show()` re-realization.
+The wedge happens because the surgery runs **mid-realization** — wry/tauri
+are still doing their post-create bootstrap (webview sizing + bounds passes)
+when the tree is cut.
+
+## The fix
+
+Defer the surgery until the window is **fully realized + mapped, plus a
+settle delay**. The shipped pattern (`main.rs` `start_native_terminal`,
+`EmbeddedView(Vte)` arm): poll `gtk_window.is_mapped()` on a 250ms
+`glib::timeout_add_local`, then wait \~2s more, then embed. Verified
+empirically: 500ms after map still hits the wedge; \~2s is safe.
+
+The same surgery a beat after map renders perfectly — full-pane grid, pty
+reflows on every resize.
+
+## Related gotchas in the same path
+
+* **Spawn order matters too**: `vte_terminal_spawn_async` before the widget
+  is packed + shown leaves the pty stuck at the boot-time 80×24-ish grid.
+  Pack → `show_all()` → then spawn.
+* **No vte-rs bindings for GTK3** (tauri/wry are GTK3; `vte4` is GTK4-only
+  and two GTKs can't share a process). The embed hand-rolls \~6 C symbols and
+  **dlopens `libvte-2.91.so.0` at runtime** (`libloading`) — no dev headers,
+  no link-time/.deb dependency; when the lib is absent the strategy
+  downgrades to `NewWindow` (`downgrade_unbuilt_with`).
+* **Verifying "Wayland-only" work on the X11 box**: the embed is
+  display-server-agnostic, so `PAPERCUSP_NATIVE_TERMINAL_FORCE=embedded-vte`
+  exercises the whole path under the standard isolated Xvfb rig
+  (`/internal/docs/testing/agent-e2e` §15.4) — no Wayland compositor needed
+  for the widget-tree mechanics.

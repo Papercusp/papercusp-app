@@ -1,0 +1,65 @@
+# Arm-call-site risk tier — use the ceiling, not fail-safe critical
+URL: /internal/docs/agent-insights/arm-call-site-risk-tier-proxy
+
+When planReversibleArm runs without a declared riskTier (the common case — cups never pass decision.riskTier), deriving the risk from the category's effective ceiling is what makes tripwires actually arm. Defaulting to 'critical' silently prevents every tripwire from firing.
+
+## What
+
+The autonomy system has two separate decider-gate calls for a reversible action:
+
+1. **The chokepoint** — `resolveAutonomyDecision` run by the Mug before dispatching.
+   It has the action's `riskTier` (from the ranked item's economics) so it can correctly
+   decide `auto` for a `low`-risk action in `work-prioritization` (ceiling=`low`).
+
+2. **The arm-call-site** — `planReversibleArm` run inside the verb handler after the
+   chokepoint already said `auto`. It calls `resolveAutonomyDecision` **again** — but
+   cups never pass `decision.riskTier`, so the decider's D-002 fail-safe fires: `critical`.
+   With ceiling=`low`, `critical > low` → gated → `planReversibleArm` returns null →
+   **no tripwire is ever armed** (EI-570: `harness_shared.autonomy_tripwires` was empty
+   for the entire fleet despite 39 policy auto-takes).
+
+## The fix (landed 2026-06-18)
+
+`planReversibleArm` now derives a risk proxy from the category's effective ceiling when no
+`riskTier` is declared:
+
+```ts
+let riskTier = input.riskTier;
+if (riskTier == null) {
+  const category = categoryForAction(input.action ?? '');
+  if (category != null) {
+    const policy = await d.decider.getPolicy(category);
+    const ceiling = computeEffectiveCeiling(policy);
+    if (ceiling !== 'never-auto') {
+      riskTier = ceiling; // Exclude<AutonomyCeiling, 'never-auto'> = RiskTier
+    }
+  }
+}
+```
+
+This makes the arm gate agree with the chokepoint: if the policy would auto-decide the
+action (risk ≤ ceiling), the arm gate uses the same ceiling as the risk and also says
+`auto` → tripwire arms. Falls through to `critical` only for unmapped actions or
+`never-auto` ceiling (still correctly gates).
+
+## When you hit this
+
+* You're adding a new reversible verb to the arm seam (new `planWorkItemArm`-style wiring).
+* You see `autonomy_tripwires` empty despite policy being armed and auto-takes happening.
+* You're debugging a caller that doesn't pass `decision.riskTier` and wonder why no
+  tripwires fire.
+
+## What NOT to do
+
+* **Don't change `decider.ts`** to fix this — the D-002 fail-safe to `critical` is correct
+  for the chokepoint (where an undeclared risk should be conservatively refused). Only the
+  arm-call-site needs the ceiling-as-proxy logic, because it's called *after* the chokepoint
+  already approved the action.
+* **Don't assume callers will pass `decision.riskTier`** — the arm seam must work correctly
+  even when they don't.
+
+## Files
+
+* `packages/operator-core/lib/autonomy/arm-reversible-action.ts` — the fix lives here
+* `packages/operator-core/lib/agent-tools/work_items/arm-reversible-work-item.ts` — the
+  work\_items wiring that calls it

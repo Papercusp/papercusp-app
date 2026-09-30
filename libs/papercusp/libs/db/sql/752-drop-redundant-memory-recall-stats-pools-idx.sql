@@ -1,0 +1,48 @@
+-- 752-drop-redundant-memory-recall-stats-pools-idx.sql
+--
+-- Drop harness_shared.memory_recall_stats_pools_idx.
+-- Plan: db-performance-remediation-2026-07-26 (WI-8945, Decision D-031 category 2).
+--
+--   CREATE INDEX memory_recall_stats_pools_idx ON harness_shared.memory_recall_stats
+--     USING gin (pools jsonb_path_ops) WHERE (pools IS NOT NULL);
+--
+-- 56,944 matching rows of 115,742; idx_scan = 0 across the database's entire lifetime
+-- (pg_stat_database.stats_reset IS NULL); 4304 kB of GIN maintained against 106,941
+-- table writes, for zero reads.
+--
+-- NOT a missing-predicate misalignment. Its only consumer -- the recall-pool-health
+-- query at packages/operator-core/lib/memory/recall-stats.ts:580 -- DOES state the
+-- predicate verbatim (`WHERE s.pools IS NOT NULL`). The index is simply never the
+-- planner's best option:
+--
+--   Parallel Index Scan using memory_recall_stats_created_idx
+--     Filter: (pools IS NOT NULL)
+--     Rows Removed by Filter: 510        <-- out of ~19,195 in the window
+--
+-- The query's selective condition is `created_at >= now() - interval`, which
+-- memory_recall_stats_created_idx (2,607,262 lifetime scans) serves directly. The
+-- partial predicate removes only ~2.7% of rows in the window, so supplying it via a
+-- separate index can never pay for the extra heap work. Correctly redundant.
+--
+-- ONE BELIEF WORTH NOT PROPAGATING, because it is plausible and WRONG: this is NOT an
+-- access-method mismatch. jsonb_path_ops indeed supports only @>, @? and @@ (verified
+-- via pg_amop), and the consumer performs no containment test -- which invites the
+-- conclusion that a GIN index cannot serve `IS NOT NULL` at all. It can: a PARTIAL
+-- index may be scanned in full to satisfy its OWN predicate regardless of opclass, and
+-- forcing the planner (enable_seqscan=off, enable_indexscan=off) does produce
+-- `Bitmap Index Scan on memory_recall_stats_pools_idx`. The index is unused because it
+-- loses on cost, not because it is unusable.
+--
+-- The CONSUMING QUERY IS DELIBERATELY LEFT UNCHANGED (D-031: when a flagged partial
+-- index is redundant, drop the index and do not touch the query).
+--
+-- REVERSIBILITY: recreate with the exact definition quoted above.
+--
+-- FORWARD-COMPAT: this is a plain non-UNIQUE GIN index (definition quoted above). ON CONFLICT
+-- requires a UNIQUE btree index or a constraint, and GIN cannot back either, so the
+-- EI-18797473716313783 failure mode is doubly unreachable for the still-running older release.
+-- It is likewise absent from every deployed query plan: idx_scan = 0 across the database's
+-- entire lifetime, and the EXPLAIN above shows its only consumer served by
+-- memory_recall_stats_created_idx with `Filter: (pools IS NOT NULL)`.
+
+DROP INDEX IF EXISTS harness_shared.memory_recall_stats_pools_idx;

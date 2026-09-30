@@ -1,0 +1,56 @@
+# The wake-executor is the liveness authority — don't re-gate liveness in routines that fire wakes
+URL: /internal/docs/agent-insights/wake-executor-is-the-liveness-authority
+
+A routine that fires an inbox-wake (e.g. system:wake-brain) must NOT add its own heartbeat/liveness guard. The await-pump's wake-executor already revives a dormant OR dead session server-side (socket-inject live / headless `claude --resume` dead) and is owner-scoped. Gating in the routine strands the very dormant session the wake exists to revive.
+
+## What
+
+Any routine whose job is to **fire an inbox-wake** for an agent — `system:wake-brain`
+(the autonomous-Mug cadence), the watchdog manual-mode backstop, a peer's
+`coord:send {wake:true}` — should resolve the target owner and fire the wake,
+**full stop**. It must NOT add a heartbeat/`coord_presence` liveness check that
+decides "this session looks dead, skip the wake" (or worse, clears a durable pin).
+
+Liveness is owned, end to end, by the **wake-executor** (`lib/events/await/wake-executor.ts`),
+the liveness-ADAPTIVE re-invoke ladder the await-event pump runs for each due delivery:
+
+* **live managed pty** (pid match) → inject the wake turn.
+* **live but in a psu-hosted session** (the common interactive psu/Mug case —
+  the pty lives in the psu process, invisible to `findPty`) → `findPsuHost(owner)`
+  injects into its control socket in place (channel 1b).
+* **process exited / dead** → resume headless: `claude --resume <uuid> -p …`
+  spawned **DETACHED, `stdio:'ignore'`, server-side** (no shell, no desktop
+  launcher). The resumed session re-arms its own [always-armed inbox-wake](/agent-insights/always-armed-inbox-wake) for the next tick.
+* **alive but uninjectable** → park + a one-time inbox nudge (never concurrent-resume a live session).
+* **gone + presence stale** → drop, visibly.
+
+It is also **owner-scoped** (EI-151): it never cross-injects a foreign owner's
+session. So firing the wake is safe and revives the target in *every* state.
+
+## Why it's a trap
+
+A "dormant session looks dead, don't bother waking it" guard is seductive but
+wrong, because the presence **heartbeat only fires on tool boundaries**
+(`liveness.ts`): an idle-but-alive agent goes "stale" (>`STALE_MS`, 10 min)
+within minutes of finishing a turn. That stale-heartbeat state is *exactly* the
+dormant case a wake cadence exists to revive — so a heartbeat guard skips the one
+delivery that matters, and the agent is stranded until a human intervenes.
+
+This bit EI-908 hard: `resolveBrainOwner` in `wake-brain-action.ts` gated on a
+fresh heartbeat and, when stale, **cleared the brain pin and no-op'd** — the
+literal title of the bug, "wake-brain fires but never re-invokes the dormant
+brain." Three separate auto-fix attempts routed it to a human believing reviving
+a dormant `psu --brain` "needs a desktop shell / launch machinery the cron lacks"
+— **false**: the wake-executor's channel-2 headless resume does it server-side
+with no shell. They were looking at the desktop launcher (`psu-launcher.mjs`),
+not the await-pump's executor. The fix was to *delete* the guard: resolve the pin
+→ owner, fire the wake, let the executor decide delivery.
+
+## The rule
+
+If you are writing/reviewing a routine that fires a wake: resolve the recipient
+and call `wakeRecipients([owner], …)`. Do **not** pre-filter on liveness, and do
+**not** mutate the recipient's durable pin/registration based on a presence
+heartbeat. The pump + executor are the single liveness authority. See also
+[await-event-primitive](/agent-insights/await-event-primitive) and
+[always-armed-inbox-wake](/agent-insights/always-armed-inbox-wake).

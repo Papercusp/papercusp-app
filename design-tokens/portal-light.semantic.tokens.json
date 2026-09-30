@@ -1,0 +1,43 @@
+{
+  "_doc-portal-light": {
+    "$description": "Portal light — Papercusp semantic colors matched to the hosted portal's light token set. Used by portalEmbed and available as a built-in theme."
+  },
+  "portal-light": {
+    "bg-deepest":       { "$value": "#D8D2C7", "$type": "color" },
+    "bg-deeper":        { "$value": "#E3DDD3", "$type": "color" },
+    "bg-deep":          { "$value": "#EAE4DA", "$type": "color" },
+    "bg":               { "$value": "#F4F0E8", "$type": "color", "$description": "Portal paper" },
+    "bg-1":             { "$value": "#FFFEFA", "$type": "color", "$description": "Portal panel" },
+    "bg-2":             { "$value": "rgba(32, 32, 30, 0.035)", "$type": "color" },
+    "bg-3":             { "$value": "rgba(32, 32, 30, 0.065)", "$type": "color" },
+    "bg-4":             { "$value": "rgba(32, 32, 30, 0.105)", "$type": "color" },
+    "bg-popover":       { "$value": "#FFFFFF", "$type": "color" },
+    "bg-raised":        { "$value": "#FFFEFA", "$type": "color" },
+    "bg-raised-high":   { "$value": "#F8F5EF", "$type": "color" },
+    "fg":               { "$value": "#20201E", "$type": "color", "$description": "Portal ink" },
+    "fg-dim":           { "$value": "#4D4A45", "$type": "color" },
+    "fg-mute":          { "$value": "#56534C", "$type": "color", "$description": "AA-safe muted copy on layered portal surfaces" },
+    "border-muted":     { "$value": "rgba(77, 74, 69, 0.10)", "$type": "color" },
+    "border":           { "$value": "rgba(77, 74, 69, 0.20)", "$type": "color" },
+    "border-strong":    { "$value": "rgba(77, 74, 69, 0.34)", "$type": "color" },
+    "accent":           { "$value": "#28655A", "$type": "color", "$description": "Portal light accent" },
+    "accent-rgb":       { "$value": "40, 101, 90", "$type": "color" },
+    "accent-strong":    { "$value": "#1F544B", "$type": "color" },
+    "accent-strong-rgb":{ "$value": "31, 84, 75", "$type": "color" },
+    "accent-cool":      { "$value": "#4C8177", "$type": "color" },
+    "accent-soft":      { "$value": "#DFEEE8", "$type": "color" },
+    "accent-soft-rgb":  { "$value": "223, 238, 232", "$type": "color" },
+    "accent-deep":      { "$value": "#1F544B", "$type": "color" },
+    "accent-deeper":    { "$value": "#163D36", "$type": "color" },
+    "accent-ink":       { "$value": "#FFFEFA", "$type": "color" },
+    "good":             { "$value": "#34755F", "$type": "color" },
+    "warn":             { "$value": "#80560F", "$type": "color", "$description": "AA-safe warning copy on portal paper" },
+    "bad":              { "$value": "#9C3B36", "$type": "color" },
+    "warn-bg":          { "$value": "rgba(148, 103, 27, 0.10)", "$type": "color" },
+    "warn-border":      { "$value": "rgba(148, 103, 27, 0.34)", "$type": "color" },
+    "good-bg":          { "$value": "rgba(52, 117, 95, 0.10)", "$type": "color" },
+    "bad-bg":           { "$value": "rgba(156, 59, 54, 0.10)", "$type": "color" },
+    "card-shadow":      { "$value": "0 18px 52px rgba(43, 39, 31, 0.14)", "$type": "shadow" },
+    "frost":            { "$value": "linear-gradient(180deg, rgba(255,255,255,0.72), rgba(255,255,255,0.30))", "$type": "other" }
+  }
+}

@@ -1,0 +1,65 @@
+# The `release-fix` launch blueprint — release-pipeline-resilience-2026-06-09 (P-006).
+#
+# A SINGLE-ROLE LAUNCH BLUEPRINT (D-007), EVENT-fired — the test-failure sibling
+# of `merge-resolution`. When the hourly green-checkpoint gate fails to promote
+# `staging`→`main`, it emits `green-checkpoint:red` and dispatches a release-fixer
+# agent: it reads the checkpoint log, reproduces the failing test to classify
+# real-regression vs flake, then fixes the code or removes the flake's grip on the
+# gate (hermetic > tier-out > accountable quarantine), leaves the tree clean, and
+# does NOT push (git-sync pushes; the next checkpoint re-verifies + promotes).
+#
+# Mirrors `merge-resolution` exactly (unify-agent-launches-as-blueprints-2026-06-04):
+# the DETECTION + in-flight dedup stay in green-checkpoint (the trigger's concern);
+# the diagnose→fix→leave-clean contract lives in the release-fixer persona.
+# green-checkpoint fires THIS blueprint by its event key via
+# `fireLaunchBlueprintForEvent('green-checkpoint:red')`.
+id: release-fix
+extends: single-agent
+version: 0.1.0
+description: >-
+  Fix a green-checkpoint gate failure: a release-fixer agent reads the checkpoint
+  log, reproduces the failing test to classify regression-vs-flake, then fixes the
+  code or removes a proven flake (hermetic / tier-out / accountable quarantine),
+  leaves the tree clean, and does not push.
+
+workItem:
+  kind: release-fix
+  idPrefix: RFX
+
+# Spine edges + planner inherited from the `single-agent` parent; override the
+# decider role + this launch's turn budget only. A bit more budget than the
+# merge-resolver: diagnosing + reproducing a failing test is more open-ended.
+spine:
+  decider: release-fixer
+  maxTurns: 30
+
+roles:
+  - id: release-fixer
+    description: >-
+      Read the checkpoint log, reproduce the failing test locally to classify
+      real-regression vs flake, then fix the code or remove the flake's grip on
+      the gate; leave the tree clean and do NOT push.
+
+knobs:
+  harnessKind: release-fix
+  requiresRepo: true
+
+# Event-rule trigger (D-004/D-007): fired by the green-checkpoint red event.
+# green-checkpoint resolves this key → THIS blueprint → invokes the release-fixer
+# role via the invoke route (single-role launch). Declared here as the firing seam.
+triggers:
+  event: green-checkpoint:red
+
+# Dependencies (derived from the release-fixer persona): it reads the exact
+# checkpoint evidence, coordinates its repair, and escalates an unfixable
+# regression. Keep in sync via scripts/derive-blueprint-deps.mjs.
+dependencies:
+  tools:
+    - checkpoint:await
+    - coord:escalate
+    - plans:get
+    - release:checkpoint-run
+    - release:trace
+    - sessions:search
+    - work_items:list
+  plugins: []

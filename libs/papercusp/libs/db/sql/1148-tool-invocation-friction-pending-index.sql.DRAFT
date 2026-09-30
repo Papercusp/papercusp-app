@@ -1,0 +1,7 @@
+-- WI-10000553 / R-7: recovery reads only undelivered invocation telemetry.
+-- Reuse the existing table/metadata; successful delivery leaves this index.
+-- SOURCE DRAFT: do not apply or arm within the source-only approval boundary.
+CREATE INDEX IF NOT EXISTS tool_invocations_friction_pending_idx
+  ON harness_shared.tool_invocations
+    (workspace_id, (COALESCE(metadata_json->>'frictionAttemptAt', '')), invoked_at, id)
+  WHERE metadata_json->>'frictionCapture' = 'pending';

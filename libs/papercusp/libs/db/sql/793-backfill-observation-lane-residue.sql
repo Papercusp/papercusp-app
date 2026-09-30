@@ -1,0 +1,60 @@
+-- 793 — EI-17036: stamp `payload.lane='observation'` on legacy observation rows that carry an
+-- `observation` payload but no `lane` key, so they stop being served as claimable work.
+--
+-- ── The defect ───────────────────────────────────────────────────────────────────────────
+--
+-- D-005 keeps a turn-end reflection / rubric scorecard out of the work queue via
+-- `observationLaneExclusionSql` (work-items.ts), which is exactly:
+--
+--     wi.lane IS DISTINCT FROM 'observation'
+--
+-- `lane` is `GENERATED ALWAYS AS (payload ->> 'lane') STORED` (migration 721). So the floor
+-- keys on ONE key: `payload.lane`. A row that carries `payload.observation` — a real scorecard,
+-- with ratings and evidence — but NEVER GOT a `payload.lane` key reads `lane = NULL`, and
+-- `NULL IS DISTINCT FROM 'observation'` is TRUE, so the floor INCLUDES it. It is then handed
+-- out by `scheduler:get_next` as ordinary claimable work.
+--
+-- That is how this was found: `scheduler:get_next { harness:'papercusp' }` served EI-17036, a
+-- `pot-coordination-health` scorecard emitted 2026-07-19 whose whole body is a ratings map. It
+-- is not work and cannot be "completed"; an agent claiming it can only release it again.
+--
+-- ── Population: 17 rows, closed set, no live writer ──────────────────────────────────────
+--
+-- Measured 2026-08-11 (workspace papercusp-workspace / harness papercusp, status open|todo):
+--
+--     payload ? 'observation' AND lane IS NULL   ->     17 rows  (14 kettle, 3 su)
+--     payload ? 'observation' AND lane='observation' -> 16,404 rows  (correctly excluded)
+--
+-- The 17 span 2026-07-13 .. 2026-07-25 and STOP there: every observation filed since carries
+-- `payload.lane`, so the writer that omitted it is already gone. This is residue, not a leak
+-- still filling. The backfill is therefore bounded and idempotent, and it is deliberately
+-- written to be safe even if the writer ever regresses (it is a WHERE, not a fixed id list).
+--
+-- ── Why this stamps the lane instead of closing the rows ─────────────────────────────────
+--
+-- ⚠ D-005 explicitly forbids retiring observations out of `status='open'`, and a prior agent
+-- was corrected for proposing exactly that sweep (EI-19948341159942256). An observation is not
+-- unfinished work that should be closed — it is a durable record the Observations pane and the
+-- Scout digest read, and those readers select on the lane, not on the status. So this migration
+-- changes NO row's status, assignee, or body. It adds one key, which makes each row what it
+-- always was: an observation. The rows keep their full lifecycle; they simply stop being
+-- offered to agents as claimable work.
+--
+-- Nothing here is destructive: it is an additive jsonb key on 17 rows, so no FORWARD-COMPAT
+-- acknowledgment is required — the currently-deployed release reads `lane` through the same
+-- generated column and gets the corrected value with no code change.
+
+-- `lane` is GENERATED ALWAYS — never written directly. Writing `payload.lane` is what moves it
+-- (migration 721's own COMMENT ON COLUMN says so), and the stored column follows in the same
+-- statement.
+--
+-- `payload || jsonb` is a shallow merge, so every existing key (observation, _ei, filedByRole,
+-- ideaLifecycle, _claimHold, paths, …) is preserved untouched.
+--
+-- The `NOT (payload ? 'lane')` guard makes this idempotent AND non-destructive in the one case
+-- that matters: a row that already carries a DIFFERENT lane is left alone rather than being
+-- silently relabelled as an observation.
+UPDATE harness_shared.work_items
+   SET payload = COALESCE(payload, '{}'::jsonb) || '{"lane":"observation"}'::jsonb
+ WHERE payload ? 'observation'
+   AND NOT (payload ? 'lane');

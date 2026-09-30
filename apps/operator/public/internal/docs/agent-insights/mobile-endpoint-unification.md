@@ -1,0 +1,72 @@
+# Mobile endpoints are a defineRoute flag, not a separate router
+URL: /internal/docs/agent-insights/mobile-endpoint-unification
+
+The mobile API moved off the bespoke _hono/mobile.ts router onto defineRoute under /api/device/* + a `cors: true` flag. Device JWTs resolve through requirePrincipal; isRevoked treats unknown devices as revoked, which bites synthetic test JWTs.
+
+## What changed
+
+The `/api/mobile/*` routes used to live in a bespoke Hono router
+(`_hono/mobile.ts`, \~1000 LOC, since deleted) with its own
+`cors()` block, its own `deviceAuth()` middleware, and lazy DDL. As of
+the endpoint-unification arc (`endpoint-unification-2026-05-21`) they are
+ordinary `defineRoute` modules under
+`packages/operator-core/lib/endpoint-route/routes/device/*.ts` — the URLs
+were renamed `/api/mobile/*` → `/api/device/*` (P2b) and the principal
+kind is `'device'`, not `'mobile'`.
+
+Making a route reachable from the paired phone is now one flag:
+
+```ts
+defineRoute({
+  method: 'GET',
+  path: '/device/whatever',
+  auth: DEVICE_AUTH,  // = { kind: ['device'] } — gate on the device-JWT principal
+  cors: true,         // mount the shared CORS allowlist
+  handler(req, ctx) { /* ctx.principal is the device */ },
+});
+// (a query-token route adds `tokenIn: ['query']`, e.g. routes/device/sync.ts)
+```
+
+`cors: true` mounts the shared CORS middleware (`corsFor` in
+`packages/operator-core/lib/endpoint-route/cors.ts` — tauri.localhost,
+localhost:\*, 127.0.0.1:\*, 10.0.2.2:\*) via `corsFor(def.cors?.origins)`.
+The device-JWT gate is the separate `auth: { kind: ['device'] }`
+requirement (the reusable `DEVICE_AUTH` constant in `routes/device/_shared.ts`).
+
+## Gotcha 1 — the device JWT is just a bearer
+
+A device JWT arrives as `Authorization: Bearer <jwt>` — the same
+header shape as an agent's `system`/`pi` bearer. The `/api/agent-tools/*`
+catch-all resolves principals with a **composite** resolver:
+`resolveBearer` (token\_index → agent) first, then `principalFromDeviceJwt`.
+One hook reaches both. A phone can therefore call any built-in
+`defineTool` directly; it no longer needs the `/voice-tool/:name` proxy.
+
+## Gotcha 2 — `isRevoked` treats an unknown device as revoked
+
+`principalFromDeviceJwt` (`packages/operator-core/lib/auth/principal/from-device-jwt.ts`)
+runs `isRevoked(claims.sub)` (parity with the
+old `deviceAuth()` middleware). `isRevoked` returns **`true` for any
+device not present in `harness_shared.mobile_devices`** — a valid
+signature is not enough; the device must be a known, paired,
+non-revoked row.
+
+Consequence for tests: a synthetic JWT minted with `signDeviceToken`
+for a device that was never `insertDevice`'d will (correctly) resolve to
+a **null principal**. Mock it:
+
+```ts
+vi.mock('../device-store', async (orig) => ({
+  ...(await orig<typeof import('../device-store')>()),
+  isRevoked: async () => false,
+}));
+```
+
+## Gotcha 3 — route-stack auth needs a DB; handler-direct tests don't
+
+Driving a `requirePrincipal`-gated route through `registerAllRoutes` +
+`app.request()` exercises the real resolver chain, which touches PG. In
+a no-DB test that throws (or flakily 500s). Either mock the auth/DB
+layer (the `auth.test.ts` pattern) or test the handler directly with a
+hand-built `RouteContext` (the `agent-tools-catchall.test.ts` pattern) —
+the latter is cleaner for verifying port fidelity.

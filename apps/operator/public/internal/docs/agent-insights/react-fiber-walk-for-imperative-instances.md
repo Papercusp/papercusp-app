@@ -1,0 +1,57 @@
+# Reaching an imperative library instance via React fiber walk
+URL: /internal/docs/agent-insights/react-fiber-walk-for-imperative-instances
+
+How to read a useRef-held instance (vditor, monaco, etc.) from a webview eval when the component doesn't expose it on window.
+
+When you need to drive an imperative library instance (vditor, monaco, codemirror, chart libs) from a webview eval — a spike, a debugging session, a `tauri-agent-tools` bridge call — the instance is usually held in `useRef<...>` inside the React wrapper component. It is **not on `window`**, has no global handle, and walking the DOM only gives you the host element.
+
+The trick: walk the React fiber from the host element up to the wrapper component, then read the hooks list. `useRef` stores its `{ current }` in the fiber's `memoizedState` linked list in source order.
+
+```js
+const el = document.querySelector('.vditor'); // or whatever host element
+const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+let fiber = el[fiberKey];
+
+// Walk up to the wrapper component (by name)
+while (fiber && (typeof fiber.type !== 'function' || fiber.type.name !== 'MarkdownEditor')) {
+  fiber = fiber.return;
+}
+
+// memoizedState is a linked list of hook state nodes, IN SOURCE ORDER:
+//   useRef    → { memoizedState: { current: ... } }
+//   useState  → { memoizedState: value, queue: ... }
+//   useEffect → { memoizedState: { tag, create, deps, ... } }
+// Walk .next from hook to hook.
+let hook = fiber.memoizedState;
+let i = 0;
+while (hook && i < 30) {
+  const ms = hook.memoizedState;
+  if (ms && typeof ms === 'object' && 'current' in ms && Object.keys(ms).length <= 2) {
+    console.log(i, 'ref →', ms.current?.constructor?.name, Object.keys(ms.current ?? {}));
+  }
+  hook = hook.next; i++;
+}
+```
+
+Once you see e.g. `1 ref → Vditor [isDestroyed, version, vditor]`, you have it: `fiber.memoizedState.next.memoizedState.current` is the Vditor instance. From there `instance.vditor.lute.SetJSRenderers({...})` works.
+
+## When to use this
+
+* **Spike work** where you need to call a method on the live instance before you wire it permanently. Right path for the P-001 vditor spike (see `plans-admin-ui-2026-05-20`).
+* **Debugging** "is this method even reachable / does it fire?" without writing throwaway production code.
+* **Eval-only contexts** (Playwright, dev-bridge, devtools console) where you cannot import the React ref.
+
+## When NOT to use this
+
+* **Production code paths.** Hooks-list ordering is React internals and could change between minor versions. For permanent integration, expose the instance via your own `useImperativeHandle` / `forwardRef` or pass a ref-setter prop.
+* **If the wrapper already exposes the instance** through an `onReady` callback or a context — use that. The fiber walk is a last resort.
+
+## Gotchas
+
+* Fiber-walk depth is brittle if the wrapper component renames change. The walk-by-`type.name` filter is reliable but breaks under prod minification — only do this in dev/Tauri-dev where names survive.
+* The hooks list reflects **call order**, not declaration order in code, but in practice for our wrappers they match. If you have a custom hook that internally calls more hooks, those land in the same flat list, in the order they ran.
+* Don't mutate the fiber. Only read.
+
+## Real use
+
+The P-001 spike in the Plans admin UI plan ran inline against the live `PlanEditor` using exactly this technique — no `editor-demo` round-trip needed, no spike-only test scaffold, no app rebuild. Drove the question from "unknown — needs spike" to "GREEN — D-003 primary path holds" in a single eval.

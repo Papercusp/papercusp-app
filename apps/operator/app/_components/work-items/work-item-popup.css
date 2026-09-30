@@ -1,0 +1,26 @@
+/* WorkItemPopupModal (chat-ref-pills-2026-07-26 P-008) — mirrors
+   apps/operator/app/_components/plans/plans-pane.css's `.plan-popup__*`
+   chrome (same token vocabulary: var(--fg)/--fg-mute/--border with the same
+   fallbacks) so the two popups read as a matched set. No `__title`/`__tabs`
+   here — WorkItemDetail renders its own id/title header and there is only
+   one view (no Sessions-style second tab), so this bar carries just the
+   close affordance. */
+
+.wi-popup { display: flex; flex-direction: column; }
+.wi-popup__header {
+  display: flex; align-items: center; justify-content: flex-end; flex: 0 0 auto;
+  padding: 7px 9px; border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+}
+.wi-popup__close {
+  flex: 0 0 auto; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px; cursor: pointer; font-size: 13px;
+  color: var(--fg-mute, #8a8a91); background: transparent; border: 1px solid transparent;
+}
+.wi-popup__close:hover { color: var(--fg, #e7e7ea); background: var(--bg-3, rgba(255, 255, 255, 0.06)); }
+/* WorkItemDetail (.pc-adv-detail) is height:100% + already self-scrolling
+   (.pc-adv-detail__body owns its own overflow:auto) — this wrapper only
+   needs to bound the height, not scroll a second time. */
+.wi-popup__body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.wi-popup__empty {
+  padding: 24px; text-align: center; font-size: 12.5px; color: var(--fg-mute, #8a8a91);
+}

@@ -1,0 +1,340 @@
+# Measuring payload-tier forced truncation and result-door spill
+URL: /internal/docs/agent-insights/measuring-payload-tier-forced-truncation-and-door-spill
+
+The telemetry for both truncation stages does not exist in tool_invocations — here is the method that actually works, and the measured 2026-08-02 numbers.
+
+Two separate stages can cut a tool result before it reaches an agent. They have
+very different recoverability, very different rates, and — the trap this page
+exists for — **neither is recorded in `tool_invocations`.**
+
+## The two stages are not the same thing
+
+|                            | payload-tier forced hard ceiling                 | result-door spill                        |
+| -------------------------- | ------------------------------------------------ | ---------------------------------------- |
+| threshold                  | 30,000 chars (`PAYLOAD_TIER_HARD_CEILING_CHARS`) | \~1500 tokens per result                 |
+| recoverable?               | **No** — content is dropped in memory            | **Yes** — full result written to scratch |
+| rate (measured 2026-08-02) | 939 fires / 7 days (\~134/day)                   | 68,649 spills / 24h                      |
+
+The lossy stage runs **before** the lossless one, so the door can only preserve
+what already survived — `result-door.ts:159-166` says so in its own comment.
+That ordering is real. What it is *not* is expensive: the irrecoverable stage
+fires roughly **500× less often** than the recoverable one.
+
+## Do not try to measure this from `tool_invocations`
+
+This is the expensive mistake, because the table looks like it should answer it.
+
+* `harness_shared.tool_invocations` has 30 columns and **none** records payload
+  projection or truncation.
+* `forced: true` is set on the response object in
+  `libs/generic/tooldef/src/payload-tier.ts:532,556` and otherwise emitted only
+  to a `console.warn`.
+* `result-door.ts` writes **no** durable telemetry row at all. Grep it for
+  insert/telemetry/metric and you get nothing.
+* `output_size` is not a usable proxy. Measured over 2 days: 1,413 recorded
+  calls, `output_size` 99.2% populated, but only **2** above the 30,000-char
+  ceiling — while **73,587** spill files sat on disk. The table under-records
+  real tool traffic by roughly **50×**.
+
+A query over `output_size` returns a well-formed, plausible, wrong answer. It
+will tell you truncation is nearly nonexistent.
+
+## The method that works
+
+The forced path emits a distinctive warn line at both sites, so the journal is a
+direct census:
+
+```bash
+journalctl --user -u papercup-dev-api --since '7 days ago' --no-pager \
+  | grep -c 'hard ceiling'
+
+# which tools hit it
+journalctl --user -u papercup-dev-api --since '7 days ago' --no-pager \
+  | grep 'hard ceiling' \
+  | sed -E 's/.*\[payload-tier\] ([^ ]+) .*/\1/' | sort | uniq -c | sort -rn
+```
+
+For the door, the durable record is the **filesystem**, not the database:
+
+```bash
+find ~/.papercusp/scratch -name 'result-door-*.md' | wc -l
+# by tool
+find ~/.papercusp/scratch/<workspace> -name 'result-door-*.md' \
+  | sed 's|.*/scratch/<workspace>/||; s|/.*||' | sort | uniq -c | sort -rn
+```
+
+## Measured distribution (2026-08-02)
+
+Forced hard-ceiling fires by tool, 7 days, `papercup-dev-api` (staging: 0):
+
+| tool                 | fires     | re-callable?               |
+| -------------------- | --------- | -------------------------- |
+| `coord:orient`       | 648 (69%) | yes — cheap wake bootstrap |
+| `work_items:observe` | 106       | yes                        |
+| `plans:get`          | 54        | yes                        |
+| `work_items:get`     | 38        | yes                        |
+| `work_items:list`    | 33        | yes                        |
+| `coord:presence`     | 13        | yes                        |
+| `work_items:claim`   | 11        | **no — side-effecting**    |
+| `facts:list`         | 8         | yes                        |
+| `fleet:assignments`  | 6         | yes                        |
+| `plans:items`        | 5         | yes                        |
+
+Only 1.2% of fires are on a side-effecting call. For everything else,
+re-calling with `payloadTier:'full'` is already the correct and cheapest
+recovery — which is why building a raw-payload mirror to invert the ladder was
+measured and **rejected**, not shipped.
+
+## The dominant spill source is one tool, and it is a write
+
+87% of all spill files (64,326 of 73,587) come from **`activity:report`** — the
+per-CLI hook ingest tool called on every tool call by every agent. Its own
+description says it is fire-and-forget and *"returns `{ ok, id }`"*. Measured
+response sizes across 64,380 spills: **median 202KB, p90 351KB, max 492KB**.
+
+Scratch sits at **13G** against a 24h GC retention
+(`scratch-gc.ts`, `RETENTION_MS = 24h`, DBOS-scheduled daily 03:00 behind
+`FLAGS.STORAGE_RETAIN_SCRATCH`), i.e. roughly 11G/day written for the response
+of a write-only telemetry call that nobody reads.
+
+If you are hunting spill volume, start there — not with the agents.
+
+## But is a spill ever READ? Measured: \~4% — and the method is not obvious
+
+Volume is the easy half. The question that decides whether spill-and-reference
+is a solved problem is whether agents actually page what the door wrote for
+them. Measured 2026-08-02 over a 36h window (`workspace_id='papercusp-workspace'`):
+
+|                                                                                                        | count                                                              |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| spills produced                                                                                        | 80,048                                                             |
+| …of which hook/standing tools nobody can page (`activity:report`, `facts:list`, `locks:check_command`) | 75,633 (94.5%)                                                     |
+| **agent-facing denominator**                                                                           | **4,415**                                                          |
+| distinct spills actually read                                                                          | \~195, by 45 distinct agents, 59 with an explicit `offset`/`limit` |
+| `payloadTier:'full'` re-calls (the pay-twice route)                                                    | 157, by 22 agents, across 12 tools                                 |
+
+**\~4.4% of agent-facing spills are ever paged; \~92% are abandoned outright —
+and agents re-run the tool at full tier almost as often as they page a copy
+already sitting on disk.**
+
+Read that as an **adoption/routing** failure, not a capability gap: 45 agents
+demonstrably know how to page a spill with a bounded read, so the mechanism
+works. The cause is that the footer advertises remedies that don't fit — `pipe`
+line-operators cannot reduce a one-line JSON body (see the column-cap section
+below for why every result is one line), and `projection` was unreachable from
+every schema-driven client until it was taught to accept a JSON string.
+
+### The method: the numerator is NOT in `tool_invocations` either
+
+The same trap as the rest of this page, one level deeper. A client-native
+`Read` of a spill file **never reaches `tool_invocations`** — it is a CLI-side
+tool. Counting `capability:read` alone finds 3 distinct spills and tells you
+paging is essentially nonexistent, which is wrong by \~60×.
+
+The route that works is the PreToolUse hook's own ingest rows, because they
+record every tool call *including client-native ones*:
+
+```sql
+SELECT args_json->>'tool_name' AS via_tool,
+       count(*)                        AS read_events,
+       count(DISTINCT args_json->'tool_input'->>'file_path') AS distinct_spills,
+       count(*) FILTER (WHERE args_json->'tool_input'->>'offset' IS NOT NULL) AS bounded
+FROM harness_shared.tool_invocations
+WHERE invoked_at > now() - interval '36 hours'
+  AND workspace_id = 'papercusp-workspace'      -- multi-tenant: always scope
+  AND tool_name = 'activity:report'
+  AND args_json->>'phase' = 'pre'
+  AND args_json->'tool_input'->>'file_path' LIKE '%result-door-%'
+GROUP BY 1 ORDER BY 2 DESC;
+```
+
+Native `Read` accounted for 186 of the \~195 distinct spills; `capability_read`
+for 3. Measure only the papercusp-side tool and you will conclude the feature is
+dead.
+
+Note also that `output_ref` is **NULL on all 324,661 invocations** in the
+window — the door still does not record its own spill — which is why the
+denominator has to come off the filesystem and the numerator out of a hook
+table. Populating `output_ref` at spill time would collapse this whole exercise
+into one join (filed as EI-19389431406847252).
+
+### ⚠ `atime` is NOT a shortcut here — it measures YOUR probe, not the agents
+
+The obvious cheap method is to ask the filesystem which spill files were read:
+`atime > mtime`. Run on this box it reports **99.348% read-after-write**, i.e.
+"spill is universally paged" — the exact opposite of the truth, stated with a
+precision that makes it very easy to believe.
+
+It was self-inflicted. Any earlier recursive grep over the home tree —
+e.g. `grep -rl '<pattern>' "$HOME" --include=*.md` — **reads every spill
+file**, because every spill is a `.md` under that tree, and stamps its `atime`.
+The measurement was of the measurer.
+
+The control that settles it, and which costs one command:
+
+```bash
+# a genuine no-read baseline: freshly written spills, before anything can touch them
+NOW=$(date +%s)
+find ~/.papercusp/scratch -name 'result-door-*.md' -printf '%A@ %T@\n' \
+  | awk -v now="$NOW" '($2 > now-90){ printf "delta=%+ds\n", $1-$2 }'
+# => delta=+0s on a clean corpus. Anything else means something read them.
+```
+
+Bucketing by file age makes the contamination visible directly: files younger
+than the contaminating grep read 82.7%, everything older 99.5% — a
+discontinuity at the moment the grep ran, which no real behavioural change
+would produce.
+
+**The generalisation, which has now cost this line of work three times:** a rate
+at either extreme (0% or \~100%) over a large N is an artifact until a control
+says otherwise, and **the first suspect is your own probe.** The sibling
+instances were a `projection` telemetry rate of 100%-invalid that was really a
+deploy boundary, and a `0 matches` grep in one file read as "the feature is
+unimplemented" when it lived in another. `atime` on a shared box that agents
+grep is not evidence.
+
+## A column cap does not transfer — check the line structure first
+
+OMP caps output at 512 columns so one very wide line cannot eat a whole budget.
+Measured against real spilled output here, 89.5% of agent-facing bytes lie
+beyond column 512 — which looks like overwhelming confirmation and is not.
+
+Every sampled spill file has **exactly 10 lines, exactly one of which exceeds
+512 chars, and it begins `{"ok":true,...`**. The width is not a pathological
+wide line among normal ones; it is the serialized JSON result on a single line.
+A 512-column cap applied there would not make a wide line harmless — it would
+truncate every result to 512 characters.
+
+The cap only means anything where output is genuinely line-oriented text:
+
+| surface           | lines >512 | bytes beyond col 512 | max line |
+| ----------------- | ---------- | -------------------- | -------- |
+| `capability:bash` | 1.0%       | 28.4%                | 13,741   |
+| `logs:read`       | 0.6%       | 46.0%                | 23,787   |
+| `sessions:read`   | 26.5%      | 47.4%                | 1,625    |
+| `capability:read` | 0.1%       | 1.8%                 | 2,051    |
+
+On `capability:bash` and `logs:read` the OMP pattern is real — \~1% of lines
+carry 28–46% of the bytes. But those surfaces produced 29 and 4 spill files
+respectively against `activity:report`'s 64,326, so a cap there is correct and
+almost irrelevant to total volume. Fix the 202KB write-tool response first.
+
+**The general lesson:** a headline percentage far outside its expected range is
+usually telling you something about the measurement's definition, not about the
+system. Check the line/record structure before porting a mechanism that assumes
+one.
+
+## Which truncation is machine-readable
+
+Three distinct truncation paths reach an agent, and they differ:
+
+| path                    | signal                                                                 | recoverable by paging the spill? |
+| ----------------------- | ---------------------------------------------------------------------- | -------------------------------- |
+| payload-tier projection | **structured** — `_meta.payloadProjection` (`serialize-result.ts:241`) | no                               |
+| result-door own cut     | **structured** — `_meta.resultDoor`                                    | yes                              |
+| tool's own field cutoff | prose only — regex-detected `"*_truncated": true`                      | no                               |
+
+The door already branched structurally on the upstream `payloadProjection`
+marker (`result-door.ts:181`) while announcing **its own** cut only in the
+`[result-door: …]` prose footer — so the highest-frequency truncation path on
+the box was the one a consumer could detect only by string-matching English.
+That asymmetry is now closed: the door stamps `_meta.resultDoor`
+(`truncated`, `spillPath`, `spillUri`, `originalChars`, `doorTokens`,
+`upstreamProjected`, `innerTruncationMarkers`) alongside the footer.
+
+The prose stays. It is what teaches the reader the knob that would have
+prevented the truncation; the structured marker is what lets code branch on it.
+
+The third row is architectural rather than an oversight: each tool bakes its own
+field-level cutoff into the body it serializes, so there is no shared marker to
+stamp (EI-18745696571494110). Both non-recoverable rows mean the same thing for
+a reader — **do not page the spill, re-call the tool** with `payloadTier:'full'`
+or a wider per-field limit.
+
+## Zoom out before optimising: spill is not where the tokens are
+
+Everything above measures one stage. Before spending effort on it, measure the
+whole window — because the answer changed what the plan that produced this doc
+was willing to build.
+
+Measured 2026-08-03 over 6 days of raw transcript JSONL (590 files, 266,544
+lines, 0 unparseable), **\~49.4M estimated tokens into context**; per session
+p50 76,446 · p90 127,312 · max 2.75M:
+
+| source                          | est. tokens |     share |
+| ------------------------------- | ----------: | --------: |
+| `tool_result`                   |  30,277,398 | **61.3%** |
+| `tool_use` (the ARGS we send)   |  12,547,035 | **25.4%** |
+| `text` (user + assistant prose) |   3,490,285 |     7.07% |
+| `thinking`                      |   3,078,506 |     6.23% |
+
+And inside `tool_result`, two **client-side** tools dominate:
+
+| tool                              |  calls | est. result tokens | share of `tool_result` | avg chars |
+| --------------------------------- | -----: | -----------------: | ---------------------: | --------: |
+| `Read`                            |  5,397 |         11,949,446 |             **39.47%** |     8,856 |
+| `Bash`                            | 23,837 |          7,490,553 |             **24.74%** |     1,257 |
+| largest MCP tool (`tools:invoke`) |  1,714 |            984,345 |                  3.25% |     2,297 |
+
+`Read` + `Bash` = **64.2%** of all `tool_result` tokens — larger than every
+papercusp MCP tool combined (\~36%). The payload-tier ceiling, the result door,
+`projection` and the spill store run on **none** of it. Two consequences worth
+carrying:
+
+* Work aimed at shrinking MCP tool results is optimising the minority share.
+  The cheapest personal levers are the boring ones: `capability:read` with
+  `offset`/`limit` instead of a whole-file `Read`, and one `code:run` instead of
+  N `Bash` round-trips.
+* `tool_use` is **25.4%** of all context and nothing measures it. The two
+  largest argument payloads are `work_items:checkpoint` (2.34M chars) and
+  `coord:send` (2.16M chars) — the durable notes and messages we *write* cost
+  more context than most results we read.
+
+Reproduce: `node scripts/measure-context-token-baseline.mjs 6` (writes
+`byKind`, `topToolsByResultChars` and `doorFooters` as JSON).
+
+### ⚠ Do NOT re-derive this from `harness_shared.session_turn_parts`
+
+That table looks purpose-built for it — it carries `speaker`, `part_kind`,
+`tool_name`, `text` — and it is wrong for this measurement.
+`search/session-ingest.ts` caps every part at `PART_TEXT_CAP = 2000` chars. The
+cap is correct for its own job (faithful *render* of recent sessions) and it
+clips exactly the category you are trying to measure: the ingester's own comment
+puts `tool_result` at 218 MB raw against text's 21 MB and says capping at 2k
+"recovers 61% of it". A decomposition read off that table understates
+`tool_result` by roughly an order of magnitude **while looking entirely
+plausible** — the capped run reported 51.7%, which is a believable number.
+
+The tell was cheap and general: `max(length(text))` was **2,026** across 244,738
+rows. **A distribution that stops dead is a cap, not a population.** Check the
+max of any text column against its plausible max before trusting an aggregate
+over it.
+
+## The spill footer is emitted \~2,600 times per 6 days — so measure its wording
+
+Of those 2,599 doored results, **2,146 (82.6%) had a JSON body**, 451 (17.4%)
+multi-line text, 2 single-line. (Shape is classified from the *kept* head, since
+the transcript holds the doored text — leading `{` or `[` after trim.)
+
+That distribution is why the footer is now a function of the payload rather than
+a constant: `pipe` line-operators cannot reduce a one-line JSON body — `head n:3`
+returns the whole array and a non-matching `grep` returns an **empty** body,
+which reads exactly like a filter that worked. Only `pick` reduces it. The old
+constant led with `pipe` on five out of six doored results.
+
+The part worth generalising is the *cost* discipline, not the wording:
+
+|                               |                                            chars |
+| ----------------------------- | -----------------------------------------------: |
+| retired constant              |                                              420 |
+| first replacement, as written |                                          **570** |
+| over the same 6d corpus       | **+376,173 chars ≈ +94,043 est. tokens, +34.5%** |
+| after trimming, JSON variant  |                                              356 |
+| net over the same corpus      | **−135,018 chars ≈ −33,754 est. tokens, −12.4%** |
+
+The first cut was authored with a plausible argument for why it must be smaller
+(it dropped an irrelevant operator list) and was recorded as "context cost went
+down" in a plan decision *before anyone measured it*. It was 34.5% bigger. Any
+string on a per-call path is a multiplied cost: **measure a wording change on
+that path, do not eyeball it** — `buildProjectionHint` in
+`packages/operator-core/lib/result-door.ts` carries a budget note saying so.

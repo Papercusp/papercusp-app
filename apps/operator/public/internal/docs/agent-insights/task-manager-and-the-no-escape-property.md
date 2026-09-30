@@ -1,0 +1,135 @@
+# The task manager — what is running, who asked for it, and why nothing escapes
+URL: /internal/docs/agent-insights/task-manager-and-the-no-escape-property
+
+How the cgroup-confined task ledger classifies nested managed scopes, preserves fail-open enrollment, redacts public diagnostics, and — since 2026-08-25 — enforces on exactly one class via the agent-session reaper.
+
+# The task manager, and the no-escape property
+
+**TL;DR** — `processes:list` tells you who launched a process, for which work item, under what budget, and what it costs. `ps` cannot answer those questions. End a managed task with `processes:kill { taskId }`, never with a process-name pattern.
+
+## The one idea
+
+Cgroup membership is inherited by every descendant, and an unprivileged process cannot leave its cgroup. Operator-owned roots launch in a transient `pc-<taskId>.scope` under `papercusp.slice`; descendants remain in that subtree even when a build tool creates a nested scope such as `pc-<taskId>.scope/papercusp-deb-build-*.scope`.
+
+The reconciler therefore resolves the **nearest valid `pc-*` ancestor**, scanning from the leaf toward the slice root. Looking only at the leaf falsely reports nested build descendants as unaccounted.
+
+A managed scope name carries the ledger key, but it proves only managed launch provenance. It does **not** prove a ledger row was ever committed: synchronous enrollment chooses the task id and launches the scope before its fire-and-forget database write settles.
+
+## What you actually use
+
+| You want                                      | Call                                                |
+| --------------------------------------------- | --------------------------------------------------- |
+| What is running and why                       | `processes:list`                                    |
+| Cross-check the ledger against the kernel now | `processes:list { live: true }`                     |
+| What a work item cost                         | `processes:list { workItemId, includeEnded: true }` |
+| End one task and its whole subtree            | `processes:kill { taskId }`                         |
+| Relieve pressure without losing work          | `processes:freeze { taskId }` and `resume: true`    |
+| Cap a runaway without killing it              | `processes:limit { taskId, memoryMaxMb }`           |
+| Human surface                                 | `/admin/tasks`                                      |
+
+## Reading process provenance
+
+The public process view uses four evidence-based buckets:
+
+* **managed** — a live ledger row owns the process.
+* **unaccounted** — the process is in a managed `pc-*` scope but no live ledger row currently owns it.
+* **abandoned window** — a task-shaped process is outside any managed task scope and is old enough to merit investigation.
+* **exempt** — visible host activity that is not owned by the task manager.
+
+Do not rewrite these as lifecycle claims. In particular, `unaccounted` does not mean the row definitely existed and outlived the scope. It can also mean the enrollment write failed after scope launch. These buckets are report-only for the general population: the alarm describes, it does not kill. The one exception is the agent-session reaper below, which acts on a single class and leaves every other bucket untouched.
+
+A process started by hand may appear as foreign or exempt. For a general host process list, use `ps` or `pgrep`; for the tracked agent kinds, use `dev:processes`.
+
+## Enforcement: the agent-session carve-out
+
+D-010 of `task-manager-no-escape-2026-07-27` made the reconciler report-only, on the stated precondition that classification first prove itself right over a sustained window. That precondition was met by the censuses this same routine had already been running, and after a third accumulation of process residue the owner directed enforcement. Since 2026-08-25 the reconciler kills — but only in one narrow lane (`agent-session-scope-reaper-2026-08-25`, D-001).
+
+**The carve-out is `class='agent-session'` rows and nothing else.** Every other class, and every other bucket above, stays report-only. Two conditions are reaped:
+
+* **terminal residue** — a ledger-terminal row whose scope still holds pids, ended at least 10 minutes ago and log-quiet at least 30 minutes. Those delays are a carry-respawn guard: respawns reuse their scope, so a shorter window kills a session that is about to come back.
+* **quiet zombie** — a ledger-running row that is log-quiet at least 6 hours and has no fresh `coord_presence` heartbeat.
+
+The rails are all load-bearing:
+
+* `isAutoReapExempt` is honored (terminal-psu-session-enrolment D-001), so an owner terminal is never a candidate.
+* The quiet class disables itself entirely when the census or the presence read degrades. A degraded read is not evidence of quiet.
+* A per-tick cap of 12, so a systematic misjudgment cannot clear the fleet before anyone notices.
+* Log tails are archived under `~/.papercusp/reap-archive/` before every kill.
+* Kill switch `papercusp-task-reaper`, default ON, explicit OFF honored.
+
+**CPU is not an activity signal here.** An idle codex session spins at roughly 8% (EI-21417256075155406), so a busy-looking process proves nothing about progress. Log mtime and the presence heartbeat are the discriminators.
+
+### Addressability comes from the cgroup tree, never from `cgroup_path`
+
+`task_ledger.cgroup_path` records the cgroup observed at *enrollment*. It is stale for roughly 30% of agent-session rows: measured 2026-08-25, 28 of 94 rows recorded the operator's own `papercup-bg-host.service` cgroup while the row claimed `confined: true` — and 27 of those 28 pids were alive, each in its own correct scope.
+
+Trusting it fails in **both** directions, which is why a single guard could not fix both. Reading pids through it counts the operator's own processes as a dead session's survivors; that produced a pass selecting 12 scopes which never existed and failed 0 of 12, once every five minutes for an hour. Filtering on it excludes genuine residue whose scope is real.
+
+So addressability and pid counting resolve from `row.scopeUnit` via `scopeCgroupRelPath(...)` to `absCgroupDir` — from the cgroup tree itself (D-002). A phantom scope is simply absent, reads a real zero, and is skipped, so no stop is ever attempted against something that does not exist; a real scope is judged on the normal discriminators regardless of what the ledger recorded. `reaper.test.ts` pins the **hazard** rather than the mechanism: two rows differing only in `cgroup_path` must decide identically, so reintroducing any `cgroup_path`-derived filter or pid source fails the suite.
+
+Verify a derivation like this *before* deploying it, because its failure mode is silent: a wrong path makes every scope read absent, the reaper reaps nothing, and the pass looks clean.
+
+### The floor alarm
+
+After each pass the reconciler records `residualAfterPass` — residue still standing once the reaper has had its turn — into a `reaper_floor` ring, and `evaluateReaperFloor` fires on a **sustained non-zero** floor across three consecutive censuses. Deliberately not a growth test: the incident this closed was a flat 12 that never grew, and for a metric whose healthy value is zero, growth is formally unreachable. It raises an escalation rather than a message, because the report-only era established that a message is something a fleet learns to scroll past.
+
+## Ledger states
+
+`pending` means registered but not yet spawned. `running` means alive and accounted for. `exited`, `killed`, and `timed_out` are observed terminal states.
+
+`stranded` is intentionally distinct: the ledger said running but the kernel disagreed, and no trustworthy exit code was observed. The system must not manufacture a clean completion from absence.
+
+Note that `running` is a *ledger* claim, not a process-liveness claim. A row can sit at `running` long after its scope is gone, so a census reporting N live agent-session tasks is reporting live **rows**. Do not read it as process residue without resolving the scope.
+
+## Adding a spawn
+
+A `detached: true` spawn creates a process intended to outlive its caller, so `lint:no-unenrolled-spawn` requires one of the maintained chokepoints:
+
+* async seam: `managedSpawn`;
+* sync seam: `beginSyncEnrolment` plus `completeSyncEnrolment` and `finishSyncEnrolment`.
+
+Sync enrollment remains fail-open because task tracking must never prevent the requested command from running. A failed asynchronous ledger write is nevertheless logged once with bounded task/error context; swallowing it would make the resulting unaccounted scope impossible to diagnose.
+
+A genuinely external lifetime must be added to the static guard allowlist with a reason. Silent unenrollment is not an option.
+
+## Public diagnostic safety
+
+Task-manager payloads can contain `/proc` command lines and upstream error text. Those strings may carry API keys, bearer tokens, or secret-directed flags. The inventory projection applies the shared `redactSensitiveText` contract **before** display caps to process command lines, task titles, exit reasons, log paths, reconcile errors, and schedule errors. Truncating first can preserve a secret while deleting the context that identified it.
+
+UI components must render only the safe inventory projection; they must not read or reconstruct raw process diagnostics.
+
+## Why the reconciler sometimes declines to act
+
+`reconcileTick` refuses absence-based transitions when the owned scan is untrustworthy, including a missing cgroup root or owned-pass truncation. A bad scan is indistinguishable from an idle box and could otherwise strand every task at once. Positive confirmations are still recorded because presence remains trustworthy.
+
+Foreign-pass truncation does not degrade the ledger verdict. Display-only host activity must never disable the correctness path.
+
+## Recurrence guards
+
+The release contract is pinned by tests for:
+
+* nearest managed ancestor resolution and nested descendant matching;
+* managed-scope residue wording without invented row history;
+* fail-open enrollment plus an observable write-failure diagnostic;
+* all four public provenance buckets and accessible labels;
+* credential redaction in process and schedule payloads before rendering;
+* the static unenrolled-spawn guard;
+* the reap decision function, falsifiably — a control case per spared class (parked-fresh, live-service-held, too-young) and a caught case per reaped class;
+* the `cgroup_path`-independence invariant (D-002), which fails if addressability is ever re-derived from the ledger column.
+
+Run the task-manager Vitest suites, exact TypeScript ratchets for touched packages, `npm run lint:no-unenrolled-spawn`, and the operator production build before release. Browser verification must cover `/admin/tasks` plus the advanced Tasks roster.
+
+## Where it lives
+
+* Ledger: `harness_shared.task_ledger`
+* Core: `packages/operator-core/lib/task-manager/`
+* Reaper: `packages/operator-core/lib/task-manager/reaper.ts`, wired in `harness/routines/task-reconcile-action.ts`
+* Reap archive: `~/.papercusp/reap-archive/`
+* Kill switch: `papercusp-task-reaper` (default ON)
+* Shared redaction: `packages/operator-core/lib/sensitive-text.ts`
+* Public projections: `inventory.ts`, `TasksClient.tsx`, and `TasksRosterPanel.tsx`
+* Cadence: `system:task-reconcile`, tier `ephemeral`, every 30 seconds
+* Guard: `npm run lint:no-unenrolled-spawn`
+* Original implementation plan: `task-manager-no-escape-2026-07-27`
+* Public-release audit: `task-manager-public-release-readiness-2026-08-11`
+* Enforcement plan: `agent-session-scope-reaper-2026-08-25`

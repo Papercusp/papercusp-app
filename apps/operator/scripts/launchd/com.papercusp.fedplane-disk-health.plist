@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.papercusp.fedplane-disk-health.plist — macOS launchd equivalent of
+  papercup-fedplane-disk-health.{service,timer} (EI-8982).
+
+  Runs papercup-fedplane-disk-health-check.sh every 5 minutes on a fed-plane
+  Mac host (e.g. the Mac VM whose 100%-full Data volume caused the P-059
+  cause #9 silent wedge on 2026-07-10). Detection + escalation ONLY — see the
+  script's own header for the full rationale (mirrors the systemd unit's
+  posture 1:1).
+
+  Install (per-user agent, NOT a system daemon — runs as the papercusp
+  operator's own user, matching the systemd --user posture):
+    mkdir -p ~/Library/LaunchAgents
+    # Edit the REPO_ROOT placeholder below to this machine's actual checkout
+    # path, then:
+    cp com.papercusp.fedplane-disk-health.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.papercusp.fedplane-disk-health.plist
+    launchctl enable gui/$(id -u)/com.papercusp.fedplane-disk-health
+
+  Verify:
+    launchctl print gui/$(id -u)/com.papercusp.fedplane-disk-health
+    cat ~/.papercusp/fedplane-disk-health/*  # dedup markers, if any fired
+    tail -f /tmp/papercup-fedplane-disk-health.log
+
+  Manual run (bypasses the schedule, files a real EI on failure):
+    launchctl kickstart -k gui/$(id -u)/com.papercusp.fedplane-disk-health
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.papercusp.fedplane-disk-health
+    rm ~/Library/LaunchAgents/com.papercusp.fedplane-disk-health.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.papercusp.fedplane-disk-health</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <!-- REPLACE with this machine's actual repo checkout path. -->
+    <string>/REPO_ROOT/apps/operator/scripts/papercup-fedplane-disk-health-check.sh</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <!-- Don't pile up runs if the box was asleep — a fresh probe on next wake
+       is what matters, same "no catch-up" posture as the systemd timer's
+       Persistent=false. -->
+  <key>StartOnMount</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/papercup-fedplane-disk-health.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/papercup-fedplane-disk-health.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__REPLACE_WITH_HOME__</string>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "vitest": false,
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.mjs"],
+      "project": ["scripts/**/*.mjs"]
+    },
+    "apps/operator": {
+      "vitest": false,
+      "entry": [
+        "app/**/*.{ts,tsx}",
+        "lib/**/*.{ts,tsx}",
+        "vitest.config.ts",
+        "vitest.integration.config.ts",
+        "test/**/*.{ts,tsx}",
+        "vitest-shims/**/*.{ts,tsx}",
+        "**/*.test.{ts,tsx}",
+        "**/*.spec.{ts,tsx}",
+        "*.bench.ts"
+      ]
+    },
+    "apps/operator-vite": {
+      "ignoreDependencies": [
+        "lodash",
+        "marked",
+        "react-responsive-carousel"
+      ]
+    },
+    "libs/**": {
+      "entry": [
+        "src/index.{ts,tsx}",
+        "src/**/*.test.{ts,tsx}",
+        "src/**/*.spec.{ts,tsx}",
+        "src/**/*.property.test.{ts,tsx}",
+        "vitest.config.ts"
+      ]
+    },
+    "packages/operator-core": {
+      "vitest": false,
+      "entry": [
+        "lib/**/*.{ts,tsx}",
+        "test/**/*.{ts,tsx}",
+        "vitest.config.ts",
+        "**/*.test.{ts,tsx}",
+        "**/*.spec.{ts,tsx}"
+      ]
+    },
+    "packages/*": {
+      "entry": [
+        "src/index.{ts,tsx}",
+        "src/**/*.test.{ts,tsx}",
+        "examples/**/*.ts",
+        "vitest.config.ts"
+      ]
+    }
+  },
+  "ignoreDependencies": [
+    "@papercusp/test-config",
+    "tsconfig-paths",
+    "vite-tsconfig-paths"
+  ],
+  "ignore": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "libs/papercusp/**"
+  ]
+}

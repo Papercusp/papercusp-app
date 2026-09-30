@@ -1,0 +1,16 @@
+{
+  "ref": "papercusp-app",
+  "id": "papercusp-app",
+  "title": "Papercusp Official: App",
+  "description": "Whole-app template: a complete app on the papercusp data layer + operator-style UI closure, with a `target` decision point for desktop, web, or both. Answer `agents: pots` to add the canonical plan/work-item/stable-agent execution plane through papercusp-ops-pots. Docs: /internal/docs on your install.",
+  "category": "app",
+  "scope": "app",
+  "version": "0.1.0",
+  "source": "first-party",
+  "aliases": [
+    "papercusp-webapp",
+    "papercusp-desktop-app",
+    "papercusp-agentic-webapp",
+    "papercusp-agentic-desktop-app"
+  ]
+}

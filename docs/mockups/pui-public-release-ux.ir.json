@@ -1,0 +1,429 @@
+{
+  "irVersion": "0.1",
+  "surface": "pui-public-release-ux",
+  "ecosystem": "ratatui",
+  "layout": {
+    "kind": "stack",
+    "direction": "vertical",
+    "children": [
+      {
+        "kind": "header",
+        "children": [
+          {
+            "kind": "heading",
+            "copy": {
+              "key": "pui.chat.title",
+              "default": "Agent Chat"
+            }
+          },
+          {
+            "kind": "text",
+            "binding": {
+              "slot": "selectedSession.identity",
+              "shape": "SuSessionIdentity"
+            }
+          },
+          {
+            "kind": "badge",
+            "binding": {
+              "slot": "selectedSession.lifecycle",
+              "shape": "SuSessionLifecycle"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "grid",
+        "children": [
+          {
+            "kind": "stack",
+            "direction": "vertical",
+            "children": [
+              {
+                "kind": "list",
+                "binding": {
+                  "slot": "selectedConversation.transcript",
+                  "repeats": true,
+                  "shape": "AgentChatTranscriptEntry"
+                },
+                "item": {
+                  "kind": "card",
+                  "interactions": [
+                    "focus-transcript-entry",
+                    "open-diff",
+                    "copy-rendered",
+                    "copy-raw"
+                  ]
+                },
+                "emptyState": {
+                  "kind": "empty-state",
+                  "copy": {
+                    "key": "pui.chat.empty",
+                    "default": "No messages yet — press i to start."
+                  }
+                }
+              },
+              {
+                "kind": "card",
+                "binding": {
+                  "slot": "selectedConversation.blockingCard",
+                  "shape": "InteractiveCard"
+                },
+                "interactions": [
+                  "answer-question",
+                  "approve-once",
+                  "deny"
+                ]
+              },
+              {
+                "kind": "form",
+                "binding": {
+                  "slot": "selectedConversation.draft",
+                  "shape": "ComposerDraft"
+                },
+                "interactions": [
+                  "edit-message",
+                  "insert-newline",
+                  "open-attachment-picker",
+                  "send-once",
+                  "preserve-draft"
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "stack",
+            "direction": "vertical",
+            "children": [
+              {
+                "kind": "card",
+                "title": {
+                  "key": "pui.context.title",
+                  "default": "Context"
+                },
+                "binding": {
+                  "slot": "selectedConversation.context",
+                  "shape": "ConversationContextProjection"
+                }
+              },
+              {
+                "kind": "list",
+                "title": {
+                  "key": "pui.tasks.title",
+                  "default": "Tasks"
+                },
+                "binding": {
+                  "slot": "selectedConversation.context.tasks",
+                  "repeats": true,
+                  "shape": "SessionTask"
+                },
+                "item": {
+                  "kind": "card",
+                  "interactions": [
+                    "add-task",
+                    "edit-task",
+                    "start-task",
+                    "complete-task",
+                    "block-task",
+                    "unblock-task",
+                    "reopen-task",
+                    "reorder-task",
+                    "drop-task",
+                    "promote-task"
+                  ]
+                },
+                "emptyState": {
+                  "kind": "empty-state",
+                  "copy": {
+                    "key": "pui.tasks.empty",
+                    "default": "No tasks yet. Press a to add one."
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "responsive": {
+          "terminal.wide": {
+            "minColumns": 160,
+            "minRows": 24,
+            "layout": "chat-plus-context",
+            "contextColumns": 40
+          },
+          "terminal.compact": {
+            "minColumns": 80,
+            "minRows": 20,
+            "layout": "one-surface-at-a-time",
+            "contextRoute": "ctrl-t",
+            "chatRoute": "o"
+          },
+          "terminal.too-small": {
+            "layout": "blocking-resize-message",
+            "copy": "Terminal too small — resize to at least 80×20. Your session and draft are safe."
+          }
+        }
+      },
+      {
+        "kind": "text",
+        "copy": {
+          "key": "pui.global.help",
+          "default": "o Agent Chat · Ctrl-T Context · Ctrl-S Sessions · : commands · ? help"
+        }
+      }
+    ]
+  },
+  "components": [],
+  "tokens": {
+    "uses": []
+  },
+  "states": {
+    "first-run": {
+      "kind": "stack",
+      "direction": "vertical",
+      "children": [
+        {
+          "kind": "heading",
+          "copy": {
+            "key": "pui.setup.title",
+            "default": "Set up Papercusp"
+          }
+        },
+        {
+          "kind": "form",
+          "binding": {
+            "slot": "newSession.context",
+            "shape": "ProjectEndpointSelection"
+          },
+          "interactions": [
+            "select-project",
+            "validate-endpoint",
+            "continue"
+          ]
+        },
+        {
+          "kind": "form",
+          "binding": {
+            "slot": "newSession.runtime",
+            "shape": "SuRuntimeSelection"
+          },
+          "interactions": [
+            "select-engine",
+            "select-account",
+            "select-model",
+            "select-effort",
+            "select-mode"
+          ]
+        },
+        {
+          "kind": "card",
+          "binding": {
+            "slot": "newSession.review",
+            "shape": "SuLaunchReview"
+          }
+        },
+        {
+          "kind": "button",
+          "label": {
+            "key": "pui.setup.start",
+            "default": "Start session"
+          },
+          "interactions": [
+            "start-su-session"
+          ]
+        }
+      ]
+    },
+    "session-picker": {
+      "kind": "stack",
+      "direction": "vertical",
+      "children": [
+        {
+          "kind": "heading",
+          "copy": {
+            "key": "pui.sessions.switcher",
+            "default": "Sessions · fuzzy live + parked + ended + recorded"
+          }
+        },
+        {
+          "kind": "list",
+          "binding": {
+            "slot": "sessions.matches",
+            "repeats": true,
+            "shape": "SessionRoute"
+          },
+          "item": {
+            "kind": "card",
+            "interactions": [
+              "attach-session",
+              "focus-session",
+              "resume-session",
+              "rename-session",
+              "archive-session",
+              "new-su-session"
+            ]
+          },
+          "emptyState": {
+            "kind": "empty-state",
+            "copy": {
+              "key": "pui.sessions.empty",
+              "default": "No sessions match this filter."
+            }
+          }
+        }
+      ]
+    },
+    "settings-palette": {
+      "kind": "stack",
+      "direction": "vertical",
+      "children": [
+        {
+          "kind": "form",
+          "binding": {
+            "slot": "sessionConfig.liveOptions",
+            "shape": "SessionConfigMenu"
+          },
+          "interactions": [
+            "select-conversation",
+            "select-model",
+            "select-effort",
+            "select-account",
+            "select-mode"
+          ]
+        },
+        {
+          "kind": "list",
+          "binding": {
+            "slot": "commandPalette.matches",
+            "repeats": true,
+            "shape": "CommandOrToolMatch"
+          },
+          "item": {
+            "kind": "card",
+            "interactions": [
+              "preview-command",
+              "run-command"
+            ]
+          }
+        }
+      ]
+    },
+    "approval": {
+      "kind": "card",
+      "binding": {
+        "slot": "selectedConversation.pendingApproval",
+        "shape": "CorrelatedApproval"
+      },
+      "children": [
+        {
+          "kind": "button",
+          "label": {
+            "key": "pui.approval.allow-once",
+            "default": "Allow once"
+          },
+          "interactions": [
+            "approve-once"
+          ]
+        },
+        {
+          "kind": "button",
+          "label": {
+            "key": "pui.approval.deny",
+            "default": "Deny"
+          },
+          "interactions": [
+            "deny"
+          ]
+        }
+      ]
+    },
+    "error-recovery": {
+      "kind": "banner",
+      "binding": {
+        "slot": "selectedSession.reconciliation",
+        "shape": "SuSessionRuntimeReconciliation"
+      },
+      "copy": {
+        "key": "pui.recovery.uncertain",
+        "default": "Delivery is uncertain — reconciling before retry."
+      },
+      "children": [
+        {
+          "kind": "button",
+          "label": {
+            "key": "pui.recovery.resume",
+            "default": "Resume"
+          },
+          "interactions": [
+            "resume-or-reattach"
+          ]
+        },
+        {
+          "kind": "button",
+          "label": {
+            "key": "pui.recovery.fork",
+            "default": "Continue in new session"
+          },
+          "interactions": [
+            "fork-session"
+          ]
+        }
+      ]
+    },
+    "attachment-picker": {
+      "kind": "list",
+      "binding": {
+        "slot": "selectedProject.attachments",
+        "repeats": true,
+        "shape": "ProjectAttachment"
+      },
+      "item": {
+        "kind": "card",
+        "interactions": [
+          "select-attachment",
+          "remove-attachment"
+        ]
+      },
+      "emptyState": {
+        "kind": "empty-state",
+        "copy": {
+          "key": "pui.attachments.empty",
+          "default": "No project files match this filter."
+        }
+      }
+    },
+    "about-support": {
+      "kind": "stack",
+      "direction": "vertical",
+      "children": [
+        {
+          "kind": "card",
+          "binding": {
+            "slot": "installedPui.identity",
+            "shape": "InstalledArtifactIdentity"
+          }
+        },
+        {
+          "kind": "menu",
+          "interactions": [
+            "check-for-updates",
+            "update",
+            "rollback",
+            "preview-diagnostics",
+            "uninstall"
+          ]
+        }
+      ]
+    },
+    "too-small": {
+      "kind": "empty-state",
+      "copy": {
+        "key": "pui.terminal.too-small",
+        "default": "Terminal too small — resize to at least 80×20. Your session and draft are safe."
+      }
+    }
+  },
+  "a11y": {
+    "landmark": "main",
+    "headingLevel": 1
+  }
+}

@@ -1,0 +1,226 @@
+# Driving the autonomous pot loop — health-check + schema runbook
+URL: /internal/docs/agent-insights/driving-the-autonomous-pot-loop
+
+The 6-link health-check, exact tool names/args, force-tick + reset-circuit commands, a verified schema cheat-sheet, and the bg-host-drops-MCP→psql gotcha for any agent monitoring/improving the autonomous pot loop.
+
+:::danger\[SUPERSEDED — this loop no longer runs. Do not use it as a health-check runbook.]
+The `mug ─► cup` forward half described below was **retired 2026-08-09** (owner-directed).
+While `papercusp-mug-kettle-system` is OFF — the delivered end state, not a pending flip —
+no Mug wakes, no cup can be spawned, and **Links 3 and 4 of the 6-link check below can
+never be green**. An agent set on "monitor the loop until it's reliable" is monitoring
+something that is off on purpose. See
+[the Mug · Kettle · Cup tier is retired](/agent-insights/mug-kettle-cup-tier-is-retired).
+
+**What survives, and is still accurate:** Scout (and Blender) run UNGATED, so the
+`observation ─► scout ─► route` half of the diagram is live. The schema cheat-sheet, the
+tool names/args, the force-tick and reset-circuit commands, and the
+bg-host-drops-MCP→psql gotcha are all still correct and are why this page is kept rather
+than deleted. Scout's three Mug-consuming watchdogs were retargeted to deliver to a live
+su instead (plan `retire-mug-kettle-su-only-2026-08-09`, P-034).
+
+**What replaced the driving half:** su + GOAL mode. `loop:arm` + `coord:orient` is the
+cadence wake; `fleet:launch-on-plan` is the placement mechanism.
+:::
+
+The autonomous **pot loop** is Papercusp dogfooding itself: the system generates its own
+work, places it, does it, and learns from it — with no human in the cycle. If you are the
+agent set on "monitor + improve the loop until it's reliable," this is your runbook. It
+exists because the same handful of schema-guesses and wrong tool names have burned multiple
+sessions **hours** of avoidable rework (audit 2026-07-01, W1–W3/W6/H5). Read it first; do
+**not** re-discover the schema by trial and error.
+
+> **Golden rule for a loop-monitor wake:** ONE batched, schema-correct health check → ONE
+> decisive action → **end the turn**. The engine loop re-fires \~120s *after your turn
+> settles*, so a long turn = a slow loop. Deep-diving every wake is the #1 way the cadence
+> stretches to 30–60 min/cycle. Don't block a cycle on a long subagent.
+
+## The 6 links (what "the loop" actually is)
+
+```
+observation/completion ─► scout ─► route (plan | improvement | gym) ─► mug ─► cup ─► complete ─► observation
+                                                                                         ▲
+                                          overwatch (meta-monitor) watches ALL of it ────┘
+                                          and emits the `pot-coordination-health` scorecard
+```
+
+* **Feedback half** = scout: reads the corpus (observations, completions, patterns) and
+  *routes* ideas onto one of three rails — `plan`, `improvement`, or `gym`.
+* **Forward half** = mug → cup: the Mug *places* ranked work onto generic cups; a cup
+  does it and `complete`s; the completion feeds the next scout cycle.
+* **Overwatch** = the meta-monitor. Every wake it surveys system health and emits a
+  14-criterion `pot-coordination-health` scorecard, then acts on anomalies (files an
+  observation, escalates, etc.). It is the thing that catches a *stalled Mug*.
+
+A "clean full cycle" (the reliability bar) is: an observation/completion → scout routes it →
+mug places it → a cup completes it → it lands as a new completion/observation, WITH
+overwatch emitting a real (non-synthesized) scorecard in the same window.
+
+## The 6-link health check (schema-correct — copy these)
+
+All of these run under `dev:pg_query` (read-only SELECT, 5s timeout) or `psql` on the bg-host
+`DATABASE_URL`. **Every table below lives in the `harness_shared` schema.** Normalize
+timestamps to one TZ to avoid the UTC-vs-EDT misjudgement (audit W7): compare against `now()`
+inside the same query.
+
+**Link 1 — scout tick (is the feedback clock running?)** The live scout is the `@singleton`
+routine, NOT the dormant per-harness `scout-cycle` (see cheat-sheet):
+
+```sql
+select id, active, trigger_config->>'cron' as cron, last_fired_at, next_fire_at,
+       now() - last_fired_at as since_last
+from harness_shared.routines
+where id = 'rt__singleton_bp_singleton_scout_0';
+-- healthy: active=true, cron '0 */30 * * * *', last_fired within ~30m, next_fire in the future.
+```
+
+**Link 2 — scout rail mix (is it routing, and to what?)** `routed_at` is **BIGINT epoch-ms**:
+
+```sql
+select rail, count(*),
+       to_timestamp(max(routed_at)/1000) as newest
+from harness_shared.scout_routed_ideas
+where routed_at > (extract(epoch from now())*1000 - 24*3600*1000)
+group by rail order by count(*) desc;
+-- expect a mix across plan/improvement/gym over 24h; all-zero for hours = scout stalled or gated.
+```
+
+**Link 3 — mug wake + placements (is the forward half moving?)** The Mug's watchdog
+fallback is the `wake-brain` routine (`0 */30 * * * *`). Placements = work\_items a cup has
+taken recently (`taken_by`, `taken_at`):
+
+```sql
+select last_fired_at, next_fire_at from harness_shared.routines where name = 'wake-brain';
+
+-- ⚠ TERMINAL STATUS IS FAMILY-SPECIFIC (verified 2026-07-02): issue-family
+-- (bug/change) resolves to 'resolved'/'closed'; feature-family to 'passed'.
+-- Counting only status='done' reads a HEALTHY loop as "zero completions" —
+-- an su burned a wake concluding the forward half was stalled when 9
+-- completions had landed that hour. Count the whole terminal set:
+-- sql-snippet-justified: loop-health forensics — no tool exposes a terminal-set
+-- count across the whole status family in a time window.
+select count(*) filter (where taken_by is not null) as taken,
+       count(*) filter (where status in ('done','resolved','closed','passed')
+             and updated_ts > extract(epoch from now())*1000 - 3600*1000) as done_1h
+from harness_shared.work_items
+where harness_slug = 'papercusp';
+```
+
+**Link 4 — cursed / infra-loss placements (are cups dying?)** Prefer the typed tool —
+`pot:status` and `fleet:capacity` surface the cursed count and free slots directly. The
+per-item infra-breaker trips at `infra_loss_count = 12` (`infraBreakerThreshold`); a rising
+cursed count means cups are dying mid-placement (OOM / reaper-requeue), not a capacity wall.
+
+**Link 5 — overwatch freshness (is the meta-monitor really emitting?)** A synthesized floor
+scorecard is NOT a healthy signal — it's the backstop firing because the real turn didn't emit:
+
+```sql
+select role, last_fired_at, last_status, consecutive_errors
+from harness_shared.autoloop_state
+where harness_slug = 'papercusp' and role = 'overwatch';
+```
+
+Or, typed: `scorecards:freshness { rubricRef: 'pot-coordination-health', since: <overwatch last wake> }`
+→ `fresh` (a COMPLETE real scorecard landed), `partial-only` (silent truncation), or `stale`
+(nothing landed). In `scorecards:list`/`:freshness`, **`synthesized:false` = a REAL agent
+scorecard**; `synthesized:true` = the derived floor. A `last_status` of "no complete scorecard
+within 180000ms launch deadline; backstop synthesized" means the overwatch turn didn't finish
+in time — check the gateway (`:8788`) and the model window before assuming the fix regressed.
+
+**Link 6 — deploy position (is your fix live on :3070?)** Never idle waiting for the pipeline —
+`dev:pipeline_position { path }` tells you committed / on-staging / in-main / deployed in one
+call. Force it when a fix must be live to proceed (see the deploy runbook: `git-sync:run` →
+`release:checkpoint-run` → `release:deploy { op:'trigger' }`).
+
+## Exact tool names + args (the ones people get wrong)
+
+* **There is no `overwatch:status`.** Read overwatch health via `autoloop:status { harnessSlug }`
+  (role `overwatch`), `scorecards:freshness`, and `pot:status`. Control it with
+  `overwatch:start` / `overwatch:pause` / `overwatch:declare-wake`.
+* **`plans:*` and `docs:*` need a concrete `harness` in a workspace-scoped session.** Pass
+  `harness: 'papercusp'` — **`harness: 'all'` is FORBIDDEN** here (`harness_forbidden`); `'all'`
+  only works in an unscoped (`--all-workspaces`) session.
+* **`docs:author` writes to the DOC surface of the `harness` you pass — which for a managed
+  harness may be a DIFFERENT repo than the canonical engineering reference.** Papercusp
+  engineering runbooks (this one included) belong in `apps/operator-docs/src/content/docs/agent-insights/`
+  in the `papercusp` staging tree. If `docs:author` reports an `absPath` outside that tree
+  (e.g. a sibling `pot-canary/docs`), the file is stranded — write the MDX directly to the
+  canonical path instead and `cd apps/operator-docs && npm run build`.
+* **In `code:run`, verbs are camelCase**: `tools.dev.pgQuery`, `tools.dev.pipelinePosition`,
+  `tools.pot.controlPolicy`, `tools.autoloop.status`, `tools.scorecards.freshness`. (The MCP
+  wire names are colon-kebab: `dev:pg_query`, `pot:control_policy`.)
+* **Reset a gated error circuit:** `autoloop:control { op: 'reset-errors', role: '<scout-cycle|overwatch>', harness: '<papercusp|papercusp-workspace>' }`
+  (zeroes `consecutive_errors` so backoff stops withholding fires).
+* **Force a routine fire NOW:** `git-sync:run` (git-sync) and `release:checkpoint-run`
+  (green-checkpoint) are the sanctioned fire-now levers. For scout/overwatch there is no
+  fire-now verb yet — set `next_fire_at = now()` via psql (below), or `pot:wake` to nudge the
+  Mug. `routines:set` retunes cron / pauses, it does not fire.
+
+## Force-tick + reset via psql (when the MCP is down)
+
+```sql
+-- force the singleton scout to fire on the next tick (catchup=skip-old, no burst):
+update harness_shared.routines set next_fire_at = now()
+where id = 'rt__singleton_bp_singleton_scout_0';
+```
+
+## Schema cheat-sheet (VERIFIED against information\_schema 2026-07-01)
+
+| table (`harness_shared.`) | gotcha                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scout_routed_ideas`      | `routed_at`, `outcome_checked_at` are **BIGINT epoch-ms** — there is NO `created_at`. `graded_at` is timestamptz. Columns: `rail`, `lens`, `routed_ref`, `outcome`, `cycle_id`, `source_hive`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `work_items`              | PK is **`feature_id`** (text), not `id`. Raw SQL status column is **`status`** — but the `work_items:get` MCP returns it as **`.state`**. **Terminal statuses are FAMILY-SPECIFIC**: issue-family (bug/change) → `resolved`/`closed`, feature-family → `passed` — `'done'` alone undercounts (see Link 3). A terminal `set_state` REQUIRES a completion record — use `work_items:complete { id, state, completion:{ summary, status } }`; ⚠ `complete` WITHOUT `state` returns ok:true but writes NOTHING (EI-6502). `ts` / `created_ts` / `updated_ts` / `fed_ts` are **BIGINT epoch-ms**; claims use `taken_by` + `taken_at` (timestamptz). `source_plan_slug` / `source_plan_item_ids` (array) link back to a plan. |
+| `routines`                | cron lives in **`trigger_config->>'cron'`** (jsonb), not a `cron` column. `last_fired_at` / `next_fire_at` are **timestamptz** (note: `last_fired_at`, not `last_fire_at`). `id`, `install_slug`, `name`, `active` (bool), `target_role`, `catchup`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `autoloop_state`          | `harness_slug`, `role`, `last_fired_at` (timestamptz), `last_status` (text), `consecutive_errors` (int). NO `next_fire_at` here — that's on `routines`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+
+* **The overwatch rubric `pot-coordination-health` is a CODE CONSTANT**, not a rubric-registry
+  row: `COORDINATION_RUBRIC_REF` in `packages/operator-core/lib/overwatch/scorecard-backstop.ts`
+  (14 criterion keys). Don't look for it in `rubrics:list`.
+* **Two scout routines exist — don't confuse them.** The LIVE one is install `@singleton`,
+  id `rt__singleton_bp_singleton_scout_0`, name `bp-singleton-scout-0`, `0 */30 * * * *`,
+  active. The per-harness `rt_papercusp_scout_cycle` (name `scout-cycle`) is **dormant**
+  (`active:false`) — a decoy.
+
+## The bg-host gotcha (why the MCP vanishes mid-session)
+
+A **deploy restarts the bg-host**, which **drops the `papercusp-su` MCP and the loop's
+psu-socket wake for minutes** (\~6-min boot). Worse, when the MCP drops mid-turn its tools may
+not even be *deferred* (ToolSearch finds none), so you cannot reconnect mid-turn — wait for a
+fresh wake, or fall back to `psql`. **`loop:arm` survives the restart and re-fires on
+reconnect**, so the loop itself is not lost. Get an MCP-independent DB handle with:
+
+```bash
+export DATABASE_URL=$(tr '\0' '\n' < /proc/$(systemctl --user show papercup-bg-host.service -p MainPID --value)/environ | grep '^DATABASE_URL=' | cut -d= -f2-)
+```
+
+## Failure-signal decoding (don't chase the wrong ghost)
+
+* **"Prompt is too long" is NOT a 429 / gateway stall.** As of `autonomous-loop-hardening`
+  F1, a prompt-length death classifies `context_overflow` (a LAUNCH-CONFIG bug — too many
+  tokens loaded, e.g. an unscoped MCP toolset on a small-context model), recorded distinctly
+  from `capacity_shed`/`infra_loss`. See `packages/operator-core/lib/fleet/invoke-outcome.ts`.
+  If overwatch (or any spawn) dies this way, fix the **tool-scoping** (`OVERWATCH_MCP_TOOL_NAMES`
+  in `libs/papercusp/packages/orchestrator/src/invoke.ts`), not gateway capacity.
+* **A "rate limit" is usually account-routing, not real capacity.** Verify with
+  `accounts:status` + `dev:rate_governor_status` before concluding you're capacity-gated —
+  other accounts usually have headroom (`agent-insights/rate-limit-is-usually-account-routing-not-capacity`).
+* **The recorded error is authoritative — read it first.** `autoloop_state.last_status` (and
+  the work-item's error) already carries the verbatim failure. Don't go log-spelunking `.out`
+  files (often stale / wrong-tree) before reading the recorded status (audit W3).
+* **A `CHRONIC autoloop failure: loop-su-…` EI is usually ALREADY self-resolved by the time you
+  read it.** These are auto-filed by the chronic-failure escalator (`autoloop-chronic-failure.ts`)
+  at `consecutive_errors >= 6`. The common cause is a **dead-owner loop** — the pinned warm
+  su-session died, so every fire stuck-backstops. The WI-1399 dead-owner terminal guard
+  (`loop-unreachable-guard.ts`) then auto-pauses the routine (`routines.active=false`,
+  `last_status='loop-terminal-unreachable'`), but only after its \~4h window — *later* than the
+  escalator's \~3h fire, so the EI is filed in the pre-termination window and self-resolves. **Before
+  touching anything, verify it's already dead:** (1) the routine `active=false`
+  (`SELECT active FROM harness_shared.routines WHERE name=<role> AND workspace_id=<ws>`), and (2)
+  the owner `adv_session` actually `ended_at` and never restarted (confirms the terminal-unreachable
+  verdict was correct, not a false kill). If both hold, the reported live-failure condition is GONE
+  — a dead-owner loop *should* be dead. Close the hygiene with `autoloop:control reset-errors` (or a
+  targeted single-row `consecutive_errors=0` UPDATE for a `*`-scoped brain row the tool can't
+  target). Once `active=false`, the (twice-hardened) watchdog already **skips** the row
+  (skipped-paused), so it will NOT re-escalate. The **durable class fix** (stop the escalator firing
+  for a dead-owner loop the terminal guard is about to own) touches the self-improvement watchdog +
+  routines scheduler = protected surface — it is tracked as a `change` (EI-7016), not an
+  auto-implement; don't re-file per-loop dupes.

@@ -1,0 +1,16 @@
+<svg viewBox="0 0 480 160" xmlns="http://www.w3.org/2000/svg">
+  <!-- mathematical cusp curve y^2 = x^3 above the wordmark -->
+  <g fill="none" stroke="#0a0a0a" stroke-width="5" stroke-linecap="round">
+    <!-- two branches meeting at a sharp cusp point at (240, 22), both tangent to vertical -->
+    <path d="M 240 22 C 240 60 220 78 200 90"/>
+    <path d="M 240 22 C 240 60 260 78 280 90"/>
+  </g>
+  <!-- wordmark -->
+  <text x="240" y="135"
+        font-family="'Courier New', ui-monospace, monospace"
+        font-size="64"
+        font-weight="700"
+        text-anchor="middle"
+        fill="#0a0a0a"
+        letter-spacing="-2">papercusp</text>
+</svg>

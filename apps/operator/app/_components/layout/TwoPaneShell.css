@@ -1,0 +1,66 @@
+/* TwoPaneShell — the shared flush 2-pane frame used by the Plans / Inbox /
+ * Sessions views (plan: unified-2-pane-shell). Generalized from the Sessions
+ * panes, which the user prefers: a scrolling list column on the left and a
+ * flush, full-height, left-bordered detail column on the right.
+ *
+ * The shell owns ONLY the column geometry + scroll + the detail surface. Each
+ * view supplies its own list/detail content WITH its own inner padding/colour
+ * (the roster, inbox lists, and plan items differ), so this stays neutral.
+ */
+
+.pc-twopane {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+}
+
+/* Left column — the scrolling list. The inner content owns its padding/gap and
+   may carry a sticky header (which sticks to THIS scroll container). */
+.pc-twopane__list {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+}
+
+/* Right column — the flush, full-height detail pane: a left border + the raised
+   gradient surface (the Sessions dossier look). The detail content placed here
+   is transparent and supplies its own padding. */
+.pc-twopane__detail {
+  flex: 0 0 348px;
+  width: 348px;
+  height: 100%;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--bg-raised), transparent 3%),
+    color-mix(in srgb, var(--bg-1), transparent 4%)
+  );
+  color: var(--fg);
+}
+
+/* ───────────────────────── responsive ──────────────────────────────────── */
+@media (max-width: 920px) {
+  .pc-twopane__detail {
+    flex-basis: 300px;
+    width: 300px;
+  }
+}
+@media (max-width: 760px) {
+  .pc-twopane {
+    flex-direction: column;
+    height: auto;
+  }
+  .pc-twopane__list {
+    height: auto;
+    overflow-y: visible;
+  }
+  .pc-twopane__detail {
+    width: 100%;
+    flex-basis: auto;
+    height: auto;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+}

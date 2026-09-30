@@ -1,0 +1,549 @@
+<!doctype html>
+<!--
+  Desktop docs-search palette (WI-2648, feature #5).
+
+  A standalone page — NOT part of the Astro/Starlight content pipeline — so it
+  loads instantly with zero site chrome. Served at /internal/docs/search-palette.html
+  by the SAME docsRoutes static handler that already serves every other page
+  under PUBLIC_DOCS_ROOT (apps/operator/bin/host-docs.ts), which is a byte-for-
+  byte copy of this package's `dist/` (postbuild-copy.sh) — so this file needs
+  no new server route, no new build step: `npm run build` here picks it up
+  exactly like any other `public/` static asset.
+
+  Reuses Pagefind's own default UI widget (pagefind-ui.js/css, already built +
+  served alongside every doc page since `pagefind: true` in astro.config.mjs) —
+  no custom search code. `bundlePath` is set explicitly (relative to THIS
+  page's own URL) rather than relying on PagefindUI's root-relative default,
+  since this page and the pagefind assets are siblings under /internal/docs/.
+
+  Opened by the Rust CmdOrCtrl+K global shortcut (src-tauri/src/docs_search.rs)
+  in a small, focused WebviewWindow — Escape closes it (native, no JS needed:
+  Tauri's window decorations handle the keypress via the OS on most platforms,
+  reinforced by the local `Escape` listener below as a webview-level fallback).
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Search docs</title>
+    <link href="./pagefind/pagefind-ui.css" rel="stylesheet" />
+    <style>
+      /* Blue-frost theme — palette borrowed VERBATIM from the docs site
+         (apps/operator-docs/src/styles/blue-frost.css) so the search palette
+         matches the docs visually. Force-dark like the docs. Owner spec: the
+         search box is translucent frosted glass; result cards stay SOLID so
+         their text is crisp over the busy backdrop. */
+      :root {
+        color-scheme: dark;
+        --frost-bg: #050b13;
+        --frost-panel: #07101d; /* SOLID surface for result cards */
+        --frost-text: #e7f7ff;
+        --frost-text-soft: #b9d4e8;
+        --frost-text-muted: #86a3bb;
+        --frost-accent: #38bdf8;
+        --frost-accent-soft: #7dd3fc;
+        --frost-border: rgba(125, 211, 252, 0.16);
+        --frost-border-strong: rgba(125, 211, 252, 0.34);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        color: var(--frost-text);
+        background: var(--frost-bg);
+      }
+      /* Frosted body: cyan glows over a deep blue gradient (docs-site body). */
+      body {
+        display: flex;
+        flex-direction: column;
+        padding: 12px;
+        background:
+          radial-gradient(circle at 50% -10%, rgba(56, 189, 248, 0.26), transparent 22rem),
+          radial-gradient(circle at 92% 6%, rgba(125, 211, 252, 0.14), transparent 16rem),
+          radial-gradient(circle at 8% 40%, rgba(14, 165, 233, 0.12), transparent 18rem),
+          linear-gradient(180deg, #0b1220 0%, #081523 44%, #050b13 100%);
+        background-attachment: fixed;
+      }
+      ::selection {
+        background: rgba(56, 189, 248, 0.35);
+        color: #f0fbff;
+      }
+      #search {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+      }
+
+      /* ---- Pagefind default UI, re-skinned to blue-frost ---- */
+      .pagefind-ui {
+        --pagefind-ui-primary: var(--frost-accent);
+        --pagefind-ui-text: var(--frost-text);
+        --pagefind-ui-background: var(--frost-panel); /* SOLID result cards */
+        --pagefind-ui-border: var(--frost-border);
+        --pagefind-ui-tag: rgba(56, 189, 248, 0.12);
+        --pagefind-ui-border-width: 1px;
+        --pagefind-ui-border-radius: 10px;
+        --pagefind-ui-font: inherit;
+      }
+
+      /* Search box — TRANSLUCENT frosted glass over the gradient. */
+      .pagefind-ui__search-input {
+        background: rgba(3, 8, 16, 0.45) !important;
+        -webkit-backdrop-filter: blur(14px) saturate(160%);
+        backdrop-filter: blur(14px) saturate(160%);
+        border: 1px solid var(--frost-border-strong) !important;
+        color: var(--frost-text) !important;
+        font-size: 15px;
+        border-radius: 10px;
+      }
+      .pagefind-ui__search-input::placeholder {
+        color: var(--frost-text-muted);
+      }
+
+      /* Result cards — SOLID so text stays crisp over the busy backdrop. */
+      .pagefind-ui__result {
+        background: var(--frost-panel) !important;
+        border: 1px solid var(--frost-border) !important;
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin-bottom: 8px;
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.04),
+          0 10px 30px rgba(0, 0, 0, 0.32);
+      }
+      .pagefind-ui__result:hover {
+        border-color: var(--frost-border-strong) !important;
+      }
+      .pagefind-ui__result-link {
+        color: var(--frost-accent-soft);
+        text-decoration: none;
+        font-weight: 600;
+      }
+      .pagefind-ui__result-link:hover {
+        color: #d7f3ff;
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+      .pagefind-ui__result-excerpt {
+        color: var(--frost-text-soft);
+      }
+      .pagefind-ui__result-excerpt mark,
+      .pagefind-ui__result-title mark {
+        background: rgba(56, 189, 248, 0.3);
+        color: #f0fbff;
+        border-radius: 3px;
+        padding: 0 2px;
+      }
+      .pagefind-ui__result-nested {
+        border-left: 1px solid var(--frost-border);
+      }
+      .pagefind-ui__message {
+        color: var(--frost-text-muted);
+      }
+
+      /* Frost scrollbar (docs site). */
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: rgba(125, 211, 252, 0.22);
+        border: 3px solid rgba(5, 11, 19, 0.9);
+        border-radius: 999px;
+      }
+      ::-webkit-scrollbar-track {
+        background: rgba(3, 8, 16, 0.55);
+      }
+      input:focus-visible,
+      a:focus-visible,
+      button:focus-visible {
+        outline: 2px solid rgba(125, 211, 252, 0.48);
+        outline-offset: 2px;
+      }
+
+      /* ---- "Chat with an agent" mode (WI-2844) ----
+         Keyword search stays the DEFAULT; this is the prominent, unmistakable
+         entry into the agent Q&A that answers from the REAL docs with
+         citations. Owner ask (2026-07-05): make the chat affordance obvious —
+         a full-width primary CTA card, not a slim easy-to-miss link. */
+      #askbar {
+        margin-top: 12px;
+        flex: 0 0 auto;
+      }
+      #ask-btn {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        width: 100%;
+        text-align: left;
+        background: linear-gradient(135deg, rgba(56, 189, 248, 0.22), rgba(56, 189, 248, 0.07));
+        border: 1px solid var(--frost-border-strong);
+        color: var(--frost-text);
+        border-radius: 12px;
+        padding: 12px 14px;
+        font: inherit;
+        cursor: pointer;
+        transition:
+          border-color 0.15s ease,
+          box-shadow 0.15s ease,
+          transform 0.05s ease;
+      }
+      #ask-btn:hover {
+        border-color: var(--frost-accent);
+        box-shadow:
+          0 0 0 1px rgba(56, 189, 248, 0.35),
+          0 10px 30px rgba(0, 0, 0, 0.32);
+      }
+      #ask-btn:active {
+        transform: translateY(1px);
+      }
+      .ask-btn__icon {
+        flex: 0 0 auto;
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        border-radius: 9px;
+        background: rgba(56, 189, 248, 0.18);
+        border: 1px solid var(--frost-border-strong);
+        font-size: 18px;
+      }
+      .ask-btn__text {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .ask-btn__title {
+        font-size: 14px;
+        font-weight: 600;
+        color: #f0fbff;
+      }
+      .ask-btn__sub {
+        font-size: 12px;
+        color: var(--frost-text-muted);
+      }
+      .ask-btn__kbd {
+        margin-left: auto;
+        flex: 0 0 auto;
+        color: var(--frost-text-muted);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .ask-btn__kbd .k,
+      .ask-you-label .k {
+        border: 1px solid var(--frost-border);
+        border-radius: 4px;
+        padding: 0 4px;
+        margin: 0 1px;
+        color: var(--frost-text-soft);
+      }
+      /* Answer view labels — frame the exchange as a chat: the user's question,
+         then the agent's grounded reply. */
+      .ask-you-label,
+      .ask-agent-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--frost-text-muted);
+      }
+      .ask-agent-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .ask-agent-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--frost-accent);
+        box-shadow: 0 0 8px var(--frost-accent);
+      }
+
+      /* Answer view — replaces the results list while an answer streams. */
+      #answer {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      #ask-back {
+        align-self: flex-start;
+        background: transparent;
+        border: 1px solid var(--frost-border);
+        color: var(--frost-text-soft);
+        border-radius: 8px;
+        padding: 5px 10px;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      #ask-back:hover {
+        border-color: var(--frost-border-strong);
+        color: #f0fbff;
+      }
+      #ask-q {
+        color: var(--frost-text);
+        font-weight: 600;
+        font-size: 15px;
+      }
+      #ask-body {
+        background: var(--frost-panel);
+        border: 1px solid var(--frost-border);
+        border-radius: 10px;
+        padding: 12px 14px;
+        color: var(--frost-text-soft);
+        line-height: 1.5;
+        white-space: pre-wrap;
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.04),
+          0 10px 30px rgba(0, 0, 0, 0.32);
+      }
+      #ask-body.muted {
+        color: var(--frost-text-muted);
+        font-style: italic;
+      }
+      #ask-cites {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      #ask-cites a {
+        color: var(--frost-accent-soft);
+        text-decoration: none;
+        font-size: 12px;
+        border: 1px solid var(--frost-border);
+        border-radius: 999px;
+        padding: 2px 10px;
+      }
+      #ask-cites a:hover {
+        border-color: var(--frost-accent);
+        color: #d7f3ff;
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="search"></div>
+    <div id="askbar">
+      <button id="ask-btn" type="button" aria-label="Chat with an agent about the docs">
+        <span class="ask-btn__icon" aria-hidden="true">💬</span>
+        <span class="ask-btn__text">
+          <span class="ask-btn__title">Chat with an agent about the docs</span>
+          <span class="ask-btn__sub">Type your question above — answered from the real docs, with sources.</span>
+        </span>
+        <span class="ask-btn__kbd" aria-hidden="true">or <span class="k">Ctrl</span><span class="k">↵</span></span>
+      </button>
+    </div>
+    <div id="answer" hidden>
+      <button id="ask-back" type="button">← Back to search</button>
+      <div class="ask-you-label">You asked</div>
+      <div id="ask-q"></div>
+      <div class="ask-agent-label"><span class="ask-agent-dot" aria-hidden="true"></span> Agent · answered from the docs</div>
+      <div id="ask-body"></div>
+      <div id="ask-cites"></div>
+    </div>
+    <script src="./pagefind/pagefind-ui.js"></script>
+    <script>
+      window.addEventListener('DOMContentLoaded', () => {
+        new PagefindUI({
+          element: '#search',
+          // ABSOLUTE bundlePath — Pagefind loads its engine via
+          // `import(`${bundlePath}pagefind.js`)`. A relative `pagefind/` becomes a
+          // BARE module specifier ("pagefind/pagefind.js") the browser refuses to
+          // resolve → the search silently never runs (WI-2648 shipped this way).
+          // The palette is always served at /internal/docs/search-palette.html with
+          // the index sibling at /internal/docs/pagefind/, in dev AND the packaged
+          // Server, so this absolute path is stable across every host.
+          bundlePath: '/internal/docs/pagefind/',
+          showSubResults: true,
+          showImages: false,
+          autofocus: true,
+          // Results carry an ABSOLUTE /internal/docs/... URL already (Astro's
+          // `base: '/internal/docs'` bakes it into every crawled page), so no
+          // rewriting is needed here — the anchors just work when clicked.
+        });
+      });
+
+      // ---- "Ask a question" mode (WI-2844) --------------------------------
+      // Keyword search is the default; this is the shortcut into the agent
+      // Q&A that searches our REAL /internal/docs (POST /api/desktop/docs-qa,
+      // same server-side flow as the terminal tutorial's "Ask a question").
+      const $ = (id) => document.getElementById(id);
+      const searchEl = $('search');
+      const askbarEl = $('askbar');
+      const answerEl = $('answer');
+      const bodyEl = $('ask-body');
+      const qEl = $('ask-q');
+      const citesEl = $('ask-cites');
+      let asking = false;
+
+      function searchInput() {
+        return document.querySelector('.pagefind-ui__search-input');
+      }
+      function showSearch() {
+        answerEl.hidden = true;
+        searchEl.hidden = false;
+        askbarEl.hidden = false;
+        const i = searchInput();
+        if (i) i.focus();
+      }
+      function showAnswer(question) {
+        qEl.textContent = question;
+        citesEl.textContent = '';
+        bodyEl.className = 'muted';
+        bodyEl.textContent = 'Searching the docs…';
+        searchEl.hidden = true;
+        askbarEl.hidden = true;
+        answerEl.hidden = false;
+      }
+
+      // Minimal SSE frame reader over a fetch() Response body.
+      async function consumeSse(body, onEvent) {
+        const reader = body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) !== -1) {
+            const frame = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            let event = 'message';
+            let data = '';
+            for (const line of frame.split('\n')) {
+              if (line.startsWith('event:')) event = line.slice(6).trim();
+              else if (line.startsWith('data:')) data += line.slice(5).trim();
+            }
+            if (!data) continue;
+            let parsed;
+            try { parsed = JSON.parse(data); } catch { parsed = { raw: data }; }
+            onEvent(event, parsed);
+          }
+        }
+      }
+
+      async function askQuestion(question) {
+        if (asking || !question) return;
+        asking = true;
+        showAnswer(question);
+        let answer = '';
+        let errored = false;
+        const cites = [];
+        try {
+          const r = await fetch('/api/desktop/docs-qa', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ question, currentPath: '/internal/docs' }),
+          });
+          if (!r.ok || !r.body) {
+            // 404 = the DOCS_QA flag is off in this build; other = server error.
+            errored = true;
+          } else {
+            await consumeSse(r.body, (event, d) => {
+              if (event === 'delta' && typeof d.text === 'string') {
+                answer += d.text;
+                bodyEl.className = '';
+                bodyEl.textContent = answer;
+                answerEl.scrollTop = answerEl.scrollHeight;
+              } else if (event === 'citation' && d.slug) {
+                cites.push(d);
+              } else if (event === 'needs_backend') {
+                bodyEl.className = 'muted';
+                bodyEl.textContent =
+                  d.message ||
+                  'No agent backend is configured yet. Sign in to an agent in Setup to ask questions — keyword search works without one.';
+                answer = '';
+                errored = false;
+              } else if (event === 'error') {
+                errored = true;
+              }
+            });
+          }
+        } catch {
+          errored = true;
+        }
+        if (answer && cites.length) {
+          for (const c of cites) {
+            const a = document.createElement('a');
+            // Citations arrive from the agent answer stream — only http(s) may become
+            // an href (a javascript: URI here is click-to-XSS), and the slug fallback
+            // is stripped to path-safe chars so it can't smuggle a scheme or traversal.
+            let href = '';
+            if (c.url) {
+              try {
+                const u = new URL(c.url, location.origin);
+                if (u.protocol === 'https:' || u.protocol === 'http:') href = u.href;
+              } catch { /* invalid URL — fall back to the slug */ }
+            }
+            if (!href) {
+              const slug = String(c.slug || '').replace(/[^A-Za-z0-9/_-]/g, '').replace(/^\/+/, '');
+              href = `/internal/docs/${slug}`;
+            }
+            a.href = href;
+            a.textContent = c.title || c.slug;
+            citesEl.appendChild(a);
+          }
+        }
+        if (!answer && bodyEl.className !== 'muted') {
+          bodyEl.className = 'muted';
+          bodyEl.textContent = errored
+            ? "I couldn't get a live answer just now — try again, or browse the docs via search."
+            : 'No answer was returned.';
+        }
+        asking = false;
+      }
+
+      function askFromSearchBox() {
+        const i = searchInput();
+        const q = (i && i.value ? i.value : '').trim();
+        if (q) askQuestion(q);
+        else if (i) i.focus();
+      }
+
+      $('ask-btn').addEventListener('click', askFromSearchBox);
+      $('ask-back').addEventListener('click', showSearch);
+      // Ctrl/Cmd+Enter from the Pagefind search box → ask. The input is created
+      // by PagefindUI after mount, so bind at the document level (capture) and
+      // filter by target.
+      document.addEventListener('keydown', (e) => {
+        if (
+          (e.ctrlKey || e.metaKey) &&
+          e.key === 'Enter' &&
+          e.target &&
+          e.target.classList &&
+          e.target.classList.contains('pagefind-ui__search-input')
+        ) {
+          e.preventDefault();
+          askFromSearchBox();
+        }
+      });
+
+      // Escape: if an answer is showing, go back to search; otherwise close the
+      // palette window (webview-level fallback alongside the native chrome).
+      window.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if (!answerEl.hidden) {
+          e.preventDefault();
+          showSearch();
+          return;
+        }
+        if (window.__TAURI__?.window) {
+          window.__TAURI__.window.getCurrentWindow().close();
+        }
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,23 @@
+{
+  "name": "@papercusp/kokoro-tts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic, domain-free port of kokoro-js@1.2.1's glue (text normalization + phonemization chain, voice-style table + HF voices-bin loader, StyleTextToSpeech2Model wrapper) — Apache-2.0-attributed, upstream https://github.com/hexgrad/kokoro. Zero @huggingface/transformers runtime dependency: the model/tokenizer/tensor primitives are host-injected via configureKokoroTts() (WI-4470), so this package never pins a transformers version and can't create the nested-dependency duplicate that vendoring originally worked around (see WI-4449/WI-4471). The tiny `phonemizer` package is a real dependency (no injection needed).",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@papercusp/module-singleton": "*",
+    "phonemizer": "^1.2.1"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

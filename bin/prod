@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Build the operator and run the production Hono host on :3070.
+#
+# Build  = Starlight docs + Vite SPA (`npm --workspace @papercusp/web run build`).
+# Server = `bin/hono-host.ts` — serves the Hono API, the page-namespace
+#          handlers, and the built Vite SPA as a static fallback. This is the
+#          same host the packaged desktop sidecar runs; :3070 is the
+#          production operator port.
+#
+# Next.js is retired — nothing here invokes `next`. See next.config.js for the
+# guard that blocks an accidental `next dev`/`next start`.
+#
+# Usage: bin/prod                         (defaults: PORT=3070 PTY=3056)
+#        PORT=3170 PTY=3156 bin/prod      (override ports)
+# Stop server later:  fuser -k $PORT/tcp
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+LOG="${LOG:-/tmp/prod.log}"
+PORT="${PORT:-3070}"
+PTY="${PTY:-3056}"
+
+echo "==> killing prior server on :$PORT"
+# fuser kills only whoever holds our port — never a sibling dev server (:3055).
+fuser -k "$PORT/tcp" 2>/dev/null
+fuser -k "$PTY/tcp"  2>/dev/null
+sleep 2
+
+echo "==> tailing $LOG"
+: > "$LOG"
+tail -F "$LOG" &
+TAIL_PID=$!
+trap 'kill $TAIL_PID 2>/dev/null' EXIT INT
+
+echo "==> building operator (Starlight docs + Vite SPA)"
+cd "$REPO"
+if ! npm --workspace @papercusp/web run build >> "$LOG" 2>&1; then
+  echo "==> build failed — see $LOG"
+  exit 1
+fi
+
+# Source apps/operator/.env.local so local-dev config (Zero pointer,
+# Chatwoot tokens, etc.) reaches the host. `tsx` — unlike `next` — does not
+# auto-load .env files, so do it explicitly here.
+ENV_LOCAL="$REPO/apps/operator/.env.local"
+if [ -f "$ENV_LOCAL" ]; then
+  echo "==> sourcing $ENV_LOCAL"
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_LOCAL" || true
+  set +a
+fi
+
+echo "==> starting Hono host on :$PORT (pty-ws :$PTY)"
+# `npm run start` → `tsx bin/hono-host.ts` (cwd apps/operator). The host
+# reads PAPERCUSP_HONO_PORT for its listen port and serves the Vite dist/
+# resolved __dirname-relative, so no extra path wiring is needed.
+PAPERCUSP_HONO_PORT="$PORT" \
+  PAPERCUSP_BIND_HOST="${PAPERCUSP_BIND_HOST:-127.0.0.1}" \
+  PAPERCUSP_PTY_WS_PORT="$PTY" \
+  NODE_ENV=production \
+  nohup npm --workspace @papercusp/web run start >> "$LOG" 2>&1 &
+disown
+echo "==> server pid $! — Ctrl-C stops the tail; server keeps running"
+echo "==> kill server later:  fuser -k $PORT/tcp"
+wait $TAIL_PID

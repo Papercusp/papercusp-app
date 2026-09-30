@@ -1,0 +1,106 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Papercusp GUI",
+  "version": "0.0.25",
+  "identifier": "com.papercusp.gui",
+  "build": {
+    "beforeDevCommand": "bash bin/dev-operator-ifneeded.sh",
+    "beforeBuildCommand": "",
+    "frontendDist": "http://127.0.0.1:3070",
+    "devUrl": "http://127.0.0.1:3270"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Papercusp",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "decorations": true,
+        "dragDropEnabled": false
+      }
+    ],
+    "withGlobalTauri": true,
+    "security": {
+      "csp": null,
+      "dangerousDisableAssetCspModification": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg",
+      "msi",
+      "nsis",
+      "deb",
+      "rpm",
+      "appimage"
+    ],
+    "createUpdaterArtifacts": true,
+    "category": "DeveloperTool",
+    "shortDescription": "Open-source autonomous-harness framework",
+    "longDescription": "Papercusp lets you define a goal and watch a coordinated team of AI agent roles plan, execute, validate, and iterate against your spec. Runs locally; your API keys never leave your machine.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "sidecar/spa/**/*"
+    ],
+    "publisher": "Papercusp",
+    "homepage": "https://papercuspai.com",
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist"
+    },
+    "linux": {
+      "deb": {
+        "depends": [],
+        "preRemoveScript": "deb/preremove.sh",
+        "postInstallScript": "deb/postinstall.sh",
+        "postRemoveScript": "deb/postremove.sh"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "windows": {
+      "wix": {
+        "language": "en-US",
+        "fragmentPaths": [
+          "./windows/fragments/tutorial-shortcut.wxs"
+        ],
+        "componentRefs": [
+          "PapercuspTutorialShortcut"
+        ]
+      },
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dangerousInsecureTransportProtocol": true,
+      "dialog": false,
+      "windows": {
+        "installerArgs": [
+          "/VERYSILENT",
+          "/NORESTART",
+          "/SUPPRESSMSGBOXES"
+        ]
+      },
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVEM0E3REQ0QTcwODk5NDQKUldSRW1RaW4xSDA2WGZzZVFiRHhaeG5iVXpWRUZxTnpZTG1BNWduQ2RnKzZjQUt1Y3FoMDJCZTUK"
+    }
+  }
+}

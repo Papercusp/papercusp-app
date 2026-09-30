@@ -1,0 +1,103 @@
+{
+  "name": "@papercupai/fetch-plus",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "Clean URL→markdown for agents doing web research. Wraps Jina AI Reader (https://r.jina.ai) so agents get LLM-friendly content instead of raw HTML. Handles HTML pages, PDFs, and JS-rendered sites with no install required. Optional JINA_API_KEY env var unlocks higher rate limits.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "icon": "Globe",
+  "capabilities": [
+    "tools:web:fetch_clean",
+    "http:fetch:r.jina.ai",
+    "secrets:read:JINA_API_KEY"
+  ],
+  "tools": [
+    {
+      "name": "fetch_clean",
+      "description": "Fetch a URL and return clean markdown stripped of boilerplate. Uses Jina AI Reader; handles HTML, PDF, and JS-rendered sites. Use this instead of OMP's `fetch` when you want LLM-ready content; use `fetch` when you need raw bytes/headers.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Absolute URL to fetch. Must be http:// or https://."
+          },
+          "format": {
+            "enum": [
+              "markdown",
+              "text"
+            ],
+            "default": "markdown",
+            "description": "Response shape. Markdown preserves headings/links/code blocks; text is plain."
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "capabilities": [
+        "tools:web:fetch_clean",
+        "http:fetch:r.jina.ai"
+      ],
+      "roles": [
+        "scoper",
+        "architect",
+        "operator",
+        "reviewer",
+        "debugger",
+        "worker",
+        "validator"
+      ],
+      "rolesQuota": {
+        "worker": {
+          "perChunk": 5
+        },
+        "scoper": {
+          "perRun": 20
+        },
+        "architect": {
+          "perRun": 30
+        },
+        "reviewer": {
+          "perRun": 10
+        },
+        "debugger": {
+          "perRun": 20
+        }
+      },
+      "timeoutSec": 30,
+      "expose": {
+        "http": {
+          "path": "/api/plugins/fetch-plus/fetch_clean",
+          "methods": [
+            "POST"
+          ]
+        },
+        "mcp": {
+          "name": "fetch_plus.fetch_clean"
+        }
+      },
+      "guidance": {
+        "when": "Read a single URL's content as clean markdown. Boilerplate-stripped, handles HTML/PDF/JS-rendered pages via Jina Reader.",
+        "notWhen": "For STRUCTURED extraction (JSON shape), use `firecrawl.extract`. For crawling many pages, use `firecrawl.map` then `firecrawl.scrape` per URL."
+      }
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "maxResponseChars": {
+        "type": "number",
+        "default": 200000,
+        "description": "Hard cap on returned content. Larger pages get truncated with a note."
+      },
+      "userAgent": {
+        "type": "string",
+        "default": "Papercusp/fetch-plus",
+        "description": "User-Agent header sent to Jina Reader."
+      }
+    }
+  }
+}

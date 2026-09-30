@@ -1,0 +1,56 @@
+# The `memory-live-recall-canary` blueprint — EI-10047.
+#
+# The live memory recall canary as a SCHEDULED DETERMINISTIC blueprint,
+# mirroring memory-precision. One step fires a registered typed function
+# (`memory-live-recall:canary`) that replays frozen known-item queries against the
+# LIVE memory stack (read-only — no store writes, no bench schema), records
+# recall@10 vs the frozen baseline to harness_shared.memory_live_recall_canary_run,
+# and alerts (attention + severe-event) on a >5pt drop or a zero-hit blackout.
+#
+# Why it exists next to memory-precision: the precision bench seeds a FIXTURE
+# corpus into an ISOLATED bench schema — it watches the code path and stays
+# green while the DEPLOYMENT silently degrades (the 2026-07-12 PG-42703 class:
+# live schema drift made every search swallow an error and return nothing).
+# The canary watches the deployment itself, so its cadence is DAILY, not
+# weekly — a canary that fires weekly is an obituary. Flag-only, NO governor:
+# ~25 live searches/tick, no LLM.
+id: memory-live-recall-canary
+extends: base
+version: 0.1.0
+description: >-
+  Daily memory recall canary: replay frozen known-item queries against the
+  live memory stack (read-only), record recall@10 vs baseline, and alert on
+  degradation — so live-store silent failures surface within a day, not
+  whenever someone notices recall feels off.
+
+# Descriptive only (the deterministic pipeline records rows directly).
+workItem:
+  kind: benchmark-run
+  idPrefix: MRC
+
+# Program-mode spine: one deterministic step, NO gate ⇒ deterministic pipeline.
+spine:
+  steps:
+    - id: canary
+      op: memory-live-recall:canary
+      bind: canary
+
+knobs:
+  harnessKind: learning
+  # Read-only against the live store; no repo, no bench schema.
+  requiresRepo: false
+
+# Scheduled trigger: DAILY 05:45 (offset off the deploy rhythm and the weekly
+# memory-precision slot). Fires `system:blueprint-run`; always-on monitoring —
+# seeds ACTIVE (self-gates on the papercusp-memory-live-recall-canary flag).
+triggers:
+  schedule:
+    - cron: "0 45 5 * * *"
+      action: system:blueprint-run
+      singleton: true        # workspace-singleton cadence — one routine per workspace
+      singletonActive: true  # monitoring loop — seeds ACTIVE (flag-gated, not governor-gated)
+
+# No agent roles (pure-deterministic) and no agent-tool deps.
+dependencies:
+  tools: []
+  plugins: []

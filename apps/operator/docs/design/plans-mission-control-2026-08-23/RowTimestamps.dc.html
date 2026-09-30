@@ -1,0 +1,157 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    :root{
+      --bg:#07101d;--bg-1:#0b1220;--bg-2:rgba(255,255,255,0.045);--bg-3:rgba(255,255,255,0.075);
+      --fg:#e7f7ff;--fg-dim:#b9d4e8;--fg-mute:#7f9bb4;
+      --border-muted:rgba(125,211,252,0.08);--border:rgba(125,211,252,0.15);
+      --accent:#38bdf8;--accent-strong:#7dd3fc;--accent-soft:#bae6fd;
+      --good:#34d399;--warn:#fbbf24;--bad:#fb7185;
+      --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    }
+    body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:12.5px;-webkit-font-smoothing:antialiased;padding:14px}
+    a{color:var(--accent-strong)}a:hover{color:var(--accent-soft)}
+    .ic{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+    .vh{font-size:9.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-mute);margin:14px 0 8px}
+    .vh:first-child{margin-top:0}
+    .vh .rec{color:#bbf7d0;font-weight:650;text-transform:none;letter-spacing:0;margin-left:6px}
+    .row{position:relative;overflow:hidden;display:flex;align-items:center;gap:8px;padding:7px 9px 8px;border-radius:8px;border:1px solid var(--border);border-left-width:3px;background:transparent;margin-bottom:4px}
+    .row.needs{border-left-color:color-mix(in srgb,var(--bad) 70%,transparent)}
+    .row.live{border-left-color:color-mix(in srgb,var(--good) 55%,transparent)}
+    .ricon{color:var(--fg-mute);display:flex}
+    .main{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+    .head{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--fg-mute);min-width:0}
+    .bucket{padding:0 5px;border-radius:999px;font-size:8.5px;font-weight:650;text-transform:uppercase;color:var(--fg-mute);border:1px solid var(--border);flex:0 0 auto}
+    .bucket.run{color:#bae6fd;border-color:rgba(56,189,248,0.4)}
+    .bucket.draft{color:#c4b5fd;border-color:rgba(139,92,246,0.4)}
+    .sp{flex:1}
+    .t{display:inline-flex;align-items:center;gap:4px;font-variant-numeric:tabular-nums;font-size:10px;color:var(--fg-mute);flex:0 0 auto}
+    .t.hot{color:var(--fg-dim)}.t.hot .ic{color:var(--good)}
+    .t.dim{opacity:.5}
+    .title{font-size:12px;font-weight:550;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .stat{font-size:10px;color:var(--fg-mute);display:flex;align-items:center;gap:8px}
+    .badges{display:flex;align-items:center;gap:4px;flex:0 0 auto}
+    .badge{display:inline-flex;align-items:center;padding:1px 6px;border-radius:999px;font-size:10px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--fg-mute);border:1px solid var(--border);background:var(--bg-3)}
+    .badge.live{color:#bbf7d0;border-color:color-mix(in srgb,var(--good) 50%,transparent);background:color-mix(in srgb,var(--good) 14%,transparent)}
+    .badge.needs{color:#fecaca;border-color:color-mix(in srgb,var(--bad) 55%,transparent);background:color-mix(in srgb,var(--bad) 16%,transparent)}
+    .badge.stale{color:#fdba74;border-color:rgba(251,146,60,0.4)}
+    .track{position:absolute;left:0;right:0;bottom:0;height:2px;background:color-mix(in srgb,var(--fg-mute) 14%,transparent)}
+    .fill{display:block;height:100%;background:color-mix(in srgb,var(--accent) 70%,transparent)}
+    .chev{color:var(--fg-mute);flex:0 0 auto}
+    .tipbox{position:relative;margin:2px 0 10px 24px;display:inline-flex;flex-direction:column;gap:2px;background:#0d1829;border:1px solid rgba(125,211,252,0.32);border-radius:8px;padding:7px 10px;font-size:10.5px;color:var(--fg-dim);box-shadow:0 24px 70px rgba(0,0,0,0.32)}
+    .legend{margin-top:16px;border-top:1px solid var(--border-muted);padding-top:12px;display:flex;flex-direction:column;gap:9px}
+    .lrow{display:flex;align-items:flex-start;gap:9px;font-size:11px;color:var(--fg-dim);line-height:1.45}
+    .lic{display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:6px;background:var(--bg-3);flex:0 0 auto;margin-top:1px}
+    .lic.work{color:var(--good)}.lic.edit{color:var(--accent-strong)}
+    .lrow b{color:var(--fg);font-weight:600}
+    .lrow .src{display:block;font-size:10px;color:var(--fg-mute);font-family:var(--mono);margin-top:2px}
+  </style>
+</helmet>
+<div style="width:392px">
+  <div class="vh">V1 — header pair <span class="rec">recommended</span></div>
+
+  <!-- Row: live, worked recently -->
+  <div class="row needs">
+    <span class="ricon"><svg class="ic" viewBox="0 0 24 24" style="width:16px;height:16px"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg></span>
+    <span class="main">
+      <span class="head">
+        <span class="bucket run">plan</span><span>papercusp</span><span class="sp"></span>
+        <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>2m</span>
+        <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>41s</span>
+      </span>
+      <span class="title">EI-100 security posture closure</span>
+      <span class="stat">1 decision needs you</span>
+    </span>
+    <span class="badges"><span class="badge needs">1</span><span class="badge live">● 4</span><span class="badge">3/9</span></span>
+    <svg class="ic chev" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="m9 18 6-6-6-6"/></svg>
+    <span class="track"><span class="fill" style="width:33%"></span></span>
+  </div>
+
+  <!-- Hover tooltip mock -->
+  <div class="tipbox">
+    <span><b style="color:var(--fg)">✎ Plan edited</b> 2m ago — 2026-08-23 13:54 EDT</span>
+    <span><b style="color:var(--fg)">⚒ Last work</b> 41s ago — WI-40729 checkpoint by su-76a83</span>
+  </div>
+
+  <!-- Row: edited long ago, never worked -->
+  <div class="row">
+    <span class="ricon"><svg class="ic" viewBox="0 0 24 24" style="width:16px;height:16px"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg></span>
+    <span class="main">
+      <span class="head">
+        <span class="bucket draft">draft</span><span>papercusp</span><span class="sp"></span>
+        <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>3d</span>
+        <span class="t dim"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>—</span>
+      </span>
+      <span class="title">System health tab</span>
+      <span class="stat">0 of 8 items done</span>
+    </span>
+    <span class="badges"><span class="badge">0/8</span></span>
+    <svg class="ic chev" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="m9 18 6-6-6-6"/></svg>
+    <span class="track"><span class="fill" style="width:0%"></span></span>
+  </div>
+
+  <!-- Row: stale on BOTH clocks -->
+  <div class="row">
+    <span class="ricon"><svg class="ic" viewBox="0 0 24 24" style="width:16px;height:16px"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg></span>
+    <span class="main">
+      <span class="head">
+        <span class="bucket draft">draft</span><span>papercusp</span><span class="sp"></span>
+        <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>6d</span>
+        <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>6w</span>
+      </span>
+      <span class="title">Shared pot collaboration</span>
+      <span class="stat">0 of 15 items done</span>
+    </span>
+    <span class="badges"><span class="badge stale">stale</span></span>
+    <svg class="ic chev" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="m9 18 6-6-6-6"/></svg>
+    <span class="track"><span class="fill" style="width:0%"></span></span>
+  </div>
+
+  <div class="vh">V2 — spelled out in the status line</div>
+
+  <div class="row live">
+    <span class="ricon"><svg class="ic" viewBox="0 0 24 24" style="width:16px;height:16px"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg></span>
+    <span class="main">
+      <span class="head">
+        <span class="bucket run">plan</span><span>papercusp</span><span class="sp"></span>
+      </span>
+      <span class="title">P2P git public release</span>
+      <span class="stat">
+        <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>edited 12m</span>
+        <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>worked 2m</span>
+      </span>
+    </span>
+    <span class="badges"><span class="badge live">● 3</span><span class="badge">21/30</span></span>
+    <svg class="ic chev" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="m9 18 6-6-6-6"/></svg>
+    <span class="track"><span class="fill" style="width:70%"></span></span>
+  </div>
+
+  <div class="legend">
+    <div class="lrow">
+      <span class="lic edit"><svg class="ic" viewBox="0 0 24 24" style="width:12px;height:12px"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg></span>
+      <span><b>Last edit</b> — the plan document changed: content, ## Now, decisions, item status flips.
+        <span class="src">source: harness_plans.updated (already on PlanListRow)</span>
+      </span>
+    </div>
+    <div class="lrow">
+      <span class="lic work"><svg class="ic" viewBox="0 0 24 24" style="width:12px;height:12px"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg></span>
+      <span><b>Last work</b> — newest work-item progress on items created from this plan: checkpoints, state changes, completions. Green icon when &lt; 1h. “—” when nothing has been worked yet.
+        <span class="src">source: max(work_items activity) where source_plan_slug = plan → new planWorkActivity.list sync map</span>
+      </span>
+    </div>
+    <div class="lrow">
+      <span class="lic"><svg class="ic" viewBox="0 0 24 24" style="width:12px;height:12px"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span>
+      <span>Hovering either time shows the full timestamp + what happened (tooltip above). <b>stale</b> now means neither clock moved in 14d — a plan being worked without edits no longer reads stale.</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

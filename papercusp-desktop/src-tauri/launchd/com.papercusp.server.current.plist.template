@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Papercusp current-payload macOS LaunchDaemon (EI-216508).
+
+  This is the rig-sidecar-current variant of com.papercusp.server.plist.template.
+  It deliberately keeps the SAME launchd label, user, RunAtLoad, KeepAlive and
+  clean-stop contract as the packaged Server. One label means the packaged and
+  composed variants cannot both be bootstrapped and race for Postgres/:3070.
+
+  The launcher owns environment assembly, bounded log rotation and the exact
+  serve.mjs invocation. The launchd-run mode execs Node in the foreground,
+  so launchd's PID is also operator.json's PID and can be verified as the owner
+  of the configured Hono port.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.papercusp.server</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PAPERCUSP_CURRENT_LAUNCHER__</string>
+        <string>--launchd-run</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__PAPERCUSP_SERVICE_HOME__</string>
+        <key>USERPROFILE</key>
+        <string>__PAPERCUSP_SERVICE_HOME__</string>
+        <key>PAPERCUSP_RIG_HOME</key>
+        <string>__PAPERCUSP_SERVICE_HOME__</string>
+        <key>PAPERCUSP_RIG_SIDECAR_DIR</key>
+        <string>__PAPERCUSP_CURRENT_PAYLOAD__</string>
+        <key>PAPERCUSP_HONO_PORT</key>
+        <string>__PAPERCUSP_CURRENT_PORT__</string>
+        <!-- A bundled sidecar cannot derive its source identity from git. The
+             current-payload installer binds the exact stamped payload SHA so
+             /api/health remains provenance-bearing under launchd. -->
+        <key>PAPERCUSP_BUILD_SHA</key>
+        <string>__PAPERCUSP_CURRENT_BUILD_SHA__</string>
+        <key>PAPERCUSP_BUILD_VERSION</key>
+        <string>__PAPERCUSP_CURRENT_BUILD_VERSION__</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>__PAPERCUSP_CURRENT_PAYLOAD__</string>
+
+    <key>UserName</key>
+    <string>__PAPERCUSP_SERVICE_USER__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart failures, but honour an intentional clean exit. `bootout`
+         removes the job before deploy/stop, so SIGTERM cannot race a respawn. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

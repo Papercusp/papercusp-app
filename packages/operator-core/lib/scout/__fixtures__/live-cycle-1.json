@@ -1,0 +1,936 @@
+{
+  "meta": {
+    "capturedAt": "2026-06-11T15:49:12.523Z",
+    "cycleId": "scout-live-cycle-1",
+    "harnessSlug": "papercup",
+    "limits": {
+      "maxCostUsd": 0.5,
+      "maxIdeators": 2
+    },
+    "transport": "meridian-stateless via AGENT_BACKEND=claude-code",
+    "noveltyCorpusSize": 1359,
+    "inertRails": {
+      "planDrafts": [
+        {
+          "slug": "scout-in-multi-agent-coding-platforms-needs-human-deferrals-block",
+          "title": "In multi-agent coding platforms, 'needs-human' deferrals block downstream work because agents surface abstract questions — humans must reason about imagined futures rather than evaluate concrete evide"
+        },
+        {
+          "slug": "scout-token-budgets-are-decoupled-from-value-delivery-sessions-rec",
+          "title": "Token budgets are decoupled from value delivery: sessions receive fixed allotments and spend them regardless of whether they are making progress, producing a large unattributed spend sink with no corr"
+        },
+        {
+          "slug": "scout-hand-maintained-registries-zod-schemas-and-rate-governor-hoo",
+          "title": "Hand-maintained registries, Zod schemas, and rate-governor hooks in a multi-agent system drift silently from reality: args get stripped because schemas weren't updated, governors miss subprocess bees "
+        }
+      ],
+      "gymSeeds": [],
+      "captures": [
+        "SP-003"
+      ]
+    }
+  },
+  "result": {
+    "cycleId": "scout-live-cycle-1",
+    "stop": "completed",
+    "costUsd": 0.5907676,
+    "digest": {
+      "generatedAt": "2026-06-11T15:42:33.443Z",
+      "corpus": {
+        "completions": 289,
+        "reverts": 58,
+        "frictionCaptured": 254,
+        "deferrals": 222,
+        "spendUsd": 65961.43,
+        "spendBuckets": 23
+      },
+      "recurringFriction": [
+        {
+          "category": "recurring-friction",
+          "summary": "Tool plans:set-status erroring repeatedly",
+          "detail": "recurred 2× (2 open), last 0.2d ago",
+          "ref": "wi:EI-131",
+          "weight": 1
+        },
+        {
+          "category": "recurring-friction",
+          "summary": "p2p-perf scenario crashed in weekly Tier-2 run: netem.sustained: netem-inner fatal: Error: proc mesh: reader 1 never ad…",
+          "detail": "recurred 2× (2 open), last 0.1d ago",
+          "ref": "wi:EI-115",
+          "weight": 1
+        },
+        {
+          "category": "recurring-friction",
+          "summary": "coord invariant: wake-queue depth/age growth",
+          "detail": "recurred 2× (1 open), last 0.3d ago",
+          "ref": "wi:EI-275",
+          "weight": 0.75
+        },
+        {
+          "category": "recurring-friction",
+          "summary": "Schema drift: migrations on disk are not applied to the live DB",
+          "detail": "recurred 2× (1 open), last 1.6d ago",
+          "ref": "wi:EI-182",
+          "weight": 0.75
+        },
+        {
+          "category": "recurring-friction",
+          "summary": "Test failing repeatedly: packages/operator-core/lib/sync/hyperbee/__tests__/swarm.test.ts",
+          "detail": "recurred 2× (0 open), last 0.6d ago",
+          "ref": "wi:EI-236",
+          "weight": 0.25
+        },
+        {
+          "category": "recurring-friction",
+          "summary": "Test failing repeatedly: apps/operator/app/harness/dock/RealAgentsPanel.test.tsx",
+          "detail": "recurred 2× (0 open), last 0.6d ago",
+          "ref": "wi:EI-263",
+          "weight": 0.25
+        },
+        {
+          "category": "recurring-friction",
+          "summary": "Test failing repeatedly: apps/operator/e2e/voice-mode.spec.ts",
+          "detail": "recurred 2× (0 open), last 0.6d ago",
+          "ref": "wi:EI-222",
+          "weight": 0.25
+        },
+        {
+          "category": "recurring-friction",
+          "summary": "Test failing repeatedly: libs/papercusp/packages/orchestrator/src/state.test.ts",
+          "detail": "recurred 2× (0 open), last 1.2d ago",
+          "ref": "wi:EI-167",
+          "weight": 0.25
+        },
+        {
+          "category": "recurring-friction",
+          "summary": "Test failing repeatedly: apps/operator/app/cupboard/__tests__/CupboardDetailPage.test.tsx",
+          "detail": "recurred 2× (0 open), last 1.2d ago",
+          "ref": "wi:EI-159",
+          "weight": 0.25
+        }
+      ],
+      "timeTokenSinks": [
+        {
+          "category": "time-token-sink",
+          "summary": "$65893.29 on (unattributed) · interactive",
+          "detail": "8266 run(s), 642,647,638 tokens",
+          "ref": "usage:(unattributed)/interactive",
+          "weight": 1
+        },
+        {
+          "category": "time-token-sink",
+          "summary": "$21.92 on brood-box-alpha · bee",
+          "detail": "121 run(s), 676,049 tokens",
+          "ref": "usage:brood-box-alpha/bee",
+          "weight": 0
+        },
+        {
+          "category": "time-token-sink",
+          "summary": "$10.75 on sb-devboard · worker",
+          "detail": "4 run(s), 159,856 tokens",
+          "ref": "usage:sb-devboard/worker",
+          "weight": 0
+        },
+        {
+          "category": "time-token-sink",
+          "summary": "$9.37 on papercup · bee",
+          "detail": "30 run(s), 309,146 tokens",
+          "ref": "usage:papercup/bee",
+          "weight": 0
+        },
+        {
+          "category": "time-token-sink",
+          "summary": "$5.35 on papercup · worker",
+          "detail": "3 run(s), 59,264 tokens",
+          "ref": "usage:papercup/worker",
+          "weight": 0
+        },
+        {
+          "category": "time-token-sink",
+          "summary": "$4.15 on sb-devboard-hive · operator",
+          "detail": "12 run(s), 165,627 tokens",
+          "ref": "usage:sb-devboard-hive/operator",
+          "weight": 0
+        },
+        {
+          "category": "time-token-sink",
+          "summary": "$4.08 on papercup-hive · queen",
+          "detail": "12 run(s), 94,937 tokens",
+          "ref": "usage:papercup-hive/queen",
+          "weight": 0
+        },
+        {
+          "category": "time-token-sink",
+          "summary": "$2.65 on papercup · release-fixer",
+          "detail": "6 run(s), 65,929 tokens",
+          "ref": "usage:papercup/release-fixer",
+          "weight": 0
+        },
+        {
+          "category": "time-token-sink",
+          "summary": "$2.1 on papercup-hive · operator",
+          "detail": "15 run(s), 77,339 tokens",
+          "ref": "usage:papercup-hive/operator",
+          "weight": 0
+        },
+        {
+          "category": "time-token-sink",
+          "summary": "$1.93 on sb-devboard · validator",
+          "detail": "1 run(s), 30,682 tokens",
+          "ref": "usage:sb-devboard/validator",
+          "weight": 0
+        }
+      ],
+      "chronicDeferrals": [
+        {
+          "category": "chronic-deferral",
+          "summary": "**Bee**: keep `invoke-once` as the headless work engine (D-007); make the bee's zellij pane a real psu/Claude TUI by at…",
+          "detail": "deferred 1× across 1 plan(s) [needs-human]",
+          "ref": "plan:hive-agent-tabs-psu-tui-2026-06-09#P-004",
+          "weight": 1
+        },
+        {
+          "category": "chronic-deferral",
+          "summary": "Design + stage per-route auth tiers for the ~767 auth:'public' endpoint-routes (EI-100); tactical loopback gates (P-025…",
+          "detail": "deferred 1× across 1 plan(s) [needs-human]",
+          "ref": "plan:papercusp-full-app-audit-2026-06-09#P-032",
+          "weight": 1
+        },
+        {
+          "category": "chronic-deferral",
+          "summary": "Two-box variant: run P-005's verb sweep + P-008/P-009 rungs across two physical machines per the `vm-federation-separat…",
+          "detail": "deferred 1× across 1 plan(s) [needs-human]",
+          "ref": "plan:coord-system-e2e-testing-2026-06-10#P-010",
+          "weight": 1
+        },
+        {
+          "category": "chronic-deferral",
+          "summary": "needs-human: Owner ratifies the four proposed decisions before execution — D-001 (build natively on the Windows VM, no …",
+          "detail": "deferred 1× across 1 plan(s) [needs-human]",
+          "ref": "plan:windows-desktop-release-readiness-2026-06-11#P-019",
+          "weight": 1
+        },
+        {
+          "category": "chronic-deferral",
+          "summary": "Live one-shot cycle harness: drive system:scout-cycle on staging with the approved cap; assert on REAL output — 100% sc…",
+          "detail": "deferred 1× across 1 plan(s) [needs-human]",
+          "ref": "plan:scout-loop-test-plan-2026-06-11#P-007",
+          "weight": 1
+        },
+        {
+          "category": "chronic-deferral",
+          "summary": "Judge-panel quality baseline: score the live cycle's proposals on groundedness / novelty-vs-corpus / bettability (exper…",
+          "detail": "deferred 1× across 1 plan(s) [needs-human]",
+          "ref": "plan:scout-loop-test-plan-2026-06-11#P-008",
+          "weight": 1
+        },
+        {
+          "category": "chronic-deferral",
+          "summary": "Duplicate-rate measurement: real-cycle ideas vs the prior plans+ideas corpus through the shipped dedup signature; recor…",
+          "detail": "deferred 1× across 1 plan(s) [needs-human]",
+          "ref": "plan:scout-loop-test-plan-2026-06-11#P-009",
+          "weight": 1
+        },
+        {
+          "category": "chronic-deferral",
+          "summary": "Queen triage E2E: a Scout-routed draft plan reaches Queen triage; greenlight promotes it into pipeline work, reject par…",
+          "detail": "deferred 1× across 1 plan(s) [needs-human]",
+          "ref": "plan:scout-loop-test-plan-2026-06-11#P-012",
+          "weight": 1
+        },
+        {
+          "category": "chronic-deferral",
+          "summary": "Pre-ship sign-off: review Phase 1–5 results, confirm flag default-ON, close out.",
+          "detail": "deferred 1× across 1 plan(s) [needs-human]",
+          "ref": "plan:hive-from-github-url-2026-06-11#P-020",
+          "weight": 1
+        },
+        {
+          "category": "chronic-deferral",
+          "summary": "Decide the Tahoe question: someone prepped a macOS Tahoe upgrade on Jun 9 (BaseSystem.img + OSX-KVM \"Support for macOS …",
+          "detail": "deferred 1× across 1 plan(s) [needs-human]",
+          "ref": "plan:mac-desktop-release-readiness-2026-06-11#P-004",
+          "weight": 1
+        }
+      ],
+      "capabilityGaps": [
+        {
+          "category": "capability-gap",
+          "summary": ".papercusp/tests.json TestItem.framework lacks cargo/shell — the Rust desktop gate can't be a first-class Tests-tab reg…",
+          "detail": "net-new ask (1 open)",
+          "ref": "wi:EI-299",
+          "weight": 1
+        },
+        {
+          "category": "capability-gap",
+          "summary": "Test failing repeatedly: packages/operator-core/lib/sync/hyperbee/__tests__/cross-peer-coordination.integration.test.ts",
+          "detail": "named missing capability (1 open)",
+          "ref": "wi:EI-327",
+          "weight": 0.67
+        },
+        {
+          "category": "capability-gap",
+          "summary": "The rate-governor is BLIND to subprocess bees — claude-CLI children's 429s never reach penalize(), so the AIMD can't re…",
+          "detail": "named missing capability (1 open)",
+          "ref": "wi:EI-86",
+          "weight": 0.67
+        },
+        {
+          "category": "capability-gap",
+          "summary": "plans:promote resolves plans only at papercup-primary scope — a harness-scoped plan (plans:* { harness: slug }) cannot …",
+          "detail": "named missing capability (1 open)",
+          "ref": "wi:EI-103",
+          "weight": 0.67
+        },
+        {
+          "category": "capability-gap",
+          "summary": "memory:forget / memory:update lack the per-call workspace arg memory:remember/search have — unusable from an unscoped p…",
+          "detail": "named missing capability (1 open)",
+          "ref": "wi:EI-211",
+          "weight": 0.67
+        },
+        {
+          "category": "capability-gap",
+          "summary": "hive-watchdog hiveBootCheck floods console.warn (\"time?.lastFiredAt?.getTime is not a function\") — intermittently fails…",
+          "detail": "named missing capability (1 open)",
+          "ref": "wi:EI-257",
+          "weight": 0.67
+        },
+        {
+          "category": "capability-gap",
+          "summary": "Adding a role requires edits in THREE parallel hand-maintained registries — COORD_ROLES misses silently disable coord:*…",
+          "detail": "named missing capability (1 open)",
+          "ref": "wi:EI-66",
+          "weight": 0.67
+        },
+        {
+          "category": "capability-gap",
+          "summary": "Feature flags can't be toggled at runtime on dev boxes without PostHog — env override requires a :3070 restart per flip…",
+          "detail": "named missing capability (1 open)",
+          "ref": "wi:EI-76",
+          "weight": 0.67
+        },
+        {
+          "category": "capability-gap",
+          "summary": "fleet:spawn children were MUTE on coord — signed-spawn MCP URL carried no stable coord owner (no client= param)",
+          "detail": "named missing capability (1 open)",
+          "ref": "wi:EI-77",
+          "weight": 0.67
+        },
+        {
+          "category": "capability-gap",
+          "summary": "fleet:spawn silently STRIPS unknown args (zod strip-default) — a `brief` sent to a pre-brief host spawned 5 task-less b…",
+          "detail": "named missing capability (1 open)",
+          "ref": "wi:EI-72",
+          "weight": 0.67
+        }
+      ],
+      "reverts": [
+        {
+          "summary": "F-015 reverted 13× (latest validating→failing)",
+          "detail": "last by api",
+          "ref": "wi:F-015",
+          "weight": 1
+        },
+        {
+          "summary": "F-AUTOFIT-001 reverted 7× (latest validating→failing)",
+          "detail": "last by api",
+          "ref": "wi:F-AUTOFIT-001",
+          "weight": 0.73
+        },
+        {
+          "summary": "F-CSV-003 reverted 3× (latest passed→failing)",
+          "detail": "last by api",
+          "ref": "wi:F-CSV-003",
+          "weight": 0.55
+        },
+        {
+          "summary": "F-FIX-012 reverted 3× (latest todo→deprecated)",
+          "detail": "last by api",
+          "ref": "wi:F-FIX-012",
+          "weight": 0.45
+        },
+        {
+          "summary": "F-KV-004 reverted 4× (latest todo→deprecated)",
+          "detail": "last by api",
+          "ref": "wi:F-KV-004",
+          "weight": 0.36
+        },
+        {
+          "summary": "F-FIX-024 reverted 4× (latest validating→failing)",
+          "detail": "last by api",
+          "ref": "wi:F-FIX-024",
+          "weight": 0.27
+        },
+        {
+          "summary": "F-FIX-017 reverted 5× (latest todo→failing)",
+          "detail": "last by api",
+          "ref": "wi:F-FIX-017",
+          "weight": 0.23
+        },
+        {
+          "summary": "F-FIX-028 reverted 4× (latest in_progress→todo)",
+          "detail": "last by api",
+          "ref": "wi:F-FIX-028",
+          "weight": 0.18
+        },
+        {
+          "summary": "F-HOME-001 reverted 1× (latest passed→todo)",
+          "detail": "last by api:reset",
+          "ref": "wi:F-HOME-001",
+          "weight": 0.18
+        },
+        {
+          "summary": "F-FILL-001 reverted 2× (latest validating→failing)",
+          "detail": "last by api",
+          "ref": "wi:F-FILL-001",
+          "weight": 0.18
+        }
+      ],
+      "headline": "State of the Hive: 9 recurring friction, 10 spend sink(s) ($65961.43), 10 chronic deferral(s), 10 capability gap(s), 10 reverted item(s) over 289 completions"
+    },
+    "ideas": [
+      {
+        "id": "scout-idea-analogical-0-0",
+        "lens": "analogical",
+        "title": "Epitope Registry: Immunological Memory for Recurring Failures",
+        "body": "Every recurring test/infra failure in the Hive (coord invariant wake-queue, schema drift, the five flapping test suites) is cleared once and then re-encountered fresh — exactly like a pathogen that re-infects an immune-amnesiac host. The immune system solves this by persisting *memory B/T cells*: compact structural encodings of the prior threat that enable near-instant recognition and a pre-loaded response on re-encounter. The Hive has no equivalent. It treats each recurrence as a novel event, spending full triage cost each time. An Epitope Registry changes that: when a recurring failure is resolved, the resolver extracts and persists a compact 'epitope' — not the test name, but the *failure signature* (stack frame pattern, schema delta shape, assertion site + preceding mutation). On every subsequent CI run, a lightweight patrol matches incoming failure output against the epitope corpus. Match → instant route to the known fix with escalating confidence weight per re-encounter, bypassing full triage. No central watchdog: epitopes are stored as metadata on the affected code path, consulted by the CI runner itself.",
+        "mechanism": "1. On resolution of any item tagged recurring-friction, a post-fix agent extracts a failure epitope: a compact (file:line, error-class, preceding-diff-signature) tuple stored in a per-repo `.hive/epitopes.json`. 2. A pre-merge CI hook runs an O(n_epitopes) scan over the current test failure output. On structural match (>0.85 cosine similarity of error token n-grams), it attaches a `known-regression:ref` tag and routes directly to the prior fix plan, skipping standard triage. 3. Each confirmed match increments an `affinity` counter; high-affinity epitopes trigger a 'memory plasma cell' — a standing canary test generated from the exact failure scenario that runs on every push to the affected path, not just on failure. 4. Epitopes that go unmatched for 90 days are pruned (immune senescence), preventing false-positive accumulation.",
+        "seedDomain": "immune-systems",
+        "addressesPatternRefs": [
+          "wi:EI-236",
+          "wi:EI-263",
+          "wi:EI-222",
+          "wi:EI-167",
+          "wi:EI-159",
+          "wi:EI-182",
+          "wi:EI-275"
+        ]
+      },
+      {
+        "id": "scout-idea-analogical-0-1",
+        "lens": "analogical",
+        "title": "DAMP Side-Channel: Distributed Danger Signaling for Subprocess 429s",
+        "body": "The rate-governor's AIMD is blind to subprocess bees' 429s (EI-86) because the coupling is missing: child CLIs have no path to penalize(). The immune analogy is precise — the immune system does NOT require a central receptor to detect distress. Damaged cells emit *danger-associated molecular patterns* (DAMPs): small, non-specific stress molecules that any proximate immune cell reads without knowing the source identity. The governor needs the same: a source-anonymous, structurally simple stress signal any subprocess can emit into a shared namespace, which the governor passively monitors without the subprocess knowing anything about AIMD internals.",
+        "mechanism": "1. A per-hive-namespace tmpfs file (or a named POSIX semaphore) acts as the 'extracellular DAMP pool': any subprocess bee that receives a 429 atomically increments a stress counter and writes a monotonic timestamp. No subprocess-to-governor RPC, no knowledge of penalize(). 2. The rate-governor adds a 100ms polling loop over this file — when the stress counter increased since last poll, it calls penalize() with a weight proportional to the counter delta (graduated response). Counter decays exponentially when no new 429s arrive (homeostasis). 3. The DAMP pool is strictly write-only for subprocesses and read-only for the governor — no bidirectional coupling, so subprocess death can't deadlock the governor. 4. The structural key: the governor tolerates a baseline DAMP rate (normal load) and only escalates AIMD when rate exceeds a rolling-window threshold — immune tolerance of benign signals, not zero-tolerance shutdown.",
+        "seedDomain": "immune-systems",
+        "addressesPatternRefs": [
+          "wi:EI-86",
+          "usage:(unattributed)/interactive"
+        ]
+      },
+      {
+        "id": "scout-idea-analogical-0-2",
+        "lens": "analogical",
+        "title": "Pyrexia Governor: Graduated Thermal Throttle on Anomalous Token Burn",
+        "body": "The $65k unattributed interactive sink (8266 runs, 642M tokens) is not a session-count problem — it's a burn-*rate* problem: sessions that individually look normal but collectively enter a runaway state. The immune system's fever response is the right model: it does not kill cells outright, does not terminate the organism. It raises the metabolic cost of replication globally and proportionally to the deviation from homeostatic baseline — slowing pathogen growth while tolerating normal tissue. The Hive's token governor should work identically: no hard per-session kill, but a system-wide 'thermal' signal that increases compression pressure on all concurrent sessions in proportion to how far aggregate burn rate exceeds the rolling baseline. When burn rate normalizes, pressure lifts automatically. No operator intervention needed for transient spikes; chronic elevation triggers an escalating alert ladder.",
+        "mechanism": "1. A background process computes a rolling 15-minute token-burn-rate baseline (tokens/min) across all sessions. 2. When the live rate exceeds baseline by >1.5σ, it emits a 'fever signal': a shared config value (`HIVE_THERMAL_LEVEL` in {0,1,2,3}) broadcast to all running sessions via a watched config file. 3. Each session's system prompt injector reads THERMAL_LEVEL and appends a graduated instruction tier: level 1 = 'prefer concise responses'; level 2 = 'omit examples unless asked; compress tool outputs'; level 3 = 'single-tool-call chains only; no speculative reads'. These are soft constraints — sessions still complete tasks, just with less expansive reasoning. 4. THERMAL_LEVEL decays by 1 every 5 minutes the burn rate stays within 1σ of baseline (homeostasis). Level 3 sustained for >20min fires a PushNotification to the operator (escalating adaptive response). 5. Critically: sessions attributed to known workflows (brood-box-alpha, papercup/bee) are 'self' — they receive attenuated thermal signals (regulatory T cell analog) so long-running legitimate work isn't starved by interactive bursts.",
+        "seedDomain": "immune-systems",
+        "addressesPatternRefs": [
+          "usage:(unattributed)/interactive",
+          "wi:EI-86"
+        ]
+      },
+      {
+        "id": "scout-idea-first-principles-1-0",
+        "lens": "first-principles",
+        "title": "Choose Between Worlds, Not Answer Questions",
+        "body": "Every 'needs-human' deferral is a question asked into a void. The real goal isn't an answer — it's a *decision that unblocks downstream work*. From scratch, the ideal mechanism would never ask abstract questions; it would pre-compute what the world looks like under each plausible choice and let the human ratify an outcome rather than reason about a future. The chronic deferral pile ($65k+ of blocked work) exists because humans are handed abstractions when they could be handed completed realities.",
+        "mechanism": "When a plan item is flagged needs-human, a 'decision-fan' agent identifies N plausible resolutions (typically 2–3), spins up N isolated git worktrees, and runs 10–20 minutes of downstream work in each in parallel. The human is presented not with a question but with a rendered diff-summary: 'World A: native Windows build, here are the passing tests and the 2 blockers. World B: cross-compile, here are the 3 regressions.' The human clicks a world; the unchosen worktrees are discarded and the chosen one is fast-forwarded to main. The human ratifies a completed state, not an imagined one — which is 10× faster and produces better decisions. Cost is bounded: the fan only runs the cheapest next-step of each world, not the full plan.",
+        "addressesPatternRefs": [
+          "plan:windows-desktop-release-readiness-2026-06-11#P-019",
+          "plan:hive-agent-tabs-psu-tui-2026-06-09#P-004",
+          "plan:scout-loop-test-plan-2026-06-11#P-007",
+          "plan:hive-from-github-url-2026-06-11#P-020",
+          "plan:mac-desktop-release-readiness-2026-06-11#P-004"
+        ]
+      },
+      {
+        "id": "scout-idea-first-principles-1-1",
+        "lens": "first-principles",
+        "title": "Empirical Capability Graph — Observation Replaces Declaration",
+        "body": "Three hand-maintained registries for roles (EI-66), Zod schemas that silently strip fleet:spawn args (EI-72), a rate governor blind to subprocess bees (EI-86) — these aren't separate bugs. They're the same root cause: the system's self-knowledge is declared, not observed, so it drifts. From first principles, a system where agents spawn agents should *derive* its capability schema from the live call graph, not the other way around. The declaration is always stale; the observations are always current.",
+        "mechanism": "An 'epistemic harness' wraps every inter-agent boundary (fleet:spawn, coord verb dispatch, memory:*, rate-governor penalize). It records the full call envelope: args declared in schema vs. args actually received vs. args actually consumed downstream. Nightly, a diff agent runs statistical analysis over the observation log: 'brief appears in 89% of fleet:spawn calls, is stripped 100% of the time' → auto-PR adding brief to the Zod schema. 'penalize() was never called for a PID in the subprocess bee range' → auto-PR wiring the rate governor to the subprocess tree. The canonical registries (COORD_ROLES, Zod schemas, rate-governor hooks) are *generated outputs* of the observation pipeline, not hand-maintained inputs. A new role is discovered when it appears in 5+ coord interactions before it's declared — the system files the registration PR itself.",
+        "addressesPatternRefs": [
+          "wi:EI-66",
+          "wi:EI-72",
+          "wi:EI-86",
+          "wi:EI-103",
+          "wi:EI-211"
+        ]
+      },
+      {
+        "id": "scout-idea-first-principles-1-2",
+        "lens": "first-principles",
+        "title": "Intent-Bonded Elastic Budget",
+        "body": "$65,893 of unattributed interactive spend is not an attribution problem — it's a missing feedback loop. The underlying goal of spend governance is not reporting; it's *coupling resource consumption to value delivery*. From scratch, you'd never give a session a fixed token budget and measure waste afterward. You'd make the budget *elastic*: it expands as the session demonstrates measurable progress and contracts as it stalls. The session's spend is bonded to its declared intent; the bond pays out on delivery.",
+        "mechanism": "Every session (interactive or agent) opens with a structured 'intent declaration': a lightweight JSON diff of expected state changes — which tests should move from failing to passing, which issues should close, which files should change in which direction. A session governor polls measurable proxies every 5 minutes (test counts, open issues, file churn, PR state). When the session crosses 50% of declared intent, its token ceiling doubles from the starter allotment. When it stalls — no measurable state change for 20 minutes — the ceiling halves and a 'stall signal' is emitted to the coord layer, which can reassign the task. Sessions that consistently deliver on intent accumulate 'delivery credit' that raises their starter ceiling. The $65k unattributed sink has no declared intent → it gets only the starter budget; to spend more it must show progress. Recurring test failures (EI-236, EI-263, EI-167) trigger stall detection after the second identical failure and cap the retry budget until a root-cause diff is present in the session.",
+        "addressesPatternRefs": [
+          "usage:(unattributed)/interactive",
+          "wi:EI-236",
+          "wi:EI-263",
+          "wi:EI-167",
+          "wi:EI-159",
+          "wi:EI-222"
+        ]
+      }
+    ],
+    "scored": [
+      {
+        "idea": {
+          "id": "scout-idea-analogical-0-0",
+          "lens": "analogical",
+          "title": "Epitope Registry: Immunological Memory for Recurring Failures",
+          "body": "Every recurring test/infra failure in the Hive (coord invariant wake-queue, schema drift, the five flapping test suites) is cleared once and then re-encountered fresh — exactly like a pathogen that re-infects an immune-amnesiac host. The immune system solves this by persisting *memory B/T cells*: compact structural encodings of the prior threat that enable near-instant recognition and a pre-loaded response on re-encounter. The Hive has no equivalent. It treats each recurrence as a novel event, spending full triage cost each time. An Epitope Registry changes that: when a recurring failure is resolved, the resolver extracts and persists a compact 'epitope' — not the test name, but the *failure signature* (stack frame pattern, schema delta shape, assertion site + preceding mutation). On every subsequent CI run, a lightweight patrol matches incoming failure output against the epitope corpus. Match → instant route to the known fix with escalating confidence weight per re-encounter, bypassing full triage. No central watchdog: epitopes are stored as metadata on the affected code path, consulted by the CI runner itself.",
+          "mechanism": "1. On resolution of any item tagged recurring-friction, a post-fix agent extracts a failure epitope: a compact (file:line, error-class, preceding-diff-signature) tuple stored in a per-repo `.hive/epitopes.json`. 2. A pre-merge CI hook runs an O(n_epitopes) scan over the current test failure output. On structural match (>0.85 cosine similarity of error token n-grams), it attaches a `known-regression:ref` tag and routes directly to the prior fix plan, skipping standard triage. 3. Each confirmed match increments an `affinity` counter; high-affinity epitopes trigger a 'memory plasma cell' — a standing canary test generated from the exact failure scenario that runs on every push to the affected path, not just on failure. 4. Epitopes that go unmatched for 90 days are pruned (immune senescence), preventing false-positive accumulation.",
+          "seedDomain": "immune-systems",
+          "addressesPatternRefs": [
+            "wi:EI-236",
+            "wi:EI-263",
+            "wi:EI-222",
+            "wi:EI-167",
+            "wi:EI-159",
+            "wi:EI-182",
+            "wi:EI-275"
+          ]
+        },
+        "novelty": 0.41,
+        "feasibility": 0.5,
+        "noveltyMatches": [],
+        "verdict": "keep",
+        "notes": "novel (0.41) + feasible (0.5) — Error fingerprinting, deduplication, and known-error routing already exist in mature ops tooling (Sentry fingerprinting, ITIL KEDBs, Google/Meta flakiness detectors) — the immunological framing is evocative but does not structurally change the mechanism; the one genuine leap is the plasma-cell → auto-generated standing canary test, which is novel within this domain. That step is also the least feasible: auto-synthesizing a regression canary from a prior failure scenario is a hard generation problem, the 0.85 cosine-similarity threshold on raw error token n-grams is brittle against refactors that move stack frames without changing behaviour, and a false-positive route to a stale fix plan could be strictly worse than re-triage."
+      },
+      {
+        "idea": {
+          "id": "scout-idea-analogical-0-1",
+          "lens": "analogical",
+          "title": "DAMP Side-Channel: Distributed Danger Signaling for Subprocess 429s",
+          "body": "The rate-governor's AIMD is blind to subprocess bees' 429s (EI-86) because the coupling is missing: child CLIs have no path to penalize(). The immune analogy is precise — the immune system does NOT require a central receptor to detect distress. Damaged cells emit *danger-associated molecular patterns* (DAMPs): small, non-specific stress molecules that any proximate immune cell reads without knowing the source identity. The governor needs the same: a source-anonymous, structurally simple stress signal any subprocess can emit into a shared namespace, which the governor passively monitors without the subprocess knowing anything about AIMD internals.",
+          "mechanism": "1. A per-hive-namespace tmpfs file (or a named POSIX semaphore) acts as the 'extracellular DAMP pool': any subprocess bee that receives a 429 atomically increments a stress counter and writes a monotonic timestamp. No subprocess-to-governor RPC, no knowledge of penalize(). 2. The rate-governor adds a 100ms polling loop over this file — when the stress counter increased since last poll, it calls penalize() with a weight proportional to the counter delta (graduated response). Counter decays exponentially when no new 429s arrive (homeostasis). 3. The DAMP pool is strictly write-only for subprocesses and read-only for the governor — no bidirectional coupling, so subprocess death can't deadlock the governor. 4. The structural key: the governor tolerates a baseline DAMP rate (normal load) and only escalates AIMD when rate exceeds a rolling-window threshold — immune tolerance of benign signals, not zero-tolerance shutdown.",
+          "seedDomain": "immune-systems",
+          "addressesPatternRefs": [
+            "wi:EI-86",
+            "usage:(unattributed)/interactive"
+          ]
+        },
+        "novelty": 0.28,
+        "feasibility": 0.71,
+        "noveltyMatches": [],
+        "verdict": "reject",
+        "notes": "novelty 0.28 < 0.34 — too close to an existing/already-tried idea — The DAMP analogy is intellectually evocative but maps directly onto a decades-old 'shared atomic counter in a file + passive polling' IPC pattern — the biological framing is the novel contribution, not the mechanism; exponential-decay rate counters and anonymous write-only/read-only splits are textbook. Feasibility is solid assuming subprocess bees share a writable tmpfs namespace (the main hidden assumption): the graduated AIMD response, 100ms poll, and strict unidirectional coupling are all low-cost, well-understood primitives that cleanly solve the EI-86 coupling gap without introducing deadlock risk."
+      },
+      {
+        "idea": {
+          "id": "scout-idea-analogical-0-2",
+          "lens": "analogical",
+          "title": "Pyrexia Governor: Graduated Thermal Throttle on Anomalous Token Burn",
+          "body": "The $65k unattributed interactive sink (8266 runs, 642M tokens) is not a session-count problem — it's a burn-*rate* problem: sessions that individually look normal but collectively enter a runaway state. The immune system's fever response is the right model: it does not kill cells outright, does not terminate the organism. It raises the metabolic cost of replication globally and proportionally to the deviation from homeostatic baseline — slowing pathogen growth while tolerating normal tissue. The Hive's token governor should work identically: no hard per-session kill, but a system-wide 'thermal' signal that increases compression pressure on all concurrent sessions in proportion to how far aggregate burn rate exceeds the rolling baseline. When burn rate normalizes, pressure lifts automatically. No operator intervention needed for transient spikes; chronic elevation triggers an escalating alert ladder.",
+          "mechanism": "1. A background process computes a rolling 15-minute token-burn-rate baseline (tokens/min) across all sessions. 2. When the live rate exceeds baseline by >1.5σ, it emits a 'fever signal': a shared config value (`HIVE_THERMAL_LEVEL` in {0,1,2,3}) broadcast to all running sessions via a watched config file. 3. Each session's system prompt injector reads THERMAL_LEVEL and appends a graduated instruction tier: level 1 = 'prefer concise responses'; level 2 = 'omit examples unless asked; compress tool outputs'; level 3 = 'single-tool-call chains only; no speculative reads'. These are soft constraints — sessions still complete tasks, just with less expansive reasoning. 4. THERMAL_LEVEL decays by 1 every 5 minutes the burn rate stays within 1σ of baseline (homeostasis). Level 3 sustained for >20min fires a PushNotification to the operator (escalating adaptive response). 5. Critically: sessions attributed to known workflows (brood-box-alpha, papercup/bee) are 'self' — they receive attenuated thermal signals (regulatory T cell analog) so long-running legitimate work isn't starved by interactive bursts.",
+          "seedDomain": "immune-systems",
+          "addressesPatternRefs": [
+            "usage:(unattributed)/interactive",
+            "wi:EI-86"
+          ]
+        },
+        "novelty": 0.62,
+        "feasibility": 0.55,
+        "noveltyMatches": [],
+        "verdict": "keep",
+        "notes": "novel (0.62) + feasible (0.55) — The fever-model framing earns partial novelty credit — specifically the workflow-attribution attenuation ('regulatory T-cell' exemption for known brood sessions) and auto-decay homeostasis go meaningfully beyond standard adaptive rate-limiting, but the underlying mechanism is dressed-up QoS with a biological coat; graduated soft throttling triggered by σ-deviation from a rolling baseline is textbook SRE. Feasibility is mid-range: the rolling-baseline math and THERMAL_LEVEL broadcast are straightforward, but mid-session system-prompt injection is architecturally non-trivial in most agent runtimes (new sessions pick up the signal, long-running ones likely don't without explicit polling hooks), and soft LLM compliance with 'prefer concise' instructions is probabilistic — you may need a hard fallback anyway, which undermines the 'no kill' premise."
+      },
+      {
+        "idea": {
+          "id": "scout-idea-first-principles-1-0",
+          "lens": "first-principles",
+          "title": "Choose Between Worlds, Not Answer Questions",
+          "body": "Every 'needs-human' deferral is a question asked into a void. The real goal isn't an answer — it's a *decision that unblocks downstream work*. From scratch, the ideal mechanism would never ask abstract questions; it would pre-compute what the world looks like under each plausible choice and let the human ratify an outcome rather than reason about a future. The chronic deferral pile ($65k+ of blocked work) exists because humans are handed abstractions when they could be handed completed realities.",
+          "mechanism": "When a plan item is flagged needs-human, a 'decision-fan' agent identifies N plausible resolutions (typically 2–3), spins up N isolated git worktrees, and runs 10–20 minutes of downstream work in each in parallel. The human is presented not with a question but with a rendered diff-summary: 'World A: native Windows build, here are the passing tests and the 2 blockers. World B: cross-compile, here are the 3 regressions.' The human clicks a world; the unchosen worktrees are discarded and the chosen one is fast-forwarded to main. The human ratifies a completed state, not an imagined one — which is 10× faster and produces better decisions. Cost is bounded: the fan only runs the cheapest next-step of each world, not the full plan.",
+          "addressesPatternRefs": [
+            "plan:windows-desktop-release-readiness-2026-06-11#P-019",
+            "plan:hive-agent-tabs-psu-tui-2026-06-09#P-004",
+            "plan:scout-loop-test-plan-2026-06-11#P-007",
+            "plan:hive-from-github-url-2026-06-11#P-020",
+            "plan:mac-desktop-release-readiness-2026-06-11#P-004"
+          ]
+        },
+        "novelty": 0.65,
+        "feasibility": 0.72,
+        "noveltyMatches": [],
+        "verdict": "keep",
+        "notes": "novel (0.65) + feasible (0.72) — Speculative execution applied to human-in-the-loop decisions is a real reframing — 'ratify a completed state, not an imagined one' is a genuine design principle leap over the standard question-answer pattern — but parallel-futures UX exists in scenario-planning tools and the mechanism leans heavily on well-known primitives (git worktrees, parallel agents, diff summaries), so the novelty is in the specific pipeline rather than the underlying concept. Architecturally the pipeline is sound and the blocked-work cost argument justifies the 2–3× compute multiplier, but the hardest sub-problem — a 'decision-fan' agent reliably enumerating the N right plausible resolutions without itself needing human clarification — is underspecified and could collapse the whole mechanism if it fails to partition the decision space correctly."
+      },
+      {
+        "idea": {
+          "id": "scout-idea-first-principles-1-1",
+          "lens": "first-principles",
+          "title": "Empirical Capability Graph — Observation Replaces Declaration",
+          "body": "Three hand-maintained registries for roles (EI-66), Zod schemas that silently strip fleet:spawn args (EI-72), a rate governor blind to subprocess bees (EI-86) — these aren't separate bugs. They're the same root cause: the system's self-knowledge is declared, not observed, so it drifts. From first principles, a system where agents spawn agents should *derive* its capability schema from the live call graph, not the other way around. The declaration is always stale; the observations are always current.",
+          "mechanism": "An 'epistemic harness' wraps every inter-agent boundary (fleet:spawn, coord verb dispatch, memory:*, rate-governor penalize). It records the full call envelope: args declared in schema vs. args actually received vs. args actually consumed downstream. Nightly, a diff agent runs statistical analysis over the observation log: 'brief appears in 89% of fleet:spawn calls, is stripped 100% of the time' → auto-PR adding brief to the Zod schema. 'penalize() was never called for a PID in the subprocess bee range' → auto-PR wiring the rate governor to the subprocess tree. The canonical registries (COORD_ROLES, Zod schemas, rate-governor hooks) are *generated outputs* of the observation pipeline, not hand-maintained inputs. A new role is discovered when it appears in 5+ coord interactions before it's declared — the system files the registration PR itself.",
+          "addressesPatternRefs": [
+            "wi:EI-66",
+            "wi:EI-72",
+            "wi:EI-86",
+            "wi:EI-103",
+            "wi:EI-211"
+          ]
+        },
+        "novelty": 0.62,
+        "feasibility": 0.52,
+        "noveltyMatches": [],
+        "verdict": "keep",
+        "notes": "novel (0.62) + feasible (0.52) — The 'registries as generated outputs, not inputs' inversion is a meaningful reframe, but schema-inference-from-traffic and drift-detection auto-PRs already exist in service-mesh and API-contract tooling (Pact, OpenAPI-from-traffic, Terraform drift), so this is a well-worn principle transplanted rather than a genuine leap. The auto-PR mechanism is buildable, but the false-positive risk on core schemas is non-trivial — 'brief stripped 100% of the time' is equally consistent with 'brief should never arrive' as with 'schema is wrong' — and the nightly-batch lag means the system is still running on stale declarations between cycles, which is exactly the failure mode it aims to cure."
+      },
+      {
+        "idea": {
+          "id": "scout-idea-first-principles-1-2",
+          "lens": "first-principles",
+          "title": "Intent-Bonded Elastic Budget",
+          "body": "$65,893 of unattributed interactive spend is not an attribution problem — it's a missing feedback loop. The underlying goal of spend governance is not reporting; it's *coupling resource consumption to value delivery*. From scratch, you'd never give a session a fixed token budget and measure waste afterward. You'd make the budget *elastic*: it expands as the session demonstrates measurable progress and contracts as it stalls. The session's spend is bonded to its declared intent; the bond pays out on delivery.",
+          "mechanism": "Every session (interactive or agent) opens with a structured 'intent declaration': a lightweight JSON diff of expected state changes — which tests should move from failing to passing, which issues should close, which files should change in which direction. A session governor polls measurable proxies every 5 minutes (test counts, open issues, file churn, PR state). When the session crosses 50% of declared intent, its token ceiling doubles from the starter allotment. When it stalls — no measurable state change for 20 minutes — the ceiling halves and a 'stall signal' is emitted to the coord layer, which can reassign the task. Sessions that consistently deliver on intent accumulate 'delivery credit' that raises their starter ceiling. The $65k unattributed sink has no declared intent → it gets only the starter budget; to spend more it must show progress. Recurring test failures (EI-236, EI-263, EI-167) trigger stall detection after the second identical failure and cap the retry budget until a root-cause diff is present in the session.",
+          "addressesPatternRefs": [
+            "usage:(unattributed)/interactive",
+            "wi:EI-236",
+            "wi:EI-263",
+            "wi:EI-167",
+            "wi:EI-159",
+            "wi:EI-222"
+          ]
+        },
+        "novelty": 0.65,
+        "feasibility": 0.52,
+        "noveltyMatches": [],
+        "verdict": "keep",
+        "notes": "novel (0.65) + feasible (0.52) — The intent-bond framing — elastic ceilings expanding on measurable state-change diffs rather than fixed upfront budgets — is a fresh application to LLM session governance, but the underlying mechanism (adaptive resource allocation gated on demonstrated progress) is well-trodden in distributed systems, circuit-breakers, and milestone-based funding. Feasibility is middling: the measurable proxies (test counts, PR state, file churn) are genuinely accessible in a coding platform and stall detection is buildable, but the intent-declaration step adds real friction for interactive sessions, proxy signals are gameable by agents optimizing for token ceiling expansion rather than real delivery, and the stall-reassignment path presupposes a coordination layer with task-handoff semantics that likely doesn't exist yet."
+      }
+    ],
+    "survivors": [
+      "scout-idea-analogical-0-0",
+      "scout-idea-analogical-0-2",
+      "scout-idea-first-principles-1-0",
+      "scout-idea-first-principles-1-1",
+      "scout-idea-first-principles-1-2"
+    ],
+    "proposals": [
+      {
+        "id": "SP-001",
+        "framing": "In multi-agent coding platforms, 'needs-human' deferrals block downstream work because agents surface abstract questions — humans must reason about imagined futures rather than evaluate concrete evidence. The result is a compounding deferral pile where every blocked item waits on a human cognitive task that is unnecessarily hard.",
+        "mechanism": "A 'decision-fan' orchestrator intercepts any needs-human flag before surfacing it to the user. It enumerates N plausible resolutions (2–3), spawns N isolated git worktrees via the existing worktree API, and runs a bounded slice of downstream plan steps (time-capped at ~15 min of agent-wall-clock) in each world in parallel. It then renders a structured diff-summary per world — passing tests, new blockers, changed files, cost delta — and presents these to the human as selectable outcomes rather than a freeform question. The human clicks a world; the unchosen worktrees are torn down and the chosen worktree is fast-forwarded to main. The fan cost is bounded: only the cheapest next-steps of each world execute, not the full plan tail.",
+        "whyNew": "Existing approaches either block-and-ask (pure deferral), auto-resolve with an audit log (no human in the loop), or show a multiple-choice question (options as text). None pre-execute downstream consequences and present rendered partial realities. The key distinction is epistemic: the human is not asked to predict; they are asked to ratify an outcome they can already observe. This is the difference between 'which route should we take?' and 'here are two cars that drove both routes — which arrival do you prefer?'",
+        "bet": "If humans ratify outcomes 3–5× faster than they answer abstract questions, and downstream regression rates drop because decisions are grounded in evidence, the chronic deferral pile shrinks dramatically and overall Hive throughput scales with human attention rather than human reasoning bandwidth.",
+        "cheapExperiment": {
+          "hypothesis": "Humans make materially faster and higher-quality unblock decisions when shown pre-executed world-diffs versus equivalent abstract questions.",
+          "method": "Select 10 real historical needs-human deferrals from Hive logs. For each, manually author 2–3 canned 'world summaries' (diff stats, test pass/fail counts, one-line blocker list) simulating what the fan would have produced — no real worktree execution needed. Run a within-subjects comparison: 5 evaluators see each item twice, once as the original abstract question and once as the world-diff card, order counterbalanced. Measure: time-to-decision and a 1-item confidence rating. Then check the chosen resolution against the ground-truth outcome that actually shipped (known from history) to score decision quality.",
+          "falsifiableSignal": "If median decision time for world-diff cards is NOT at least 40% faster than for abstract questions, OR if confidence ratings are not higher, OR if ground-truth alignment is no better — the core premise that pre-executed realities are easier to ratify than imagined futures is wrong and the mechanism loses its primary justification."
+        },
+        "sourceIdeaIds": [
+          "scout-idea-first-principles-1-0"
+        ],
+        "addressesPatternRefs": [
+          "plan:windows-desktop-release-readiness-2026-06-11#P-019",
+          "plan:hive-agent-tabs-psu-tui-2026-06-09#P-004",
+          "plan:scout-loop-test-plan-2026-06-11#P-007",
+          "plan:hive-from-github-url-2026-06-11#P-020",
+          "plan:mac-desktop-release-readiness-2026-06-11#P-004"
+        ],
+        "routeHint": "plan"
+      },
+      {
+        "id": "SP-002",
+        "framing": "Token budgets are decoupled from value delivery: sessions receive fixed allotments and spend them regardless of whether they are making progress, producing a large unattributed spend sink with no corrective signal and no incentive structure for the session itself to demonstrate forward motion.",
+        "mechanism": "Each session opens with a structured 'intent declaration' — a lightweight JSON diff of expected observable state changes (tests failing→passing, files changing, issues closing, PR state transitions). A session governor polls measurable proxies every 5 minutes. When a session crosses 50% of declared intent signals, its token ceiling doubles from the starter allotment. When 20 consecutive minutes pass with no measurable state change, the ceiling halves and a stall signal is emitted to the coordination layer for reassignment. Sessions accumulate 'delivery credit' across completions, raising their starter ceiling over time. Sessions with no declared intent are capped at the starter budget and cannot expand — they must show progress to earn spend.",
+        "whyNew": "Existing approaches are static pre-assigned quotas plus post-hoc attribution dashboards — reporting on waste after it occurs. This is a real-time closed-loop controller where the spend rate is a direct function of observed progress velocity. No current multi-agent platform ties token ceiling elasticity to a declared-intent fulfillment signal at the session level.",
+        "bet": "The $65k unattributed sink either declares intent and earns its spend (justified, visible) or hits the starter ceiling and surfaces a stall (redirected). Recurring test-failure retry loops (EI-236, EI-263, EI-167) are capped after the second identical failure signature, forcing a root-cause diff before budget restores. Net effect: spend becomes a lagging indicator of progress rather than an input to it.",
+        "cheapExperiment": {
+          "hypothesis": "Sessions that eventually produce a measurable value artifact (test flip, merged PR, closed issue) exhibit at least one detectable proxy signal change within their first 20 minutes — meaning the 5-minute polling window would have a real signal to act on, not noise.",
+          "method": "Retroactively annotate the last 30 days of session logs. Classify each session as 'produced value' (measurable state change before session end) vs 'no value' (no detectable artifact). For each session, check whether any of the four proxy dimensions (test counts, file churn byte delta, issue/PR state, open error rate) changed within the first 20 minutes. Compute the true-positive rate: what fraction of 'produced value' sessions had an early proxy signal.",
+          "falsifiableSignal": "If 'produced value' sessions show NO early proxy change (within first 20 min) at the same rate as 'no value' sessions — i.e., early proxy signal has near-zero predictive lift (AUC < 0.55) — then the polling mechanism is blind and the elastic controller has nothing to act on, falsifying the entire mechanism."
+        },
+        "sourceIdeaIds": [
+          "scout-idea-first-principles-1-2"
+        ],
+        "addressesPatternRefs": [
+          "usage:(unattributed)/interactive",
+          "wi:EI-236",
+          "wi:EI-263",
+          "wi:EI-167",
+          "wi:EI-159",
+          "wi:EI-222"
+        ],
+        "routeHint": "plan"
+      },
+      {
+        "id": "SP-003",
+        "framing": "A $65k unattributed interactive token sink (8266 runs, 642M tokens) is not a session-count problem — individual sessions look normal but collectively enter a runaway burn-rate state. Existing mitigations are binary: per-session quotas miss the aggregate signal; hard kills terminate legitimate work. There is no system-wide proportional governor that responds to aggregate deviation and self-heals without operator intervention.",
+        "mechanism": "A background process computes a rolling 15-minute token-burn-rate baseline (tokens/min) across all sessions. When the live rate exceeds baseline by >1.5σ, it writes HIVE_THERMAL_LEVEL ∈ {0,1,2,3} to a watched config file broadcast to all running sessions. Each session's system-prompt injector appends a graduated compression tier: L1='prefer concise responses'; L2='omit examples unless asked, compress tool outputs'; L3='single-tool-call chains only, no speculative reads'. THERMAL_LEVEL decays by 1 for every 5 consecutive minutes within 1σ of baseline. Sessions attributed to known workflows (brood-box-alpha, papercup/bee) receive attenuated signals — half the THERMAL_LEVEL — so legitimate long-running work is not starved by interactive bursts. L3 sustained >20min fires a PushNotification to the operator.",
+        "whyNew": "Existing token governors are binary (quota → kill) or scoped per-session. This is the first system-wide soft-constraint governor that is simultaneously (a) proportional to aggregate deviation from a rolling baseline rather than a fixed ceiling, (b) self-healing with no operator action for transient spikes, and (c) identity-aware — applying a self/non-self distinction so known legitimate workflows are not throttled alongside anonymous interactive bursts.",
+        "bet": "Eliminate the majority of unattributed runaway token spend autonomously, targeting ≥40% reduction in unattributed burn during spike events, while keeping task-completion rate flat for attributed workflows — converting a $65k silent leak into a self-regulating system with operator pages only for chronic anomalies.",
+        "cheapExperiment": {
+          "hypothesis": "Appending THERMAL_LEVEL=2 compression instructions to session system prompts reduces per-session token output by ≥25% without increasing tool-call failure rate on a fixed benchmark task suite.",
+          "method": "In a staging Hive environment, manually hardcode HIVE_THERMAL_LEVEL=2 for 30 minutes across 20 concurrent test sessions running an identical fixed benchmark (e.g. 10 standard coding tasks). Compare mean tokens/session and task-completion rate vs. a simultaneous control cohort at THERMAL_LEVEL=0. Total cost: ~1 engineer-hour and the token cost of 40 benchmark runs.",
+          "falsifiableSignal": "If mean per-session token output does NOT drop by ≥15% at THERMAL_LEVEL=2, OR if task-completion rate falls by more than 10 percentage points relative to control, the soft-instruction compression mechanism does not produce the required effect and the entire thermal-signal approach is invalid as designed."
+        },
+        "sourceIdeaIds": [
+          "scout-idea-analogical-0-2"
+        ],
+        "addressesPatternRefs": [
+          "usage:(unattributed)/interactive",
+          "wi:EI-86"
+        ],
+        "routeHint": "improvement"
+      },
+      {
+        "id": "SP-004",
+        "framing": "Hand-maintained registries, Zod schemas, and rate-governor hooks in a multi-agent system drift silently from reality: args get stripped because schemas weren't updated, governors miss subprocess bees because PIDs weren't wired in, roles go unregistered until a human notices. The root cause is that the system's self-model is declared once and then forgotten, not continuously reconciled against what agents actually do.",
+        "mechanism": "An 'epistemic harness' wraps every inter-agent boundary (fleet:spawn, coord verb dispatch, memory:*, rate-governor penalize) and records the full call envelope: args present in the Zod schema, args actually passed by the caller, args consumed or stripped by the receiver. A nightly diff agent runs statistical analysis over this log and emits auto-PRs: if 'brief' appears in 89% of fleet:spawn envelopes but is absent from the Zod schema, the PR adds it; if penalize() is never called for PIDs in the subprocess-bee range, the PR wires that range into the governor. The canonical artifacts (COORD_ROLES, Zod schemas, rate-governor hooks) become *generated outputs* of the observation pipeline rather than hand-maintained inputs. A new role graduates to official registration when it appears in 5+ coord interactions before it has been declared.",
+        "whyNew": "Runtime schema inference exists for databases and REST APIs (e.g., Prisma introspection, OpenAPI generators), but those operate on static structure. Applying continuous call-envelope observation to a *live multi-agent capability graph* — where the schema itself is the product of emergent agent behavior rather than a pre-specified contract — and closing the loop with auto-PRs back into the canonical sources is not a pattern in existing agent frameworks (LangGraph, CrewAI, AutoGen all treat capability declaration as a human responsibility).",
+        "bet": "Schema drift, blind governors, and stale role registries become self-correcting within one nightly cycle. Silent arg stripping turns into a detected divergence signal rather than a runtime surprise. The system's self-knowledge converges toward reality automatically as the fleet evolves, eliminating an entire class of hand-maintenance bugs without requiring developers to remember to update registries.",
+        "cheapExperiment": {
+          "hypothesis": "The declared Zod schema for fleet:spawn diverges measurably from the args actually passed in live calls within a 24-hour window — i.e., at least one field is present in >20% of real calls but absent from the schema, or present in the schema but passed in <5% of real calls.",
+          "method": "Instrument only the fleet:spawn boundary with a thin logging middleware (no generation, no auto-PR, no schema changes). For 24 hours, log every call as {declaredFields: schema.keyof(), receivedFields: Object.keys(args), timestamp}. After the window, run a one-off diff script: count field-presence frequency in received vs declared.",
+          "falsifiableSignal": "If declared schema fields and received call fields overlap at ≥95% fidelity in both directions (no field present in >5% of calls is missing from the schema; no schema field absent from >95% of calls), the drift premise is false and the mechanism has nothing to fix — the proposal is wrong."
+        },
+        "sourceIdeaIds": [
+          "scout-idea-first-principles-1-1"
+        ],
+        "addressesPatternRefs": [
+          "wi:EI-66",
+          "wi:EI-72",
+          "wi:EI-86",
+          "wi:EI-103",
+          "wi:EI-211"
+        ],
+        "routeHint": "plan"
+      }
+    ],
+    "routed": [
+      {
+        "proposalId": "SP-001",
+        "sourceIdeaIds": [
+          "scout-idea-first-principles-1-0"
+        ],
+        "rail": "plan",
+        "reason": "followed recombine routeHint → plan",
+        "followedHint": true,
+        "title": "In multi-agent coding platforms, 'needs-human' deferrals block downstream work because agents surface abstract questions — humans must reason about imagined futures rather than evaluate concrete evide",
+        "addressesPatternRefs": [
+          "plan:windows-desktop-release-readiness-2026-06-11#P-019",
+          "plan:hive-agent-tabs-psu-tui-2026-06-09#P-004",
+          "plan:scout-loop-test-plan-2026-06-11#P-007",
+          "plan:hive-from-github-url-2026-06-11#P-020",
+          "plan:mac-desktop-release-readiness-2026-06-11#P-004"
+        ],
+        "routedRef": "plan:scout-in-multi-agent-coding-platforms-needs-human-deferrals-block"
+      },
+      {
+        "proposalId": "SP-002",
+        "sourceIdeaIds": [
+          "scout-idea-first-principles-1-2"
+        ],
+        "rail": "plan",
+        "reason": "followed recombine routeHint → plan",
+        "followedHint": true,
+        "title": "Token budgets are decoupled from value delivery: sessions receive fixed allotments and spend them regardless of whether they are making progress, producing a large unattributed spend sink with no corr",
+        "addressesPatternRefs": [
+          "usage:(unattributed)/interactive",
+          "wi:EI-236",
+          "wi:EI-263",
+          "wi:EI-167",
+          "wi:EI-159",
+          "wi:EI-222"
+        ],
+        "routedRef": "plan:scout-token-budgets-are-decoupled-from-value-delivery-sessions-rec"
+      },
+      {
+        "proposalId": "SP-003",
+        "sourceIdeaIds": [
+          "scout-idea-analogical-0-2"
+        ],
+        "rail": "improvement",
+        "reason": "followed recombine routeHint → improvement",
+        "followedHint": true,
+        "title": "A $65k unattributed interactive token sink (8266 runs, 642M tokens) is not a session-count problem — individual sessions look normal but collectively enter a runaway burn-rate state. Existing mitigati",
+        "addressesPatternRefs": [
+          "usage:(unattributed)/interactive",
+          "wi:EI-86"
+        ],
+        "routedRef": "wi:inert-1"
+      },
+      {
+        "proposalId": "SP-004",
+        "sourceIdeaIds": [
+          "scout-idea-first-principles-1-1"
+        ],
+        "rail": "plan",
+        "reason": "followed recombine routeHint → plan",
+        "followedHint": true,
+        "title": "Hand-maintained registries, Zod schemas, and rate-governor hooks in a multi-agent system drift silently from reality: args get stripped because schemas weren't updated, governors miss subprocess bees ",
+        "addressesPatternRefs": [
+          "wi:EI-66",
+          "wi:EI-72",
+          "wi:EI-86",
+          "wi:EI-103",
+          "wi:EI-211"
+        ],
+        "routedRef": "plan:scout-hand-maintained-registries-zod-schemas-and-rate-governor-hoo"
+      }
+    ],
+    "provenance": [
+      {
+        "ideaId": "scout-idea-first-principles-1-0",
+        "lens": "first-principles",
+        "rail": "plan",
+        "routedRef": "plan:scout-in-multi-agent-coding-platforms-needs-human-deferrals-block",
+        "cycleId": "scout-live-cycle-1",
+        "title": "In multi-agent coding platforms, 'needs-human' deferrals block downstream work because agents surface abstract questions — humans must reason about imagined futures rather than evaluate concrete evide",
+        "addressesPatternRefs": [
+          "plan:windows-desktop-release-readiness-2026-06-11#P-019",
+          "plan:hive-agent-tabs-psu-tui-2026-06-09#P-004",
+          "plan:scout-loop-test-plan-2026-06-11#P-007",
+          "plan:hive-from-github-url-2026-06-11#P-020",
+          "plan:mac-desktop-release-readiness-2026-06-11#P-004"
+        ]
+      },
+      {
+        "ideaId": "scout-idea-first-principles-1-2",
+        "lens": "first-principles",
+        "rail": "plan",
+        "routedRef": "plan:scout-token-budgets-are-decoupled-from-value-delivery-sessions-rec",
+        "cycleId": "scout-live-cycle-1",
+        "title": "Token budgets are decoupled from value delivery: sessions receive fixed allotments and spend them regardless of whether they are making progress, producing a large unattributed spend sink with no corr",
+        "addressesPatternRefs": [
+          "usage:(unattributed)/interactive",
+          "wi:EI-236",
+          "wi:EI-263",
+          "wi:EI-167",
+          "wi:EI-159",
+          "wi:EI-222"
+        ]
+      },
+      {
+        "ideaId": "scout-idea-analogical-0-2",
+        "lens": "analogical",
+        "rail": "improvement",
+        "routedRef": "wi:inert-1",
+        "cycleId": "scout-live-cycle-1",
+        "title": "A $65k unattributed interactive token sink (8266 runs, 642M tokens) is not a session-count problem — individual sessions look normal but collectively enter a runaway burn-rate state. Existing mitigati",
+        "addressesPatternRefs": [
+          "usage:(unattributed)/interactive",
+          "wi:EI-86"
+        ]
+      },
+      {
+        "ideaId": "scout-idea-first-principles-1-1",
+        "lens": "first-principles",
+        "rail": "plan",
+        "routedRef": "plan:scout-hand-maintained-registries-zod-schemas-and-rate-governor-hoo",
+        "cycleId": "scout-live-cycle-1",
+        "title": "Hand-maintained registries, Zod schemas, and rate-governor hooks in a multi-agent system drift silently from reality: args get stripped because schemas weren't updated, governors miss subprocess bees ",
+        "addressesPatternRefs": [
+          "wi:EI-66",
+          "wi:EI-72",
+          "wi:EI-86",
+          "wi:EI-103",
+          "wi:EI-211"
+        ]
+      }
+    ],
+    "calls": [
+      {
+        "step": "ideate",
+        "costUsd": 0.0925387,
+        "promptChars": 8705,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 6247
+      },
+      {
+        "step": "ideate",
+        "costUsd": 0.1111257,
+        "promptChars": 8429,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 4898
+      },
+      {
+        "step": "critique",
+        "costUsd": 0.042902699999999995,
+        "promptChars": 3145,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 800
+      },
+      {
+        "step": "critique",
+        "costUsd": 0.03504549999999999,
+        "promptChars": 2766,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 676
+      },
+      {
+        "step": "critique",
+        "costUsd": 0.041188499999999996,
+        "promptChars": 3206,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 920
+      },
+      {
+        "step": "critique",
+        "costUsd": 0.03611349999999999,
+        "promptChars": 2400,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 895
+      },
+      {
+        "step": "critique",
+        "costUsd": 0.0363505,
+        "promptChars": 2542,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 751
+      },
+      {
+        "step": "critique",
+        "costUsd": 0.0371435,
+        "promptChars": 2708,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 882
+      },
+      {
+        "step": "recombine",
+        "costUsd": 0.0387667,
+        "promptChars": 2398,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 3114
+      },
+      {
+        "step": "recombine",
+        "costUsd": 0.038521099999999996,
+        "promptChars": 2706,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 2993
+      },
+      {
+        "step": "recombine",
+        "costUsd": 0.0441581,
+        "promptChars": 3204,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 3029
+      },
+      {
+        "step": "recombine",
+        "costUsd": 0.0369131,
+        "promptChars": 2540,
+        "model": "claude-sonnet-4-6",
+        "parsed": true,
+        "responseChars": 3252
+      }
+    ]
+  }
+}

@@ -1,0 +1,215 @@
+# A green mechanism gate over a synthetic benchmark is not learning
+URL: /internal/docs/agent-insights/a-green-mechanism-gate-over-a-synthetic-benchmark-is-not-learning
+
+The blender release gate held seven criteria, every one of them sound, correctly implemented and honestly green — while the gym they certified was optimizing prompts against three toy tasks on a generated 4-line stub whose only build gate was `node --check`. Six consecutive scorecards passed. The gate even carried a self-audit criterion ('the bars themselves are proven to discriminate') and that criterion missed it too, because a bar can discriminate perfectly among runs and still be blind to the substrate every run shares. The shape: a criterion set complete about the MECHANISM and silent about the SUBSTRATE certifies the mechanism only, and it fails GREEN. Includes the three checks that catch it, in cost order, and the one that works before you suspect anything.
+
+## The shape
+
+Every criterion asks whether the machine **ran correctly**. None asks whether what it ran
+**against** was real.
+
+Each criterion is individually sound. Each is correctly implemented. Each is honestly
+green. And the aggregate still certifies something it never measured — because the
+property that failed was not *inside* any criterion's subject. This is the dangerous
+direction: it fails **green**, so nothing ever prompts you to look.
+
+> **A criterion set that is complete about the mechanism and silent about the substrate
+> certifies the mechanism only.** Whatever it says on the label.
+
+## The instance
+
+The gym's fitness function, verified in `gym/autoloop-cycle.ts`:
+
+```js
+// the ENTIRE substrate the loop optimized against (autoloop-cycle.ts:105)
+export function handle(req){ return { status: 404 }; }
+```
+
+Its only build gate is `node --check index.js` — a syntax check (`:104`). Against that
+stub sat exactly three hardcoded tasks (`:93-100`): `gym-loop-health` ("Add a health
+endpoint"), `gym-loop-version` ("Expose the service version"), `gym-loop-ready` ("Add a
+readiness endpoint"). A champion prompt "won" by adding `/health` to a four-line fake
+file, and every judge rationale a human read — *"the worker declared done after only a
+syntax check…"* — was about that.
+
+The code said so itself, in a comment sitting right there the whole time (`:97`):
+
+> *"a faithful real-anchor is a corpus of REAL shipped features with known outcomes; this
+> synthetic stand-in exercises the MECHANISM … Populating it with real features is the
+> data-gathering follow-up."*
+
+The follow-up never happened. The gate never asked.
+
+## Why seven good criteria all missed it
+
+The `blender-release-readiness` rubric (ratified 2026-07-17, `rubrics:get`) is not a weak
+gate. It was built deliberately, each criterion a defect class a hardening session had
+*proved* could rot silently, each carrying a copy-runnable replication drill. Here it is
+in full, with the subject each criterion actually judges:
+
+| # | Criterion                                                        | Its subject               |
+| - | ---------------------------------------------------------------- | ------------------------- |
+| 1 | Scout cycles fail rarely, and only for real reasons              | the pipeline's error rate |
+| 2 | Ideation spans lenses every cycle, not one groove                | the ideator roster        |
+| 3 | Filed ideas get graded, and the grade teaches                    | the feedback loop         |
+| 4 | The pipeline proves itself on demand (`origin:'drill'`)          | the pipeline, on demand   |
+| 5 | What ticks claim equals what the ledger holds                    | bookkeeping integrity     |
+| 6 | **The bars themselves are proven to discriminate**               | **the bars**              |
+| 7 | The judged evidence and the running code are the same generation | code/evidence provenance  |
+
+Seven subjects. Not one of them is **the input**. The benchmark is the one thing in the
+system that no criterion's subject covers, so no criterion could turn red on it — and six
+consecutive scorecards passed.†
+
+**Criterion 6 is the part worth sitting with.** The gate *had* a self-audit — a criterion
+whose entire job is catching bars that cannot discriminate — and it missed this too. That
+is not negligence, it is the shape:
+
+> A bar can discriminate **perfectly among runs** and still be blind to the substrate that
+> **every run shares**. A control that varies with your treatment cannot detect a constant.
+
+Criterion 6 asks *can this bar tell a good run from a bad one?* — a question entirely
+inside the mechanism. The synthetic corpus was not a bad run. It was the floor every run
+stood on, identical across all of them, and therefore invisible to any comparison between
+them. **Adding a meta-criterion does not widen the frame; it recurses inside it.**
+
+† The "six consecutive scorecards" figure is as recorded in plan
+`gym-real-fitness-signal-2026-07-27` (§Background) and in the `gymCorpus` comment in
+`scout/success-metrics.ts:119`. I did not independently re-derive the count — noted here
+rather than quietly inherited, per the discipline this page is about.
+
+## Recognising it before it costs you six scorecards
+
+**The tell.** Write down each criterion's *subject* in one word. If every subject is the
+machine — throughput, error rate, reconciliation, provenance, coverage, latency — you have
+a **mechanism gate**. That is a legitimate and useful thing to have. It is not a
+correctness gate, and it must not be reported as one.
+
+**The general rule, from the detector side.** A detector that fires on *every* case
+carries zero information. Its dual is what bit here:
+
+> **A bar that no realizable state of the world can turn red is not a criterion.** If you
+> cannot describe the observation that would fail it, it is decoration.
+
+For every bar you own, name the failure it would catch. If the answer is only ever "the
+pipeline broke", the substrate is unguarded.
+
+**The question that would have caught it in one line:** *is the thing we are optimizing
+against real?* No criterion asked it, because it is not a question about the pipeline —
+and everyone's attention was on the pipeline.
+
+## The checks that catch it
+
+Four, in increasing cost. The last is the cheapest insight and the first you should build,
+because it is the only one that works **before you suspect anything**.
+
+### 1. Ask the substrate question as a bar that can actually fail
+
+`fitness-signal-is-real` (`scout/success-metrics.ts:586`, the 7th programmatic bar). The
+branch ordering *is* the safety property:
+
+```
+absent          ⇒ unknown      (never pass — provenance unproven)
+empty corpus    ⇒ unknown      (no benchmark at all; report, don't grade)
+ANY synthetic   ⇒ fail
+all real        ⇒ pass
+```
+
+Two design choices carry the weight:
+
+* **Absent rates `unknown`, never `pass`.** The default is where this class of bug lives.
+  A bar that defaults to pass when it has no data reproduces the original failure with an
+  extra step. (Same root as
+  [a check that never ran must not read as PASSED](/internal/docs/agent-insights/a-check-that-never-ran-must-not-read-as-passed) —
+  "never ran" and "ran and passed" must not be the same value.)
+* **The input is optional by construction**, deliberately. A required field goes stale in
+  every existing fixture and — worse — tempts a fixture author to fill it with a convenient
+  `'real'`. Absence must be *visibly unproven*, not silently fine.
+
+### 2. Close the label loophole
+
+A corpus bar that reads labels greens on labels. Insert a few rows tagged `corpus='real'`
+that nothing can execute, and the gate reports a real fitness signal while the gym learns
+exactly as much as before. That is the same mistake one level up — **certifying an
+artifact's description instead of its behaviour** — and it is an easy accident for whoever
+implements the real corpus.
+
+The guard is `realScoredRuns`: a real corpus counts only once it has actually been **run
+and scored**. Labels are a claim; a scored run is an observation.
+
+### 3. Score a held-out pool you never optimize
+
+This is the one that needs no labels, no corpus metadata, and no suspicion — and it was
+already in the code (`autoloop-cycle.ts:580-585`):
+
+> *"train vs real-anchor composite per variant. If the train aggregate climbs across
+> variants while the real-anchor stays flat, the loop is optimizing a proxy."*
+
+Keep a pool that is **scored every cycle and never optimized**, then watch for divergence.
+Rising train + flat anchor is the signature of proxy-optimization, and it shows up without
+anyone having to first suspect the benchmark is fake. If you build one thing from this
+page, build this.
+
+### 4. Audit what is registered but dark
+
+The counterpart failure: the gym designed to judge *real* outcomes (`LEARNING_GYM_TARGETS`
+— implement-worker, triage-classifier, Scout ideators, judged on drill resolve rate, mean
+time-to-self-heal, test regressions) **existed the whole time**, seeded `enabled:false`
+with `budget:null`, awaiting an arming act that never came. A target that never ran
+produces no failures, so it reads as *no data*, not as *broken* — and nothing surfaced it
+for weeks.
+
+`gym/dark-target-audit.ts` reports the four distinct no-signal reasons, most-severe first:
+`unregistered` → `disabled` → `unbudgeted` → `never-ran`. Silence is not health.
+
+## The rule when you write a gate
+
+1. **List each criterion's subject.** All machine? Say so in the gate's own name and
+   description. Do not let "release readiness" imply substrate coverage it does not have.
+2. **For each bar, name the observation that turns it red.** No such observation ⇒ not a
+   criterion.
+3. **Default absent to `unknown`.** Never to `pass`.
+4. **Grade behaviour, not labels.** Anything self-declared needs a scored run behind it.
+5. **Hold out a pool you never optimize.** Cheap, label-free, and it fires before you know
+   to look.
+6. **State what a green does NOT cover.** See below — this is the step everyone skips.
+
+## Do not let the fix over-claim either
+
+`fitness-signal-is-real` passing means *"the gym optimizes against real specs with real
+oracles"*. It does **not** mean *"the gym predicts end-to-end performance on Papercusp
+work"*. Per plan D-003, a test-anchored corpus measures implementing a well-specified unit
+against a precise oracle; it does not measure finding the problem in a large codebase,
+integration behaviour, migrations, or anything needing a full build. The stronger claim
+needs a separate corpus and a separate bar — **it must not be smuggled in under this one.**
+
+A gate that overstates its own coverage is the same defect as the one this page documents,
+just written in the description instead of the criteria.
+
+## Open thread (verify before relying on it)
+
+The `fitness-signal-is-real` bar landed on the **programmatic** instrument
+(`scout/success-metrics.ts`). The **graded rubric** `blender-release-readiness`, as
+ratified 2026-07-17, still carries the seven mechanism criteria in the table above and no
+corpus-reality criterion of its own. The two surfaces are related — agents grading the
+rubric cite `blender:success-metrics` as an instrument, so the signal can propagate through
+evidence — but a bar on the instrument is not a criterion on the rubric. Whether that gap
+should be closed by amending the rubric is a live question, not a settled defect.
+
+Re-check before acting on this: `rubrics:get { rubricRef: 'blender-release-readiness' }`
+and look for a corpus/substrate criterion among `criteria[]`.
+
+## See also
+
+* [A confident verdict about the wrong object](/internal/docs/agent-insights/a-confident-verdict-about-the-wrong-object) —
+  the sibling failure. There, the surface judges the wrong object; here it judges the
+  *right* object and the wrong *property*. Both fail green.
+* [A check that never ran must not read as PASSED](/internal/docs/agent-insights/a-check-that-never-ran-must-not-read-as-passed) —
+  the default-to-pass root, at leg granularity.
+* [Absorbing-state guards, and why your detector didn't notice](/internal/docs/agent-insights/absorbing-state-guards-and-self-report-detectors) —
+  Shape D (a correct detector aimed at an empty set) is this page's nearest neighbour.
+* [Benchmark over the transport that ships](/internal/docs/agent-insights/benchmark-over-the-transport-that-ships) —
+  when the benchmark is real but the *environment* is not.
+* Plan `gym-real-fitness-signal-2026-07-27` (D-002: grading is not testing — an LLM
+  composite score is not a fitness signal) and `EI-18770895403270471` for the full
+  original finding.

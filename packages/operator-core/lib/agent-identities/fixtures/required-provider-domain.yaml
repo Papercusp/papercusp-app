@@ -1,0 +1,26 @@
+id: provider-domain
+extends: base
+version: 1.0.0
+slots:
+  - slot: domain
+knobs:
+  aiBackend:
+    default:
+      model: selected-provider-model
+contributions:
+  - id: current-brief
+    purpose: operational
+    source: provider
+    refresh: turn
+    inputKind: setting
+    ref: current-brief
+    producerRef: existing.brief
+    availability: required
+  - id: current-guidance
+    purpose: prompt
+    source: provider
+    refresh: launch
+    inputKind: prompt-file
+    ref: current-guidance
+    producerRef: existing.guidance
+    availability: optional

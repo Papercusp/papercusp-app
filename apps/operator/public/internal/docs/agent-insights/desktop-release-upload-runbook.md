@@ -1,0 +1,315 @@
+# Desktop release: cut → upload → auto-update (runbook)
+URL: /internal/docs/agent-insights/desktop-release-upload-runbook
+
+Runbook for shipping a desktop release on the local-only rail: build the cut, upload artifacts to the R2 release host, and publish the manifest that drives auto-update.
+
+## The two invariants — read these before you touch anything
+
+**1. The manifest address is PERMANENT.** Every shipped app has
+`<base>/latest.json` compiled into it. It polls that exact URL forever. Change the
+base and every install that is already out there silently stops updating — it keeps
+polling an address that no longer answers, and (this is the nasty part) reports
+itself as *up to date* while doing so. The base lives in
+`~/.papercusp/release-host.env`, mode 600, outside git. **Never regenerate it.**
+
+**2. The ARTIFACT urls are NOT permanent — and that is deliberate.** They live
+*inside* `latest.json`, which is fetched fresh on every check. So you can move where
+the installers are stored, per release, without shipping a new app. Only the manifest
+has to stay put. That asymmetry is the whole design.
+
+The secret sits in the **path** (`https://dl.papercusp.com/<secret>/…`), not in the
+hostname. A random *subdomain* would be published to Certificate Transparency logs
+the moment it got a TLS cert — paths never appear in CT or in DNS. This is
+obscurity, not access control: the URL is baked into the binary and `strings` will
+find it. It keeps the artifacts unlisted; it does not keep them private.
+
+## Cut the release
+
+```bash
+cd papercusp-desktop
+bin/release-local.sh 0.0.8 alpha
+```
+
+This builds, signs, and writes `/tmp/papercusp-latest-desktop-v0.0.8-alpha.json`.
+It publishes nothing — artifacts stay local. The script sources
+`release-host.env` itself, so the manifest comes out already pointing at the real
+host, and the host is baked into the binary via `PAPERCUSP_RELEASE_HOST`.
+
+If that env is missing, the cut still succeeds but every url in the manifest is the
+deliberate placeholder `papercusp-update-base-unset://…`. That is a **feature**: a
+loud, unmistakably-invalid URL beats a plausible-but-wrong one. Both the uploader and
+the operator refuse to serve a manifest containing it.
+
+## Security audit — YOU run this, and you read the output
+
+The build already gates itself: `bin/stage-source-tree.sh` runs
+`bin/audit-release-bundle.py` on the `source.tar.zst` it just produced and **fails
+the build** on any finding. You do not have to remember to invoke it. You *do* have
+to do the part a regex cannot.
+
+**Why this gate exists at all.** Every bundle ships `source.tar.zst` — a plaintext
+tar of the whole monorepo working tree, so the packaged app's dev/local buttons have
+something to run. The 0.0.8 cut shipped **53,225 untracked files** that way,
+including **121 agent session transcripts** (`.papercusp/pi-sessions/*.jsonl`) with
+the operator's home path in every record. Nobody decided to ship those. The staging
+script's exclusion list simply had never heard of `.papercusp/` (WI-4419).
+
+**Two things follow, and they are the whole point:**
+
+1. **Scan the artifact, not the repo.** A source-tree scan would have *passed* on
+   0.0.8 — the repo was clean. The leak only existed once the tar swept up untracked
+   scratch. If you find yourself grepping the working tree to check a build is clean,
+   you are measuring the wrong object.
+
+2. **The leak's contents vary by build host.** The same structural hole on the mac
+   box carried *zero* transcripts, purely because that machine had none. A clean
+   audit on your box says nothing about anyone else's. This is why the identity rules
+   (username, home path, hostname) resolve **at run time** from the building machine
+   rather than being hardcoded — the gate scrubs *whatever box it runs on*.
+
+**Your job — the triage the scanner cannot do.** Its rules are deliberately
+high-recall, so it will hand you things that are not leaks, and telling them apart is
+judgment. Real examples from the WI-4419 sweep: `AKIAIOSFODNN7EXAMPLE` is AWS's own
+documentation placeholder; a bare 27-character PEM `BEGIN…PRIVATE KEY` *header*
+string sitting in a V8 compile cache is a header, not a key; `sk-ant-…-CHANGED` is a
+test fixture. All three look alarming and none of them are. Meanwhile a real 40-char
+`gho_…` token *was* sitting in a turbopack build cache on the dev box.
+
+(This document itself tripped the repo's `secrets-guard` hook while being written,
+because it quoted that PEM header literally. That is the same false-positive class,
+and it is a fair illustration: a high-recall rule cannot tell a *description* of a key
+from a key. Judgment is the job.)
+
+So when it fires:
+
+* **Fix the source of the leak** — the allowlist in `bin/stage-source-tree.sh`.
+* **Do not add an exception to make the build pass.** The `BENIGN` list in the
+  auditor is for *documented* false positives with a justification, not a place to
+  park a finding you would rather not deal with. Silencing the gate to ship is the
+  bug the gate exists to catch.
+* If you genuinely cannot classify a hit, **stop and ask** rather than shipping it.
+
+To audit a bundle by hand (it is idempotent, and safe to run any time):
+
+```bash
+python3 bin/audit-release-bundle.py src-tauri/sidecar/source.tar.zst   # exit 0 clean / 1 findings
+```
+
+It never prints a secret value — findings are redacted to `head…tail (len N)`.
+
+## Upload
+
+```bash
+bin/upload-release.sh 0.0.8 alpha        # DRY_RUN=1 to preview
+```
+
+Order is load-bearing: **artifacts first, `latest.json` last.** The manifest is what
+makes an update *visible* to every installed app, so publishing it before the bytes
+it points at exist would advertise an update that 404s for anyone who checks in the
+gap.
+
+It then verifies two things separately, because they fail for unrelated reasons:
+
+* **storage** (authenticated, via the S3 endpoint) — did the bytes land at full size?
+* **the public read path** — can a client actually fetch what the manifest advertises?
+  It re-downloads `latest.json` over HTTPS, diffs it byte-for-byte against what was
+  uploaded, and HEADs every artifact url in it.
+
+Exit `2` means the artifacts uploaded fine but the hostname does not resolve — the
+R2 bucket has not been bound to the custom domain yet. That is one-time Cloudflare
+setup, not a broken upload.
+
+### Never paste raw upload output into a status update — mask the prefix first
+
+`upload-release.sh` and `upload-mobile-release.sh` self-mask their own preview lines
+(`s3://<bucket>/<secret>/`, `<host>/<secret>`), including under `DRY_RUN=1`, so their
+*own* stdout is already safe to paste (fixed EI-15305, 2026-07-18 — an earlier build
+of the DRY\_RUN preview leaked the raw prefix on one line while masking it on the next).
+
+But if you are quoting `$KEY_PREFIX`, `$PAPERCUSP_UPDATE_BASE_URL`, or any ad-hoc `aws
+s3` / `s3api` command's own output by hand (not the scripts' own preview lines) before
+it goes into a transcript, a coord message, or PG — mask it yourself first. **There is
+no `KEY_PREFIX=` line in `~/.papercusp/release-host.env`** — that file holds only
+`PAPERCUSP_RELEASE_HOST` and `PAPERCUSP_UPDATE_BASE_URL`; every script *derives*
+`KEY_PREFIX` at runtime by stripping the scheme+host off `PAPERCUSP_UPDATE_BASE_URL`.
+A masking wrapper that does `grep '^KEY_PREFIX=' ~/.papercusp/release-host.env` matches
+nothing, silently no-ops, and passes the secret straight through — a masking rail that
+silently no-ops is worse than none, because it produces false confidence ("I piped it
+through the mask") while doing nothing. Derive it the same way the scripts do instead:
+
+```bash
+source ~/.papercusp/release-host.env
+KP="$(sed -E 's#^https?://[^/]+/?##; s#/$##' <<<"$PAPERCUSP_UPDATE_BASE_URL")"
+# then substitute it out of anything you're about to paste, e.g.:
+your-command-here 2>&1 | sed "s#${KP}#<secret>#g"
+```
+
+The `<secret>` path segment is **permanent** (it cannot be rotated without stranding
+every existing install — see the two invariants at the top of this doc), so
+containment, not rotation, is the only remedy if it leaks. If you ever see the raw
+value land in a transcript, PG, coord, or mem0, treat it as a live incident, not a
+typo to quietly fix.
+
+## Re-publishing ONE platform onto an existing cut (incremental)
+
+You do **not** rebuild or re-upload the whole cut to add a single platform late (the
+common case: mac lands after linux + windows are already live). Two things make the
+incremental add cheap, and both are already built in:
+
+* **`upload-release.sh` size-skips what is already on R2.** It HEADs each artifact and
+  skips any whose remote size matches, so adding mac uploads only the new mac
+  `.app.tar.gz`/`.sig`/`.dmg` + the refreshed `latest.json` — the 4 GB AppImage and the
+  windows installer are skipped, not re-sent. Put the *full* artifact set in the
+  recorded manifest (`/tmp/papercusp-artifacts-<tag>.txt`, via
+  `bin/lib/release-artifacts.sh`) and let the size-check do the rest. If `/tmp` was
+  cleaned, rebuild that manifest with `release_artifacts_write <tag> <paths…>`.
+* **`latest.json` is regenerated with ALL platforms, every time.** Feed the generator
+  the linux + windows + mac *updater* artifacts (AppImage, `-setup.exe`, `.app.tar.gz`)
+  so it carries all four platform keys — `linux-x86_64`, `windows-x86_64`, and both
+  `darwin-x86_64` + `darwin-aarch64` pointing at the one universal `.app.tar.gz`.
+  `upload-release.sh` **asserts every `latest.json` url's basename is in the recorded
+  manifest**, so a platform added to one must be added to the other or it refuses.
+
+The **download page** is a *separate surface* from the updater — for a human,
+"published" means the artifact is visible on `index.html`, **not** merely present in
+`latest.json`. After the upload, re-run `record-release-cli.ts` (it re-scans `$BUNDLE`,
+so a newly-dropped `.dmg` in `$BUNDLE/dmg/` is picked up) then
+`publish-release-history.sh`. Miss this and the auto-updater has the new platform but
+the shared beta link does not.
+
+* **Heed the two non-blocking completeness alerts `record-release-cli` prints.** A
+  partial cut is legal, but must be a *conscious* choice, never a silent one: (1) the
+  desktop **INCOMPLETE RELEASE** alert names every missing `gui`/`server` × platform
+  slot (WI-5515); (2) the **MOBILE REGRESSION** alert (WI-5583) fires when a cut LOSES
+  a phone build its predecessor carried (0.0.11 shipped Android+iOS, 0.0.12 shipped
+  neither — previously silent, because mobile is not part of the required desktop set).
+  If the drop is intentional (mobile leg skipped this cut), fine — but if the phone
+  build exists on disk and just wasn't recorded, re-run with `--mobile-root` pointing
+  at `papercup-rust-mobile`. ⚠ Mobile filenames carry **no version** (`app-release.apk`,
+  `Papercup.ipa`); the recorder *synthesizes* the version, so a backfill labels whatever
+  bytes are on disk AS this cut — confirm they are THIS build, not a stale prior one.
+  Both alerts re-surface on every `--regenerate` until resolved.
+
+## The mac leg — a DMG from an intact `.app`, and ENOSPC
+
+* **A build that dies AFTER producing the signed `.app` but BEFORE the DMG step is a
+  \~5-minute recovery, not a rebuild.** The DMG is just `hdiutil` over a staged
+  `.app` + tutorial app + `/Applications` symlink (the DMG loop in `mac-vm-build.sh`) —
+  independent of the Rust compile. Replicate only that step against the existing
+  `.app` (`cp -Rc` clones it for free on APFS; only the \~2 GB compressed DMG costs
+  disk). No re-signing: the updater signature is the separate `.app.tar.gz.sig` (Tauri
+  minisign); the DMG is an unsigned plain download (mac alphas aren't Apple-notarized —
+  users right-click → Open past Gatekeeper).
+* **The recurring "mac build hangs / dies silently" is DISK EXHAUSTION (ENOSPC), not
+  memory.** Each role compiles into its OWN \~11–12 GB `CARGO_TARGET_DIR`
+  (`role-gui` + `role-server` ≈ 24 GB) and the VM's 120 GB disk runs \~95 % full — a
+  cold two-role build cannot fit, and dies mid-build with no artifacts and no `DONE`
+  sentinel (which *looks* like a hang). `PAPERCUSP_BUILD_ROLES=gui` builds only the
+  auto-updatable/download GUI artifact and fits. `mac-vm-build.sh` now has a disk
+  preflight that fails LOUD (`DONE:28`) instead of dying silently; the durable fix is
+  growing the VM disk — **WI-5027 did this 2026-07-16 (120→180 GiB, 68 GB free), so
+  both roles' target dirs now fit and stay warm** (see "Keep cargo caches warm" below).
+* **Pull artifacts whose filenames contain spaces with a tar-over-ssh pipe, not `scp`.**
+  Modern (SFTP-mode) `scp` mangles the space in `Papercusp GUI.app.tar.gz`, and the
+  mac's ancient `rsync` 2.6.9 lacks `--protect-args`. Use
+  `ssh … "cd '<dir>' && tar -cf - 'Papercusp GUI.app.tar.gz'" | tar -C <local> -xf -`
+  (and delete the stray `._<name>` AppleDouble sidecar `tar` leaves behind).
+
+## Keep cargo caches warm — the build-speed fast path
+
+The dominant cost of a desktop cut is the cold Rust recompile (hundreds of dependency
+crates, two roles). The single biggest lever is simply **not building cold** — and the
+build scripts are already set up for it, so the discipline is "don't break the warm
+path," not "add one." (Plan: `desktop-build-speed-2026-07-16`.)
+
+* **Warm caches are already the design — do not regress them.** All three legs keep the
+  cargo target dir warm: the mac + windows VM rsyncs both `--exclude 'target'` (so the
+  persistent per-role `role-gui`/`role-server` target survives each new snapshot), and
+  the linux-local build compiles into an external `~/.cargo-target` that is never
+  cleaned. **Never add a `cargo clean`, never drop the `--exclude 'target'` from a VM
+  rsync, and never "helpfully" wipe a role target dir to free space** — each forces the
+  next build cold. The only cache-clean in the whole rail is the ENOSPC-gated emergency
+  reclaim in `release-local.sh` (fires only below `PAPERCUSP_MAC_MIN_FREE_GB`, and
+  prunes `debug` dirs a `--release` build never creates — which is why it freed \~0
+  bytes every time).
+* **ENOSPC was the real cause of cold builds, and WI-5027 fixed it.** Builds ran cold
+  because the disk-tight mac VM kept hitting ENOSPC and agents cleaned the target dirs
+  to make room. WI-5027 grew the mac VM disk 120→180 GiB (68 GB free, 2026-07-16), so
+  both roles' target dirs now fit and stay warm.
+* **Re-cuts are incremental.** `[profile.release]` in `src-tauri/Cargo.toml` now sets
+  `incremental = true` (+ `strip = "symbols"`), so a cut after a small source change
+  recompiles only the changed crates instead of the world. The FIRST cut after that
+  profile landed is a one-time cold rebuild (the profile change busts the cache once);
+  every cut after is incremental. **Measured (linux, `cargo build --release` Rust
+  compile only, 2026-07-16):** a full 428-crate recompile was **143 s**; a warm rebuild
+  after a one-line change was **4 s**. So the linux Rust compile is already fast — the
+  build-time that matters lives in the slower mac/windows VM legs (keep *their* target
+  dirs warm, per the first bullet), not linux micro-optimizations.
+* **sccache is OPT-IN, default OFF — leave it off for normal cuts.** sccache and cargo
+  incremental are mutually exclusive: enabling sccache forces `CARGO_INCREMENTAL=0`, which
+  overrides the `incremental = true` profile above, and running both just splits the
+  hit-rate between two caches. sccache only helps a genuinely *cold* build (fresh checkout /
+  reverted VM / rotated target) — which the warm-cache design + WI-5027 made rare — so it is
+  now gated behind `PAPERCUSP_USE_SCCACHE=1` (`bin/lib/sccache.sh` for the linux+mac legs;
+  Windows is cross-compiled on this same Linux box since WI-5651 retired the VM
+  — `bin/build-windows-cross.sh` has no sccache wiring of its own, confirmed by grep,
+  so it either inherits the linux-leg cache setup or runs uncached — re-verify before
+  relying on this for a Windows cut). The default cut
+  keeps the incremental warm path; reach for `PAPERCUSP_USE_SCCACHE=1` only when you KNOW the
+  target dir is cold. (Plan `desktop-build-speed-2026-07-16` D-006 / WI-5577 — it was briefly
+  wired on-by-default, which silently disabled the incremental warm win.)
+* **Fast iteration build: one role, not two.** `PAPERCUSP_BUILD_ROLES=gui
+  bin/release-local.sh` (or `bin/mac-vm-build.sh`) skips the \~12 GB Server-role compile
+  — roughly halving the build — and produces only the auto-updatable/download GUI
+  artifact. Use this for iteration. It is **not** the release default: the linux Server
+  `.deb`/`.appimage` is still a published product (record-release-cli emits
+  `product: 'server'`), and WI-5028 wants Server *completed* on mac/win now that the
+  disk is grown — so a full release keeps both roles (plan
+  `desktop-build-speed-2026-07-16` D-004).
+* **Measure before claiming a speedup (profile-before-assume).** A build-speed change
+  that isn't measured can silently do nothing — the same discipline that found the
+  record-release page-regen was a 40 s regex, not the hashing. Record the before/after
+  wall-clock on the plan, not a vibe.
+
+## record-release-cli is fast now — keep it that way
+
+Regenerating the download site once took \~50 s, which looks absurd for "a static
+page". Two causes, both fixed 2026-07-15 — profile (`NODE_OPTIONS=--cpu-prof`) before
+assuming it's the artifacts if it is ever slow again:
+
+* It **re-SHA-256'd every artifact on every run** (\~18 GB for a tri-platform cut).
+  Now cached by (path, size, mtime) in `~/.papercusp/release-sha256-cache.json`: an
+  unchanged artifact is hashed exactly once, so an incremental re-publish hashes only
+  the genuinely-new files.
+* The identity scrubber's **email regex backtracked catastrophically** on large page
+  bodies — that one regex was 40 s of the 45 s. Its quantifiers are now bounded to RFC
+  maxima; **do not relax them back to `+`** (there's a comment on `IDENTITY_PATTERNS`
+  in `release-content-scrub.ts` saying exactly this). A full `record-release-cli` run
+  is now \~2 s.
+
+## How auto-update actually resolves
+
+An installed app polls its operator's `/api/updates/manifest`, which discovers
+releases from **two** sources, in priority order:
+
+1. **The static release host** — authoritative *whenever it publishes
+   `<host>/latest.json`*. This is the live rail.
+2. **GitHub Releases** — legacy. Still used for the hybrid case where GitHub carries
+   the release but artifacts exceed its 2 GiB asset cap.
+
+A configured host that is *unreachable* returns 204 and warns server-side; it
+deliberately does **not** fall through to GitHub, because a stale GitHub release
+could be offered as a silent **downgrade**.
+
+## The failure this rail exists to prevent
+
+`204` means "no update available", and the Tauri updater **cannot distinguish it from
+"the check failed"**. So any break in this chain — no manifest, an unreachable host, a
+manifest whose urls 404 — presents to the user as *"you are up to date."* Forever.
+That is exactly how auto-update was silently dead on the local-only rail (WI-4389):
+the manifest route discovered releases only from GitHub Releases, which we stopped
+publishing to.
+
+The lesson generalizes: **a signed, schema-valid manifest that names a download
+location which does not exist is still a broken release.** Verify the bytes are
+fetchable at the advertised url, not merely that the manifest validates.

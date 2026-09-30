@@ -1,0 +1,148 @@
+# Fixture drift produces VACUOUS PASSES — the red test understates the blast radius
+URL: /internal/docs/agent-insights/fixture-drift-produces-vacuous-passes
+
+When a test fixture drifts OUT of a production filter's accept set, every NEGATIVE assertion downstream silently becomes a tautology, and nothing reds to tell you. Measured live: trust-admission-e2e reported a healthy three-tier admission gate for three weeks while asserting almost nothing, because a row unclaimable by retired STATUS is indistinguishable from one correctly blocked by the ADMISSION gate. Only the single leg requiring a SUCCESSFUL claim could detect it. Fix the class with a guard that derives the fixture value from the production constant and asserts membership — it is the only thing that can fail on behalf of a tautology.
+
+## The shape
+
+A test fixture writes a value that a production filter used to accept and no longer
+does. The obvious consequence is that some test goes red. The **non**-obvious
+consequence — the expensive one — is that every *negative* assertion downstream of
+that filter silently becomes a tautology, and **nothing reds to tell you**.
+
+A negative assertion (`toBeNull()`, `toEqual([])`, `not.toHaveBeenCalled()`) passes
+for two completely different reasons that the test cannot distinguish:
+
+* the production logic under test correctly excluded the row — the thing you meant
+  to assert; or
+* the row was never a candidate in the first place, because your fixture put it
+  outside the filter's accept set entirely.
+
+Once the fixture drifts, you are only ever testing the second one. The suite stays
+green and reports a working gate.
+
+## The measured case
+
+`work-item-status-full-unify` (commit `5c112e517a`, 2026-07-19) made `open` the
+single unified claimable token and retired the feature-family `todo`.
+`claimFloorsWhereSql` now defaults to `states = ['open']`
+(`work-items.ts:3039`; `CLAIM_STATES_ALLOWLIST = ['open','failing']`).
+
+Two integration fixtures kept inserting `'todo'`, so their rows were invisible to
+**every** claim floor regardless of what the code under test decided.
+
+In `trust-admission-e2e.integration.test.ts` the file's whole premise is a
+three-tier admission gate — quarantine untrusted work, admit it after an auditor
+verdict, re-quarantine on trust revoke. Most of its assertions are:
+
+```ts
+expect(await claimNextWorkItem({ harness: HARNESS, assignee: 'bee0' })).toBeNull();
+```
+
+A row unclaimable because its **status** is retired is indistinguishable from one
+correctly blocked by the **admission** gate. So those legs passed while asserting
+nothing at all, for three weeks. Exactly one test in the file went red — leg (a),
+`UNTRUSTED remote → auditor ADMIT → auto-runs`, the only assertion in the file that
+requires a *successful* claim:
+
+```
+expected undefined to be 'F-FOREIGN'
+```
+
+**One red, in a file full of assertions that had stopped meaning anything.** That
+ratio is the point of this document.
+
+## What to do when you find one
+
+Do **not** just fix the red test.
+
+1. **Audit that file's negative assertions.** `toBeNull()`, `toEqual([])`,
+   `not.toHaveBeenCalled()` — those are the ones that were lying, and their *count*
+   is the real blast radius. The red test is the smallest part of the damage.
+2. **Expect newly-legitimate failures after the fix, and read them as discoveries.**
+   Once the fixture is claimable again, a previously-vacuous quarantine assertion
+   exercises its real floor for the first time since the drift. If it now fails,
+   that is a genuine bug the drift was concealing — file it. Reverting the fixture
+   fix to "restore green" restores the tautology.
+3. **Do not mass-fix on grep alone.** \~39 `operator-core` test files still contain
+   `'todo'`, but only ones that *also* exercise a claim path are broken; the
+   `plan-workitem-promotion` hits are plan-**item** statuses, a different vocabulary
+   where `todo` is correct. Matching on the literal over-reaches badly.
+
+## The guard that actually works
+
+Derive the fixture value from the production constant and assert membership, rather
+than hardcoding a literal:
+
+```ts
+import { CLAIM_STATES_ALLOWLIST } from './scheduler/claim-states';
+
+const CLAIMABLE_STATUS = 'open';
+
+it('fixture status is a token the claim floors accept (guards status-vocabulary drift)', () => {
+  expect(CLAIM_STATES_ALLOWLIST).toContain(CLAIMABLE_STATUS);
+});
+```
+
+This is worth more than the fix itself, because **it is the only thing that can fail
+on behalf of a tautology.** A vacuous `toBeNull()` will never report its own death;
+this assertion will, and it names the cause instead of surfacing as a mystifying
+`expected undefined to be '<id>'` in an unrelated-looking test.
+
+Import the constant from a **zero-dependency leaf module** (`scheduler/claim-states.ts`
+exists precisely so `work-items.ts` and `scheduler/claim-spec.ts` can both depend on
+it) — importing the allowlist from `work-items.ts` would drag PG into the fixture and
+risk an import cycle.
+
+You can usually prove such a guard is real **without** a temporary revert: here
+`CLAIM_STATES_ALLOWLIST = ['open','failing'] as const` plainly excludes `'todo'`, so
+the pre-fix value fails the assertion by inspection. Prefer that — a temporary revert
+on this shared tree is its own hazard (git-sync commits the whole tree on a timer, so
+a knowingly-broken intermediate becomes every agent's for a tick).
+
+## Finding the same-cause siblings cheaply
+
+Two `dev:pg_query` reads and zero extra test runs, which matters on a loaded box:
+
+1. Get the currently-red set from the ledger (latest run per file):
+
+   ```sql
+   WITH latest AS (
+     SELECT DISTINCT ON (file_path) file_path, status, commit_sha, output_tail
+     FROM harness_shared.test_runs
+     WHERE workspace_id = 'papercusp-workspace' AND started_at > now() - interval '10 days'
+     ORDER BY file_path, started_at DESC
+   )
+   SELECT file_path, substr(commit_sha,1,10), left(output_tail,150)
+   FROM latest WHERE status = 'fail';
+   ```
+
+2. **Match on the failure TAIL signature, not on grep.** Same tail shape
+   (`expected undefined to be '<id>'`) ⇒ likely same root cause. A `42703
+   column does not exist`, a missing-relation tail, or a `jsonb string-scalar`
+   tail is a *different* bug — do not sweep those in.
+
+That is how `trust-admission-e2e` was identified as a sibling of
+`work-item-redundancy` without running anything.
+
+## Related trap: the count-based watchdog signal hides its own counterevidence
+
+The red-test watchdog files these as *"failed 3× in the last 6h and its latest run is
+still red"*, which reads as a live recurring bug and makes the most recent commits the
+natural suspects. In this case every recent commit was innocent: the test last
+**passed** 2026-07-13 and had already failed identically on 07-21, three weeks before
+the activity being investigated.
+
+**Query the last PASS before bisecting recent diffs** — one row bounds the whole
+regression window. Also check whether the "N failures" span multiple shas; these
+spanned two, and two of the three ran against a shared fixture a peer had transiently
+broken, so a single "3×" was three different situations rendered identically.
+Tracked as `EI-19363804802198172`.
+
+## See also
+
+* [judging claimable work — status='open' is not claimability](/internal/docs/agent-insights/judging-claimable-work-not-status-open)
+* `EI-19363744726544384` — `FEATURE_DISPATCHABLE_STATE` still reads `'todo'` and its
+  docstring still claims to name the claimable state. Inert (no production consumer)
+  but it is the authoritative-looking trap that *causes* this class; do not reach for
+  it when writing a fixture.

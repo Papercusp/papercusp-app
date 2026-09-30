@@ -1,0 +1,99 @@
+# Operator crash-loops with a postgres null-`write` TypeError = event-loop saturation tearing down PG connections (NOT connection exhaustion)
+URL: /internal/docs/agent-insights/operator-crash-loop-pg-null-write-event-loop-saturation
+
+When :3070 (papercup-dev-api) crash-loops with "[hono-host] fatal uncaughtException — exiting: TypeError: Cannot read properties of null (reading ''write'')" from postgres/src/connection.js, the cause is sustained main-thread event-loop saturation — the loop blocks long enough (observed p99 ~103s) that PG/the OS drops the backend, then postgres-js''s detached nextWrite() fires on a null socket and crashes the whole host. PG itself is healthy. Fix: the host guards now treat this as a recoverable blip; the root cause is loop saturation.
+
+import { Aside } from '@astrojs/starlight/components';
+
+## Symptom
+
+`:3070` (papercup-dev-api, the green operator that also runs the background
+machinery) crash-loops — `systemctl --user show papercup-dev-api -p NRestarts`
+climbs, `curl :3070/api/health` times out (8s+), while `:3170` (request-only) is
+snappy. The journal shows, in order:
+
+```
+[event-loop-lag] high loop delay — host is CPU-bound on the main thread { p99Ms: 103079, … }
+[…] write CONNECTION_CLOSED localhost:5432            (subsystems' PG writes failing)
+[hono-host] fatal uncaughtException — exiting: TypeError: Cannot read properties of null (reading 'write')
+    at Immediate.nextWrite (…/node_modules/postgres/src/connection.js:255:22)
+papercup-dev-api.service: Main process exited, code=exited, status=1/FAILURE
+```
+
+This is NOT "too many clients" / connection exhaustion — `pg_stat_activity` has
+plenty of free slots (e.g. 166/512). Don't chase the pool. The DB is fine; the
+**main thread** is the problem.
+
+## Root cause
+
+Sustained main-thread CPU work (heavy fleet/MCP load + in-process background
+work: TOON encoding, gzip, large JSON, git-sync shelling, DBOS) blocks the single
+event loop for *seconds to minutes* (observed p99 \~103s). While the loop is
+blocked, Postgres / the OS tears down the operator's now-idle/stuck backend
+connection. When the loop finally unblocks, postgres-js's **detached**
+`nextWrite()` flush fires against the connection whose socket is now `null` →
+`TypeError: Cannot read properties of null (reading 'write')`. Because it's
+detached (a queued immediate, not awaited at a call site), it surfaces as an
+**uncaughtException** → the host's fatal guard calls `process.exit(1)` → systemd
+restarts → the box is still loaded → it saturates + crashes again → crash loop.
+
+So two compounding faults: (1) the event-loop saturation (the real driver), and
+(2) a *recoverable* connection blip crashing the whole multi-tenant host.
+
+## Fix
+
+Fault (2) — resilience — is fixed: `apps/operator/bin/host-benign-errors.ts`
+`isTransientPgConnectionError` classifies the postgres-js null-`write` TypeError
+(scoped to a stack inside `postgres/src/connection.js`, so a genuine null-deref
+elsewhere still fails fast) and `CONNECTION_CLOSED` as recoverable. The
+`uncaughtException` / `unhandledRejection` guards in `hono-host.ts` now SWALLOW
+it (log + keep serving — the pool reconnects on the next query) instead of
+exiting. The host degrades under load instead of crash-looping the fleet.
+
+Fault (1) — the saturation itself — is the durable fix, from
+`operator-scalability-event-loop-2026-06-16`, and both legs have since
+**landed**:
+
+* **P1 (un-block the loop)** — `packages/operator-core/lib/cpu-task-worker.ts`
+  offloads the hot-path `JSON.stringify` + `gzipSync` on large SSE poll
+  payloads to a persistent `worker_threads` Worker (lazy-spawned per process),
+  falling back to inline sync execution if workers are unavailable/crash.
+* **P3 (split the background host off the request loop)** — `hono-host.ts`'s
+  optional `node:cluster` split (`PAPERCUSP_CLUSTER`, `startCluster` /
+  `cluster-fork.ts`): the PRIMARY runs the background machinery
+  (DBOS/git-sync/substrate) while N request-only WORKER processes share the
+  port via `SO_REUSEPORT`, so request serving stays responsive even while the
+  primary's loop saturates. This is **owner-gated and default OFF** — it needs
+  validating under the Tauri shell / a staging restart first — so on a
+  single-process host the symptom above can still recur.
+
+The resilience patch (fault 2) stops the *crash* on every topology; P1 reduces
+how easily the loop saturates in the first place; P3 removes the request-path
+blast-radius once enabled, but is not yet the default.
+
+## Independent crash-loop alarm
+
+The operator cannot reliably supervise its own total outage, so the dedicated
+`papercup-bg-host` runs `system:supervision-reconcile` once a minute and watches
+the operator's systemd `NRestarts` counter. Three automatic restarts inside five
+minutes is a crash loop, even if every one-minute sample catches the service in
+its brief `active` interval. The reconciler sends one fleet escalation and adds
+the most recent concrete failure line from `systemctl status` (for example,
+`EADDRINUSE` or `Main process exited`) so responders see the cause without first
+reconstructing the journal. Manual deploy restarts do not increment
+`NRestarts`, so they do not trip this detector.
+
+## Diagnose / runbook
+
+```bash
+systemctl --user show papercup-dev-api.service -p NRestarts          # climbing = crash loop
+journalctl --user -u papercup-dev-api.service -n 40 --no-pager        # look for the null-write + [event-loop-lag]
+curl -s -o /dev/null -w '%{http_code} %{time_total}s' --max-time 8 http://127.0.0.1:3070/api/health   # 000/8s = wedged
+uptime                                                                # is the box CPU-bound?
+sudo -u postgres psql -p 5432 -tAc "select count(*),current_setting('max_connections') from pg_stat_activity"  # confirm PG is NOT exhausted
+```
+
+If the box is overloaded by fleet activity, that load is the pot's domain (it
+holds benchmark runs until the box quiets) — let it recede rather than
+double-intervening. The resilience patch keeps the operator alive through the
+spike.

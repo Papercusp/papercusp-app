@@ -1,0 +1,22 @@
+{
+  "name": "@papercusp/eval-battery",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The one eval-battery engine: a bounded variant×case×repeat battery loop with a swappable `Subject` port (run → collect/distill → judge → score, never-abort + rate-pause discipline) plus the frozen LLM-judge + scoring + rate-pause cores it owns. The gym is the `HarnessSubject` (a component eval), the Apiary/gen-0 is the `InstanceSubject` (a whole-instance eval) — one engine, two subjects (self-improvement-stack-reconciliation-2026-06-09 D-001). Pure, dependency-injected core; the only runtime dep is the rate-limit-error classifier.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@papercusp/testing-shell": "*"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

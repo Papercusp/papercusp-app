@@ -1,0 +1,232 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/social-bluesky",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Bluesky platform trigger pack: Watches an account's firehose slice for its own posts, replies and mentions. Records each event and publishes nothing.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": {
+    "mode": "exact"
+  },
+  "capabilities": [],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "appPassword"
+    ],
+    "properties": {
+      "handle": {
+        "type": "string",
+        "title": "Bluesky handle",
+        "shareable": true,
+        "description": "The account handle to watch, e.g. `owner.bsky.social`. Public, so it travels with a share."
+      },
+      "appPassword": {
+        "type": "string",
+        "title": "Bluesky app password",
+        "secret": true,
+        "shareable": false,
+        "snapshotPolicy": "strip",
+        "description": "An app password generated in Bluesky settings — never the account password. Stored encrypted; declared strip-on-share."
+      }
+    }
+  },
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "escalationGuidance": {
+          "type": "string",
+          "title": "What needs a human",
+          "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said.",
+          "maxLength": 1000
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 12,
+      "windowSeconds": 300
+    },
+    "targets": [
+      {
+        "id": "record-bluesky-event",
+        "kind": "plan",
+        "path": "plan.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "trigger"
+          ],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": [
+                "key",
+                "source",
+                "event",
+                "sourceId",
+                "externalId",
+                "dedupeKey",
+                "payload"
+              ],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "pattern": "^ext:bluesky:(post|reply|mention)$"
+                },
+                "source": {
+                  "type": "string",
+                  "const": "bluesky"
+                },
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "post",
+                    "reply",
+                    "mention"
+                  ]
+                },
+                "sourceId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "externalId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dedupeKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "payload": {
+                  "type": "object",
+                  "datatype": "social-post",
+                  "additionalProperties": true,
+                  "required": [
+                    "id",
+                    "text"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "replyToId": {
+                      "type": "string"
+                    },
+                    "occurredAt": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "escalationGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said."
+            }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "bluesky-post",
+        "source": {
+          "kind": "external",
+          "sourceKind": "bluesky"
+        },
+        "target": "record-bluesky-event",
+        "eventPattern": "ext:bluesky:post",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      },
+      {
+        "id": "bluesky-reply",
+        "source": {
+          "kind": "external",
+          "sourceKind": "bluesky"
+        },
+        "target": "record-bluesky-event",
+        "eventPattern": "ext:bluesky:reply",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      },
+      {
+        "id": "bluesky-mention",
+        "source": {
+          "kind": "external",
+          "sourceKind": "bluesky"
+        },
+        "target": "record-bluesky-event",
+        "eventPattern": "ext:bluesky:mention",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      }
+    ],
+    "edges": []
+  },
+  "icon": "Cloud"
+}

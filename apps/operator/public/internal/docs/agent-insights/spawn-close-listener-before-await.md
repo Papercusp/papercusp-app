@@ -1,0 +1,71 @@
+# Never put an `await` between `spawn()` and the child's `close`/`exit` listener
+URL: /internal/docs/agent-insights/spawn-close-listener-before-await
+
+A short-lived child process can run, exit, and close its stdio streams *during* a cold `await import()` (or any await) that sits between spawn() and the child.on('close') registration — so 'close' fires before the listener attaches, is lost, and the done-promise hangs forever. It only bites the FIRST call per worker (cold import), so it masquerades as a flake or a "stderr-only" / "Node-version" bug.
+
+## The trap
+
+```ts
+const child = spawn('bash', [script], { cwd, env });
+const { publish } = await import('./branch-action-bus');   // ⬅ COLD on first call
+child.stdout.on('data', …);
+const done = new Promise((res) => child.on('close', … res(meta) …));  // ⬅ attached too late
+```
+
+`spawn()` returns instantly, but the `await import(...)` yields the event loop.
+On the **first call per worker** that dynamic import is **cold** (it has to load
+the module + its deps), so it can take several ms. A trivial child (`echo` + `exit`)
+finishes in \~1ms — so during that import await the child **runs, exits, and both
+its stdio streams close**. Node emits `'close'` on the `ChildProcess` *before* the
+`child.on('close')` listener is attached. The event is lost; the `done` promise
+never resolves and the caller hangs forever. (Any FileHandle the close handler was
+going to `.close()` then leaks and later throws `ERR_INVALID_STATE` "closed during
+garbage collection".)
+
+On **warm** calls the same `import()` resolves in the same microtask tick, so the
+listener attaches before the child exits and wins the race — which is exactly why
+it looks like a flake.
+
+## Why it fools you
+
+This is `branch-actions.runAction`'s real bug (`d43922be6`). It was mis-diagnosed
+for several rounds as:
+
+* a **"Node-25 spawn/stream-completion product bug"** — disproved by a standalone
+  Node-25 repro of the exact `spawn` + stream + FileHandle flow that completes fine;
+* a **"stderr-only"** failure — disproved by an in-vitest probe where a
+  **stdout-only** script hangs as the *first* `runAction` call while an **stderr**
+  script passes when *warm*. The original failing test just happened to be both the
+  first `runAction` call **and** the one that wrote to stderr.
+
+The tell: it always hangs on the **first** invocation in a fresh process/worker and
+passes thereafter. That points at a cold-`import()` (or any one-time async) sitting
+in front of the listener registration — not at the child, the streams, or the OS.
+
+## The rule
+
+**Register a `ChildProcess`'s `close`/`exit`/`data` listeners synchronously,
+immediately after `spawn()`, with NO `await` in between.** Hoist any `await import`,
+`await fs.open`, channel lookup, etc. to **before** the `spawn()` call:
+
+```ts
+const { publish } = await import('./branch-action-bus');   // resolve BEFORE spawn
+const child = spawn('bash', [script], { cwd, env });
+child.stdout.on('data', …);
+child.on('close', … );                                     // same synchronous tick — safe
+```
+
+Same hazard for `'message'` on forked children and `'data'` on any pipe whose source
+can EOF before you subscribe. If you genuinely must await after spawn, capture the
+result first: `const exited = once(child, 'close')` (subscribe synchronously) and
+`await exited` later.
+
+## How to confirm a suspected instance
+
+1. Standalone-repro the bare `spawn`/stream flow in plain `node` — if it completes,
+   the child/stream/OS layer is innocent.
+2. In the real environment, run the suspect path as the **first** call (cold) vs a
+   **warm** repeat. First-only hang ⇒ this race.
+3. Instrument (file-append, not console) `spawn`, `child.on('exit')`, stdout/stderr
+   `end`/`close`, and the moment you attach the `close` listener. If `close`/`exit`
+   timestamps precede the "attaching listener" timestamp, you've found it.

@@ -1,0 +1,105 @@
+# The `migration` blueprint — BRIEF-demo-blueprints-2026-06-04 (demo ②).
+#
+# SHAPE (new): discover a work-list of sites matching a migration pattern →
+# transform each site **in isolation** → verify (tests/build green per site +
+# overall). DEMONSTRATES: safe large mechanical change — renames, codemods, dep
+# bumps (the operator-core carve, the `.harness→.papercusp` rename). The **worktree
+# isolation on the transformer is the key demo**: each site is transformed in its
+# own git worktree so concurrent transforms never stomp each other (mirrors the
+# Agent/Workflow layer's `isolation: 'worktree'`, declared here via the role's
+# `isolation` field).
+#
+# Same engine as coding/research (decider model: migration-director emits a verb
+# each turn; deriveNext maps it via `edges`). Honors anti-over-decomposition
+# (D-010): a one-site migration degrades to discoverer → one transformer → verify;
+# the cheap path stays cheap. The director iterates transformer dispatches, one
+# site per turn, tracking the site list + per-site status on the work-item.
+#
+# Parallelism note: the decider spine is sequential (one verb/turn), so today the
+# director transforms sites SERIALLY — correct, just not yet concurrent. The
+# transformer's `isolation: worktree` declaration is what makes the eventual
+# fan-out safe; honoring it as TRUE parallel dispatch (N transformers at once, each
+# in its own worktree, capped by `dispatch.concurrency`) is the same global-orchestrator
+# fan-out capability `review` wants and the decider spine doesn't yet have — a
+# flagged follow-up, not a hack to force here. `knobs.worktrees.enabled` is set so
+# the blueprint-level worktree machinery is on, consistent with the role declaration.
+#
+# Work-item storage: a migration-task rides the per-harness work-item table (the
+# same FEATURE_ID mechanism coding/research use). The discovered site list and each
+# site's transform/verify status live on the work-item — only the blueprint differs.
+id: migration
+extends: base
+version: 0.1.0
+description: >-
+  A migration/codemod harness: a migration-director drives a discoverer (find all
+  sites matching the pattern), a worktree-isolated transformer (transform ONE site),
+  and a verifier (tests/build green per site + overall) — safe large mechanical change.
+
+workItem:
+  kind: migration-task
+  idPrefix: M
+
+# The autoloop dispatch policy (autoloop-pot-operator-rebuild-2026-06-05 D-005).
+# `concurrency` migrated here from the old `knobs.maxParallel` — max concurrent
+# transforms once fan-out lands (today the engine runs serially; see the
+# parallelism note above).
+dispatch:
+  concurrency: 4
+
+spine:
+  decider: migration-director
+  maxTurns: 200
+  default:
+    to: idle
+  edges:
+    DONE: { to: done }
+    ESCALATE: { to: escalate, reasonFrom: arg }
+    IDLE: { to: idle }
+    # Discover all sites matching the migration pattern → a site list on the work-item.
+    NEXT_DISCOVERER: { to: role, role: discoverer, extras: ["FEATURE_ID={feature}"] }
+    # Transform the next un-transformed site (the transformer reads the site list
+    # off the work-item, claims the next site, transforms it in its own worktree).
+    NEXT_TRANSFORMER: { to: role, role: transformer, extras: ["FEATURE_ID={feature}"] }
+    # Verify a transformed site (and, at the end, the whole migration) is green.
+    NEXT_VERIFIER: { to: role, role: migration-verifier, extras: ["FEATURE_ID={feature}"] }
+
+# Migration plans inline within the director's loop — the work-item carries the
+# discovered site list + per-site transform/verify status (no plans→features import).
+planner:
+  kind: inline
+
+roles:
+  - { id: migration-director, description: "Per-migration-task orchestrator; emits the next verb." }
+  - { id: discoverer, description: "Finds all sites matching the migration pattern → a site list on the work-item." }
+  # The transformer is dispatched once per site; `isolation: worktree` so concurrent
+  # transforms (when fan-out lands) each get their own git worktree — no collisions.
+  - { id: transformer, isolation: worktree, description: "Transforms ONE site (worktree-isolated)." }
+  - { id: migration-verifier, description: "Runs the verify command per site + overall; green gates the site." }
+
+# Gym trace = the substrate git diff (migration produces code changes, like coding).
+# `regressionsFromTests` is the deterministic guardrail (the verify command).
+gym:
+  collectTrace: git-diff
+  signals: [regressionsFromTests]
+
+knobs:
+  harnessKind: migration
+  requiresRepo: true
+  # The blueprint-level worktree machinery, consistent with the transformer's
+  # role-level `isolation: worktree` declaration.
+  worktrees: { enabled: true }
+  # What to find + transform (e.g. "rename @restart/* → @papercusp/*"). A fork sets this.
+  pattern: ""
+  # The verify command run per site + overall (the verifier's gate; also the gym signal).
+  verifyCmd: ""
+
+# Dependencies (official-blueprints-cupboard-publish D-002): derived from the
+# migration role personas (scripts/derive-blueprint-deps.mjs). The roles work
+# the substrate via shell/edit; their agent-tool surface is the work-item +
+# plan readback (the site list + per-site status ride the work-item).
+dependencies:
+  tools:
+    - features:get
+    - plans:items
+    - work_items:list
+  plugins: []

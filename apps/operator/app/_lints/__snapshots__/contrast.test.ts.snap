@@ -1,0 +1,701 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`contrast lint > tracks every pair the lint could NOT statically verify — a new skip is a reviewed diff, not a silent gap 1`] = `
+[
+  "operator-vite/src/components/adv/adv-header-pills.css :: .pc-advshell__action--agents.is-running :: color:--good on background:--good-bg
+    black:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    default:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    frost:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    honeycomb:background:unsupported-function(rgba(104, 211, 145, 0.11))",
+  "operator-vite/src/components/adv/adv-header-pills.css :: .pc-advshell__action--start :: color:--good on background:--good-bg
+    black:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    default:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    frost:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    honeycomb:background:unsupported-function(rgba(104, 211, 145, 0.11))",
+  "operator-vite/src/components/adv/adv-header-pills.css :: .pc-advshell__action--stop :: color:--bad on background:--bad-bg
+    black:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    default:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    frost:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    honeycomb:background:unsupported-function(rgba(224, 111, 105, 0.11))",
+  "operator-vite/src/components/adv/adv-header-pills.css :: .pc-task-kill-notice.is-done :: color:--good on background:--good-bg
+    black:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    default:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    frost:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    honeycomb:background:unsupported-function(rgba(104, 211, 145, 0.11))",
+  "operator-vite/src/components/adv/adv-header-pills.css :: .pc-task-kill-notice.is-refused :: color:--bad on background:--bad-bg
+    black:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    default:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    frost:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    honeycomb:background:unsupported-function(rgba(224, 111, 105, 0.11))",
+  "operator-vite/src/components/adv/adv-header-pills.css :: .pc-tasks-roster__alarm :: color:--bad on background:--bad-bg
+    black:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    default:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    frost:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    honeycomb:background:unsupported-function(rgba(224, 111, 105, 0.11))",
+  "operator-vite/src/components/adv/adv-header-pills.css :: .pc-tasks-roster__alarm.is-warn :: color:--warn on background:--warn-bg
+    black:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    default:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    frost:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    honeycomb:background:unsupported-function(rgba(198, 142, 36, 0.11))",
+  "operator-vite/src/components/adv/adv-pot-bar.css :: .pc-advshell__action--shared :: color:--good on background:--good-bg
+    black:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    default:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    frost:background:unsupported-function(rgba(52, 211, 153, 0.1))
+    honeycomb:background:unsupported-function(rgba(104, 211, 145, 0.11))",
+  "operator-vite/src/components/adv/scheduled-calendar.css :: .pc-sched-cal__iconbtn:hover :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator-vite/src/components/voice-video/VideoGrid.css :: .pc-video-grid__banner :: color:--warn on background:--warn-bg
+    black:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    default:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    frost:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    honeycomb:background:unsupported-function(rgba(198, 142, 36, 0.11))",
+  "operator-vite/src/components/voice-video/VideoGrid.css :: .pc-video-grid__btn :: color:--pc-text-1 on background:--pc-surface-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator-vite/src/components/voice-video/VideoGrid.css :: .pc-video-grid__overflow :: color:--pc-text-2 on background:--pc-surface-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator-vite/src/components/voice-video/VoiceChannelPanel.css :: .pc-voice-chan__banner :: color:--warn on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator-vite/src/components/voice-video/VoiceChannelPanel.css :: .pc-voice-chan__btn :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator-vite/src/components/voice-video/VoiceChannelPanel.css :: .pc-voice-chan__input :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_components/chat/chat-controls.css :: .pc-chat-decisions .pc-items__action--nav:hover :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_components/chat/conversation-context-projection.css :: .pc-context-projection :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_components/chat/session-chat.css :: .session-chat .oracle-msg-avatar :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_components/inbox/inbox-bulk-report.css :: .inbox-bulk-report__recovery button :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_components/inbox/inbox-bulk.css :: .op-inbox__bulk-start:disabled :: color:--fg-mute on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/_components/inbox/inbox-pane.css :: .op-inbox__detail-copy code :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_components/inbox/inbox-pane.css :: .op-inbox__detail-why :: color:--warn on background:--warn-bg
+    black:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    default:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    frost:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    honeycomb:background:unsupported-function(rgba(198, 142, 36, 0.11))",
+  "operator/app/_components/plans/plan-cleanup-report.css :: .plan-cleanup-report__recovery-actions button :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_components/plans/plan-dashboard.css :: .plan-dash .plan-dash__btn--ghost:hover :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_components/plans/plan-dashboard.css :: .plan-dash__fic :: color:--fg-mute on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/_components/plans/plan-dashboard.css :: .plan-dash__iwork:hover :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/_components/plans/plans-pane.css :: .plan-popup__fullscreen:hover:not(:disabled), .plan-popup__close:hover :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/_components/plans/plans-pane.css :: .plan-sessions__launch :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/_components/plans/plans-pane.css :: .plan-sessions__search :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/_components/plans/plans-pane.css :: .plan-sessions__tag :: color:--fg-mute on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/_components/plans/plans-pane.css :: .plans-pane__archive, .plans-pane__cleanup :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_components/plans/plans-pane.css :: .plans-pane__badge :: color:--fg-mute on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/_components/plans/plans-pane.css :: .plans-pane__search :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/_components/review-report/run-lifecycle-bar.css :: .run-lifecycle__btn :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_components/work-items/work-item-popup.css :: .wi-popup__close:hover :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/_primitives.css :: .pc-btn :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/_primitives.css :: .pc-warn :: color:--fg on background:--warn-bg
+    black:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    default:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    frost:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    honeycomb:background:unsupported-function(rgba(198, 142, 36, 0.11))",
+  "operator/app/_primitives.css :: :where( input:not([type]), input[type="text"], input[type="number"], input[type="email"], input[type="search"], input[type="tel"], input[type="url"], input[type="password"], input[type="date"], input[type="time"], input[type="datetime-local"], textarea ) :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_primitives.css :: :where(.pc-btn-ghost):hover:not(:disabled) :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_primitives.css :: :where(button, .pc-btn) :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/_primitives.css :: :where(button, .pc-btn):hover:not(:disabled) :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/admin/admin-ops.css :: .pc-ops-intro code :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/admin/plans/plans.css :: .pc-editbar__btn :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/admin/plans/plans.css :: .pc-editbar__btn:hover:not(:disabled) :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/admin/plans/plans.css :: .pc-items__plan-head:hover, .pc-items__plan-head:focus-visible :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/admin/plans/plans.css :: .pc-plan-actions__btn :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/admin/plans/plans.css :: .pc-plan-actions__btn--demote:hover :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/admin/plans/plans.css :: .pc-plan-actions__btn:hover :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/admin/plans/plans.css :: .pc-plan-dialog__note :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/admin/plans/plans.css :: .pc-plan-editor-tools__btn :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/admin/plans/plans.css :: .pc-plan-editor-tools__btn:hover :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/admin/plans/plans.css :: .pc-plans__editbtn :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/admin/plans/plans.css :: .pc-plans__editbtn:hover:not(:disabled) :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/admin/plans/plans.css :: .pc-plans__harness-filter-select :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/admin/plans/plans.css :: .pc-plans__tab:hover :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/admin/plans/plans.css :: .pc-queue__filtertoggle :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/admin/testing/testing.css :: .pc-test-badge.is-muted :: color:--fg-mute on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/adv/harnesses/adv-panel-chrome.css :: .pc-advpanel__iconbtn :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/adv/harnesses/adv-panel-chrome.css :: .pc-advpanel__input :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/adv/harnesses/adv-panel-chrome.css :: .pc-advpanel__select :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/adv/hud/hud.css :: .hud-goal-composer__btn :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/adv/hud/hud.css :: .hud-goal__close :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/adv/hud/hud.css :: .hud__av--more :: color:--fg-dim on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/adv/hud/hud.css :: .hud__col-h :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/adv/hud/hud.css :: .hud__railcol :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/adv/hud/hud.css :: .pc-new-session-launcher__input :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/adv/sessions/AgentOrders.css :: .pc-orders__age--aging :: color:--warn on background:--pc-orders-warn-bg
+    black:background:dynamic-or-alpha(transparent)
+    default:background:dynamic-or-alpha(transparent)
+    frost:background:dynamic-or-alpha(transparent)
+    honeycomb:background:dynamic-or-alpha(transparent)",
+  "operator/app/adv/sessions/AgentOrders.css :: .pc-orders__age--unknown :: color:--pc-orders-mute on background:--pc-orders-surface
+    black:background:dynamic-or-alpha(transparent)
+    default:background:dynamic-or-alpha(transparent)
+    frost:background:dynamic-or-alpha(transparent)
+    honeycomb:background:dynamic-or-alpha(transparent)",
+  "operator/app/adv/sessions/AgentOrders.css :: .pc-orders__badge--self :: color:--pc-orders-mute on background:--pc-orders-surface
+    black:background:dynamic-or-alpha(transparent)
+    default:background:dynamic-or-alpha(transparent)
+    frost:background:dynamic-or-alpha(transparent)
+    honeycomb:background:dynamic-or-alpha(transparent)",
+  "operator/app/adv/sessions/AgentOrders.css :: .pc-orders__badge--warn :: color:--warn on background:--pc-orders-warn-bg
+    black:background:dynamic-or-alpha(transparent)
+    default:background:dynamic-or-alpha(transparent)
+    frost:background:dynamic-or-alpha(transparent)
+    honeycomb:background:dynamic-or-alpha(transparent)",
+  "operator/app/adv/sessions/AgentOrders.css :: .pc-orders__drift :: color:--warn on background:--pc-orders-warn-bg
+    black:background:dynamic-or-alpha(transparent)
+    default:background:dynamic-or-alpha(transparent)
+    frost:background:dynamic-or-alpha(transparent)
+    honeycomb:background:dynamic-or-alpha(transparent)",
+  "operator/app/adv/sessions/AgentOrders.css :: .pc-orders__n :: color:--pc-orders-cap-label on background:--pc-orders-cap-veil
+    black:background:unsupported-function(rgb(0 0 0 / 0.2))
+    default:background:unsupported-function(rgb(0 0 0 / 0.2))
+    frost:background:unsupported-function(rgb(0 0 0 / 0.2))
+    honeycomb:background:unsupported-function(rgb(0 0 0 / 0.2))",
+  "operator/app/adv/sessions/AgentOrders.css :: .pc-orders__n--hot :: color:--pc-orders-cap-label-warn on background:--pc-orders-cap-veil-hot
+    black:background:unsupported-function(rgb(0 0 0 / 0.28))
+    default:background:unsupported-function(rgb(0 0 0 / 0.28))
+    frost:background:unsupported-function(rgb(0 0 0 / 0.28))
+    honeycomb:background:unsupported-function(rgb(0 0 0 / 0.28))",
+  "operator/app/adv/sessions/SessionsRosterView.css :: .pc-files__agent :: color:--fg on background:--pc-roster-chip-bg
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/adv/sessions/SessionsRosterView.css :: .pc-roster__badge :: color:--fg on background:--pc-roster-chip-bg
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/adv/sessions/SessionsRosterView.css :: .pc-roster__chip :: color:--fg on background:--pc-roster-chip-bg
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/adv/sessions/SessionsRosterView.css :: .pc-roster__file-chip :: color:--fg on background:--pc-roster-chip-bg
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/adv/sessions/SessionsRosterView.css :: .pc-roster__group-count :: color:--fg on background:--pc-roster-chip-bg
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/adv/sessions/SessionsRosterView.css :: .pc-zone--activity .pc-dossier__h .pc-dossier__badge-count :: color:--pc-dossier-cap-label on background:--pc-dossier-cap-veil
+    black:background:unsupported-function(rgb(0 0 0 / 0.2))
+    default:background:unsupported-function(rgb(0 0 0 / 0.2))
+    frost:background:unsupported-function(rgb(0 0 0 / 0.2))
+    honeycomb:background:unsupported-function(rgb(0 0 0 / 0.2))",
+  "operator/app/cloud-workspaces/cloud-workspaces.module.css :: .badge :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/cloud-workspaces.module.css :: .emptyIcon :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/cloud-workspaces.module.css :: .estimateIcon :: color:--accent on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/cloud-workspaces.module.css :: .hostIcon :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/cloud-workspaces.module.css :: .overflowItem:hover:not(:disabled) :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/cloud-workspaces.module.css :: .providerIcon :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/cloud-workspaces.module.css :: .railStep:hover:not([aria-disabled="true"]) :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/cloud-workspaces.module.css :: .railStepIcon :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/cloud-workspaces.module.css :: .readinessMark :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/cloud-workspaces.module.css :: .recoverability, .dangerNotice :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/cloud-workspaces.module.css :: .stageNumber :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/hosted-workspace-session.module.css :: .desktopThumbnail :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/hosted-workspace-session.module.css :: .pathInput :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/cloud-workspaces/hosted-workspace-session.module.css :: .toolbar button, .fileToolbar button, .fileEntry button, .claimButton :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/command-palette.css :: .h-cmd-kbd :: color:--fg-dim on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/coord/coord.module.css :: .alert :: color:--bad on background:--bad-bg
+    black:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    default:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    frost:background:unsupported-function(rgba(251, 113, 133, 0.1))
+    honeycomb:background:unsupported-function(rgba(224, 111, 105, 0.11))",
+  "operator/app/coord/coord.module.css :: .button :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/coord/coord.module.css :: .kindBadgeEscalation :: color:--warn on background:--warn-bg
+    black:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    default:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    frost:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    honeycomb:background:unsupported-function(rgba(198, 142, 36, 0.11))",
+  "operator/app/coord/coord.module.css :: .kindBadgeNeutral :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/coord/coord.module.css :: .miniBadge :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/coord/coord.module.css :: .sourceBadgeEscalation :: color:--warn on background:--warn-bg
+    black:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    default:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    frost:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    honeycomb:background:unsupported-function(rgba(198, 142, 36, 0.11))",
+  "operator/app/coord/coord.module.css :: .sourceBadgeMessage :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/coord/coord.module.css :: .sourcePillInactive :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/coord/coord.module.css :: .warningAlert :: color:--warn on background:--warn-bg
+    black:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    default:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    frost:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    honeycomb:background:unsupported-function(rgba(198, 142, 36, 0.11))",
+  "operator/app/globals.css :: .op-ph-chip :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/globals.css :: .pc-agent-card__badge :: color:--fg-mute on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/globals.css :: .pc-badge--optional :: color:--fg-mute on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/globals.css :: .pc-consent__status :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/globals.css :: .pc-perm__badge :: color:--fg-mute on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/globals.css :: .pc-radio-card :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/globals.css :: .pc-setup-wizard__status[data-status="skipped"] :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/globals.css :: .pc-setup-wizard__status[data-status="unknown"] :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/globals.css :: .pc-setup-wizard__step-num :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/globals.css :: .pc-warn-banner :: color:--fg on background:--warn-bg
+    black:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    default:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    frost:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    honeycomb:background:unsupported-function(rgba(198, 142, 36, 0.11))",
+  "operator/app/harness/harness.css :: .h-brainstorm-write .bn-container :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/harness/harness.css :: .h-bsfull-sub.on :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-bsfull-sub[data-state="active"] :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-btn :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-btn-icon.on :: color:--accent on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-btn-icon:hover :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-combobox__box :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/harness/harness.css :: .h-fid-chip :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-fid-chip.h-fid-unknown :: color:--fg-dim on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-fid-pop-claim :: color:--counter on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-md code :: color:--counter on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-select-item[data-highlighted] :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-sub.on :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-tab-count :: color:--fg-dim on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/harness/harness.css :: .h-tab[aria-selected="true"] :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/quick-panel/quick-panel.css :: .pc-qp__count :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/quick-panel/quick-panel.css :: .pc-qp__dragghost :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/quick-panel/quick-panel.css :: .pc-qp__iconbtn:hover:not(:disabled) :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/quick-panel/quick-panel.css :: .pc-qp__name :: color:--accent-strong on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/quick-panel/quick-panel.css :: .pc-qp__pin :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/res/res.css :: .res-draft-note :: color:--warn on background:--warn-bg
+    black:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    default:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    frost:background:unsupported-function(rgba(251, 191, 36, 0.1))
+    honeycomb:background:unsupported-function(rgba(198, 142, 36, 0.11))",
+  "operator/app/res/res.css :: .res-empty :: color:--fg-mute on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/res/res.css :: .res-ws :: color:--fg-dim on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+  "operator/app/settings/settings.css :: .kbd-settings-input :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/settings/settings.css :: .kbd-settings-record, .kbd-settings-reset, .kbd-settings-reset-all :: color:--fg on background:--bg-3
+    black:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.075))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.07))",
+  "operator/app/settings/settings.css :: .pc-settings-choice :: color:--fg on background:--bg-2
+    black:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    default:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    frost:background:unsupported-function(rgba(255, 255, 255, 0.045))
+    honeycomb:background:unsupported-function(rgba(255, 255, 255, 0.045))",
+]
+`;

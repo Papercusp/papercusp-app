@@ -1,0 +1,66 @@
+From: Papercusp release engineering
+Subject: Separate Inno Verification metadata from GOG output checksums
+
+Applies to upstream innoextract 376a13e7c41cc5528b6088d0dd16ec1b323a8d37.
+Inno 6.5+ always serializes a Verification record, including when its type is
+None. It is not a GOG multipart checksum. Loading it into that field requests
+an output checksum against the GOG size (zero for ordinary files), producing
+read-back warnings for every file. Keep the metadata in its own field and
+restore initialization of the GOG-only checksum. The independently parsed
+data_entry SHA256 and extraction/test verification are unchanged.
+
+--- a/src/setup/file.hpp
++++ b/src/setup/file.hpp
+@@ -114,6 +114,7 @@
+ 	std::string issig_allowed_keys;        //!< 6.5.0+
+ 	
+ 	file_verification_type verification;   //!< 6.5.0+
++	crypto::checksum verification_checksum; //!< Verification record, not GOG output
+ 	
+ 	boost::uint32_t location; //!< index into the data entry list
+ 	boost::uint32_t attributes;
+@@ -126,7 +127,7 @@
+ 	// Information about GOG Galaxy multi-part files
+ 	// These are not used in normal Inno Setup installers
+ 	std::vector<boost::uint32_t> additional_locations;
+-	crypto::checksum checksum; //!< Inno Setup 6.5.0+: SHA-256 from the per-file ISSig Verification block
++	crypto::checksum checksum;
+ 	boost::uint64_t size;
+ 	
+ 	void load(std::istream & is, const info & i);
+--- a/src/setup/file.cpp
++++ b/src/setup/file.cpp
+@@ -121,8 +121,8 @@
+ 		is >> util::encoded_string(download_password, i.codepage, i.header.lead_bytes);
+ 		is >> util::encoded_string(archive_password, i.codepage, i.header.lead_bytes);
+ 		is >> util::ansi_string(issig_allowed_keys);
+-		is.read(checksum.sha256, std::streamsize(sizeof(checksum.sha256)));
+-		checksum.type = crypto::SHA256;
++		is.read(verification_checksum.sha256, std::streamsize(sizeof(verification_checksum.sha256)));
++		verification_checksum.type = crypto::SHA256;
+ 		verification = stored_enum<stored_file_verification_type>(is).get();
+ 	} else {
+ 		excludes.clear();
+@@ -133,6 +133,7 @@
+ 		archive_password.clear();
+ 		issig_allowed_keys.clear();
+ 		verification = FileVerificationNone;
++		verification_checksum.type = crypto::None;
+ 	}
+ 	
+ 	load_version_data(is, i.version);
+@@ -277,11 +278,9 @@
+ 	}
+ 	
+ 	additional_locations.clear();
+-	if(i.version < INNO_VERSION(6, 5, 0)) {
+-		// For Inno Setup 6.5.0+, file_entry::checksum carries the SHA-256
+-		// from the per-file ISSig Verification block, populated above.
+-		checksum.type = crypto::None;
+-	}
++	// Only GOG Galaxy processing populates this output checksum and size.
++	// Ordinary embedded payload checksums live in data_entry::file.checksum.
++	checksum.type = crypto::None;
+ 	size = 0;
+ 	
+ }

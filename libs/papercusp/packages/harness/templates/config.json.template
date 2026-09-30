@@ -1,0 +1,122 @@
+{
+  "_comment": "Copy to .papercusp/config.json and customize. All fields optional.",
+
+  "models": {
+    "_comment": "Per-role model override. Skipped if $CLAUDE env already contains --model.",
+    "planner": "opus",
+    "worker": "sonnet",
+    "validator": "opus",
+    "orchestrator": "haiku"
+  },
+
+  "promptOverrides": {
+    "_comment_": "Appended to role prompt as 'Droid specialization'. Inline string OR path (./file.md relative to .papercusp/, /absolute/path also supported).",
+    "validator": "Be extra paranoid. Reject anything that isn't fully tested with explicit RUN evidence — you must SEE the test output, not infer it.",
+    "worker": "./prompts/worker-override.md"
+  },
+
+  "snapshotRetention": 50,
+
+  "_comment_logs": "Agent-run log (.out/.err/.jsonl) retention. Oldest N pruned each iteration; run.log + hook logs never pruned.",
+  "logRetention": 500,
+
+  "_comment_cost": "Safety cap — run.sh exits rc=6 when total cost across all jsonl logs >= this value. Checked each iteration. Leave unset for unlimited.",
+  "maxCostUsd": 10.00,
+
+  "_comment_timeouts": "Per-role invocation timeout in seconds. Uses GNU `timeout`. Agent gets SIGTERM (rc=124) after the duration; main loop continues.",
+  "timeouts": {
+    "worker": 900,
+    "validator": 600,
+    "orchestrator": 120,
+    "planner": 300
+  },
+
+  "_comment_branch_iso": "Isolate each feature on its own harness/<FEATURE_ID> branch off baseBranch. onPass=merge|pr|keep decides what happens when validator marks the feature passed. useWorktrees (Composio-inspired): when true, each parallel lane gets its own .papercusp/worktrees/lane-<N>/ dir instead of switching branches in the main working tree.",
+  "branchIsolation": {
+    "enabled": false,
+    "baseBranch": "main",
+    "onPass": "merge",
+    "useWorktrees": false
+  },
+
+  "_comment_screenshot": "Auto-capture a screenshot after each worker via `verdict`. Saves to .papercusp/screenshots/<FEATURE_ID>-<ts>.png.",
+  "autoScreenshot": {
+    "enabled": false,
+    "url": "http://localhost:5173"
+  },
+
+  "_comment_plan_reviewer": "Post-planner challenge pass. Reviews features.json + validation-contract.md, writes plan-review.md. VERDICT: reject halts with escalation.",
+  "planReviewer": {
+    "enabled": true
+  },
+
+  "_comment_debugger": "When a feature's attempts >= threshold, invoke the debugger role BEFORE the next worker retry. Writes debug/<FID>.md with root-cause analysis; worker reads it.",
+  "debugger": {
+    "enabled": true,
+    "threshold": 3
+  },
+
+  "_comment_crosscheck": "Cross-model re-validation after validator passes a feature. Use models.crosscheck to set the alternate model. On disagree, feature reverts to failing.",
+  "crosscheck": {
+    "enabled": false
+  },
+
+  "_comment_ui_qa": "Real-browser verification via verdict for features with VAL-UI-* claims. Runs after validator + crosscheck pass.",
+  "uiQa": {
+    "enabled": false,
+    "url": "http://localhost:5173"
+  },
+
+  "_comment_wip": "Background WIP commits during long worker runs. Requires branchIsolation so main branch isn't polluted.",
+  "wipCheckpoint": {
+    "enabled": false,
+    "intervalSeconds": 300
+  },
+
+  "_comment_parallel": "Worker execution model. Defaults to chunk-loop: planner LLM decomposes the feature into chunks, each acquires file-level locks, runs in a scratch worktree, passes an L1 typecheck gate, then commits straight to the integration branch. On validator reject, the prior plan is dropped and the planner replans with the validator's complaints in context (see PRIOR_VALIDATOR_LOG). Set useChunkLoop=false to opt into the alternate synth pipeline (per-feature branches + multi-worker synthesis, requires branchIsolation.enabled=true). max=N runs up to N concurrent workers when chunk-loop's file locks allow; workersPerFeature=M only applies to the synth path.",
+  "parallelWorkers": {
+    "max": 1,
+    "useChunkLoop": true,
+    "workingStateCheck": "pnpm typecheck",
+    "replanStrikes": 3,
+    "escalateToRole": "debugger",
+    "synthesizeSingle": true
+  },
+
+  "_comment_checkpoints": "Hermes-inspired named human-gated pauses. Orchestrator emits `CHECKPOINT <name>` when a configured milestone is hit; harness exits rc=8 and waits for grant via UI. Each type: { name, description, triggerDoc }.",
+  "checkpoints": {
+    "enabled": false,
+    "types": [
+      { "name": "architecture-locked", "description": "Planner+plan-reviewer approval", "triggerDoc": "After planner+plan-reviewer both pass for the first time." },
+      { "name": "pre-ship", "description": "All features green, awaiting release approval", "triggerDoc": "Before the orchestrator emits DONE." }
+    ]
+  },
+
+  "_comment_scoper_experts": "When true, the scoper runs in two phases: phase 1 decomposes SPEC.md into high-level areas and spawns one expert per area; phase 2 (re-invoked when experts finalize) derives the validation contract + features from the experts' detailed specs. When false (default), scoper is one-shot. Opt in on harness templates that benefit from a deep planning pass.",
+  "scoper": {
+    "useExperts": false
+  },
+
+  "_comment_expert": "Bounds for the expert role's feedback loop. The expert decides how many feedback agents to consult and how many turns per agent (sizingHints are guidance, not limits); these are the absolute caps. maxAgents triggers the max_rounds terminal status; maxTurnsPerAgent is per-conversation.",
+  "expert": {
+    "maxAgents": 12,
+    "maxTurnsPerAgent": 15,
+    "sizingHints": {
+      "small":    { "agentsTarget": 2,  "turnsTarget": 1 },
+      "standard": { "agentsTarget": 4,  "turnsTarget": 3 },
+      "large":    { "agentsTarget": 10, "turnsTarget": 15 }
+    }
+  },
+
+  "_comment_smoke": "claudecode-orchestrator-inspired service smoke-test gate. Runs bin/service-smoke-test.sh on DONE (and optionally after each feature pass). If any URL returns non-expectStatus, reopens the most recent passed feature as failing.",
+  "smokeTest": {
+    "enabled": false,
+    "onDone": true,
+    "onFeaturePass": false,
+    "urls": [],
+    "startupCmd": null,
+    "startupWaitSeconds": 30
+  },
+
+  "_comment_identity": "Per-role cross-mission memory (Agent-Swarm-inspired). Maintained by curator at ~/autonomous-harness/identity/<role>.md. Auto-injected by run.sh alongside memory/summary.md. No config flag — always on."
+}

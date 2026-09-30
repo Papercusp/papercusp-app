@@ -1,0 +1,1347 @@
+{
+  "version": "v1",
+  "corpusVersion": "v1",
+  "frozenAt": "2026-06-05T14:16:39.240Z",
+  "count": 150,
+  "classes": {
+    "lexical-gap": 40,
+    "exact-identifier": 35,
+    "hard-negative": 30,
+    "session-start-intent": 45
+  },
+  "note": "Frozen gold set (memory-backend-benchmark D-003). lexical-gap = no DISTINCTIVE-token overlap with the target memory (generic domain anchors allowed); exact-identifier = verbatim identifier from the target text; hard-negative = grep-verified absent topic, expected=[]; session-start-intent = realistic agent boot intents. Expected keys bind to corpus.v1.json — regen BOTH together as a new version, never in place.",
+  "queries": [
+    {
+      "id": "lg-001",
+      "class": "lexical-gap",
+      "query": "our point-in-time copies keep ballooning in size because every run folds the prior archive into the new one over and over",
+      "expected": [
+        "feedback_backup_self_exclusion"
+      ],
+      "note": "Recursive self-inclusion balloon; avoids 'snapshot/store/kopia/IGNORE_PATTERNS/workspaceRoot/backups'."
+    },
+    {
+      "id": "lg-002",
+      "class": "lexical-gap",
+      "query": "the program shrank to a tiny speck on my screen so I can see no content, but the markup inside reports everything mounted",
+      "expected": [
+        "feedback_check_window_size_not_viewport"
+      ],
+      "note": "Collapsed OS window symptom; avoids 'desktop/blank/page/alive/white screen/viewport/dimensions'."
+    },
+    {
+      "id": "lg-003",
+      "class": "lexical-gap",
+      "query": "logging into the other coding assistant by reusing its saved credentials got me signed out of my real account",
+      "expected": [
+        "feedback_codex_auth_probe_hazard"
+      ],
+      "note": "Rotating-refresh-token logout described without 'Codex/auth.json/CODEX_HOME/OAuth' tokens."
+    },
+    {
+      "id": "lg-004",
+      "class": "lexical-gap",
+      "query": "the screen rendered empty with no errors after I trimmed an unused package from the manifest",
+      "expected": [
+        "feedback_dep_removal_orphans_transitive_imports",
+        "feedback_vite_silent_external_bare_import"
+      ],
+      "note": "Blank app after dependency removal; avoids 'transitive/orphan/rollup/externalize/bare import' terms."
+    },
+    {
+      "id": "lg-005",
+      "class": "lexical-gap",
+      "query": "I yanked a database relation but later some stored routines blow up complaining the thing they read from is gone",
+      "expected": [
+        "feedback_drop_table_cascade_not_function_bodies"
+      ],
+      "note": "DROP TABLE leaving dangling function-body references; no 'CASCADE/pg_proc/prosrc/trigger' tokens."
+    },
+    {
+      "id": "lg-006",
+      "class": "lexical-gap",
+      "query": "removing one API endpoint also wiped out the type definitions and shared utility code that happened to live just above the next one",
+      "expected": [
+        "feedback_handler_delete_bounds"
+      ],
+      "note": "Over-deletion swallowing interfaces/helpers; avoids 'lines/helpers/between/two/unrelated/handler'."
+    },
+    {
+      "id": "lg-007",
+      "class": "lexical-gap",
+      "query": "a peer took over my in-progress assignment because the tracker marked me idle after I spent a while heads-down in the editor making code changes",
+      "expected": [
+        "feedback_heartbeat_during_long_local_edits"
+      ],
+      "note": "Presence-staleness during heads-down edits; avoids 'long/stretch/file/coord:presence/heartbeat/lane'."
+    },
+    {
+      "id": "lg-008",
+      "class": "lexical-gap",
+      "query": "the virtual machine seems to die on a clock — gets terminated every couple of minutes and brought back",
+      "expected": [
+        "feedback_mac_vm_systemd_kill_loop"
+      ],
+      "note": "Periodic kill loop framed as 'keeps crashing'; avoids 'systemd/Type=forking/PIDFile/qemu'."
+    },
+    {
+      "id": "lg-009",
+      "class": "lexical-gap",
+      "query": "long shell operations come back with a stream-stalled error even though the work actually finished on the server",
+      "expected": [
+        "feedback_mcp_pi_bash_stalls"
+      ],
+      "note": "Long-output tool-stall; avoids 'mcp__pi__bash/OMP/Meridian/background+poll'."
+    },
+    {
+      "id": "lg-010",
+      "class": "lexical-gap",
+      "query": "a procedure body wrapped in doubled dollar signs got mangled and the schema change quietly didn't run",
+      "expected": [
+        "feedback_named_dollar_quote_in_sql"
+      ],
+      "note": "Heredoc collapsing $$ in a migration; query uses 'doubled dollar signs/procedure' not 'named dollar-quote/DO block/$body$'."
+    },
+    {
+      "id": "lg-011",
+      "class": "lexical-gap",
+      "query": "a task flagged as requiring a person's approval must not be carried out unattended, even under a trust-your-judgment finish-the-whole-list directive",
+      "expected": [
+        "feedback_needs_human_is_a_hard_stop"
+      ],
+      "note": "needs-human gate; avoids 'owner/sign-off/overnight/mandate/step/agent'."
+    },
+    {
+      "id": "lg-012",
+      "class": "lexical-gap",
+      "query": "I temporarily shelved a file change to rerun the compiler and ended up restoring someone else's parked changes and jamming everyone's commits",
+      "expected": [
+        "feedback_never_git_stash_shared_tree"
+      ],
+      "note": "git stash hazard via 'temporarily shelved/parked changes' not 'stash push/pop/wedge'."
+    },
+    {
+      "id": "lg-013",
+      "class": "lexical-gap",
+      "query": "pushing simulated keypresses at a live text-mode console wired into the fleet's common backend could accidentally kick off a real worker the rest of the team relies on",
+      "expected": [
+        "feedback_no_live_keystroke_drive_pui"
+      ],
+      "note": "pui keystroke-injection hazard; avoids 'launch/live/session/shared/depends/terminal/agent/spawn'."
+    },
+    {
+      "id": "lg-014",
+      "class": "lexical-gap",
+      "query": "my bulk text substitution ran past the closing bracket it should have stopped at and dropped the extra argument into an inner expression by mistake",
+      "expected": [
+        "feedback_no_regex_for_func_args"
+      ],
+      "note": "Greedy match over arg lists; avoids 'pattern/nested/parentheses/call/inside/wrong/regex/sed'."
+    },
+    {
+      "id": "lg-015",
+      "class": "lexical-gap",
+      "query": "I keep reaching for that enumerate-the-available-helpers function when I begin a sweep, but it just throws because it doesn't exist in this setup",
+      "expected": [
+        "feedback_avoid_mcp_resources_tool",
+        "feedback_operator_scan_tools"
+      ],
+      "note": "ListMcpResourcesTool absence; avoids 'discovery/call/scan/start/errors/wired'."
+    },
+    {
+      "id": "lg-016",
+      "class": "lexical-gap",
+      "query": "a row that returned an icon for an unexpected value blanked out the whole panel tree, not just that row",
+      "expected": [
+        "feedback_react_icon_map_fallback"
+      ],
+      "note": "Missing map fallback crashing the subtree; avoids 'STATUS_ICON/?? FallbackIcon/component ref'."
+    },
+    {
+      "id": "lg-017",
+      "class": "lexical-gap",
+      "query": "I've patched this same failure three times and it keeps coming back — maybe I should paste the literal text into a search engine and see if it's a known upstream issue",
+      "expected": [
+        "feedback_search_web_before_15_loops"
+      ],
+      "note": "Web-search-before-loop; avoids 'fix/exact/message/before/again/look/error string'."
+    },
+    {
+      "id": "lg-018",
+      "class": "lexical-gap",
+      "query": "the camera's built-in microphone is what records by default here, and there are a few other plug-in sound gadgets attached so I need to pick the right one",
+      "expected": [
+        "reference_audio_setup"
+      ],
+      "note": "Audio device disambiguation; avoids 'webcam/usb/capture/PipeWire/Brio/source/mic'."
+    },
+    {
+      "id": "lg-019",
+      "class": "lexical-gap",
+      "query": "the guest froze with a stuck black image and connecting over the network hangs at the greeting, but the host disk had a brief hiccup",
+      "expected": [
+        "feedback_qemu_io_error_pause"
+      ],
+      "note": "QEMU io-error pause via 'guest froze/stuck black image/network greeting' not 'VM/info status/werror=stop/SSH banner'."
+    },
+    {
+      "id": "lg-020",
+      "class": "lexical-gap",
+      "query": "the product look-up went dark for a day and a half; the engine ran out of file handles whenever it tried to checkpoint",
+      "expected": [
+        "project_restart_typesense_durability"
+      ],
+      "note": "Typesense fd-exhaustion outage; avoids 'Typesense/Raft/snapshot/nofile/.sst' tokens (uses 'file handles/checkpoint')."
+    },
+    {
+      "id": "lg-021",
+      "class": "lexical-gap",
+      "query": "shop pages lock up only in one specific browser when you click around, even though the React warning shows up everywhere",
+      "expected": [
+        "project_restart_shop_firefox_freeze_zerocache"
+      ],
+      "note": "Firefox freeze rooted in a down realtime backend; avoids 'Firefox/zero-cache/:4848/WebSocket' naming."
+    },
+    {
+      "id": "lg-022",
+      "class": "lexical-gap",
+      "query": "a data table on the storefront comes out dark grey instead of the brand blue tint",
+      "expected": [
+        "project_restart_grid_theme_injection"
+      ],
+      "note": "Per-island theme-init miss; avoids 'papergrid/grid-theme-init/configureGridColors/frost'."
+    },
+    {
+      "id": "lg-023",
+      "class": "lexical-gap",
+      "query": "items added to the basket vanish on the next read and a fresh empty basket is minted each request when I point the test at the loopback IP",
+      "expected": [
+        "project_restart_shop_e2e_localhost_cookie"
+      ],
+      "note": "Host-scoped cookie drop on 127.0.0.1; avoids 'localhost/cookie/SameSite/shop_cart_id'."
+    },
+    {
+      "id": "lg-024",
+      "class": "lexical-gap",
+      "query": "my edit to a product page never shows up in the browser until I rebuild everything and bounce the server",
+      "expected": [
+        "project_restart_shop_preview_build"
+      ],
+      "note": "astro preview serving built dist; avoids 'astro preview/dist/build/CORS' exact words."
+    },
+    {
+      "id": "lg-025",
+      "class": "lexical-gap",
+      "query": "while a colleague and I both recompiled the shop simultaneously, the page my browser loaded referenced a chunk with my colleague's code and none of mine",
+      "expected": [
+        "feedback_shop_dist_build_race"
+      ],
+      "note": "Concurrent build race; avoids 'rebuilt/served/bundle/hash/two/other/dist/content-hashed'."
+    },
+    {
+      "id": "lg-026",
+      "class": "lexical-gap",
+      "query": "the camera-mic loopback check should run without any sound coming out of the speakers or disturbing my normal devices",
+      "expected": [
+        "reference_isolated_audio_e2e_null_sink"
+      ],
+      "note": "Silent isolated audio loopback; avoids 'null-sink/cpal/PULSE_SINK/monitor'."
+    },
+    {
+      "id": "lg-027",
+      "class": "lexical-gap",
+      "query": "I told the assistant to run claude with the newest model id but the conversation log shows it answered as the previous version",
+      "expected": [
+        "reference_claude_cli_opus48_id_fallback"
+      ],
+      "note": "opus-4-8 id silently downgrades; avoids 'opus-4-8/alias/4.7/--effort/transcript' literal forms."
+    },
+    {
+      "id": "lg-028",
+      "class": "lexical-gap",
+      "query": "after I dropped a package the bundler still finished cleanly but the page came up empty with a module-doesn't-resolve runtime error",
+      "expected": [
+        "feedback_vite_silent_external_bare_import",
+        "feedback_dep_removal_orphans_transitive_imports"
+      ],
+      "note": "Silent externalized import after prune; targets the vite-exit-0 memory primarily."
+    },
+    {
+      "id": "lg-029",
+      "class": "lexical-gap",
+      "query": "the page calls into a server route that should be slow but it returns in milliseconds — am I even hitting fresh code",
+      "expected": [
+        "feedback_verify_server_pid_before_measuring"
+      ],
+      "note": "Suspiciously-fast response = stale process; avoids 'PID/orphan/restart/lstart' literals."
+    },
+    {
+      "id": "lg-030",
+      "class": "lexical-gap",
+      "query": "matching a column against a set of values blew up when I used the 'equals any of these' form, and changing it to a membership check fixed it",
+      "expected": [
+        "reference_drizzle_array_any_vs_in"
+      ],
+      "note": "ANY(${arr}) vs IN; avoids 'raw/SQL/template/list/array/operator/throws/switching/drizzle'."
+    },
+    {
+      "id": "lg-031",
+      "class": "lexical-gap",
+      "query": "the route loads fine via a direct command-line request but throws a missing-export error only when the live tsx server actually serves it",
+      "expected": [
+        "reference_esm_cjs_named_import_under_tsx"
+      ],
+      "note": "ESM-imports-CJS-under-tsx named-export break; avoids 'cjs-module-lexer/type:module/createRequire'."
+    },
+    {
+      "id": "lg-032",
+      "class": "lexical-gap",
+      "query": "the auto-push job has been silently stuck for hours, way ahead of the remote, and nothing told anyone",
+      "expected": [
+        "reference_git_sync_silent_wedge_recovery"
+      ],
+      "note": "git-sync silent push wedge; avoids 'git-sync/routines.metadata/last_error/oversized pack/100MB'."
+    },
+    {
+      "id": "lg-033",
+      "class": "lexical-gap",
+      "query": "a list view stopped advancing and got frozen at the last three-digit entry the moment the counter crossed into four digits",
+      "expected": [
+        "reference_pg_order_by_binds_output_alias"
+      ],
+      "note": "ORDER BY binding the text alias = lexical sort; avoids 'ORDER BY/output alias/::text/bigint/lexical'."
+    },
+    {
+      "id": "lg-034",
+      "class": "lexical-gap",
+      "query": "a route transition on the page that nudges things sideways locks up whenever a heavy view is mounting",
+      "expected": [
+        "reference_motion_y_shorthand_main_thread"
+      ],
+      "note": "y-shorthand main-thread freeze; avoids 'motion/react/y/transform/WAAPI/opacity/compositor'."
+    },
+    {
+      "id": "lg-035",
+      "class": "lexical-gap",
+      "query": "I want to know what error popups the user actually saw earlier in the session, not just what's printing right now",
+      "expected": [
+        "reference_toast_log_recent"
+      ],
+      "note": "Persistent toast log vs live monitor; avoids 'toastLog/PG/perfRecorder/console-monitor'."
+    },
+    {
+      "id": "lg-036",
+      "class": "lexical-gap",
+      "query": "the writes the auto-committer makes sweep in everyone's pending changes on the shared tree, so I shouldn't be committing by hand",
+      "expected": [
+        "feedback_git_sync_live"
+      ],
+      "note": "git-sync owns commit/push; phrased as 'auto-committer sweeps everyone's changes' not 'git-sync routine/cron/push'."
+    },
+    {
+      "id": "lg-037",
+      "class": "lexical-gap",
+      "query": "the user dropped a big blob of terminal escape sequences plus a folder change and a service-boot invocation into our conversation, clearly meant for a prompt elsewhere",
+      "expected": [
+        "feedback_shell_command_misfires"
+      ],
+      "note": "Misfired terminal startup; avoids 'shell/color/title/directory/launch/command/ritual'."
+    },
+    {
+      "id": "lg-038",
+      "class": "lexical-gap",
+      "query": "when I forward a compressed upstream reply through my pass-through, the browser refuses to decode it and the request fails",
+      "expected": [
+        "feedback_proxy_strip_content_encoding"
+      ],
+      "note": "Proxy must strip content-encoding/length; avoids 'undici/arrayBuffer/content-encoding/brotli/ERR_CONTENT_DECODING'."
+    },
+    {
+      "id": "lg-039",
+      "class": "lexical-gap",
+      "query": "I chose the next sequence id for a schema change by eyeballing the largest one present and ended up clashing with a slot a teammate had set aside",
+      "expected": [
+        "feedback_use_db_next_migration_for_numbers"
+      ],
+      "note": "db:next-migration vs eyeballing max-on-disk; avoids 'number/highest/disk/reserved/migration'."
+    },
+    {
+      "id": "lg-040",
+      "class": "lexical-gap",
+      "query": "launching a browser-environment .tsx spec from the top of the monorepo while scoping it to one workspace dies because it can't locate the shared bootstrap module",
+      "expected": [
+        "feedback_vitest_root_flag_breaks_jsdom_fs_allow"
+      ],
+      "note": "--root walls off hoisted libs/; avoids 'UI/component/suite/repo/root/package/setup/file/vitest/jsdom'."
+    },
+    {
+      "id": "ei-001",
+      "class": "exact-identifier",
+      "query": "[boot-migrate] FAILED 000-baseline.sql: must be owner of function task_lineage",
+      "expected": [
+        "reference_papercup_dev_api_unit_cwd"
+      ],
+      "note": "error string 'must be owner of function task_lineage' (token task_lineage verbatim; corpus line-wraps after 'function')"
+    },
+    {
+      "id": "ei-002",
+      "class": "exact-identifier",
+      "query": "ListMcpResourcesTool not found in environment",
+      "expected": [
+        "feedback_avoid_mcp_resources_tool",
+        "feedback_operator_scan_tools"
+      ],
+      "note": "tool name 'ListMcpResourcesTool' (appears in two memories)"
+    },
+    {
+      "id": "ei-003",
+      "class": "exact-identifier",
+      "query": "getHarnessAdminUrl resolve admin DSN",
+      "expected": [
+        "feedback_webapp_retired_use_tauri_dev",
+        "project_embedded_pg_discovery"
+      ],
+      "note": "function name 'getHarnessAdminUrl' (appears in two memories)"
+    },
+    {
+      "id": "ei-004",
+      "class": "exact-identifier",
+      "query": "papercup-vm-mac.service keeps getting SIGTERM'd",
+      "expected": [
+        "feedback_mac_vm_systemd_kill_loop",
+        "reference_mac_vm_ios_build_access"
+      ],
+      "note": "systemd unit name 'papercup-vm-mac.service' (appears in two memories)"
+    },
+    {
+      "id": "ei-005",
+      "class": "exact-identifier",
+      "query": "allocate migration number with db:next-migration",
+      "expected": [
+        "feedback_use_db_next_migration_for_numbers"
+      ],
+      "note": "tool name 'db:next-migration'"
+    },
+    {
+      "id": "ei-006",
+      "class": "exact-identifier",
+      "query": "PAPERCUSP_USE_TS_ORCHESTRATOR=0 escape hatch",
+      "expected": [
+        "project_ts_orchestrator_default"
+      ],
+      "note": "env var 'PAPERCUSP_USE_TS_ORCHESTRATOR'"
+    },
+    {
+      "id": "ei-007",
+      "class": "exact-identifier",
+      "query": "qemu werror=stop pauses VM on disk write failure",
+      "expected": [
+        "feedback_qemu_io_error_pause"
+      ],
+      "note": "flag 'werror=stop'"
+    },
+    {
+      "id": "ei-008",
+      "class": "exact-identifier",
+      "query": "ERR_CONTENT_DECODING_FAILED in the browser console",
+      "expected": [
+        "feedback_proxy_strip_content_encoding"
+      ],
+      "note": "error string 'ERR_CONTENT_DECODING_FAILED'"
+    },
+    {
+      "id": "ei-009",
+      "class": "exact-identifier",
+      "query": "WebKitGTK libsoup max-conns-per-host default 6",
+      "expected": [
+        "feedback_webkitgtk_localhost_over_ip"
+      ],
+      "note": "setting 'max-conns-per-host'"
+    },
+    {
+      "id": "ei-010",
+      "class": "exact-identifier",
+      "query": "restart papercup-staging-api.service to test a main-tree edit",
+      "expected": [
+        "reference_dev_webview_api_rides_ipc_to_green",
+        "reference_papercup_two_port_host_model"
+      ],
+      "note": "service name 'papercup-staging-api' (appears in two memories)"
+    },
+    {
+      "id": "ei-011",
+      "class": "exact-identifier",
+      "query": "SQLITE_BUSY: database is locked journal_mode = delete",
+      "expected": [
+        "project_restart_shop_firefox_freeze_zerocache"
+      ],
+      "note": "error string 'SQLITE_BUSY'"
+    },
+    {
+      "id": "ei-012",
+      "class": "exact-identifier",
+      "query": "Typesense ulimits.nofile soft 1024 to 524288 fix",
+      "expected": [
+        "project_restart_typesense_durability"
+      ],
+      "note": "config key 'ulimits.nofile'"
+    },
+    {
+      "id": "ei-013",
+      "class": "exact-identifier",
+      "query": "RESPOND_SENTINEL forced function-calling round 1",
+      "expected": [
+        "feedback_scout_e2e_use_qwen_model"
+      ],
+      "note": "const name 'RESPOND_SENTINEL'"
+    },
+    {
+      "id": "ei-014",
+      "class": "exact-identifier",
+      "query": "pactl load-module module-null-sink for isolated audio test",
+      "expected": [
+        "reference_isolated_audio_e2e_null_sink"
+      ],
+      "note": "module name 'module-null-sink'"
+    },
+    {
+      "id": "ei-015",
+      "class": "exact-identifier",
+      "query": "Codex probe 401 refresh_token_reused",
+      "expected": [
+        "feedback_codex_auth_probe_hazard"
+      ],
+      "note": "error code 'refresh_token_reused'"
+    },
+    {
+      "id": "ei-016",
+      "class": "exact-identifier",
+      "query": "fn_recompute_reserved_qty dangling reference after dropping b2b_quote_item",
+      "expected": [
+        "feedback_drop_table_cascade_not_function_bodies"
+      ],
+      "note": "function name 'fn_recompute_reserved_qty' / table 'b2b_quote_item'"
+    },
+    {
+      "id": "ei-017",
+      "class": "exact-identifier",
+      "query": "use named dollar-quote $body$ in a DO block migration",
+      "expected": [
+        "feedback_named_dollar_quote_in_sql"
+      ],
+      "note": "literal '$body$'"
+    },
+    {
+      "id": "ei-018",
+      "class": "exact-identifier",
+      "query": "cjs-module-lexer links the namespace empty under tsx",
+      "expected": [
+        "reference_esm_cjs_named_import_under_tsx"
+      ],
+      "note": "tool name 'cjs-module-lexer'"
+    },
+    {
+      "id": "ei-019",
+      "class": "exact-identifier",
+      "query": "Cloudflare tunnel c53515b3-edfe-4e99-813b-e3916ae9d02c ingress",
+      "expected": [
+        "reference_cloudflare_tunnel"
+      ],
+      "note": "tunnel id 'c53515b3-edfe-4e99-813b-e3916ae9d02c'"
+    },
+    {
+      "id": "ei-020",
+      "class": "exact-identifier",
+      "query": "Logitech_BRIO alsa_input.usb-046d default mic source name",
+      "expected": [
+        "reference_audio_setup"
+      ],
+      "note": "device id 'alsa_input.usb-046d_Logitech_BRIO'"
+    },
+    {
+      "id": "ei-021",
+      "class": "exact-identifier",
+      "query": "mapModelToClaudeModel in Meridian collapses model string to alias",
+      "expected": [
+        "reference_claude_bridge_models"
+      ],
+      "note": "function name 'mapModelToClaudeModel'"
+    },
+    {
+      "id": "ei-022",
+      "class": "exact-identifier",
+      "query": "--model claude-opus-4-8 silently runs opus-4-7",
+      "expected": [
+        "reference_claude_cli_opus48_id_fallback"
+      ],
+      "note": "model id 'claude-opus-4-8'"
+    },
+    {
+      "id": "ei-023",
+      "class": "exact-identifier",
+      "query": "papergrid grids render black without grid-theme-init import",
+      "expected": [
+        "project_restart_grid_theme_injection"
+      ],
+      "note": "import 'grid-theme-init' / 'papergrid'"
+    },
+    {
+      "id": "ei-024",
+      "class": "exact-identifier",
+      "query": "set PAPERCUSP_TUI_OWNER and drive pui under a pyte Screen",
+      "expected": [
+        "project_pui_live_pty_harness"
+      ],
+      "note": "env var 'PAPERCUSP_TUI_OWNER'"
+    },
+    {
+      "id": "ei-025",
+      "class": "exact-identifier",
+      "query": "release-local.sh signed tauri build replaces desktop-release.yml",
+      "expected": [
+        "reference_desktop_releases_local"
+      ],
+      "note": "script name 'release-local.sh' / workflow 'desktop-release.yml'"
+    },
+    {
+      "id": "ei-026",
+      "class": "exact-identifier",
+      "query": "STATUS_ICON undefined crashes the React subtree, need ?? FallbackIcon",
+      "expected": [
+        "feedback_react_icon_map_fallback"
+      ],
+      "note": "identifier 'STATUS_ICON' / 'FallbackIcon'"
+    },
+    {
+      "id": "ei-027",
+      "class": "exact-identifier",
+      "query": "WasmPlugin::load regex ate through nested HashMap::new() parens",
+      "expected": [
+        "feedback_no_regex_for_func_args"
+      ],
+      "note": "signature 'WasmPlugin::load'"
+    },
+    {
+      "id": "ei-028",
+      "class": "exact-identifier",
+      "query": "deleting a harness handler swallowed loadIssuesOrSeed from harness.ts",
+      "expected": [
+        "feedback_handler_delete_bounds"
+      ],
+      "note": "helper name 'loadIssuesOrSeed'"
+    },
+    {
+      "id": "ei-029",
+      "class": "exact-identifier",
+      "query": "do not strip plpgsql.so from the embedded-pg bundle",
+      "expected": [
+        "project_embedded_pg_discovery"
+      ],
+      "note": "file 'plpgsql.so'"
+    },
+    {
+      "id": "ei-030",
+      "class": "exact-identifier",
+      "query": "isolated desktop admin route 403 trust unverified-loopback not in allowlist",
+      "expected": [
+        "reference_isolated_desktop_admin_api_bearer"
+      ],
+      "note": "trust label 'unverified-loopback'"
+    },
+    {
+      "id": "ei-031",
+      "class": "exact-identifier",
+      "query": "AGENT_ROLES has 19 vs KNOWN_ROLES 18, no tester",
+      "expected": [
+        "feedback_verify_identifiers_against_source_not_grep"
+      ],
+      "note": "const 'AGENT_ROLES' / 'KNOWN_ROLES'"
+    },
+    {
+      "id": "ei-032",
+      "class": "exact-identifier",
+      "query": "Meridian listens on 127.0.0.1:3456 telemetry/summary byModel",
+      "expected": [
+        "reference_claude_bridge_models"
+      ],
+      "note": "address '127.0.0.1:3456'"
+    },
+    {
+      "id": "ei-033",
+      "class": "exact-identifier",
+      "query": "git-sync push wedge diagnose via harness_shared.routines last_error",
+      "expected": [
+        "reference_git_sync_silent_wedge_recovery"
+      ],
+      "note": "table 'harness_shared.routines'"
+    },
+    {
+      "id": "ei-034",
+      "class": "exact-identifier",
+      "query": "scout telemetry degraded because restart_app has no CREATE on schema public, probe to_regclass",
+      "expected": [
+        "feedback_scout_e2e_use_qwen_model"
+      ],
+      "note": "DB role 'restart_app' / function 'to_regclass'"
+    },
+    {
+      "id": "ei-035",
+      "class": "exact-identifier",
+      "query": "override operator bind with PAPERCUSP_BIND_HOST=0.0.0.0 for LAN device testing",
+      "expected": [
+        "project_operator_auth_loopback"
+      ],
+      "note": "env var 'PAPERCUSP_BIND_HOST'"
+    },
+    {
+      "id": "hn-001",
+      "class": "hard-negative",
+      "query": "how do I configure the Kubernetes ingress controller for the operator API?",
+      "expected": [],
+      "note": "corpus has no Kubernetes / ingress-controller content at all"
+    },
+    {
+      "id": "hn-002",
+      "class": "hard-negative",
+      "query": "best way to do GraphQL schema stitching / federation across our services",
+      "expected": [],
+      "note": "no GraphQL anywhere; all APIs are Hono REST / MCP"
+    },
+    {
+      "id": "hn-003",
+      "class": "hard-negative",
+      "query": "Terraform state locking keeps failing on the S3 backend, how to unlock",
+      "expected": [],
+      "note": "no Terraform / IaC content; infra is systemd + scripts"
+    },
+    {
+      "id": "hn-004",
+      "class": "hard-negative",
+      "query": "Redis cluster resharding hangs when migrating hash slots",
+      "expected": [],
+      "note": "no Redis; caches are PG / in-memory Maps"
+    },
+    {
+      "id": "hn-005",
+      "class": "hard-negative",
+      "query": "our Kafka consumer group rebalances constantly and lags on partitions",
+      "expected": [],
+      "note": "no Kafka / message queues; transport is HTTP/SSE/PG"
+    },
+    {
+      "id": "hn-006",
+      "class": "hard-negative",
+      "query": "tuning Elasticsearch index mappings and BM25 relevance scoring",
+      "expected": [],
+      "note": "search backends mentioned are Typesense / PG FTS, never Elasticsearch"
+    },
+    {
+      "id": "hn-007",
+      "class": "hard-negative",
+      "query": "our iOS app got rejected in App Store review for guideline 4.3, how to appeal",
+      "expected": [],
+      "note": "iOS build is covered but never App Store submission / review rejections"
+    },
+    {
+      "id": "hn-008",
+      "class": "hard-negative",
+      "query": "how to verify a Stripe webhook signature and handle idempotency keys",
+      "expected": [],
+      "note": "Stripe only appears as a test-mode card in shop e2e; no webhook/payment-integration content"
+    },
+    {
+      "id": "hn-009",
+      "class": "hard-negative",
+      "query": "setting up OpenTelemetry distributed tracing with span context propagation",
+      "expected": [],
+      "note": "no tracing/observability stack; telemetry here is a Meridian summary endpoint only"
+    },
+    {
+      "id": "hn-010",
+      "class": "hard-negative",
+      "query": "Prometheus alertmanager rule to page PagerDuty when a service is down",
+      "expected": [],
+      "note": "no Prometheus/alerting; health is ad-hoc systemctl + notify-send"
+    },
+    {
+      "id": "hn-011",
+      "class": "hard-negative",
+      "query": "Helm chart values override and helm rollback for a failed release",
+      "expected": [],
+      "note": "no Helm/k8s packaging anywhere"
+    },
+    {
+      "id": "hn-012",
+      "class": "hard-negative",
+      "query": "configuring an Istio service mesh with envoy sidecars",
+      "expected": [],
+      "note": "no service mesh / sidecar-proxy networking"
+    },
+    {
+      "id": "hn-013",
+      "class": "hard-negative",
+      "query": "ArgoCD GitOps sync keeps showing the app OutOfSync",
+      "expected": [],
+      "note": "no GitOps/ArgoCD; deploys are local scripts + git-sync routine"
+    },
+    {
+      "id": "hn-014",
+      "class": "hard-negative",
+      "query": "HashiCorp Vault dynamic secrets rotation for database credentials",
+      "expected": [],
+      "note": "secrets are PG-encrypted columns + files; no Vault/secret-manager"
+    },
+    {
+      "id": "hn-015",
+      "class": "hard-negative",
+      "query": "Sentry source maps aren't resolving, stack traces stay minified",
+      "expected": [],
+      "note": "no Sentry/error-aggregation; errors go to toastLog + perf recorder"
+    },
+    {
+      "id": "hn-016",
+      "class": "hard-negative",
+      "query": "gRPC + protobuf schema registry versioning for backward compatibility",
+      "expected": [],
+      "note": "no gRPC/protobuf; wire contracts are OpenAPI/JSON over HTTP"
+    },
+    {
+      "id": "hn-017",
+      "class": "hard-negative",
+      "query": "SAML vs OIDC for enterprise SSO into the admin dashboard",
+      "expected": [],
+      "note": "operator auth is loopback Host-gate + device JWT; no SSO/SAML/OIDC"
+    },
+    {
+      "id": "hn-018",
+      "class": "hard-negative",
+      "query": "React Server Components streaming SSR causing a hydration mismatch",
+      "expected": [],
+      "note": "Next is retired here; UI is operator-vite SPA — no RSC/streaming-SSR content"
+    },
+    {
+      "id": "hn-019",
+      "class": "hard-negative",
+      "query": "service worker cache strategy for an offline-first PWA with Workbox",
+      "expected": [],
+      "note": "no service-worker/PWA/offline content (desktop is Tauri)"
+    },
+    {
+      "id": "hn-020",
+      "class": "hard-negative",
+      "query": "Tailwind config and dark-mode theme toggle for the storefront",
+      "expected": [],
+      "note": "no Tailwind/dark-mode theming guidance (grid theming is papergrid-specific, different topic)"
+    },
+    {
+      "id": "hn-021",
+      "class": "hard-negative",
+      "query": "i18n / localization: extracting strings and ICU message formatting",
+      "expected": [],
+      "note": "no internationalization/translation content"
+    },
+    {
+      "id": "hn-022",
+      "class": "hard-negative",
+      "query": "WCAG accessibility audit — ARIA roles and screen-reader support",
+      "expected": [],
+      "note": "no a11y/WCAG/screen-reader content"
+    },
+    {
+      "id": "hn-023",
+      "class": "hard-negative",
+      "query": "Postgres autovacuum tuning to deal with table bloat and dead tuples",
+      "expected": [],
+      "note": "heavy PG usage but nothing on autovacuum/vacuum/bloat tuning"
+    },
+    {
+      "id": "hn-024",
+      "class": "hard-negative",
+      "query": "diagnosing a Postgres deadlock and choosing the right transaction isolation level",
+      "expected": [],
+      "note": "no deadlock / isolation-level / serializable content"
+    },
+    {
+      "id": "hn-025",
+      "class": "hard-negative",
+      "query": "set up PgBouncer connection pooling and a read replica with failover",
+      "expected": [],
+      "note": "no pgbouncer / replication / read-replica / failover content"
+    },
+    {
+      "id": "hn-026",
+      "class": "hard-negative",
+      "query": "fixing an N+1 query — read the EXPLAIN ANALYZE plan and add an index",
+      "expected": [],
+      "note": "no query-plan / EXPLAIN / N+1 / index-tuning content"
+    },
+    {
+      "id": "hn-027",
+      "class": "hard-negative",
+      "query": "Node memory leak — capture a heap snapshot and inspect retained GC roots",
+      "expected": [],
+      "note": "no memory-leak/heap-profiling/GC content"
+    },
+    {
+      "id": "hn-028",
+      "class": "hard-negative",
+      "query": "Airflow DAG scheduling for the nightly dbt model run into the warehouse",
+      "expected": [],
+      "note": "no data-engineering / Airflow / dbt / warehouse content"
+    },
+    {
+      "id": "hn-029",
+      "class": "hard-negative",
+      "query": "picking a vector database — Pinecone vs Weaviate vs Qdrant — for embeddings",
+      "expected": [],
+      "note": "pgvector is used in-DB; no dedicated vector-DB selection content"
+    },
+    {
+      "id": "hn-030",
+      "class": "hard-negative",
+      "query": "Let's Encrypt / certbot ACME renewal for the nginx reverse proxy TLS cert",
+      "expected": [],
+      "note": "no nginx / TLS-cert / certbot content (edge is a Cloudflare tunnel, no local TLS termination)"
+    },
+    {
+      "id": "ss-001",
+      "class": "session-start-intent",
+      "query": "running e2e tests for the Papercusp desktop app",
+      "expected": [
+        "feedback_drive_desktop_with_tauri_agent_tools",
+        "feedback_own_xvfb_for_e2e",
+        "reference_desktop_console_error_sweep"
+      ],
+      "note": "Desktop e2e — surfaces the tauri-agent-tools driver, the Xvfb-isolation rule, and the console-sweep harness."
+    },
+    {
+      "id": "ss-002",
+      "class": "session-start-intent",
+      "query": "verifying a frontend fix in the browser before telling the user it's done",
+      "expected": [
+        "feedback_browser_e2e_verify_ui_fixes"
+      ],
+      "note": "UI-fix verification discipline at session boot."
+    },
+    {
+      "id": "ss-003",
+      "class": "session-start-intent",
+      "query": "adding a new SQL migration to the shared papercup tree",
+      "expected": [
+        "feedback_use_db_next_migration_for_numbers",
+        "feedback_named_dollar_quote_in_sql"
+      ],
+      "note": "Migration authoring — number allocation + dollar-quote gotcha."
+    },
+    {
+      "id": "ss-004",
+      "class": "session-start-intent",
+      "query": "dropping a Postgres table that other code might still reference",
+      "expected": [
+        "feedback_drop_table_cascade_not_function_bodies"
+      ],
+      "note": "Table drop — CASCADE-doesn't-touch-function-bodies warning."
+    },
+    {
+      "id": "ss-005",
+      "class": "session-start-intent",
+      "query": "deploying the Restart storefront to production",
+      "expected": [
+        "reference_restart_prod_deploy_marker",
+        "project_restart_stack"
+      ],
+      "note": "Restart prod deploy — SHA-marker trap + stack overview."
+    },
+    {
+      "id": "ss-006",
+      "class": "session-start-intent",
+      "query": "starting the Restart dev services because :3001 is down",
+      "expected": [
+        "project_restart_stack"
+      ],
+      "note": "Bring up Restart stack — overmind + stale-socket recovery."
+    },
+    {
+      "id": "ss-007",
+      "class": "session-start-intent",
+      "query": "implementing a new operator MCP tool",
+      "expected": [
+        "project_papercusp_first_party_tool_pattern"
+      ],
+      "note": "Tool authoring — package-side vs operator-side placement."
+    },
+    {
+      "id": "ss-008",
+      "class": "session-start-intent",
+      "query": "moving new durable operator state into storage",
+      "expected": [
+        "feedback_pg_by_default",
+        "feedback_pg_canonical_no_mirrors",
+        "feedback_db_not_a_transport"
+      ],
+      "note": "Storage decision — PG by default, no FS mirrors, DB-not-a-transport."
+    },
+    {
+      "id": "ss-009",
+      "class": "session-start-intent",
+      "query": "fix the white-screen bug in the Tauri desktop window",
+      "expected": [
+        "feedback_check_window_size_not_viewport",
+        "feedback_webkitgtk_localhost_over_ip"
+      ],
+      "note": "Blank-desktop debugging — window-size check + libsoup pool root cause."
+    },
+    {
+      "id": "ss-010",
+      "class": "session-start-intent",
+      "query": "editing files in the shared papercup checkout alongside other agents",
+      "expected": [
+        "feedback_use_locks_before_editing",
+        "feedback_papercup_main_dir_stays_on_main",
+        "feedback_git_sync_live"
+      ],
+      "note": "Concurrent shared-tree editing — locks, stay-on-main, git-sync ownership."
+    },
+    {
+      "id": "ss-011",
+      "class": "session-start-intent",
+      "query": "running the operator's Playwright e2e specs locally",
+      "expected": [
+        "feedback_playwright_dev_worker_cap"
+      ],
+      "note": "Playwright runs — worker cap vs next-dev compile pipeline."
+    },
+    {
+      "id": "ss-012",
+      "class": "session-start-intent",
+      "query": "building the iOS app on the Mac VM",
+      "expected": [
+        "reference_mac_vm_ios_build_access",
+        "reference_papercup_rust_mobile_android_build"
+      ],
+      "note": "iOS build — Mac VM access path; mobile build doc as adjacent context."
+    },
+    {
+      "id": "ss-013",
+      "class": "session-start-intent",
+      "query": "building and testing the Android mobile app on this box",
+      "expected": [
+        "reference_papercup_rust_mobile_android_build"
+      ],
+      "note": "Android build/test workflow + shared-checkout pathspec hazard."
+    },
+    {
+      "id": "ss-014",
+      "class": "session-start-intent",
+      "query": "wiring up the mobile pair endpoint and pointing the app at the backend",
+      "expected": [
+        "feedback_mobile_targets_hono",
+        "project_operator_auth_loopback"
+      ],
+      "note": "Mobile pairing — Hono-not-Rust target + loopback auth gate."
+    },
+    {
+      "id": "ss-015",
+      "class": "session-start-intent",
+      "query": "live-verifying a server-side handler change against the running operator",
+      "expected": [
+        "reference_papercup_two_port_host_model",
+        "reference_papercup_dev_api_unit_cwd",
+        "feedback_verify_server_pid_before_measuring"
+      ],
+      "note": "Server-side verify — two-port :3070/:3170 model, the dev-api unit, fresh-process check."
+    },
+    {
+      "id": "ss-016",
+      "class": "session-start-intent",
+      "query": "verifying a /adv tab change is actually live in the desktop",
+      "expected": [
+        "project_adv_live_in_operator_vite",
+        "reference_desktop_dev_nohmr_3070_dist"
+      ],
+      "note": "/adv live-verify — operator-vite is the live shell + nohmr dist serving."
+    },
+    {
+      "id": "ss-017",
+      "class": "session-start-intent",
+      "query": "adding a new admin tab to the desktop app",
+      "expected": [
+        "project_adv_live_in_operator_vite"
+      ],
+      "note": "Admin tab — needs an operator-vite mirror route + TABS entry."
+    },
+    {
+      "id": "ss-018",
+      "class": "session-start-intent",
+      "query": "debugging why the Restart product search returns nothing",
+      "expected": [
+        "project_restart_typesense_durability"
+      ],
+      "note": "Search-down debugging — Typesense fd-exhaustion wedge."
+    },
+    {
+      "id": "ss-019",
+      "class": "session-start-intent",
+      "query": "reproducing a Firefox-only freeze in the Restart shop",
+      "expected": [
+        "project_restart_real_firefox_repro_harness",
+        "project_restart_shop_firefox_freeze_zerocache"
+      ],
+      "note": "Firefox repro — stock-snap-Firefox harness + the zero-cache-down root cause."
+    },
+    {
+      "id": "ss-020",
+      "class": "session-start-intent",
+      "query": "fixing a page-transition freeze on the Restart web admin",
+      "expected": [
+        "reference_motion_y_shorthand_main_thread"
+      ],
+      "note": "PageTransition freeze — motion@12 opacity-only fix."
+    },
+    {
+      "id": "ss-021",
+      "class": "session-start-intent",
+      "query": "renaming a shared library scope from @restart to @papercusp",
+      "expected": [
+        "feedback_shared_libs_papercusp_scope"
+      ],
+      "note": "Shared-lib scope — six-place rename checklist."
+    },
+    {
+      "id": "ss-022",
+      "class": "session-start-intent",
+      "query": "landing a code change in a papercup git submodule",
+      "expected": [
+        "project_submodule_pins_local_only"
+      ],
+      "note": "Submodule change — local-only pins, how to bump the gitlink."
+    },
+    {
+      "id": "ss-023",
+      "class": "session-start-intent",
+      "query": "setting up an isolated Tauri instance under Xvfb for console-error iteration",
+      "expected": [
+        "feedback_own_xvfb_for_e2e",
+        "reference_desktop_console_error_sweep",
+        "feedback_e2e_no_focus_steal"
+      ],
+      "note": "Isolated console-error loop — own-Xvfb rule, the sweep harness, no-focus-steal."
+    },
+    {
+      "id": "ss-024",
+      "class": "session-start-intent",
+      "query": "editing the Cloudflare tunnel ingress for the brand domain",
+      "expected": [
+        "reference_cloudflare_tunnel"
+      ],
+      "note": "Tunnel ingress edit — zones, token extraction, PUT recipe."
+    },
+    {
+      "id": "ss-025",
+      "class": "session-start-intent",
+      "query": "verifying which model the claude CLI actually ran",
+      "expected": [
+        "reference_claude_cli_opus48_id_fallback",
+        "reference_claude_bridge_models"
+      ],
+      "note": "Model verification — opus-4-8 id fallback + Meridian alias mapping."
+    },
+    {
+      "id": "ss-026",
+      "class": "session-start-intent",
+      "query": "cutting a desktop release build locally",
+      "expected": [
+        "reference_desktop_releases_local"
+      ],
+      "note": "Release build — local bin/release-local.sh, no GH Actions."
+    },
+    {
+      "id": "ss-027",
+      "class": "session-start-intent",
+      "query": "running an interactive live test of the pui terminal workbench",
+      "expected": [
+        "project_pui_live_pty_harness",
+        "feedback_no_live_keystroke_drive_pui"
+      ],
+      "note": "pui live run — isolated PTY harness + no-keystroke-on-shared-box rule."
+    },
+    {
+      "id": "ss-028",
+      "class": "session-start-intent",
+      "query": "checking the kopia backup snapshots and timers",
+      "expected": [
+        "reference_kopia_backup",
+        "feedback_backup_self_exclusion"
+      ],
+      "note": "Backup ops — kopia setup + the self-exclusion ignore-pattern rule."
+    },
+    {
+      "id": "ss-029",
+      "class": "session-start-intent",
+      "query": "recovering a Mac VM that keeps appearing to crash",
+      "expected": [
+        "feedback_mac_vm_systemd_kill_loop",
+        "feedback_qemu_io_error_pause"
+      ],
+      "note": "VM crash recovery — systemd kill-loop + io-error pause."
+    },
+    {
+      "id": "ss-030",
+      "class": "session-start-intent",
+      "query": "writing a reverse proxy for the auth endpoints",
+      "expected": [
+        "feedback_proxy_strip_content_encoding"
+      ],
+      "note": "Proxy work — strip content-encoding/length on re-emit."
+    },
+    {
+      "id": "ss-031",
+      "class": "session-start-intent",
+      "query": "migrating new useState into URL-backed state",
+      "expected": [
+        "feedback_nuqs_default"
+      ],
+      "note": "State migration — nuqs-by-default rule."
+    },
+    {
+      "id": "ss-032",
+      "class": "session-start-intent",
+      "query": "doing a styling-only design pass on a Restart product page",
+      "expected": [
+        "feedback_styling_only_scope",
+        "feedback_visual_execution_weak_brief_for_designer"
+      ],
+      "note": "Styling pass — scope-restriction + hand-off-visual-craft guidance."
+    },
+    {
+      "id": "ss-033",
+      "class": "session-start-intent",
+      "query": "deleting the bash run.sh now that the TS orchestrator is default",
+      "expected": [
+        "project_run_sh_function_library",
+        "project_ts_orchestrator_default",
+        "reference_orchestrator_parity_doc"
+      ],
+      "note": "run.sh retirement — it's also a function lib, TS already default, parity gaps."
+    },
+    {
+      "id": "ss-034",
+      "class": "session-start-intent",
+      "query": "debugging a 'does not provide an export named X' error from an operator route",
+      "expected": [
+        "reference_esm_cjs_named_import_under_tsx"
+      ],
+      "note": "Named-export break under tsx — ESM/CJS interop fix."
+    },
+    {
+      "id": "ss-035",
+      "class": "session-start-intent",
+      "query": "investigating a stuck git-sync that's far ahead of origin",
+      "expected": [
+        "reference_git_sync_silent_wedge_recovery"
+      ],
+      "note": "git-sync wedge — diagnose via routines.metadata, oversized-pack recovery."
+    },
+    {
+      "id": "ss-036",
+      "class": "session-start-intent",
+      "query": "diagnosing why on-demand fetches hang on the operator harness page",
+      "expected": [
+        "project_harness_sse_pool_exhaustion",
+        "feedback_webkitgtk_localhost_over_ip"
+      ],
+      "note": "SSE socket-budget starvation — both the Chromium and WebKit variants."
+    },
+    {
+      "id": "ss-037",
+      "class": "session-start-intent",
+      "query": "presenting a plan for a new feature before building it",
+      "expected": [
+        "feedback_plan_first_for_features",
+        "feedback_give_reasoning_with_options"
+      ],
+      "note": "Plan-first discipline + lead-with-recommendation framing."
+    },
+    {
+      "id": "ss-038",
+      "class": "session-start-intent",
+      "query": "removing a dependency from package.json and the lockfile",
+      "expected": [
+        "feedback_dep_removal_orphans_transitive_imports",
+        "feedback_vite_silent_external_bare_import"
+      ],
+      "note": "Dep removal — orphaned-transitive verify + silent blank-build."
+    },
+    {
+      "id": "ss-039",
+      "class": "session-start-intent",
+      "query": "claiming a plan item in the multi-agent checkout",
+      "expected": [
+        "feedback_recheck_plan_status_before_starting",
+        "feedback_heartbeat_during_long_local_edits",
+        "feedback_repoll_coord_between_prs"
+      ],
+      "note": "Plan-item claim — re-check status, keep presence fresh, re-poll coord."
+    },
+    {
+      "id": "ss-040",
+      "class": "session-start-intent",
+      "query": "committing a batch of edits in a shared-checkout repo",
+      "expected": [
+        "feedback_git_status_before_commit_shared_checkout",
+        "feedback_paperclip_collision_race"
+      ],
+      "note": "Shared-checkout commit — git status first, commit-immediately vs paperclip."
+    },
+    {
+      "id": "ss-041",
+      "class": "session-start-intent",
+      "query": "testing audio capture and playback code without making real sound",
+      "expected": [
+        "reference_isolated_audio_e2e_null_sink",
+        "reference_audio_setup"
+      ],
+      "note": "Audio e2e — null-sink loopback recipe + the box's audio stack."
+    },
+    {
+      "id": "ss-042",
+      "class": "session-start-intent",
+      "query": "sweeping the desktop app for console errors",
+      "expected": [
+        "reference_desktop_console_error_sweep",
+        "reference_toast_log_recent"
+      ],
+      "note": "Console-error sweep — the harness + the persistent error-log surfaces."
+    },
+    {
+      "id": "ss-043",
+      "class": "session-start-intent",
+      "query": "spinning up the operator to test something",
+      "expected": [
+        "feedback_webapp_retired_use_tauri_dev",
+        "project_papercusp_pg_topology"
+      ],
+      "note": "Run the operator — webapp retired, launch Tauri dev; PG topology context."
+    },
+    {
+      "id": "ss-044",
+      "class": "session-start-intent",
+      "query": "fixing the Scout chat assistant's tool-calling reliability",
+      "expected": [
+        "feedback_scout_e2e_use_qwen_model",
+        "reference_drizzle_array_any_vs_in"
+      ],
+      "note": "Scout work — forced-function-calling fix + the pgvector recall ANY/IN bug."
+    },
+    {
+      "id": "ss-045",
+      "class": "session-start-intent",
+      "query": "making sure two of our processes talk over a real transport instead of polling the database",
+      "expected": [
+        "feedback_db_not_a_transport",
+        "feedback_pg_by_default"
+      ],
+      "note": "Inter-process transport — DB-not-a-transport principle + PG-by-default."
+    }
+  ]
+}

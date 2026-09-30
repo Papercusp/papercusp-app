@@ -1,0 +1,214 @@
+# Coordinator dispatch & wake — hand a lane to a peer in ONE call, and read "wakeable" not "active"
+URL: /internal/docs/agent-insights/coordinator-dispatch-and-wake
+
+How a coordinator/Mug reliably gets work picked up by another agent — coord:dispatch (assign+wake+confirm), the presence wakeable/sessionState signal that tells you who can actually take work, and why a dead session shows as a fake "parked" target until the reclaim lane GCs its dangling inbox-wake await.
+
+## What this fixes
+
+A coordinator (an su handing work to a peer, or the Mug placing a lane) repeatedly
+hit the same four-step confusion when trying to get an agent to actually pick up work:
+
+1. **`coord:presence` showed dead sessions as "active".** A just-ended su session keeps a
+   fresh `heartbeat_at` for up to 10 min, so an `active:17` count was really \~6 — you
+   could not tell who could take work from who was a stale/ended row.
+2. **`coord:send` injects but does not wake.** A plain send lands in the inbox, seen on the
+   recipient's *next* turn — an idle agent never gets one, so the work silently stalls.
+3. **The wake key was undiscoverable.** Waking meant hand-composing `events:emit` on the
+   `coord:inbox-wake:<ownerId>` key — a format you had to reverse-engineer.
+4. **A woken agent did not reliably ACT on the assignment** — some woke → read → re-parked
+   instead of claiming + working the directed lane.
+
+The fixes: a `wakeable`/`sessionState` signal on presence, a single `coord:dispatch`
+primitive, and a reclaim lane that stops dead sessions from masquerading as live targets.
+
+## The rule: read `sessionState` / `wakeable`, NEVER raw `active`
+
+`coord:presence` enriches every row with two derived signals
+(`presence-wakeability.ts`):
+
+* **`wakeable`** — a live `coord:inbox-wake:<id>` standing await exists, so a wake **will**
+  be delivered. This is the authoritative woken:1-vs-woken:0 signal.
+* **`sessionState`** — `live` (a turn is running now) · `parked` (wakeable but idle — **the
+  ideal dispatch target**, a wake resumes it) · `ended` (a dead/zombie row; it needs a
+  **relaunch**, never a wake) · `recorded` (authoritatively live per the session log but not
+  yet coord-wakeable).
+
+  A row is `ended` for **either** of two reasons (`deriveSessionState` in
+  `presence-wakeability.ts`): it is **NOT wakeable** (no standing await), **OR** its heartbeat
+  is cold beyond the **DEAD ceiling** — `PRESENCE_DEAD_MS = 3 × PRESENCE_STALE_MS` (**30 min**),
+  added 2026-07-07. The hard-stale check runs **FIRST**, so an hour-cold heartbeat is
+  authoritative-dead even if a **lingering wake-await** would otherwise read `wakeable:true`.
+  This closes the invisible-dead-fleet hole: an **abrupt death** (host reboot, OOM kill,
+  SIGKILL) skips `cancelInboxWakeAwaits`, so the await outlives the process and *used to* pin a
+  dead session to `parked` forever. Both `coord:presence` (`presence-snapshot.ts`) and
+  `fleet:assignments` (`reconcileWakeability`) apply this ceiling via `isHardStale`, so the
+  live signal itself now force-ends a 30-min-cold zombie. (A `recorded` row is classified
+  before this path, so a session-log-authoritative session is never force-ended by heartbeat.)
+
+So: **before dispatching, find a `parked` (or `live`) target. An `ended` target cannot be
+woken — relaunch/resume it instead.** Read `summary.wakeable`, not the `active` count.
+
+**`active` is the ACTIONABLE roster only — `ended` rows are excluded by default.** `coord:presence`
+used to have an `include_stale` flag that dumped the whole stale roster; that's gone. Instead:
+`active` returns only live/parked/recorded rows, `summary.byState.ended` gives you the dead count,
+and `owner:<id>` does a **targeted** lookup that *does* return a matching row even if it's `ended`
+— use it to inspect/wake one specific dead agent, never to expand the whole stale pile. Each row
+also carries `onDesktop`/`viewerAttached`: a human is watching that session RIGHT NOW (an open OS
+window, or attached to its PTY panel) — see the reaper exemption below.
+
+**Cheap re-polling: `since:<etag>`.** The roster snapshot carries an `etag`; pass the etag from
+your prior read back as `since` and, if the delta-eligible roster (identity/state — NOT liveness)
+is unchanged, you get a \~100B `{ unchanged:true, etag, as_of }` instead of the full payload. Right
+before you actually dispatch, re-read *without* `since:` — liveness (live↔parked) is deliberately
+excluded from the etag, so a `since`-short-circuited read can be stale on exactly the signal a
+dispatch decision needs.
+
+**Self-identification.** A caller's own row is stamped `isSelf:true`, and the top-level result
+carries `self: { ownerId, ownerLabel }` — so you can tell which roster row is you without a
+separate `coord:whoami` call (`self-marker.ts`).
+
+> `coord:roster { view }` (`tools/roster.ts`) is the newer unified read door — `view:"live"` is the
+> same underlying model as `coord:presence`; `view:"history"` answers "who was ever here" for a
+> roster with `ended` rows; `view:"claims"`/`view:"members"` cover `fleet:assignments`-shaped and
+> membership questions. `coord:glance` gives a one-line fleet headline. `coord:presence` stays the
+> dispatch-focused door documented here.
+
+**`intentStale` is now forced by `sessionState`, not just the 30-min activity clock.** As of
+2026-07-10 (EI-9262), `overrideIntentStaleForSessionState` (`presence-wakeability.ts`, applied in
+`presence-snapshot.ts`) forces a row's `intentStale` to `true` the instant `sessionState` reads
+`parked` or `ended` — overriding the separate `INTENT_STALE_SEC` (30-minute) activity heuristic.
+The gap it closes: a killed/exited agent's `sessionState` can flip to `parked`/`ended` (via the
+wakeability + hard-stale-ceiling checks above) **long before** `lastActiveSecAgo` crosses the
+30-minute `intentStale` threshold — a reader trusting `intentStale` alone (not cross-checking
+`sessionState`) could see a fresh-looking declared intent for an agent no longer taking turns, and
+stand down a takeover that should proceed. `recorded` rows are left alone (authoritatively-live,
+not idle/dead — their `intent` is an empty placeholder anyway). **So: never read `intentStale` in
+isolation — a `parked`/`ended` `sessionState` already means "treat the intent as stale", by
+construction.**
+
+**A `parked` row can be deliberately benched, not just idle — check `parkedOn`.** As of
+2026-07-10 (WI-3715), `coord:presence` stamps each active row with `parkedOn: string[]` when the
+agent is parked on a real `events:await` key (the same derivation `fleet:assignments` already
+used via `decorateParkedOn`, now surfaced here too via `listParkedAwaitsForSubscribers` +
+`buildParkedOnMap`). A `parkedOn` agent is intentionally waiting for a specific event to be
+pushed — not abandoned, and not necessarily the ideal dispatch target: waking it re-invokes a
+turn that will just re-arm the same await unless your dispatch is what it's waiting on. `parkedOn`
+is (like `modes`) derived fresh outside the byte-stable snapshot, so it is **not** etag-tracked —
+a `since:`-short-circuited read can be stale on it, same caveat as liveness.
+
+**Staging a member's bench yourself? Use `fleet:bench`, not a hand-written events:await ask.**
+(fleet-reliability-verification-2026-07-10 P-006.) The `parkedOn` read above is *derived* —
+it tells you a member is parked, but says nothing about whether the leader can trust it (a
+member might silently forget to register, or their session might have no resumable wake
+handle). `fleet:bench { member, wakeEvent, stagedAssignment }` closes that gap: the LEADER
+registers the await *for* the member (`captureWakeHandleForOwner(member)` +
+`registerAwait`), tags the row's note with the staged assignment, and reports
+`registered:false` immediately if no resumable session exists for that member — a bench
+miss caught at stage time instead of discovered only when `events:emit`'s `woken` count
+comes up short. `fleet:bench { list: true }` is the query half — the same
+`listParkedAwaitsForSubscribers` read filtered to bench-tagged rows, with the staged
+assignment restored from the note. Replaces the night-shift workaround of asking a member
+to `events:await` on their own and *also* directed-waking everyone as a fallback because
+there was no way to confirm who actually registered.
+
+## coord:dispatch — assign + wake + confirm, in ONE call
+
+`coord:dispatch { to, planSlug?, items?[], note }` (`tools/dispatch.ts`) replaces the
+hand-composed `plan_items:assign` + `coord:send` + `events:emit` + key-format ritual. It:
+
+1. reads the target's `sessionState`/`wakeable` via a **targeted** `coord:presence { owner: to }`
+   lookup (not an unscoped roster read — `owner` still resolves an `ended` row, which the default
+   `active` list now omits) so the result tells you what you dispatched to,
+2. **assigns the lane** — `plan_items:assign` of `items` in `planSlug` to `to` (durable; survives
+   the target sleeping/dying — omit `planSlug`+`items` for a pure directed wake),
+3. **delivers the note + wakes** — `coord:send { wake:'required' }` persists the directed note to
+   the target's inbox AND fires its `coord:inbox-wake:<id>` key, and
+4. returns `{ ok, to, sessionState, wakeable, assigned, delivered, woken, staged?, warning? }`.
+
+It is composed (the in-process re-dispatch pattern, like `coord:orient`) — it builds no second
+wake pump; it reuses `coord:send`'s deliver-and-wake, which owns the
+`recipient_absent`/`recipient_dead`/`staged` honesty signals.
+
+**Read the result, not your hope.** A dispatch to a non-wakeable (or non-delivering) target is a
+LOUD miss, never a silent `woken:0`:
+
+* `woken: 1+` → the target was parked and is now running your lane.
+* `warning` + `recipient_dead` / `sessionState: 'ended'` → the lane was **assigned durably** but no
+  live process will pick it up until the target is **relaunched/resumed**. Re-dispatch to a
+  `parked`/`live` agent or respawn this one. Do NOT assume it landed.
+* `staged: 1+` (EI-5957) → the target is **alive** but in **manual wake-mode** (the pot
+  pause/edit gate), so the note was **queued for owner review**, not delivered — the #1
+  leader-steering trap: a quiet `staged:1` reads like success while the member never acts on it.
+  The lane is still assigned durably; release the wake
+  (`coord:wake-queue { action: "release_all", agent: to }`) or flip the target to auto
+  (`coord:wake-mode { agent: to, mode: "auto" }`) — a fleet leader steering its own members
+  almost always wants them on auto.
+
+```
+coord:presence → pick a `parked` target → coord:dispatch { to, planSlug, items, note }
+  → check woken / staged / warning → (woken target) coord:orient → plan_items:my_items → claim + work
+```
+
+## The woken agent's contract: claim + work, don't re-park
+
+A wake starts a turn; the directed `note` is in the inbox (and the `[coord+N]` injection). A
+woken agent that finds a **directed assignment** must `coord:orient` → see the dispatched lane
+(`plan_items:my_items` / its claimed items) → **claim + work it**, not read-and-repark. Re-parking
+on a directed dispatch is the failure mode that makes a confirmed `woken:1` still do nothing.
+
+## Why a dead session can still look "parked": the reclaim lane
+
+Every idle agent arms a standing `coord:inbox-wake:<self>` await. A **clean** session end
+cancels it; a process that **crashes/is killed** never runs that hygiene, so the await row
+persists — and `presence`/`fetchWakeability` reads exactly that row to derive `wakeable`/`parked`.
+Result: a dead session shows as a live dispatch target (the "misleading zombie pile"), and the
+dangling await even **protects** its ghost adv\_session from the idle-session-reaper (it counts a
+standing await as "alive").
+
+The **reclaim lane** (`idle-session-reaper.ts` slice 4, `reclaimDanglingInboxWakeAwaits`) is the
+SessionEnd-hygiene the dead process never ran: it cancels the inbox-wake await of any owner that
+is **not** live-or-resumable (no fresh presence heartbeat, no running cup, no in-flight wake, no
+OPEN adv\_session). A *parked-but-resumable* session (open adv\_session — the wake-executor can
+`--resume` it) keeps its await; only a session that is genuinely over loses it and flips from a
+false `parked` to an honest `ended`. (Work-item *claims* of dead owners are released separately by
+the stale-claims reaper, which already uses a heartbeat/running-cup liveness rule that is not
+await-polluted.)
+
+So if a coordinator sees a stale "parked" pile, the reclaim sweep — fired by the
+`system:idle-session-reaper` routine — converges it to honest `ended`, and reclaim "fires on dead
+sessions" as designed.
+
+**Two layers now guard the zombie-await, not one.** The reclaim lane above *cancels the dangling
+await* (the durable cleanup), but it runs on the reaper's schedule. As of 2026-07-07 there is also
+an **immediate read-time backstop**: `deriveSessionState` force-ends any row whose heartbeat is
+cold beyond `PRESENCE_DEAD_MS` (3 × `PRESENCE_STALE_MS` = 30 min) **regardless** of a still-live
+await (see the `sessionState` rule above). So a coordinator reading `coord:presence` /
+`fleet:assignments` sees an abruptly-killed session as `ended` **within 30 min of its last
+heartbeat**, even before the reclaim sweep has cancelled its await. The 30-min ceiling matches the
+parked-claim reclaim grace (`STALE_CLAIM_PARKED_GRACE_MS`): past 30 min a parked holder's *claims*
+are already reclaimed, so treating its *session* as `ended` at the same threshold is consistent
+policy. The asymmetry favours it — a needless relaunch costs one spawn; a mis-`parked` zombie costs
+an invisible dead fleet.
+
+Two more sessions are now HARD-EXEMPT from reaping regardless of heartbeat age (owner decision
+2026-06-29), folded into the same `protectedOwners` set as the live/claim/wake check:
+`keptOnDesktop` — a session with a live OS window currently on screen
+(`desktop-window-liveness.ts`) — and `keptViewerAttached` — a session with no OS window but a
+human currently attached to its terminal in the operator PTY panel
+(`pty-viewer-heartbeat.ts`). Both are best-effort (headless box / no `wmctrl` → empty set), so they
+can only ever **protect more**, never reap more; `runIdleSessionReap`'s result surfaces both
+counts alongside `keptLive`.
+
+## Wake fan-out is capped — `MAX_WAKE_FANOUT`
+
+`wakeRecipients` (`inbox-wake.ts`) caps how many concrete agents ONE send/dispatch will actually
+re-invoke: `MAX_WAKE_FANOUT` (default 64, `PAPERCUSP_MAX_WAKE_FANOUT`-tunable). Beyond the cap the
+overflow recipients are still **injected** (durable — they see the note on their next turn) but
+**not woken** — this stops a `@fleet:`/`@topic:` audience that expands to thousands of agents from
+turning one message into thousands of billable turns. The result carries `fanoutCapped: string[]`
+(the overflow ownerIds) alongside `targets`/`keys`/`woken`/`staged`/`stagedTargets` — non-empty only
+for an oversized audience fan; a normal directed dispatch never hits it.
+
+`stagedTargets` (the named set behind `staged`) lets a leader-steering send/dispatch surface a
+loud, addressed warning ("wake STAGED, not delivered for `<who>`") instead of a bare `staged:1` —
+see `buildStagedWakeNote` and the `coord:dispatch` `staged` handling above.

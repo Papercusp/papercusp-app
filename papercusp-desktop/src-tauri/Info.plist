@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Papercusp needs microphone access for voice mode, push-to-talk, and wake-word capture.</string>
+
+  <!-- P-302 / EI-20584279536840151 — macOS LOCAL NETWORK PRIVACY (TCC).
+
+       Papercusp's p2p federation (hyperswarm/hyperdht over UDP) dials PEERS ON
+       THE LOCAL SUBNET. Since macOS 15, an app that initiates local-network
+       traffic must declare this key; without it the system denies that traffic
+       and every send fails with EHOSTUNREACH.
+
+       ⚠ DO NOT confuse this with `NSAllowsLocalNetworking` in the ATS dict
+       below. That key is App Transport Security — an HTTP/TLS policy for the
+       WEBVIEW's plaintext loopback requests. It has NOTHING to do with the TCC
+       local-network permission, despite the near-identical name. Having the ATS
+       key and missing THIS one is exactly the state that cost ~7h of packet
+       archaeology: the DHT was perfectly configured and retrying (918 requests,
+       917 timeouts, 0 responses) while the OS dropped every datagram, and
+       udx's fire-and-forget `trySend` reported no error to any layer above it.
+
+       The denial is precisely scoped, which is what makes it so deceptive:
+       loopback, the host's own address, and the entire PUBLIC internet all
+       still work — only local-subnet peers are unreachable. Inbound-initiated
+       flows are exempt too, so the node still ANSWERS pings while being unable
+       to dial anyone. Guarded by
+       macos_local_network_tests::info_plist_declares_local_network_usage. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Papercusp connects directly to your other devices on this network to sync your workspaces peer-to-peer.</string>
+
+  <!-- App Transport Security (WI-1802 — packaged-macOS blank page).
+
+       The desktop webview reaches the local operator over PLAINTEXT http on the
+       LOOPBACK IP LITERAL: http://127.0.0.1:<dynamic port>. serve binds 127.0.0.1
+       ONLY (main.rs: `PAPERCUSP_BIND_HOST=127.0.0.1`, bind `127.0.0.1:{port}`),
+       and finish_boot deliberately dials the 127.0.0.1 LITERAL rather than
+       `localhost` because WebKitGTK/Wry may resolve `localhost` to ::1 where the
+       operator isn't listening (see the comment at main.rs finish_boot).
+
+       macOS App Transport Security blocks plaintext http by default. The prior
+       `bundle.macOS.exceptionDomain: "localhost"` in tauri.conf.json generated an
+       ATS exception for the HOSTNAME `localhost` ONLY — it does NOT cover the
+       127.0.0.1 IP literal the app actually dials. So on packaged macOS builds
+       ATS silently blocked every operator request (top-level nav when the custom
+       protocol is off, AND the SPA's /api fetch + EventSource always) and the GUI
+       rendered a blank white page. Linux (webkit2gtk, no ATS) was unaffected —
+       which is exactly why the bug only ever bit the Mac app.
+
+       `NSAllowsLocalNetworking` grants ATS an exception for LOOPBACK (127.0.0.1,
+       ::1), link-local, and .local addresses WITHOUT broadly permitting arbitrary
+       public http — the surgical, Apple-sanctioned key for a localhost-only
+       backend. This dict REPLACES the removed `exceptionDomain` config and is now
+       the single source of the app's ATS policy (the `localhost` hostname
+       exception is kept explicit below so nothing regresses). Guarded by
+       macos_ats_tests::info_plist_allows_loopback_http_for_macos_ats. -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+    <key>NSExceptionDomains</key>
+    <dict>
+      <key>localhost</key>
+      <dict>
+        <key>NSExceptionAllowsInsecureHTTPLoads</key>
+        <true/>
+        <key>NSIncludesSubdomains</key>
+        <true/>
+      </dict>
+    </dict>
+  </dict>
+</dict>
+</plist>

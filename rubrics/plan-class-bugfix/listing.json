@@ -1,0 +1,10 @@
+{
+  "ref": "plan-class-bugfix",
+  "id": "plan-class-bugfix",
+  "title": "Plan class: bugfix (shared acceptance invariants)",
+  "description": "Class rubric for bugfix plans' acceptance rubrics (5 criteria, pass/partial/fail/unknown): root cause named at its origin, recurrence guard that can fail, fix verified against the original failure, no mitigation presented as the fix, and the independent grader spot-checks the implementer's audit citations.",
+  "category": "plan-acceptance",
+  "scope": "rubric",
+  "version": "0.2.0",
+  "source": "first-party"
+}

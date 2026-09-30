@@ -1,0 +1,153 @@
+-- 1099-repair-ei8866-physical-twin.sql
+--
+-- WI-5372 follow-up to migration 826 (WI-38468 / drain-admission-integrity-
+-- remediation-2026-08-13 P-005). Migration 826 repaired a frozen set of 69
+-- physical-ID collisions classified at the time of its P-004 manifest/snapshot
+-- 74209. EI-8866 is a physical twin of the EXACT SAME SHAPE (one row under
+-- harness_slug='papercusp', one under a non-papercusp scope, identical title
+-- AND identical summary between the two) that was NOT in that frozen manifest
+-- — confirmed live 2026-09-02: it has neither a migration-826 backup row nor a
+-- migration-859 manifest entry, so it escaped both repair passes entirely.
+-- This migration repairs that one straggler using 826's own proven pattern
+-- (evidence-preserving backup, drift guard, merge-then-delete, post-guard),
+-- scoped to just this row rather than re-deriving a fresh classification pass.
+--
+-- Verified before authoring (2026-09-02, dev:pg_query against papercusp-workspace):
+--   - Exactly 2 rows: harness_slug='papercusp' (status=resolved) and
+--     harness_slug='operator:papercusp-workspace' (status=open); no others.
+--   - title AND summary are byte-identical between the two rows (826's
+--     "identical" classification, not the "divergent" one — no rekey needed).
+--   - Zero references anywhere in coord_entity_subscriptions.target_ref,
+--     coord_threads.parent_ref, or coord_links.{src,dst}_ref naming 'EI-8866';
+--     zero work_items rows with parent_id or goal_id = 'EI-8866'. Nothing to
+--     rewrite before the delete (unlike 826's divergent-map rows, which DID
+--     have live references to move).
+--   - EI-19326920187717512 (closed 2026-08-28) revalidated migration 698's
+--     closed_ts-freezing trigger and the 826/859 repair-coverage GUARD TESTS
+--     as still passing at current HEAD — it explicitly did NOT repair this
+--     row (its own checkpoint records EI-8866 as still duplicated, "neither
+--     row has physical-twin repair markers"). This migration is the actual
+--     fix that item's validation pass deferred.
+--
+-- FORWARD-COMPAT: this DELETEs a live table row, not a schema object (no DDL
+-- drop/rename), so the currently-deployed release checkout is unaffected --
+-- it already treats work-item ids as opaque text and does not depend on the
+-- duplicate physical row existing.
+
+DO $pre1099$
+BEGIN
+  IF to_regclass('harness_shared.bak_20260813_work_item_physical_twins') IS NULL THEN
+    RAISE EXCEPTION '1099: expected migration-826 backup table to exist (reusing its shape/convention)';
+  END IF;
+END
+$pre1099$;
+
+-- Reuse 826's own backup table (same shape, same unique key) rather than a
+-- fresh one-off — this row belongs to the identical repair class 826 covers,
+-- just discovered a straggler later. ON CONFLICT DO NOTHING keeps this
+-- idempotent if 1099 is ever re-run against an already-repaired tree.
+INSERT INTO harness_shared.bak_20260813_work_item_physical_twins
+SELECT w.*
+FROM harness_shared.work_items w
+WHERE w.workspace_id = 'papercusp-workspace' AND w.feature_id = 'EI-8866'
+ON CONFLICT (harness_slug, feature_id) DO NOTHING;
+
+-- Pre-mutation guard: fail loudly (not silently no-op) if the live shape has
+-- drifted from what was verified above — a THIRD physical row, a harness_slug
+-- other than 'papercusp' on the survivor, or diverged title/summary all mean
+-- this migration's "identical, safe to merge+delete" premise no longer holds
+-- and a human must re-classify before this runs.
+DO $guard1099$
+DECLARE bad text;
+BEGIN
+  SELECT string_agg(harness_slug, ', ' ORDER BY harness_slug) INTO bad
+  FROM (
+    SELECT w.harness_slug
+    FROM harness_shared.work_items w
+    WHERE w.workspace_id = 'papercusp-workspace' AND w.feature_id = 'EI-8866'
+    GROUP BY w.harness_slug
+  ) rows_by_slug
+  HAVING (SELECT count(*) FROM harness_shared.work_items w
+           WHERE w.workspace_id = 'papercusp-workspace' AND w.feature_id = 'EI-8866') <> 2
+      OR (SELECT count(*) FROM harness_shared.work_items w
+           WHERE w.workspace_id = 'papercusp-workspace' AND w.feature_id = 'EI-8866'
+             AND w.harness_slug = 'papercusp') <> 1
+      OR (SELECT count(DISTINCT coalesce(title, '')) FROM harness_shared.work_items w
+           WHERE w.workspace_id = 'papercusp-workspace' AND w.feature_id = 'EI-8866') <> 1
+      OR (SELECT count(DISTINCT coalesce(summary, '')) FROM harness_shared.work_items w
+           WHERE w.workspace_id = 'papercusp-workspace' AND w.feature_id = 'EI-8866') <> 1;
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION '1099: EI-8866 physical-twin shape has drifted from the verified classification (rows: %); re-classify before repairing', bad;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM harness_shared.coord_entity_subscriptions WHERE workspace_id = 'papercusp-workspace' AND target_ref = 'EI-8866'
+    UNION ALL SELECT 1 FROM harness_shared.coord_threads WHERE workspace_id = 'papercusp-workspace' AND parent_ref = 'EI-8866'
+    UNION ALL SELECT 1 FROM harness_shared.coord_links WHERE workspace_id = 'papercusp-workspace' AND (src_ref = 'EI-8866' OR dst_ref = 'EI-8866')
+    UNION ALL SELECT 1 FROM harness_shared.work_items WHERE workspace_id = 'papercusp-workspace' AND (parent_id = 'EI-8866' OR goal_id = 'EI-8866')
+  ) THEN
+    RAISE EXCEPTION '1099: a new reference to EI-8866 appeared since this migration was authored — re-verify no-orphan before repairing';
+  END IF;
+END
+$guard1099$;
+
+-- Merge the non-papercusp twin's fields into the papercusp survivor before
+-- deleting it — only filling fields the survivor lacks (mirrors 826's own
+-- merge exactly), and embedding the full source row under `_physicalTwinRepair`
+-- for audit/recovery (recoverable from the backup table above regardless).
+WITH pair AS (
+  SELECT p.harness_slug AS source_harness, p.status AS source_status,
+         p.payload AS source_payload, p.completion_ref AS source_completion_ref,
+         p.terminal_completion_ref AS source_terminal_completion_ref,
+         p.terminal_owner AS source_terminal_owner, p.authority AS source_authority,
+         p.closed_ts AS source_closed_ts, p.updated_ts AS source_updated_ts,
+         p.fed_hlc AS source_fed_hlc
+  FROM harness_shared.work_items p
+  WHERE p.workspace_id = 'papercusp-workspace' AND p.feature_id = 'EI-8866'
+    AND p.harness_slug <> 'papercusp'
+)
+UPDATE harness_shared.work_items s
+SET status = CASE
+      WHEN s.status IN ('passed','deprecated','resolved','closed','done','dropped') THEN s.status
+      WHEN p.source_status IN ('passed','deprecated','resolved','closed','done','dropped') THEN p.source_status
+      ELSE s.status END,
+    completion_ref = coalesce(s.completion_ref, p.source_completion_ref),
+    terminal_completion_ref = coalesce(s.terminal_completion_ref, p.source_terminal_completion_ref),
+    terminal_owner = coalesce(s.terminal_owner, p.source_terminal_owner),
+    authority = coalesce(s.authority, p.source_authority),
+    closed_ts = coalesce(s.closed_ts, p.source_closed_ts),
+    updated_ts = greatest(s.updated_ts, p.source_updated_ts),
+    payload = jsonb_strip_nulls(
+      coalesce(s.payload, '{}'::jsonb)
+      || CASE WHEN (coalesce(s.payload, '{}'::jsonb)->'_completionEvidence') IS NULL
+                   AND (coalesce(p.source_payload, '{}'::jsonb)->'_completionEvidence') IS NOT NULL
+              THEN jsonb_build_object('_completionEvidence', p.source_payload->'_completionEvidence')
+              ELSE '{}'::jsonb END)
+      || jsonb_build_object('_physicalTwinRepair', jsonb_strip_nulls(jsonb_build_object(
+           'migration', 1099, 'sourceHarness', p.source_harness,
+           'sourceStatus', p.source_status, 'sourcePayload', coalesce(p.source_payload, '{}'::jsonb),
+           'sourceCompletionRef', p.source_completion_ref,
+           'sourceTerminalCompletionRef', p.source_terminal_completion_ref,
+           'sourceTerminalOwner', p.source_terminal_owner,
+           'sourceAuthority', p.source_authority, 'sourceClosedTs', p.source_closed_ts,
+           'sourceUpdatedTs', p.source_updated_ts, 'sourceFedHlc', p.source_fed_hlc,
+           'note', 'WI-5372: straggler missed by migration 826''s frozen P-004 manifest')))
+FROM pair p
+WHERE s.workspace_id = 'papercusp-workspace' AND s.harness_slug = 'papercusp' AND s.feature_id = 'EI-8866';
+
+DELETE FROM harness_shared.work_items
+ WHERE workspace_id = 'papercusp-workspace' AND feature_id = 'EI-8866' AND harness_slug <> 'papercusp';
+
+DO $post1099$
+BEGIN
+  IF (SELECT count(*) FROM harness_shared.work_items
+       WHERE workspace_id = 'papercusp-workspace' AND feature_id = 'EI-8866') <> 1 THEN
+    RAISE EXCEPTION '1099: EI-8866 physical twin still duplicated after repair';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM harness_shared.work_items
+                  WHERE workspace_id = 'papercusp-workspace' AND feature_id = 'EI-8866'
+                    AND harness_slug = 'papercusp') THEN
+    RAISE EXCEPTION '1099: EI-8866 survivor is not the expected papercusp row';
+  END IF;
+END
+$post1099$;

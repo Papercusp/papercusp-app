@@ -1,0 +1,102 @@
+# The `review` blueprint — BRIEF-demo-blueprints-2026-06-04 (demo ①).
+#
+# SHAPE (new): fan-out across review *dimensions* → adversarially *verify* each
+# finding → *synthesize* (dedup + rank the confirmed findings). DEMONSTRATES: code
+# review, security audit, plan audit, PR review — the exact pattern done by hand
+# (a reviewer per dimension, a skeptic who tries to refute each finding, a final
+# pass that keeps only what survived). The **adversarial verifier is the key
+# demo**: it is what makes the output trustworthy — refute-by-default, and a
+# finding the verifier knocks down is dropped before it ever counts.
+#
+# Same engine as coding/research (decider model: review-director emits a verb each
+# turn; deriveNext maps it via `edges`). Honors anti-over-decomposition (D-010):
+# the cheap path is a SINGLE dimension-reviewer over one dimension; the verifier is
+# a reactive overlay the director fires only on findings worth refuting, and the
+# synthesizer only runs once findings have accumulated. A one-dimension review with
+# no contested findings degrades to one reviewer + DONE.
+#
+# Parallelism note: the decider spine is sequential (one verb/turn), so the
+# director ITERATES dimension dispatches, accumulating findings on the work-item
+# (`review-task`) between turns — correct, just serial. True fan-out (all
+# dimensions at once) is a follow-up GLOBAL-orchestrator capability (the same
+# rejectWhenParallel boundary coding's NEXT_WORKER N=k hits), not a per-pipeline
+# concern.
+#
+# Work-item storage: a review-task rides the per-harness work-item table (the same
+# FEATURE_ID mechanism coding/research use). The dimension roster, the per-finding
+# verifier verdicts, and the synthesized report all live on the work-item — that
+# reuse is the point: only the blueprint (spine + roles) differs.
+id: review
+extends: base
+version: 0.1.0
+description: >-
+  A review/audit harness: a review-director drives one dimension-reviewer per
+  review dimension, an adversarial finding-verifier refutes each finding before it
+  counts, and a findings-synthesizer dedups + ranks the survivors into one report.
+
+workItem:
+  kind: review-task
+  idPrefix: RV
+
+spine:
+  decider: review-director
+  maxTurns: 40
+  default:
+    to: idle
+  edges:
+    DONE: { to: done }
+    ESCALATE: { to: escalate, reasonFrom: arg }
+    IDLE: { to: idle }
+    # Dispatch a reviewer for the next un-reviewed dimension (the director records
+    # which dimension is next on the work-item; the reviewer reads it).
+    NEXT_REVIEWER: { to: role, role: dimension-reviewer, extras: ["FEATURE_ID={feature}"] }
+    # Adversarially verify the latest finding(s) — refute-by-default (the key demo).
+    NEXT_VERIFIER: { to: role, role: finding-verifier, extras: ["FEATURE_ID={feature}"] }
+    # Dedup + rank the confirmed findings into the final report (terminal step).
+    NEXT_SYNTHESIZER: { to: role, role: findings-synthesizer, extras: ["FEATURE_ID={feature}"] }
+
+# Review plans inline within the director's loop (no plans→features import) — the
+# work-item carries the dimension roster + accumulating findings.
+planner:
+  kind: inline
+
+roles:
+  - { id: review-director, description: "Per-review-task orchestrator; emits the next verb." }
+  - { id: dimension-reviewer, description: "Reviews ONE dimension (bugs/security/perf/…); records findings on the work-item." }
+  - { id: finding-verifier, reactive: true, description: "Adversarial: tries to REFUTE a finding; majority-refute drops it." }
+  - { id: findings-synthesizer, description: "Dedups + ranks the confirmed findings into the final report." }
+
+# Reactive overlay (layer 3): the verifier fires AFTER a reviewer produces findings
+# (adversarial check before they count). Declared; the director controls dispatch.
+reactive:
+  - role: finding-verifier
+    when: { afterRole: dimension-reviewer }
+    preempt: false
+
+# Gym trace = the work-item output (the findings report) + transcript — NOT a git
+# diff (review produces a report, not code changes; like research's collector).
+gym:
+  collectTrace: work-item-output
+  signals: []
+
+knobs:
+  harnessKind: review
+  # requiresRepo defaults true (review code). Configurable: a fork that reviews a
+  # plan/doc sets requiresRepo:false (the brief's "gate on a knob").
+  requiresRepo: true
+  # The review dimensions the director iterates. A fork narrows/widens this list.
+  dimensions: [bugs, security, perf, style]
+  # A verifier verdict below this confidence drops the finding (refute-by-default).
+  confidenceThreshold: 0.5
+
+# Dependencies (official-blueprints-cupboard-publish D-002): derived from the
+# review role personas (scripts/derive-blueprint-deps.mjs). Reviewers read the
+# substrate via their client-native tools; their agent-tool surface is the
+# work-item + plan readback (the dimension roster, findings, and verdicts all
+# ride the work-item).
+dependencies:
+  tools:
+    - features:get
+    - plans:items
+    - work_items:list
+  plugins: []

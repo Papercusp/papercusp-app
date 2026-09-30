@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "types": ["vite/client"],
+    "paths": {
+      "@/*": ["../operator/*"]
+    }
+  },
+  // The ambient shim .d.ts files in operator-core (holepunch, sodium-native,
+  // rnnoise-wasm) are imported by NOTHING, so they only enter a tsc program via
+  // `include`. operator-core's own tsconfig picks them up; ours did not — which
+  // made every already-shimmed Holepunch dep (protomux, corestore,
+  // compact-encoding, hyperswarm, hyperdht, blind-relay, sodium-native) read as
+  // TS7016 "no declaration file" here, plus a cascade of TS7006 implicit-anys on
+  // every callback whose params those shims would have typed. That is ~30 of the
+  // foreign backlog this app does not own and cannot fix at the source. The glob
+  // (not a fixed list) is deliberate: a shim added later applies automatically
+  // instead of silently re-growing the ratchet. See typecheck-ratchet.test.ts.
+  "include": ["src", "vite.config.ts", "../../packages/operator-core/lib/**/*.d.ts"]
+}

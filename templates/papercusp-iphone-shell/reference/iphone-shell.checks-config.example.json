@@ -1,0 +1,149 @@
+{
+  "$doc": "Neutral example for @papercusp/template-kit TemplateChecksConfig.iphoneShell. Replace every identity/path/command; signing values and remote-host credentials never belong here.",
+  "app": { "name": "harbor-mobile", "root": "." },
+  "iphoneShell": {
+    "bundleId": "dev.harbor.mobile",
+    "productName": "Harbor",
+    "coreModule": "HarborCore",
+    "scheme": "Harbor",
+    "projectName": "Harbor",
+    "deploymentTarget": "17.0",
+    "swiftVersion": "5.9",
+    "deviceTarget": "aarch64-apple-ios",
+    "simulatorTargets": ["aarch64-apple-ios-sim", "x86_64-apple-ios"],
+    "rustLibrary": "libharbor.a",
+    "ffiModule": "harborFFI",
+    "hostStrategy": "local-mac",
+    "releaseVersionInput": "HARBOR_IOS_RELEASE_VERSION",
+    "buildNumberInput": "HARBOR_IOS_BUILD_NUMBER",
+    "signingPrefix": "HARBOR_IOS_RELEASE_",
+    "signingInputNames": [
+      "HARBOR_IOS_RELEASE_TEAM_ID",
+      "HARBOR_IOS_RELEASE_CODE_SIGN_IDENTITY",
+      "HARBOR_IOS_RELEASE_PROVISIONING_PROFILE"
+    ],
+    "exportMethod": "development",
+    "selectedCapabilities": [],
+    "entitlementKeys": [],
+    "privacyUsageDescriptionKeys": [],
+    "backgroundModes": [],
+    "paths": {
+      "projectSpec": "ios/project.yml",
+      "generatedProject": "ios/Harbor.xcodeproj",
+      "gitignore": ".gitignore",
+      "infoPlist": "ios/Harbor/Info.plist",
+      "privacyManifest": "ios/Harbor/Resources/PrivacyInfo.xcprivacy",
+      "entitlements": "ios/Harbor/Harbor.entitlements",
+      "appSourceRoot": "ios/Harbor/Sources",
+      "coreSourceRoot": "ios/HarborCore",
+      "unitTestRoots": ["ios/HarborTests"],
+      "uiTestRoots": ["ios/HarborUITests"],
+      "buildScript": "tools/build-ios.sh",
+      "hostPreflightScript": "tools/check-ios-host.sh",
+      "testScript": "tools/run-ios-tests.sh",
+      "releaseScript": "tools/ios-release-preflight.sh",
+      "udl": "crates/harbor_bindings/src/harbor.udl",
+      "uniffiConfig": "crates/harbor_bindings/uniffi.toml",
+      "cargoLock": "Cargo.lock",
+      "generatedSwift": "ios/HarborCore/harbor.swift",
+      "ffiHeader": "ios/HarborCore/harborFFI.h",
+      "moduleMap": "ios/HarborCore/headers/module.modulemap",
+      "deviceLibrary": "target/aarch64-apple-ios/release/libharbor.a",
+      "simulatorLibrary": "ios/build/libharbor-simulator.a",
+      "xcframework": "ios/HarborCore.xcframework",
+      "archive": "ios/build/Harbor.xcarchive",
+      "exportDir": "ios/build/export",
+      "provenanceFile": "ios/build/ios-release-provenance.json"
+    },
+    "evidenceDir": "ios/build/template-checks/iphone-shell",
+    "assertions": [
+      {
+        "assertionId": "MOB-IOS-001",
+        "leg": "project-generation",
+        "command": ["xcodegen", "generate", "--spec", "ios/project.yml"],
+        "timeoutMs": 120000,
+        "hostConstraintPatterns": ["macOS is required", "xcodegen is required"]
+      },
+      {
+        "assertionId": "MOB-IOS-002",
+        "leg": "xcframework",
+        "command": ["bash", "tools/build-ios.sh"],
+        "timeoutMs": 1200000,
+        "hostConstraintPatterns": ["macOS is required", "iOS SDK is required"]
+      },
+      {
+        "assertionId": "MOB-IOS-003",
+        "leg": "swift-module",
+        "command": ["bash", "tools/check-ios-swift-module.sh"],
+        "timeoutMs": 900000,
+        "hostConstraintPatterns": [
+          "macOS is required",
+          "simulator is unavailable"
+        ]
+      },
+      {
+        "assertionId": "MOB-IOS-004",
+        "leg": "host-preflight",
+        "command": ["bash", "tools/check-ios-host.sh"],
+        "timeoutMs": 120000,
+        "hostConstraintPatterns": [
+          "macOS is required",
+          "Xcode is required",
+          "xcodegen is required",
+          "swiftformat is required",
+          "simulator is unavailable"
+        ]
+      },
+      {
+        "assertionId": "MOB-IOS-005",
+        "leg": "unit",
+        "command": ["bash", "tools/run-ios-unit-tests.sh"],
+        "timeoutMs": 1200000,
+        "expectedOutputPattern": "Executed [1-9][0-9]* tests|testsCount[^0-9]*[1-9][0-9]*",
+        "hostConstraintPatterns": [
+          "macOS is required",
+          "simulator is unavailable"
+        ]
+      },
+      {
+        "assertionId": "MOB-IOS-005",
+        "leg": "ui",
+        "command": ["bash", "tools/run-ios-ui-tests.sh"],
+        "timeoutMs": 1200000,
+        "expectedOutputPattern": "Executed [1-9][0-9]* tests|testsCount[^0-9]*[1-9][0-9]*",
+        "hostConstraintPatterns": [
+          "macOS is required",
+          "simulator is unavailable"
+        ]
+      },
+      {
+        "assertionId": "MOB-IOS-006",
+        "leg": "privacy-capabilities",
+        "command": ["bash", "tools/check-ios-privacy-capabilities.sh"],
+        "timeoutMs": 300000,
+        "hostConstraintPatterns": ["macOS is required"]
+      },
+      {
+        "assertionId": "MOB-IOS-006",
+        "leg": "archive-preflight",
+        "command": ["bash", "tools/ios-release-preflight.sh"],
+        "timeoutMs": 1200000,
+        "hostConstraintPatterns": ["macOS is required", "Xcode is required"]
+      },
+      {
+        "assertionId": "MOB-IOS-006",
+        "leg": "signing-absence",
+        "command": ["bash", "tools/ios-release-preflight.sh"],
+        "unsetEnv": [
+          "HARBOR_IOS_RELEASE_TEAM_ID",
+          "HARBOR_IOS_RELEASE_CODE_SIGN_IDENTITY",
+          "HARBOR_IOS_RELEASE_PROVISIONING_PROFILE"
+        ],
+        "expectedExit": "nonzero",
+        "expectedOutputPattern": "signing|team|identity|provisioning",
+        "timeoutMs": 300000,
+        "hostConstraintPatterns": ["macOS is required"]
+      }
+    ]
+  }
+}

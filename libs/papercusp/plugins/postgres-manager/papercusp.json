@@ -1,0 +1,87 @@
+{
+  "name": "@papercupai/postgres-manager",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "Reserve a per-plugin Postgres schema for harness-local data. Demonstrates the db:plugin-schema capability + actions for migrate / inspect / reset.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "capabilities": [
+    "db:plugin-schema"
+  ],
+  "actions": [
+    {
+      "name": "migrate",
+      "label": "Run pending migrations",
+      "icon": "Database",
+      "surfaces": [
+        "harness-toolbar"
+      ],
+      "capabilities": [
+        "db:plugin-schema"
+      ],
+      "serverHandler": {
+        "timeoutSec": 30
+      },
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    },
+    {
+      "name": "inspect",
+      "label": "Inspect schema",
+      "icon": "Search",
+      "surfaces": [
+        "harness-toolbar"
+      ],
+      "capabilities": [
+        "db:plugin-schema"
+      ],
+      "serverHandler": {
+        "timeoutSec": 5
+      }
+    },
+    {
+      "name": "reset",
+      "label": "Drop + recreate schema",
+      "surfaces": [
+        "harness-toolbar"
+      ],
+      "capabilities": [
+        "db:plugin-schema"
+      ],
+      "serverHandler": {
+        "timeoutSec": 15
+      },
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "description": "Must be true. Reset is destructive."
+          }
+        },
+        "required": [
+          "confirm"
+        ]
+      }
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "schemaName": {
+        "type": "string",
+        "default": "plugin_local",
+        "description": "Postgres schema this plugin owns. Defaults to 'plugin_local'."
+      }
+    }
+  },
+  "icon": "Database"
+}

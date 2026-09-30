@@ -1,0 +1,58 @@
+/* Coordination admin tab (integration-adoption-2026-06-03, Capstone P2).
+   Self-contained; uses --pc-* theme vars with neutral fallbacks. Visual polish
+   against the live theme is owed (needs Tauri-shell review). */
+.pc-coord { display: flex; flex-direction: column; gap: 12px; }
+
+.pc-coord__subtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--pc-border, #2a2a33); }
+.pc-coord__subtab {
+  padding: 6px 14px; background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--pc-text-dim, #9aa); cursor: pointer; font: inherit;
+}
+.pc-coord__subtab.is-active { color: var(--pc-text, #e8e8ee); border-bottom-color: var(--pc-accent, #5a9fd4); }
+
+.pc-coord__split { display: grid; grid-template-columns: 340px 1fr; gap: 16px; min-height: 60vh; }
+.pc-coord__rail { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 74vh; }
+.pc-coord__filters { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
+.pc-coord__chip {
+  padding: 3px 10px; border-radius: 999px; border: 1px solid var(--pc-border, #2a2a33);
+  background: none; color: var(--pc-text-dim, #9aa); cursor: pointer; font: inherit; font-size: 12px;
+}
+.pc-coord__chip.is-active { background: var(--pc-accent, #5a9fd4); color: #fff; border-color: transparent; }
+
+.pc-coord__row {
+  display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: baseline;
+  text-align: left; padding: 8px 10px; border-radius: 6px; border: 1px solid transparent;
+  background: none; color: inherit; cursor: pointer; font: inherit;
+}
+.pc-coord__row:hover { background: var(--pc-surface-2, #1b1b22); }
+.pc-coord__row.is-active { background: var(--pc-surface-2, #23232c); border-color: var(--pc-accent, #5a9fd4); }
+.pc-coord__row-title { grid-column: 2; font-weight: 600; }
+.pc-coord__row-meta { grid-column: 2; font-size: 12px; color: var(--pc-text-dim, #8899aa); }
+
+.pc-coord__sev, .pc-coord__kind {
+  grid-row: 1 / span 2; align-self: center; font-size: 11px; padding: 2px 6px; border-radius: 4px;
+  background: var(--pc-surface-2, #23232c); text-transform: uppercase; white-space: nowrap;
+}
+.pc-coord__sev--critical { background: #c0392b; color: #fff; }
+.pc-coord__sev--major { background: #d97a1f; color: #fff; }
+.pc-coord__sev--minor { background: #36506b; color: #cde; }
+.pc-coord__sev--nit { background: #333; color: #9aa; }
+.pc-coord__kind { color: #9bd; text-transform: none; }
+
+.pc-coord__detail { border-left: 1px solid var(--pc-border, #2a2a33); padding-left: 16px; overflow-y: auto; max-height: 74vh; }
+.pc-coord__card header h2 { margin: 0 0 4px; font-size: 18px; }
+.pc-coord__body { white-space: pre-wrap; margin: 8px 0; }
+.pc-coord__tags, .pc-coord__actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.pc-coord__tag { font-size: 12px; color: #9bd; }
+.pc-coord__actions button {
+  padding: 4px 12px; border-radius: 6px; border: 1px solid var(--pc-border, #2a2a33);
+  background: var(--pc-surface-2, #23232c); color: inherit; cursor: pointer; font: inherit;
+}
+.pc-coord__actions button:disabled { opacity: .5; cursor: default; }
+
+.pc-coord__thread, .pc-coord__feed, .pc-coord__links { list-style: none; padding: 0; margin: 12px 0 0; display: flex; flex-direction: column; gap: 8px; }
+.pc-coord__thread li { border-left: 2px solid var(--pc-border, #2a2a33); padding-left: 10px; }
+.pc-coord__thread li p { margin: 2px 0 0; white-space: pre-wrap; }
+.pc-coord__feed li { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: baseline; }
+.pc-coord__links li { font-size: 13px; color: var(--pc-text-dim, #8899aa); }
+.pc-coord__empty { color: var(--pc-text-dim, #778); font-size: 13px; padding: 8px 0; }

@@ -1,0 +1,18 @@
+{
+  "name": "@papercusp/episodic-escalation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic edge-triggered episode -> durable, deduplicated escalation -> recovery auto-resolve machinery. Given a stable-title fn, a body builder, and an injected read/write/resolve port over whatever durable issue store the host has, this provides the file()/resolve() pair (per-process in-flight guard, open-title dedup, a test-safety gate, and EI-6772-class multi-match auto-resolve) ONCE, so a host stops re-copying ~150 lines of subtle latch/dedup logic per new detector. Pure algorithm + an injected store port; zero coupling to any specific issue tracker.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  }
+}

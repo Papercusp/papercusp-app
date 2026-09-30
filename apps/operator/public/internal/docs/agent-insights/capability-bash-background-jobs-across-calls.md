@@ -1,0 +1,92 @@
+# capability:bash background jobs across calls — the ps aux red herring, and why a cup shouldn't drive a long-lived npm run dev this way (EI-8876)
+URL: /internal/docs/agent-insights/capability-bash-background-jobs-across-calls
+
+run_in_background:true jobs are tracked in the operator's own in-memory registry (bash-jobs.ts), NOT observable via a later capability:bash { ps aux } call — --unshare-pid gives every capability:bash invocation its OWN isolated PID namespace, so a follow-up ps aux can never see a prior call's sandboxed processes, sandbox or no sandbox, job alive or dead. That's expected, not evidence of non-persistence. The real risk for a genuinely long-lived job (npm run dev) on this shared multi-agent box is EI-8855's class: ANY agent's routine operator restart wipes every other agent's in-flight background-job registry — use capability:bash_output's stranded_by_operator_restart reason to tell the two apart, and prefer native (unsandboxed, un-shared-registry) Bash for a genuinely long-lived dev-server verification session.
+
+## The report (EI-8876)
+
+A cup driving `npm run dev` (Tauri dev shell) via `capability:bash { run_in_background:true }`
+to satisfy the repo's mandatory headless-UI-verification flow found: (1) a later
+`ps aux` (itself run via another `capability:bash` call) shows **nothing** — not
+even the launching shell — despite `curl :3270` having returned 200 moments
+earlier; (2) `capability:bash_output` / `capability:bash_kill` on the SAME
+`bash_id` returned moments earlier immediately report `unknown_bash_id`.
+Conclusion drawn: background jobs "don't persist across separate tool calls."
+
+## Finding 1: `ps aux` across calls is a red herring, by design
+
+`buildCapabilitySandboxCommand()` (`exec-sandbox.ts`) passes `--unshare-pid` to
+every sandboxed `bwrap`/`srt` invocation. Per `pid_namespaces(7)`, `--unshare-pid`
+gives that ONE invocation's command tree its own, fresh PID namespace — it starts
+seeing only itself (PID 1/2/…), and **cannot see any process from a host PID
+namespace, including a DIFFERENT capability:bash call's own `--unshare-pid`
+namespace** — even though both are, from the host's point of view, ordinary
+child processes of the same long-lived operator.
+
+So: a `ps aux` issued via a *second*, separate `capability:bash` call runs
+inside its **own**, brand-new PID namespace and can **never** see the first
+call's sandboxed process tree — regardless of whether that first job is still
+happily running, or already dead. Seeing "nothing" in a follow-up `ps aux` is
+the **expected, inherent shape** of `--unshare-pid`, not a signal about
+whether the background job survived. **Don't use `ps aux` (or any
+process-tree inspection run through a fresh `capability:bash` call) to check on
+a previously-started background job** — it cannot ever tell you anything
+useful about it, sandboxed or not.
+
+## Finding 2: `bash_output`/`bash_kill` are the correct cross-call check — and EI-8855 already explains a real `unknown_bash_id`
+
+Unlike `ps aux`, `capability:bash_output` / `capability:bash_kill` do **not**
+re-exec anything sandboxed — they look the `bash_id` up directly in the
+operator's own in-memory `JOBS` map (`bash-jobs.ts`), which lives in the single
+long-lived operator (Hono host) process and is exactly how the native Bash
+tool's own background-job tracking works. This is the right way to check on a
+background job across calls.
+
+If that lookup genuinely misses, `bash_output` already has a **specific,
+already-implemented diagnosis** for the single biggest real cause on this
+shared, heavily multi-agent (50+ concurrent sessions) dev box: **EI-8855** —
+*any* agent's routine `systemctl --user restart papercup-*-api.service` (the
+documented two-port-model workflow for picking up a server-side edit) kills
+the **whole service cgroup**, wiping every OTHER agent's in-flight
+`capability:bash` background jobs — registry entry AND child process — in one
+shot. `bash_output` detects this via `strandedJobLookup()`: the job's log file
+is written to a path deterministic from `stateDir` + `bash_id` (no registry
+needed), so even after the in-memory entry is gone, a surviving log file
+distinguishes **"stranded by a restart"** (`reason:
+"stranded_by_operator_restart"`, with the log tail) from a **genuinely wrong
+id** (`reason: "unknown_bash_id"`).
+
+**If you hit `unknown_bash_id` (not `stranded_by_operator_restart`):**
+
+1. Double-check you're passing the *exact* `bash_id` string `capability:bash`
+   returned — not a truncated/paraphrased copy.
+2. If the id is exact and you still get bare `unknown_bash_id`, that's a
+   genuinely more surprising case than EI-8855 already covers (the log file
+   itself is also missing) — worth a fresh, narrower issue with the exact
+   `stateDir`/`bash_id` in hand, rather than re-litigating "jobs don't
+   persist" in general (they do, by design, for the common case).
+
+## The actual right fix for "drive a long-lived npm run dev + tauri-agent-tools from a cup"
+
+Given (a) this operator process is **shared across every concurrently-running
+agent** on the box, so a long dev-server session is structurally at the mercy
+of *any* other agent's routine restart, and (b) `--unshare-pid` sandboxing adds
+real overhead/fragility for exactly the kind of multi-process, long-lived
+service tree a Tauri dev shell spawns (embedded PG + operator sidecar +
+migrations + webview) — the sanctioned path for this exact verification flow
+is already documented, just not from the cup/`capability_bash` entry point:
+**a session with real (unsandboxed, non-shared-registry) Bash** — an `su` or a
+desktop-fleet agent — driving `npm run dev` directly per
+[repo-conventions](/internal/docs/system/repo-conventions) +
+[testing/agent-e2e](/internal/docs/testing/agent-e2e), then handing the running
+shell's bridge to `tauri-agent-tools`. A cup confined to `capability_bash`
+should **checkpoint honestly and hand this specific verification step to an su
+launch** rather than retry-looping against the sandboxed background-job model —
+which is exactly what the reporting cup did on WI-3388, correctly.
+
+No change to `exec-sandbox.ts` / `--unshare-pid` is proposed here: it is
+working as designed for its actual purpose (containing a single bounded
+command), and weakening it (e.g. sharing a PID namespace across separate
+`capability:bash` calls) would undermine the containment guarantee for
+everyone, for a use case (a long-lived multi-process dev server) it was never
+meant to carry.

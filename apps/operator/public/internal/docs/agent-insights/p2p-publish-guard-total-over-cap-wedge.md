@@ -1,0 +1,331 @@
+# p2p publish silently wedged for 5 days — the total-over-cap ratchet (handoff brief)
+URL: /internal/docs/agent-insights/p2p-publish-guard-total-over-cap-wedge
+
+One 2.26GB AppImage extraction auto-committed by git-sync wedged ALL THREE pot-git publish guards at once — own_head_publish and ref_announce by total-bytes cap, GitHub egress by secrets+scan-overflow. Every one of them baselines on its OWN LAST SUCCESS, so each refusal is terminal by construction: the baseline can only advance through the success it is blocking, and deleting the files does not shrink the judged range. It reported healthy throughout because health is measured against the frozen watermark. Includes the proven root cause, the unwedge runbook, and five open defects. CORRECTED 2026-07-25: the original framing section had origin/staging exactly backwards — it IS the egress target and IS the p2p health signal.
+
+## Read this first — the framing trap (CORRECTED 2026-07-25T21:10Z)
+
+> ⚠️ **This section previously said the opposite and was WRONG.** It claimed
+> `origin/staging` "is not a push target and is not a health signal" and told you
+> that chasing it would waste your time. **It is the push target, and it is the
+> health signal.** The correction is preserved rather than deleted because the
+> mistake is instructive — and because anyone who read the earlier revision was
+> pointed away from the one indicator that was telling the truth.
+
+`origin/staging` on papercusp has not moved since **2026-07-20T17:36Z**. That is a
+**real, correct alarm.** The p2p GitHub bridge egresses the canonical hive ref to
+`origin/staging`:
+
+```ts
+// github-bridge-tick.ts
+export const BRIDGE_CANONICAL_REF     = 'refs/hive/staging';  // :36
+export const BRIDGE_REMOTE_STAGING_REF = 'refs/heads/staging'; // :38
+// …
+egress = await egressCanonicalRefs({
+  refs: [{ sha: canonicalSha, remoteRef: BRIDGE_REMOTE_STAGING_REF }],  // :188-192
+});
+```
+
+**The original error was conflating two different branch settings.** The
+`branches: [entry.github_default_branch ?? 'main']` at `git-sync-action.ts:1348`
+is the **INGRESS** list — which remote branches the bridge *pulls*. It has nothing
+to do with where the bridge *pushes*. Egress targets `refs/heads/staging`,
+unconditionally.
+
+And `origin/main` advancing hourly is a **different mechanism entirely** — the
+green-checkpoint / release pipeline fast-forwards `main` from *local* staging
+(see the memory note "the green-checkpoint gate and deploy consume LOCAL staging,
+not origin/staging"). A healthy `origin/main` therefore says nothing whatsoever
+about p2p bridge health. It was the reassuring-but-irrelevant signal; the alarming
+one was correct.
+
+The honest health question is **"is `origin/staging` tracking `refs/hive/staging`?"**
+
+```bash
+git ls-remote origin staging | cut -f1                      # egress watermark
+git -C ~/.papercusp/pot-git/<pot>/<repoKey>.git rev-parse refs/hive/staging
+```
+
+On 2026-07-25T21:05Z those were `7c79fe6a` and `8d520419ac` — **358 commits
+apart**. The bridge had been down for five days and was *still* down after the
+namespace-ref re-base described below.
+
+## The pipeline (orientation)
+
+papercusp is a `self_repo` pot. Local commits reach GitHub through a **chain**, not
+a direct push — the classic push leg (`run-git-sync.ts:975`) is a no-op here
+(`last_status:'nothing'`, `last_pushed:[]`). Don't chase it.
+
+```
+git-sync commit (blanket `git add -A`)
+      ↓
+own_head_publish        ← publish-guard judges (priorSha, HEAD]; writes namespace ref
+      ↓
+ref_announce            ← SECOND guard, its own baseline read from sigrefs
+      ↓
+integrator → worktree_bridge (stagingSha)
+      ↓
+github_bridge egress    ← pushes ONLY the default branch (main)
+```
+
+Store: `~/.papercusp/pot-git/<potHomeSlug>/<repoKey>.git`, here
+`~/.papercusp/pot-git/papercusp/gh-1223568103.git`. The `repoKey` is the
+**federated** key `gh-<github_repository_id>` (WI-5168, `repo-identity.ts`) — the
+older `papercusp.git` beside it is the pre-migration slug-keyed repo and is
+**stale; do not edit it**. Device namespace here:
+`refs/namespaces/2177c6bb…97/`.
+
+## Root cause (proven by reproduction, not inferred)
+
+1. `07-20T17:36Z` — last successful publish, staging namespace ref = `7c79fe6a`.
+2. `07-20T17:42Z` — commit `46c2a163d6` auto-committed
+   `tools/perf-test/wdio/.appimage-extract/` — an extracted AppImage: a 90.3 MB
+   `libwebkit2gtk-4.1.so.0`, ten \~64 MB `corestore/db/*.sst`, `zellij` + `kopia`
+   binaries, a 75 MB `seed/git/super.bundle`. **2261 MB of 2287 MB** of new blobs.
+   git-sync commits the whole tree, and the path was not gitignored.
+3. The next publish tick judged `(7c79fe6a, HEAD]` = **2301.5 MB** against
+   `DEFAULT_MAX_PUBLISH_TOTAL_BYTES` = 500 MB → refused `total-over-cap`
+   (`publish-guard.ts:185-187`). It refused every tick for 5 days.
+
+Reproduce any range's verdict:
+
+```bash
+git rev-list --objects <from>..<to> \
+ | git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize)' \
+ | awk '{t+=$3} END{printf "%.1f MB\n", t/1048576}'
+```
+
+Note it slipped *under both* per-object gates: the guard's per-blob cap is 100 MB
+and the largest blob was 90.3 MB. Only the cumulative total caught it — far too
+late to be actionable.
+
+## Why it could never self-heal (the ratchet)
+
+`own-head-publish.ts:212`:
+
+```ts
+const guardBaseline = priorSha ?? input.genesisBaselineSha ?? null;
+```
+
+The baseline advances **only** via `writeNamespaceRef`, which runs **only after
+`guard.ok`** (`own-head-publish.ts:227-232`). So a cap breach is *terminal*: the
+baseline can only move through the success it is blocking, and every new commit
+enlarges the refused range. It went from 2261 MB to 2301 MB while I investigated.
+
+**Deleting the offending files does nothing.** They were in fact deleted 10 minutes
+later (`b72d330d81` @17:51Z). The guard enumerates objects *introduced anywhere in*
+`(from, to]`, so the blobs stay counted as long as the commit that introduced them
+is inside the range.
+
+Related landmine — `publish-guard.ts:135`:
+
+```ts
+const negatives = input.fromOid ? [`^${input.fromOid}`] : [];
+```
+
+A **null** baseline means no negatives, i.e. *the entire history* is judged. This
+repo is 7.64 GiB packed, so a lost baseline is also permanently fatal.
+
+## Why nobody noticed for 5 days
+
+Every health surface read clean, including `/admin/git`:
+
+```json
+"github_bridge": { "egress": { "pushed": 0, "upToDate": 1 },
+                   "divergence": "clear", "needs_owner": false,
+                   "last_admitted": "aaf7d880…" }
+```
+
+`upToDate: 1` is measured against **`last_admitted`** — the watermark that the
+refusal froze. "Up to date with the frozen watermark" is trivially true while
+nothing is being admitted. The refusal is recorded at
+`metadata.own_head_publish.refused` and **raises nothing**: no `needs_owner`, no
+`divergence`, no condition. The only way to see it is to query that field directly.
+
+```sql
+SELECT install_slug,
+       metadata->'own_head_publish'->>'refused' AS refused,
+       metadata->'github_bridge'->'egress'->>'pushed' AS pushed
+  FROM harness_shared.routines
+ WHERE name='git-sync' AND workspace_id='papercusp-workspace';
+```
+
+⚠ `harness_shared.routines` has **no `harness_slug` column** — filtering on it
+errors 42703. Scope by `workspace_id` only.
+
+## Unwedge runbook
+
+Advance the baseline to a commit the remote demonstrably already has, so the guard
+judges only the genuinely-unexposed delta:
+
+```bash
+R=~/.papercusp/pot-git/papercusp/gh-1223568103.git
+NS=refs/namespaces/2177c6bb6d7a108ff3d603501b4e9d1bd094314958fdc95eb0d6103e85978117
+# CAS form: fails instead of clobbering a concurrent publish
+git -C $R update-ref "$NS/refs/heads/staging" <NEW_BASELINE> <OLD_VALUE>
+```
+
+Pick `<NEW_BASELINE>` = `origin/main`'s tip. **Before** doing so, run the repo's own
+scanner over the range you are skipping — the guard's secrets scan will never see
+it. `scanForSecrets` (`secrets-guard.ts:169`) is dependency-free; drive it from a
+scratchpad script (never add one to the repo — CI lint P-038).
+
+Then force a tick rather than waiting (the routine's real cadence was \~75 min, not
+the \~5 min the tick log suggests): `git-sync:run { installSlug }`. Verify:
+
+```
+own_head_publish.refused → null        (was total-over-cap)
+own_head_publish.changed → true
+worktree_bridge.stagingSha → advances
+```
+
+**Applied 2026-07-25T20:07Z:** `7c79fe6a → aaf7d880`. Verified at 20:10:40Z —
+`refused: null`, `changed: true`, `stagingSha` advanced `7c79fe6a → 08a62f731e`
+(first movement since 07-20). Secrets scan over the skipped range: 2735 text blobs,
+one hit — a client-side Google API key already present in the live shipped bundle
+(`papercusp-desktop/src-tauri/env-sidecars/staging/spa/assets/chunk-*.js`) and
+already on GitHub via main. No new exposure; worth confirming it is
+referrer-restricted.
+
+## Still open — the actual work
+
+**D1 · The failure is silent.** This is why it ran 5 days instead of 5 minutes.
+Propagate a publish refusal into the health verdict (`needs_owner` / `divergence`,
+patched at `git-sync-action.ts:1353-1365`) and raise a condition when a refusal
+persists beyond N ticks. Reinforced by the framing trap above: the wedge was
+invisible *and* the one surface that looked alarming was the wrong signal — there
+is currently **no trustworthy indicator of p2p publish health**.
+
+**D2 · The refusal is unrecoverable by construction.** Options: (a) on
+`total-over-cap` / `object-flood`, fall back to a baseline the remote provably has
+and re-judge; (b) judge and publish incrementally per commit so one fat commit
+cannot poison the whole range; (c) at minimum ship an operator re-baseline verb so
+recovery is not a hand-written ref.
+
+**D3 · Prevention didn't fire.** `findOversizedDirtyFiles` (`run-git-sync.ts`) has a
+`maxBytes` and did not stop a 90.3 MB `.so` from being committed. Check its
+threshold and whether it is wired into this pot's commit path at all.
+
+**D4 · The runtime secrets exemption covers only ONE of the guards.** WI-5591 added
+`harness_shared.secrets_guard_path_exemptions` as the no-restart escape hatch for a
+false-positive `secrets` refusal — and `own-head-publish` threads `workspaceId`
+into `checkPublishGuard` so it applies. **`github-egress.ts` does not**: it calls
+`scanForSecrets(collected.files)` with no workspace, so no runtime exemption can
+ever clear an egress block. The refusal log even *advertises* the exemption
+recovery ("insert a row into `harness_shared.secrets_guard_path_exemptions`") on a
+guard where it works — while the guard that is actually wedged ignores it.
+
+**D5 · `overflow` is a silent permanent block with zero findings.**
+`collectScanFiles` stops at `DEFAULT_MAX_SCAN_FILES = 5_000` blobs and returns
+`overflow: true`, and `egressCanonicalRefs` blocks on `findings.length > 0 ||
+collected.overflow`. A range that is merely *large* is therefore refused with an
+empty findings list — indistinguishable in the metadata (`blockedSecrets: 1`) from
+a real secret. Because the range only shrinks through the push it is blocking, this
+is the same terminal ratchet. Fix: judge the range in bounded per-commit slices.
+
+## RESOLVED — the second and third guards (2026-07-25T21:05Z)
+
+Both open questions from the first revision are answered, by reproduction:
+
+**The second guard (`ref_announce`) is still wedged, by the identical ratchet.**
+Its `fromOid` comes from sigrefs (`ref-announce-tick.ts:179`), which the namespace
+re-base never touched — so it kept refusing:
+
+```
+16:28:47 [git-sync] papercusp: ref-announce publish reported errors:
+         publish guard refused refs/heads/staging — 2414586659 new bytes exceeds cap
+16:50:22 … 2415433855 new bytes exceeds cap      ← still climbing
+```
+
+**`origin/staging` is absolutely meant to advance — it is THE egress target** (see
+the corrected framing section above). It was not legacy and not a red herring. The
+third defect the first revision hypothesised is real, and it is the *same* defect:
+egress takes its baseline from `origin/staging`, i.e. from its own last success.
+
+Reproducing the egress verdict over the real range `(7c79fe6a, 8d520419ac]` —
+358 commits, mirroring `collectScanFiles` + `scanForSecrets` exactly:
+
+```
+{"commits":358,"blobs":5000,"overflow":true,"skippedLarge":68,"scanned":4174}
+FINDINGS: 2
+  tools/perf-test/wdio/.appimage-extract/…/hooks/cc/pretooluse-secrets-guard.mjs:175
+      rule=private-key-pem     ← FALSE POSITIVE: the secrets scanner's own detector
+                                 source, bundled inside the extracted AppImage
+  tools/perf-test/wdio/.appimage-extract/…/spa/assets/chunk-ZUYEQ4TG-BQBy34Os.js:1
+      rule=google-api-key      ← real key, but ALREADY PUBLIC
+```
+
+The Google key is already reachable from `origin/main` at
+`_retired/papercup/.next/static/chunks/01dz7pg7tl1pc.js` (verified with
+`git grep -l <key> <origin/main sha>`), so pushing it is **not new exposure**.
+It is still worth confirming it is referrer-restricted.
+
+So the same AppImage commit (`46c2a163d6`) wedged **all three** guards — by volume
+at `own_head_publish` and `ref_announce`, and by secrets+overflow at egress. One
+accident, three terminal refusals, because all three guards share the defect of
+baselining on their own last success.
+
+## Prevention landed
+
+`.gitignore` now carries `**/.appimage-extract/` and `**/squashfs-root/` with the
+incident documented inline. Tracking: **WI-5738**; standing fact
+`p2p-publish-wedged-appimage-total-over-cap-2026-07-20`.
+
+## The detector failure — why the watchdog built for this was silent
+
+There **is** a watchdog for exactly this: `origin-freshness-watchdog` (WI-5607),
+started from `dbos/bootstrap.ts`, two signals, defaults `aheadCountMax: 50` and
+`tipAgeStaleMs: 3h`. The wedge was **358 commits and 5 days**. It never fired —
+**zero log lines in three days**. It was watching the wrong branch:
+
+```ts
+const branch = entry.github_default_branch ?? 'main';           // ← INGRESS branch
+const originSha = await readNamespaceRef(repoPath, devicePubkey,
+                                         `refs/heads/${branch}`, runGit);
+const aheadCount = revListCount(repoPath, originSha, canonicalSha);
+```
+
+It compared canonical against the ingress mirror of **`main`** while the bridge
+egresses to **`staging`** — *the same ingress-vs-egress conflation that made the
+original write-up above wrong.* And `main` is fast-forwarded hourly by the
+release pipeline, so **both** signals were structurally pinned healthy:
+
+| signal           | threshold | actual  | why it never tripped                                            |
+| ---------------- | --------- | ------- | --------------------------------------------------------------- |
+| `aheadCount`     | ≥ 50      | **24**  | measured against `main`, which the release pipeline keeps fresh |
+| `originTipAgeMs` | > 3h      | **\~0** | `main`'s tip moved every hour, restarting the clock every sweep |
+
+A watchdog pointed at a branch kept fresh by an *unrelated* mechanism cannot
+report on the mechanism it was built to watch. It reported healthy, correctly,
+about the wrong thing — for five days.
+
+**Worse: the refusal was never inference in the first place.** The publish leg
+wrote `metadata.own_head_publish.refused = 'total-over-cap'` on *every single
+tick* and logged it to the journal, and nothing consumed either. The system
+stated its own failure out loud, continuously, and no detector was listening.
+
+> **Generalisable rule.** When a component can *report its own failure*, the
+> detector must consume that self-report directly. Inferring the same condition
+> from a downstream proxy is strictly weaker — the proxy can be confounded (as
+> `main` confounded both signals here), while the self-report cannot.
+
+Both are fixed: the watchdog now measures against `github_bridge.egress_head`
+(what egress actually landed), and a sustained `own_head_publish.refused`
+alarms on its own — deliberately *not* gated behind the `aheadCount <= 0`
+early return, since a refusal is true regardless of how any commit count reads.
+Regression test: `origin-freshness.test.ts` → *"alarms on a sustained refusal
+even when BOTH inferred signals read healthy"*, pinned to this incident's exact
+numbers (24 / 1h).
+
+## The one-line lesson
+
+**Never baseline a guard on its own last success.** `own_head_publish` (namespace
+ref), `ref_announce` (sigrefs), and `github egress` (`origin/staging`) each derive
+`fromOid` from the last range they *admitted*. That makes every refusal
+self-perpetuating and every subsequent commit an aggravator — a guard that can only
+be cleared by the thing it is blocking is not a guard, it is a latch. A volume cap
+in particular belongs at **commit** time (prevention), where it can still exclude
+the offending files; at publish time it must degrade to incremental draining plus a
+loud health signal, never a permanent wedge.
+
+Fixes tracked on plan **`p2p-publish-guard-recoverability-2026-07-25`**.

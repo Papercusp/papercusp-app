@@ -1,0 +1,58 @@
+# The `memory-precision` blueprint — relight-self-learning-edges-2026-06-14 (P-033).
+#
+# The memory-precision monitoring bench as a SCHEDULED DETERMINISTIC blueprint,
+# mirroring the iq-battery always-on benchmark pulse. A program-mode spine whose
+# single step fires a registered typed function (`memory-precision:bench`) that
+# replays the frozen gold set against the production HYBRID backend AT THE PUSH
+# FLOOR and records FP@5 / R@10 / precision to harness_shared.memory_precision_bench.
+# No decision gate ⇒ a DETERMINISTIC PIPELINE.
+#
+# The floor itself is SOLVED (D-007 @ relight-self-learning-edges: 0.45 cosine /
+# 0.40 lexical is sweep-optimal) — this loop only MONITORS it so drift is visible
+# on the Learning tab instead of trusting a one-time benchmark. Flag-only, NO
+# governor (like change-ledger): cheap (~$0.05 embeddings/run, no LLM, isolated
+# bench schema). ON by default and seeds ACTIVE — finished monitoring, not a dark
+# frontier loop.
+id: memory-precision
+extends: base
+version: 0.1.0
+description: >-
+  Weekly memory-precision monitoring: replay the frozen gold set against the
+  production hybrid backend at the push floor and record FP@5 / R@10 / precision —
+  so the injection floor (solved) is monitored, not benchmarked-once.
+
+# A descriptive work-item kind (the deterministic pipeline does not create rows —
+# it records one bench row directly); the schema requires the field.
+workItem:
+  kind: benchmark-run
+  idPrefix: MPB
+
+# Program-mode spine (P-010): one deterministic step, NO gate ⇒ deterministic
+# pipeline. The bench takes no payload knobs (the gold set + floor are frozen).
+spine:
+  steps:
+    - id: bench
+      op: memory-precision:bench
+      bind: bench
+
+knobs:
+  harnessKind: learning
+  # The bench seeds the frozen corpus into an isolated bench PG schema; no repo.
+  requiresRepo: false
+
+# Scheduled trigger: WEEKLY (Sunday 04:30, offset off the deploy rhythm). The
+# routine fires `system:blueprint-run { blueprintId: memory-precision }`; the
+# handler detects program-mode and runs the step inline. Always-on monitoring —
+# seeds ACTIVE (self-gates on the papercusp-memory-precision-bench flag).
+triggers:
+  schedule:
+    - cron: "0 30 4 * * 0"
+      action: system:blueprint-run
+      singleton: true        # P-144/D-018: workspace-singleton cadence — one routine per workspace
+      singletonActive: true  # D-024: monitoring loop — seeds ACTIVE (flag-gated, not governor-gated)
+
+# No agent roles (pure-deterministic) and no agent-tool deps — the step calls a
+# registered function, not an agent.
+dependencies:
+  tools: []
+  plugins: []

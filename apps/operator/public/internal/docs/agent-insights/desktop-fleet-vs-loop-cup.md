@@ -1,0 +1,96 @@
+# Desktop fleet vs. loop cup — which spawn tool do you actually want?
+URL: /internal/docs/agent-insights/desktop-fleet-vs-loop-cup
+
+>-
+
+:::caution\[The cup half of this decision no longer exists — a FLEET is the only fan-out]
+The Mug · Kettle · Cup/nursery tier was **retired 2026-08-09** (owner-directed). While
+`papercusp-mug-kettle-system` is OFF — which is the delivered end state, not a pending
+flip — **`cup:spawn` and `fleet:place_batch` REFUSE**, and no Mug exists to place or
+supervise anything. See
+[the Mug · Kettle · Cup tier is retired](/agent-insights/mug-kettle-cup-tier-is-retired).
+
+This doc is kept, not retired, because the question it answers is still live: the
+`fleet:launch-on-plan` vs `capability:launch-agent` vs `capability:terminal` choice is
+unchanged, and the cup rows are exactly what an agent primed on older docs still reaches
+for. They are marked ⛔ below rather than deleted, so the refusal is explained instead of
+merely encountered.
+
+**The short version now:** want parallel work? → `fleet:launch-on-plan`. There is no
+longer a headless-cup alternative to weigh it against — for background work, that same
+tool takes `headless: true`.
+:::
+
+## The mistake this prevents
+
+Historically, "launch a fleet on this plan" had TWO tools that sounded alike and did
+completely different things. That was the origin of WI-1764: a leader called what was then
+`fleet:spawn` meaning to open visible desktop members, got three **background
+autonomous-loop cups** instead, and the fleet read `liveMemberCount: 0` while three cups
+quietly ran. Correct, but silent — so nobody noticed the substrate mismatch.
+
+Since the retirement the ambiguity is gone by construction: the cup door refuses, so the
+failure mode is now a loud refusal rather than a silent substrate mismatch. The rule of
+thumb it produced is still the one to carry:
+
+> **`fleet:*`** (launch-on-plan / create / take-leadership / status / cancel) =
+> VISIBLE desktop su members — and, with `headless: true`, background ones.
+> **`cup:spawn`** = ⛔ RETIRED (was: a background worker in the mug↔cup autonomous loop).
+
+## Decision table
+
+| Your goal                                                                  | Tool                                                                     | Visibility                             | Substrate                               | Capability                                    | Who drives                                                         |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------- | --------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------ |
+| Open N visible terminals on the owner's desktop to work a plan, now        | **`fleet:launch-on-plan`**                                               | VISIBLE desktop windows                | psu su sessions (`capability:terminal`) | full su collaborator (edit/tools/coord)       | you become the fleet **leader**; members auto-start on the plan    |
+| Register a named fleet (no windows yet) so you can hand a plan to it later | **`fleet:create`**                                                       | none (registry row only)               | durable `agent_fleets` row              | —                                             | leader = creator                                                   |
+| Work a plan in the background, no windows                                  | **`fleet:launch-on-plan { headless: true }`**                            | none (logs to a file the leader tails) | psu su sessions                         | full su collaborator                          | you become the leader; members auto-start on the plan              |
+| ~~Place ONE background worker on ranked work / a claim-spec~~              | ⛔ ~~`cup:spawn`~~ **RETIRED — REFUSES**                                  | —                                      | ~~mug↔cup autonomous loop~~             | —                                             | ~~the Mug~~ — no Mug exists. Use the headless-fleet row above      |
+| ~~Place MANY background cups in one shot~~                                 | ⛔ ~~`fleet:place_batch`~~ **RETIRED — REFUSES**                          | —                                      | ~~mug↔cup autonomous loop~~             | —                                             | ~~the Mug~~ — use `fleet:launch-on-plan { count, headless: true }` |
+| Put an agent on an **ad-hoc brief** (work that is not a plan)              | **`capability:launch-agent { brief }`**                                  | VISIBLE (or `headless`)                | psu su session                          | full su collaborator                          | you; it starts on the brief                                        |
+| Bring a **DEAD** agent back mid-thread, context intact                     | **`capability:launch-agent { resume: { agentId }, brief }`**             | VISIBLE (or `headless`)                | psu resume of its native session        | same agent, same coord identity               | you                                                                |
+| **Branch** a LIVE agent's thread without disturbing it                     | **`capability:launch-agent { resume: { agentId }, fork: true, brief }`** | VISIBLE (or `headless`)                | psu fork                                | a NEW identity (unaddressable until it boots) | you                                                                |
+| Just a plain worker window (no fleet, no plan, no brief)                   | **`capability:terminal`**                                                | VISIBLE desktop window                 | psu session                             | su collaborator                               | you                                                                |
+
+> **Naming note (historical).** The retired tool was `fleet:spawn`, then `bee:spawn`, then
+> `cup:spawn`; the workers were "bees", then "cups". The `beeCount` / `runningBees` fields
+> `fleet:list` / `fleet:status` return still carry the oldest spelling. Expect all three
+> names in older docs, prompts and memories — they all denote the one retired tier.
+
+## Why the confusion was easy — and how it was caught
+
+*Historical, retained for anyone reading `beeCount` / `runningBees` on an existing fleet
+row. A cup can no longer be spawned, so these are now read-only forensics rather than a
+live failure mode.*
+
+* **A cup-spawn can create a fleet.** `cup:spawn { fleet: "X" }` auto-CREATES fleet X
+  if it's absent (cups can be color-grouped). So "I passed a fleet name" does NOT mean
+  you got desktop members. A cup-spawn that materialises a new fleet now returns a loud
+  `fleet_advisory` telling you so (WI-1764 #2).
+* **The count now splits.** `fleet:list` and `fleet:status` report **`memberCount`
+  (visible desktop su) vs `beeCount` (background cups spawned INTO the fleet)**, plus a
+  workspace-wide **`runningBees`** total (WI-1764 #4). A fleet showing `0 members` while
+  `runningBees > 0` is the tell that you spawned cups where you meant `fleet:launch-on-plan`.
+* **`beeCount` is nursery-attributed and reliable (WI-1813).** A cup's `fleet_slug` is now
+  stamped on its `spawned_agents` row at spawn (mig 475), so `beeCount` (via
+  `countRunningFleetBees`) counts every running cup attributed to the fleet — *independent*
+  of whether the cup booted far enough to write a `coord_presence` fleet label (the earlier
+  weak signal). `memberCount` still comes from presence — a member IS a live desktop
+  session. The workspace-wide `runningBees` remains the belt-and-suspenders total that also
+  catches ungrouped and pre-mig-475 cups carrying no `fleet_slug`.
+
+## The three-line heuristic
+
+> Want a human to SEE terminals working a plan? → **`fleet:launch-on-plan`**.
+> Want that plan worked headlessly instead? → the SAME tool, **`{ headless: true }`**.
+> Work is a BRIEF, or the agent ALREADY EXISTS (dead → resume, live → fork)? →
+> **`capability:launch-agent`**.
+
+The old second line pointed at `cup:spawn` for headless work. That option is gone: a
+fleet is now the only fan-out, and visible-vs-headless is a flag on it rather than a
+different substrate with a different supervisor. If you catch yourself reaching for
+`cup:spawn` or `fleet:place_batch`, you want `fleet:launch-on-plan`.
+
+The launch/resume/fork half of the table has its own traps — the account-pin login
+prompt, why a live source must be forked, and how a resumed agent's first turn is
+actually delivered. They are written up in
+[launching, resuming and forking agents](/agent-insights/launching-resuming-and-forking-agents).

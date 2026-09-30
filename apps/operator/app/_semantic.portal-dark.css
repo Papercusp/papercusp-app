@@ -1,0 +1,42 @@
+/**
+ * Do not edit directly, this file was auto-generated.
+ */
+
+[data-theme="portal-dark"], [data-theme-base="portal-dark"] {
+  --bg-deepest: #11100f;
+  --bg-deeper: #141312;
+  --bg-deep: #171615;
+  --bg: #191817; /** Portal dark paper */
+  --bg-1: #201f1d; /** Portal dark panel */
+  --bg-2: rgba(255, 255, 255, 0.04);
+  --bg-3: rgba(255, 255, 255, 0.07);
+  --bg-4: rgba(255, 255, 255, 0.11);
+  --bg-popover: #262523;
+  --bg-raised: #262523;
+  --bg-raised-high: #2e2c29;
+  --fg: #ece9e2; /** Portal dark ink */
+  --fg-dim: #c9c4ba;
+  --fg-mute: #aba79e; /** AA-safe muted copy on layered portal surfaces */
+  --border-muted: rgba(201, 196, 186, 0.09);
+  --border: rgba(201, 196, 186, 0.17);
+  --border-strong: rgba(201, 196, 186, 0.31);
+  --accent: #5fae9f; /** Portal dark accent */
+  --accent-rgb: 95, 174, 159;
+  --accent-strong: #85c5b8;
+  --accent-strong-rgb: 133, 197, 184;
+  --accent-cool: #a7d6cc;
+  --accent-soft: #b7ded5;
+  --accent-soft-rgb: 183, 222, 213;
+  --accent-deep: #3d8376;
+  --accent-deeper: #28594f;
+  --accent-ink: #10211e;
+  --good: #70b89e;
+  --warn: #d1a65a;
+  --bad: #da7a72;
+  --warn-bg: rgba(209, 166, 90, 0.11);
+  --warn-border: rgba(209, 166, 90, 0.34);
+  --good-bg: rgba(112, 184, 158, 0.11);
+  --bad-bg: rgba(218, 122, 114, 0.11);
+  --card-shadow: 0 20px 58px rgba(0, 0, 0, 0.46);
+  --frost: linear-gradient(180deg, rgba(255,255,255,0.050), rgba(255,255,255,0.018));
+}

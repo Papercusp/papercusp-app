@@ -1,0 +1,90 @@
+# Gateway admission starvation BELOW the ceiling — the wedge detector's blind spot (WI-3565)
+URL: /internal/docs/agent-insights/gateway-admission-starvation-below-ceiling
+
+The B-GW-5 wedge/saturated detector requires inFlight AT the live admission ceiling to fire — but a queue can starve BELOW the ceiling (paced by a lower per-account/provider floor), so a 24-deep backlog at maxConcurrent=2 ran ~50 real minutes with zero alarm on 2026-07-09. Fixed with a distinct, sustained detector (admissionStarvationRisk -> admissionStarved) gated on idle healthy accounts, wired into the tokens health panel AND the overwatch anomaly feed.
+
+## The incident
+
+2026-07-09 22:09Z: the gateway's admission queue sat at `{running:1, queued:24, maxConcurrent:2}` for
+\~50 minutes while 4+ accounts (`ownerhandle8`, `ownerhandle8-direct`, `ownerhandle`, `ownerhandle10`) were idle at
+utilization 0.03-0.06 the whole time. `aimd.effective` was **24** (near its cap) with **zero** throttle
+pressure — AIMD itself was healthy. The actual ceiling pinning admission at 2 was a **provider FLOOR**
+(`providerFloors.anthropic.maxConcurrent`, `governor-registry.ts` `effectiveFloor()`), not the AIMD
+adaptive layer. Nothing alarmed until a human noticed; the fix was one `operator:rate_limit_config` call
+(`providerFloors.anthropic.maxConcurrent` 2 -> 8), which drained the backlog in minutes.
+
+## Why the existing detector (B-GW-5, `gateway-wedge.ts`) never fired
+
+`detectGatewayWedge`'s `saturated` signal — the gate for both `saturated` (warn) and the confirmed
+`wedge` (crit) — requires:
+
+```ts
+const saturated = metrics.maxConcurrent > 0 && metrics.inFlight >= metrics.maxConcurrent && metrics.queueDepth > 0;
+```
+
+`inFlight >= maxConcurrent`: every live admission slot pinned. But in this incident `inFlight` (1) sat
+**below** `maxConcurrent` (2) the *entire time* — the provider floor capped admission at 2, but
+per-account governor pacing (RPM/pause) kept the actually-concurrent count even lower. A queue can
+therefore be arbitrarily deep and un-drained while `saturated` stays `false` forever. `sustainedThrottle`
+(AIMD-cut / fail-fast-shed / backlog-overflow) also never fires here because AIMD's own effective
+concurrency (24) was never the bottleneck — the static floor was.
+
+This is a **spatial blind spot**, not a threshold-tuning issue: the wedge/throttle family all assume the
+starvation signature looks like "every slot busy, more waiting". This incident's signature is "hardly any
+slot busy, way more waiting, ceiling too low for the actual served rate" — the queue isn't draining
+because *admission itself* is capped low, independent of how busy the few admitted requests are.
+
+## The fix: a distinct, sustained detector gated on idle capacity
+
+Added to `gateway-wedge.ts` as a **third, independent spatial signal** (not a rewrite of `saturated`):
+
+```ts
+export const ADMISSION_STARVATION_QUEUE_RATIO = 4; // env PAPERCUSP_GATEWAY_ADMISSION_STARVATION_RATIO
+const admissionStarvationRisk =
+  metrics.maxConcurrent > 0 && metrics.queueDepth > ADMISSION_STARVATION_QUEUE_RATIO * metrics.maxConcurrent;
+```
+
+This is deliberately **independent of `inFlight`** — it only compares the backlog to the live ceiling, so
+it catches the "ceiling too low, whatever the served rate" shape the wedge detector structurally cannot.
+
+`admissionStarvationRisk` is instantaneous (a brief burst is normal churn); `gateway-sample-cache.ts`
+confirms it into `admissionStarved` only once it has persisted continuously for
+`ADMISSION_STARVATION_MIN_PERSIST_MS` (5 min) — the same anchor-tracking shape the wedge detector uses
+for its freeze confirmation, but keyed on "risk held true across ticks" rather than "totalRequests frozen".
+
+**The idle-accounts gate is what separates a real bug from normal full-pool pressure.** A deep queue at a
+low ceiling with **zero** idle accounts is just the pool being genuinely saturated — expected, not a bug.
+The incident's defining trait was idle *healthy* capacity sitting unused. That combination
+(`admissionStarved && accountsAvailable > ADMISSION_STARVATION_IDLE_ACCOUNTS_MIN`) is computed at the
+`system-health/compute.ts` / `overwatch/compute-brief.ts` call sites (which already have both signals),
+**not** inside `gateway-wedge.ts` itself — that module is deliberately domain-free (no account-pool
+knowledge), matching its existing design.
+
+## Where it surfaces
+
+1. **Health panel** (`tokens` / gateway sub-panel): `tokensStatus()` returns `crit` on the confirmed +
+   idle-gated condition, `warn` on the unconfirmed risk alone. The panel summary names the exact lever:
+   `operator:rate_limit_config { providerFloors: { anthropic: { maxConcurrent: <higher> } } }`.
+2. **Overwatch anomaly feed** (`compute-brief.ts`): a new closed-set `AnomalyKind`,
+   `'gateway-admission-starved'`, `severity: 'critical'`, `suggestedAction.type: 'escalate'` (to `owner`)
+   — mirrors `gateway-wedge`'s pattern: overwatch has no primitive to flip live rate-limit config itself
+   (D-001), so it escalates rather than auto-acting. A confirmed `gateway-wedge` still suppresses this (the
+   wedge is the louder superset), same precedence as the existing `gateway-throttle` suppression.
+
+## What was deliberately NOT done: automatic floor-lifting
+
+The original finding proposed "alert **+ auto-floor-lift**". Auto-mutating a live rate-limit floor from a
+passive health-panel compute path is a real production behavior change (raising concurrency could
+legitimately worsen a *different* kind of throttle storm the panel can't see) — that's exactly the class of
+action this platform's conventions route through an **escalation to an agent/owner with the tool call named**,
+not a blind background auto-action. An alerted agent (su, in AUTO mode, or the owner) pulling the existing
+`operator:rate_limit_config` lever — as `su-4d7a4` did manually in \~2 minutes once the incident was noticed —
+is the intended response path; the gap this closes is **visibility**, not the lack of a manual lever.
+
+## If you hit this again
+
+* Read the panel/anomaly `reasons`/`detail` text — it names the exact `operator:rate_limit_config` call.
+* `dev:rate_governor_status` / `accounts:status` to confirm idle capacity before lifting a floor (don't lift
+  blind — verify the accounts are actually healthy, not just "not currently paused").
+* The lift is a **floor override**, not a permanent config change — consider whether the low floor was
+  itself intentional (a prior incident's mitigation) before raising it further.

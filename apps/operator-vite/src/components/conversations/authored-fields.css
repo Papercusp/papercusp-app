@@ -1,0 +1,96 @@
+/**
+ * authored-fields.css — the authored message fields on a conversation detail
+ * (unified-agent-state-plane-2026-07-27 P-033 (e)).
+ *
+ * Deliberately QUIET: these fields are the sender's reasoning ABOUT the message,
+ * not the message. They sit under the body as a secondary band, and nothing here
+ * competes with the body's own type. Colour is reserved for the two rows that
+ * change what the reader should DO — `blocking`, and an open `couldNotDetermine`
+ * — everything else is neutral, so a fully-populated block does not read as an
+ * alarm. (That restraint is the point: the whole risk this plan is judged on is
+ * fields that LOOK healthy while carrying nothing.)
+ */
+.pc-authored {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 2px;
+  padding: 9px 11px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.28));
+  border-radius: 9px;
+  background: var(--bg-2, rgba(127, 127, 127, 0.05));
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.pc-authored__label {
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+  color: var(--fg-mute, rgba(127, 127, 127, 0.9));
+}
+
+.pc-authored__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+}
+
+.pc-authored__key {
+  font-weight: 650;
+  color: var(--fg-dim, inherit);
+}
+
+.pc-authored__val {
+  color: var(--fg, inherit);
+  overflow-wrap: anywhere;
+}
+
+/* A REF is quoted verbatim — the sender cited it, and rewriting it would break
+   the reader's ability to go look it up (D-026). */
+.pc-authored__ref {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+}
+
+/* D-026: the KIND decides staleness. A premise that CANNOT go stale is stated as
+   such rather than left for the reader to infer from the ref's shape. */
+.pc-authored__ref[data-invalidatable='false'] {
+  opacity: 0.75;
+}
+
+.pc-authored__section + .pc-authored__section {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--border, rgba(127, 127, 127, 0.22));
+}
+
+.pc-authored__sectext {
+  color: var(--fg-mute, inherit);
+  font-style: italic;
+}
+
+/* The two that change what the reader should do. */
+.pc-authored__flag {
+  align-self: flex-start;
+  padding: 1px 7px;
+  border: 1px solid var(--warn, currentColor);
+  border-radius: 999px;
+  color: var(--warn, inherit);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.pc-authored__open {
+  color: var(--warn, inherit);
+}
+
+/* D-072: a DERIVED value is not sender intent. Saying so inline is the whole
+   point — an unmarked default is indistinguishable from an authored field, and
+   that is exactly how an adoption number gets inflated. */
+.pc-authored__derived {
+  font-size: 10px;
+  color: var(--fg-mute, rgba(127, 127, 127, 0.9));
+  font-style: italic;
+}

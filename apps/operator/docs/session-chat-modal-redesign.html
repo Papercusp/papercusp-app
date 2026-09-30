@@ -1,0 +1,2093 @@
+<title>Session chat popup — redesign directions</title>
+
+<style>
+/* ═══════════════════════════════════════════════════════════════════════
+   Two visual layers, deliberately kept apart:
+
+   1. THE REVIEW  — quiet neutral ground, serif critique voice, one bold
+                    spend: a clay-coral used ONLY for review markup.
+   2. THE WORK    — the operator's own DTCG tokens, verbatim from
+                    design/tokens/base.json. Fixed dark in BOTH page
+                    themes, because the app itself is dark-only. Showing
+                    it light would be a lie about the product.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --paper:   #FAFAF9;
+  --plate:   #FFFFFF;
+  --ink:     #16181D;
+  --ink-2:   #4A515C;
+  --ink-3:   #828B99;
+  --rule:    rgba(20, 24, 32, 0.11);
+  --rule-2:  rgba(20, 24, 32, 0.055);
+  --mark:    #C4523A;
+  --mark-bg: rgba(196, 82, 58, 0.085);
+  --ok:      #2E7D5B;
+  --shadow:  0 1px 2px rgba(16,20,28,.05), 0 12px 32px -14px rgba(16,20,28,.22);
+
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* ── the operator's palette (design/tokens/base.json) ── */
+  --op-page:#07101D;      --op-panel:#0B1220;     --op-popover:#0D1829;
+  --op-surface:rgba(255,255,255,.045);
+  --op-hover:rgba(255,255,255,.075);
+  --op-raised:rgba(255,255,255,.12);
+  --op-solid:#112235;     --op-solid-hi:#143049;
+  --op-fg:#E7F7FF;        --op-fg2:#B9D4E8;       --op-mute:#7F9BB4;
+  --op-border:rgba(125,211,252,.15);
+  --op-border-s:rgba(125,211,252,.32);
+  --op-accent:#38BDF8;    --op-accent-soft:#BAE6FD; --op-accent-ink:#051827;
+  --op-accent-deep:#0EA5E9;
+  --op-good:#34D399;      --op-warn:#FBBF24;      --op-bad:#F87171;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper:   #0A0C10;
+    --plate:   #10131A;
+    --ink:     #E4E8EF;
+    --ink-2:   #A8B1BF;
+    --ink-3:   #6E7887;
+    --rule:    rgba(190, 205, 225, 0.14);
+    --rule-2:  rgba(190, 205, 225, 0.07);
+    --mark:    #FF8163;
+    --mark-bg: rgba(255, 129, 99, 0.10);
+    --ok:      #5DD3A0;
+    --shadow:  0 1px 2px rgba(0,0,0,.4), 0 16px 40px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"] {
+  --paper:#0A0C10; --plate:#10131A; --ink:#E4E8EF; --ink-2:#A8B1BF; --ink-3:#6E7887;
+  --rule:rgba(190,205,225,.14); --rule-2:rgba(190,205,225,.07);
+  --mark:#FF8163; --mark-bg:rgba(255,129,99,.10); --ok:#5DD3A0;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 16px 40px -16px rgba(0,0,0,.7);
+}
+:root[data-theme="light"] {
+  --paper:#FAFAF9; --plate:#FFFFFF; --ink:#16181D; --ink-2:#4A515C; --ink-3:#828B99;
+  --rule:rgba(20,24,32,.11); --rule-2:rgba(20,24,32,.055);
+  --mark:#C4523A; --mark-bg:rgba(196,82,58,.085); --ok:#2E7D5B;
+  --shadow:0 1px 2px rgba(16,20,28,.05), 0 12px 32px -14px rgba(16,20,28,.22);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 1140px; margin: 0 auto; padding: 0 28px 120px; }
+
+/* ── review voice ───────────────────────────────────────────────────── */
+.eyebrow {
+  font-size: 11px; font-weight: 620; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--mark); margin: 0 0 10px;
+}
+h1 {
+  font-family: var(--serif); font-weight: 400;
+  font-size: clamp(34px, 5.2vw, 56px); line-height: 1.05;
+  letter-spacing: -.015em; text-wrap: balance; margin: 0 0 18px;
+}
+h2 {
+  font-family: var(--serif); font-weight: 400;
+  font-size: clamp(25px, 3vw, 33px); line-height: 1.15;
+  letter-spacing: -.01em; text-wrap: balance; margin: 0 0 6px;
+}
+h3 {
+  font-size: 15px; font-weight: 640; letter-spacing: -.005em;
+  margin: 0 0 8px; color: var(--ink);
+}
+p { margin: 0 0 14px; max-width: 68ch; color: var(--ink-2); }
+p.lead { font-size: 18.5px; line-height: 1.55; color: var(--ink-2); max-width: 62ch; }
+strong { color: var(--ink); font-weight: 620; }
+code {
+  font-family: var(--mono); font-size: .87em;
+  background: var(--rule-2); padding: 1px 5px; border-radius: 3px;
+  color: var(--ink);
+}
+a { color: var(--mark); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--mark); outline-offset: 2px; }
+
+/* ── masthead ───────────────────────────────────────────────────────── */
+.masthead { padding: 76px 0 40px; border-bottom: 1px solid var(--rule); }
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 26px;
+  font-size: 12.5px; color: var(--ink-3); font-family: var(--mono);
+}
+.meta span { white-space: nowrap; }
+
+/* ── section rhythm ─────────────────────────────────────────────────── */
+section { padding-top: 74px; scroll-margin-top: 20px; }
+.sec-head { margin-bottom: 26px; }
+.sec-head p { margin-bottom: 0; }
+
+/* ── jump nav ───────────────────────────────────────────────────────── */
+.jump {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 16px 0 0; margin-bottom: -30px;
+}
+.jump a {
+  font-size: 12px; font-family: var(--mono); text-decoration: none;
+  color: var(--ink-3); border: 1px solid var(--rule);
+  padding: 4px 10px; border-radius: 3px; transition: color .15s, border-color .15s;
+}
+.jump a:hover { color: var(--mark); border-color: var(--mark); }
+
+/* ── plate: the frame a mockup sits in ──────────────────────────────── */
+.plate {
+  background: var(--plate); border: 1px solid var(--rule);
+  border-radius: 4px; box-shadow: var(--shadow); overflow: hidden;
+}
+.plate-cap {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 13px 18px; border-bottom: 1px solid var(--rule);
+  font-size: 12px; font-family: var(--mono); color: var(--ink-3);
+}
+.plate-cap b { color: var(--ink); font-weight: 640; letter-spacing: .01em; }
+.plate-body { padding: 26px 22px; background: var(--rule-2); overflow-x: auto; }
+
+/* ── two-column rationale ───────────────────────────────────────────── */
+.cols {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
+  gap: 30px; margin-top: 26px;
+}
+.cols h3 {
+  font-size: 11px; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--ink-3); font-weight: 640; padding-bottom: 7px;
+  border-bottom: 1px solid var(--rule); margin-bottom: 12px;
+}
+.cols ul { margin: 0; padding-left: 17px; }
+.cols li { margin-bottom: 9px; font-size: 14.5px; color: var(--ink-2); line-height: 1.5; }
+.cols li::marker { color: var(--ink-3); }
+
+/* ── review markup: numbered callouts ───────────────────────────────── */
+.pin {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 19px; height: 19px; flex: none;
+  border-radius: 50%; background: var(--mark); color: #fff;
+  font-size: 11px; font-weight: 700; font-family: var(--sans);
+  line-height: 1; letter-spacing: 0;
+}
+.notes { margin-top: 22px; display: flex; flex-direction: column; gap: 11px; }
+.note {
+  display: flex; gap: 11px; align-items: flex-start;
+  font-size: 14.5px; line-height: 1.5; color: var(--ink-2);
+  max-width: 80ch;
+}
+.note .pin { margin-top: 2px; }
+</style>
+
+<style>
+/* ═══ THE WORK — operator surfaces, rendered in the app's own tokens ═══ */
+
+.op {
+  background: var(--op-page); color: var(--op-fg);
+  font-family: var(--sans); font-size: 12px; line-height: 1.5;
+  border: 1px solid var(--op-border-s); border-radius: 7px;
+  overflow: hidden; min-width: 620px;
+}
+.op-title {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 12px; background: var(--op-panel);
+  border-bottom: 1px solid var(--op-border);
+  font-size: 12.5px; color: var(--op-fg2);
+}
+.op-title .x { margin-left: auto; color: var(--op-mute); font-size: 13px; }
+
+/* faded transcript stub — context, never the subject */
+.op-tx { padding: 15px 14px; display: flex; flex-direction: column; gap: 10px; }
+.op-tx .ln { height: 7px; border-radius: 3px; background: var(--op-surface); }
+.op-tx .ln.a { width: 78%; } .op-tx .ln.b { width: 54%; }
+.op-tx .ln.c { width: 88%; background: rgba(56,189,248,.10); }
+.op-tx .ln.d { width: 41%; background: rgba(56,189,248,.10); }
+.op-composer {
+  margin: 4px 10px 9px; padding: 7px 10px; border-radius: 6px;
+  border: 1px solid var(--op-border); background: var(--op-surface);
+  color: var(--op-mute); font-size: 11.5px;
+}
+
+/* ── CURRENT vocabulary (what's shipping today) ── */
+.cur-footer {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 10px 8px; border-top: 1px solid var(--op-border);
+  background: rgba(0,0,0,.10); font-size: 11px;
+}
+.cur-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cur-chip {
+  display: inline-flex; align-items: center; font-size: 9.5px; line-height: 1.6;
+  padding: 1px 5px; border-radius: 3px; border: 1px solid var(--op-border);
+  color: var(--op-mute); white-space: nowrap;
+}
+.cur-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; line-height: 1.4; padding: 2px 8px; border-radius: 5px;
+  border: 1px solid var(--op-border); background: var(--op-surface);
+  color: var(--op-fg); white-space: nowrap;
+}
+.cur-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px;
+}
+.cur-fleet {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 8px 9px; border-top: 1px solid var(--op-border);
+}
+.cur-fleet .lbl { font-size: 11px; color: var(--op-mute); }
+.cur-inp {
+  font-size: 11px; padding: 2px 7px; border-radius: 5px;
+  border: 1px solid var(--op-border); background: var(--op-surface);
+  color: var(--op-mute); white-space: nowrap;
+}
+.cur-go {
+  font-size: 11px; padding: 2px 9px; border-radius: 5px;
+  background: var(--op-accent); color: var(--op-accent-ink); font-weight: 600;
+}
+
+/* ── PROPOSED vocabulary — five shapes, one meaning each ── */
+.v-state {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10.5px; line-height: 1; padding: 4px 9px 4px 7px;
+  border-radius: 999px; border: 0;
+  background: var(--op-surface); color: var(--op-fg2);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.v-state .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--op-good); flex: none; }
+.v-state.good { background: rgba(52,211,153,.13); color: #9EEBC9; }
+.v-state.warn { background: rgba(251,191,36,.13); color: #FBD97D; }
+.v-state.bad  { background: rgba(248,113,113,.14); color: #FCA5A5; }
+
+.v-mode {
+  display: inline-flex; align-items: stretch; gap: 0;
+  border-radius: 999px; overflow: hidden; border: 0;
+  background: rgba(56,189,248,.14); color: var(--op-accent-soft);
+  font-size: 10.5px; line-height: 1; white-space: nowrap; cursor: pointer;
+}
+.v-mode .cap {
+  background: var(--op-accent); color: var(--op-accent-ink);
+  padding: 4px 8px; font-weight: 700; letter-spacing: .06em;
+}
+.v-mode .car { padding: 4px 8px 4px 7px; display: flex; align-items: center; gap: 4px; }
+.v-mode.off { background: var(--op-surface); color: var(--op-mute); }
+.v-mode.off .cap { background: var(--op-raised); color: var(--op-mute); }
+
+.v-act {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; line-height: 1; padding: 6px 10px;
+  border-radius: 4px; border: 1px solid var(--op-border-s);
+  background: var(--op-solid); color: var(--op-fg);
+  white-space: nowrap; cursor: pointer; font-family: var(--sans);
+}
+.v-act:hover { background: var(--op-solid-hi); }
+.v-act .ic { color: var(--op-accent); font-size: 12px; line-height: 1; }
+.v-act.ghost { background: transparent; border-color: var(--op-border); color: var(--op-fg2); }
+.v-act.primary {
+  background: var(--op-accent); border-color: var(--op-accent);
+  color: var(--op-accent-ink); font-weight: 640;
+}
+.v-act.primary .ic { color: var(--op-accent-ink); }
+
+.v-alert {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10.5px; line-height: 1; padding: 4px 7px 4px 8px;
+  border-radius: 999px; border: 0; cursor: pointer;
+  background: rgba(251,191,36,.14); color: #FBD97D; white-space: nowrap;
+}
+.v-alert .car { opacity: .65; }
+
+.v-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.v-field .cap {
+  font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--op-mute); font-weight: 620;
+}
+.v-field .well {
+  font-size: 11.5px; padding: 5px 9px; border-radius: 4px;
+  background: rgba(0,0,0,.28); border: 1px solid var(--op-border);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.35);
+  color: var(--op-fg); white-space: nowrap;
+  display: flex; align-items: center; gap: 8px; justify-content: space-between;
+}
+.v-field .well .car { color: var(--op-mute); font-size: 9px; }
+.v-field .well.empty { color: var(--op-mute); }
+
+/* group separators inside a control band */
+.band {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  padding: 8px 11px;
+}
+.band .sep { width: 1px; height: 17px; background: var(--op-border); margin: 0 3px; }
+.band .glabel {
+  font-size: 9px; letter-spacing: .11em; text-transform: uppercase;
+  color: var(--op-mute); font-weight: 620; margin-right: 1px;
+}
+.band--status { background: rgba(0,0,0,.16); border-top: 1px solid var(--op-border); }
+.band--do { background: var(--op-panel); border-top: 1px solid var(--op-border); }
+
+/* ── the second (left) panel + the three-column shell ── */
+.trio { display: flex; min-width: 920px; }
+.rail-l {
+  flex: none; width: 272px; background: var(--op-popover);
+  border-right: 1px solid var(--op-border);
+  height: 560px; overflow-y: auto; overflow-x: hidden;
+  font-size: 11px; color: var(--op-fg2);
+  scrollbar-width: thin; scrollbar-color: var(--op-border-s) transparent;
+}
+.rail-l::-webkit-scrollbar { width: 8px; }
+.rail-l::-webkit-scrollbar-thumb { background: var(--op-border-s); border-radius: 4px; }
+.rail-tag {
+  padding: 8px 12px; border-bottom: 1px solid var(--op-border);
+  font-size: 9px; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--op-mute); font-weight: 660;
+  display: flex; align-items: center; gap: 7px;
+}
+.rail-tag .sub { letter-spacing: 0; text-transform: none; font-weight: 400; opacity: .8; }
+.verbatim {
+  font-family: var(--mono); font-size: 10px; line-height: 1.5;
+  background: rgba(0,0,0,.28); border-left: 2px solid var(--op-border-s);
+  padding: 6px 8px; border-radius: 0 3px 3px 0; color: var(--op-fg2);
+  margin: 4px 0 0; white-space: pre-wrap;
+}
+.age { font-size: 9.5px; font-variant-numeric: tabular-nums; }
+.age--fresh { color: var(--op-good); }
+.age--warn  { color: var(--op-warn); }
+.age--bad   { color: var(--op-bad); }
+.wall-row {
+  border-left: 2px solid var(--op-warn); padding: 5px 0 5px 8px;
+  margin: 6px 0; background: rgba(251,191,36,.06);
+}
+.wall-row .ask { color: var(--op-fg); font-size: 10.5px; line-height: 1.45; }
+.wall-row .who { color: var(--op-mute); font-size: 9.5px; margin-top: 3px; display: block; }
+</style>
+
+<style>
+/* ═══ the 300px dossier rail ═══════════════════════════════════════════ */
+.rail-pair { display: flex; gap: 0; min-width: 620px; }
+.rail-stub {
+  flex: 1; min-width: 200px; background: var(--op-page);
+  padding: 14px; display: flex; flex-direction: column; gap: 10px;
+}
+.rail {
+  flex: none; width: 300px; background: var(--op-popover);
+  border-left: 1px solid var(--op-border);
+  height: 430px; overflow-y: auto; overflow-x: hidden;
+  font-size: 11px; color: var(--op-fg2);
+  scrollbar-width: thin; scrollbar-color: var(--op-border-s) transparent;
+}
+.rail::-webkit-scrollbar { width: 8px; }
+.rail::-webkit-scrollbar-thumb { background: var(--op-border-s); border-radius: 4px; }
+.rail-head { padding: 11px 12px 9px; border-bottom: 1px solid var(--op-border); }
+.rail-id { font-family: var(--mono); font-size: 12px; color: var(--op-fg); font-weight: 600; }
+.rail-intent { color: var(--op-mute); font-size: 10.5px; margin-top: 3px; line-height: 1.4; }
+.rail-sec { padding: 10px 12px; border-top: 1px solid var(--op-border); }
+.rail-h {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 9.5px; letter-spacing: .11em; text-transform: uppercase;
+  color: var(--op-mute); font-weight: 640; margin-bottom: 7px;
+}
+.rail-h .n {
+  font-family: var(--mono); letter-spacing: 0; text-transform: none;
+  font-size: 9.5px; padding: 1px 5px; border-radius: 999px;
+  background: var(--op-surface); color: var(--op-fg2); font-weight: 500;
+}
+.rail-h .n.hot { background: rgba(251,191,36,.16); color: #FBD97D; }
+.rail-row {
+  display: flex; gap: 6px; align-items: baseline;
+  padding: 2.5px 0; font-size: 10.5px; line-height: 1.45;
+}
+.rail-row .dir { color: var(--op-mute); flex: none; width: 9px; }
+.rail-row .who { font-family: var(--mono); color: var(--op-accent); flex: none; font-size: 10px; }
+.rail-row .txt {
+  color: var(--op-fg2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+.rail-row .ts { color: var(--op-mute); flex: none; font-size: 9.5px; font-variant-numeric: tabular-nums; }
+.rail-kv { display: flex; gap: 8px; padding: 2px 0; font-size: 10.5px; }
+.rail-kv .k { color: var(--op-mute); flex: none; width: 74px; }
+.rail-kv .v { color: var(--op-fg2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-more {
+  display: inline-flex; align-items: center; gap: 5px; margin-top: 6px;
+  font-size: 10px; color: var(--op-accent); cursor: pointer;
+  background: none; border: 0; padding: 3px 0; font-family: var(--sans);
+}
+.rail-empty { color: var(--op-mute); font-size: 10.5px; font-style: italic; }
+
+/* accordion (R2) */
+.acc { border-top: 1px solid var(--op-border); }
+.acc-btn {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px; background: none; border: 0; cursor: pointer;
+  font-family: var(--sans); text-align: left;
+  font-size: 9.5px; letter-spacing: .11em; text-transform: uppercase;
+  color: var(--op-mute); font-weight: 640;
+}
+.acc-btn:hover { background: var(--op-surface); }
+.acc-btn .car { margin-left: auto; transition: transform .18s ease; font-size: 8px; }
+.acc-btn[aria-expanded="true"] { color: var(--op-fg); }
+.acc-btn[aria-expanded="true"] .car { transform: rotate(90deg); }
+.acc-body { padding: 0 12px 11px; }
+.acc-body[hidden] { display: none; }
+
+/* tabs (R3) */
+.rtabs { display: flex; gap: 2px; padding: 8px 8px 0; border-bottom: 1px solid var(--op-border); flex-wrap: wrap; }
+.rtab {
+  font-family: var(--sans); font-size: 10px; padding: 5px 8px;
+  border: 1px solid transparent; border-bottom: none; border-radius: 4px 4px 0 0;
+  background: none; color: var(--op-mute); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px; margin-bottom: -1px;
+}
+.rtab:hover { color: var(--op-fg2); }
+.rtab[aria-selected="true"] {
+  background: var(--op-popover); border-color: var(--op-border);
+  color: var(--op-fg); font-weight: 600;
+}
+.rtab .n { font-family: var(--mono); font-size: 9px; color: var(--op-mute); }
+.rtab[aria-selected="true"] .n { color: var(--op-accent); }
+.rtab .n.hot { color: #FBD97D; }
+.rpane { padding: 11px 12px; }
+.rpane[hidden] { display: none; }
+
+/* ═══ the scroll-length diagram ════════════════════════════════════════ */
+.scale { display: flex; gap: 22px; align-items: flex-end; margin-top: 6px; flex-wrap: wrap; }
+.scale-col { display: flex; flex-direction: column; align-items: center; gap: 9px; }
+.scale-bar {
+  width: 62px; border-radius: 3px; overflow: hidden;
+  display: flex; flex-direction: column-reverse; border: 1px solid var(--rule);
+}
+.scale-seg { font-size: 0; }
+.scale-cap {
+  font-size: 11px; font-family: var(--mono); color: var(--ink-3);
+  text-align: center; line-height: 1.35;
+}
+.scale-cap b { display: block; color: var(--ink); font-weight: 640; }
+.viewport-mark {
+  position: relative; width: 100%; border-top: 2px dashed var(--mark);
+}
+.legend { display: flex; flex-direction: column; gap: 7px; font-size: 13.5px; }
+.legend-row { display: flex; align-items: center; gap: 9px; color: var(--ink-2); }
+.legend-sw { width: 13px; height: 13px; border-radius: 2px; flex: none; }
+
+/* ═══ vocabulary spec table ════════════════════════════════════════════ */
+.spec { width: 100%; border-collapse: collapse; font-size: 14px; }
+.spec th {
+  text-align: left; font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--ink-3); font-weight: 640; padding: 0 14px 9px 0;
+  border-bottom: 1px solid var(--rule); white-space: nowrap;
+}
+.spec td { padding: 15px 14px 15px 0; border-bottom: 1px solid var(--rule-2); vertical-align: middle; color: var(--ink-2); }
+.spec td:first-child { color: var(--ink); font-weight: 620; white-space: nowrap; }
+.spec td.dark-cell { background: var(--op-page); border-radius: 4px; padding: 12px 14px; }
+.spec-wrap { overflow-x: auto; }
+
+/* ═══ matrix ══════════════════════════════════════════════════════════ */
+.matrix { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 560px; }
+.matrix th, .matrix td { padding: 11px 14px 11px 0; text-align: left; border-bottom: 1px solid var(--rule-2); }
+.matrix th { font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); font-weight: 640; border-bottom-color: var(--rule); }
+.matrix td:first-child { color: var(--ink); font-weight: 620; white-space: nowrap; }
+.matrix td { color: var(--ink-2); }
+.yes { color: var(--ok); font-weight: 700; }
+.no  { color: var(--ink-3); }
+
+.callout {
+  border-left: 3px solid var(--mark); background: var(--mark-bg);
+  padding: 16px 20px; border-radius: 0 4px 4px 0; margin: 26px 0 0;
+}
+.callout p:last-child { margin-bottom: 0; }
+.callout p { max-width: 74ch; }
+
+@media (max-width: 720px) {
+  .wrap { padding: 0 16px 80px; }
+  .masthead { padding: 48px 0 30px; }
+  section { padding-top: 52px; }
+  .plate-body { padding: 16px 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">HUD → Sessions → agent conversation popup</p>
+  <h1>Six ways to make the session popup legible</h1>
+  <p class="lead">
+    Three directions for the bottom control strip, three for the dossier rail.
+    They are independent — pick one of each. Every mockup below is rendered in
+    the operator's real tokens at real scale, so what you see is what it looks like.
+  </p>
+  <div class="meta">
+    <span>WI-6747</span>
+    <span>2026-08-01</span>
+    <span>SessionChatModal · ChatActionBar · FleetLaunchRow · AgentDossier</span>
+  </div>
+</header>
+
+<nav class="jump" aria-label="Jump to section">
+  <a href="#brief">the brief</a>
+  <a href="#now">what's there now</a>
+  <a href="#vocab">control vocabulary</a>
+  <a href="#a">A · quiet status</a>
+  <a href="#b">B · chip is the control</a>
+  <a href="#c">C · now / do</a>
+  <a href="#d" style="color:var(--mark);border-color:var(--mark)">D · chosen</a>
+  <a href="#rails">rail R1–R3</a>
+  <a href="#add" style="color:var(--mark);border-color:var(--mark)">what to add</a>
+  <a href="#coord" style="color:var(--mark);border-color:var(--mark)">rest of coord</a>
+  <a href="#carry" style="color:var(--mark);border-color:var(--mark)">carry brief</a>
+  <a href="#panel2" style="color:var(--mark);border-color:var(--mark)">two panels</a>
+  <a href="#pick">the build</a>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════ THE BRIEF ═══ -->
+<section id="brief">
+  <div class="sec-head">
+    <p class="eyebrow">The brief</p>
+    <h2>What you asked for</h2>
+  </div>
+
+  <div class="notes" style="margin-top:4px">
+    <div class="note"><span class="pin">1</span>
+      <span>“The coord section and others take up huge vertical space if it's a long
+      list, that's bad.”</span></div>
+    <div class="note"><span class="pin">2</span>
+      <span>“The difference between what's a label, what's a button, and what's a
+      mode etc, is confusing — make it clearer.”</span></div>
+    <div class="note"><span class="pin">3</span>
+      <span>“I want other visual improvements.”</span></div>
+  </div>
+
+  <p style="margin-top:26px">
+    ① and ② are the same disease in two places: <strong>nothing in this popup
+    encodes what kind of thing it is.</strong> A rail section can't say “I'm long,
+    read the top three”; a chip can't say “I'm a fact, not a button.” Every fix
+    below works by giving each element a form that means something.
+  </p>
+</section>
+
+<!-- ══════════════════════════════════════════════════ WHAT'S THERE NOW ═══ -->
+<section id="now">
+  <div class="sec-head">
+    <p class="eyebrow">Plate 00</p>
+    <h2>What's there now</h2>
+    <p>The bottom of the popup, as it ships today. Four bands stacked under the
+       transcript, all rendered at 9.5–11px with the same 1px border and small
+       radius.</p>
+  </div>
+
+  <div class="plate">
+    <div class="plate-cap"><b>Current</b> <span>SessionChatModal → SessionFooter + ChatActionBar + FleetLaunchRow</span></div>
+    <div class="plate-body">
+      <div class="op">
+        <div class="op-title">
+          <span style="color:var(--op-mute)">▣</span>
+          <span>Chat — su · su-018aa</span>
+          <span class="x">✕</span>
+        </div>
+        <div class="op-tx">
+          <div class="ln a"></div><div class="ln b"></div>
+          <div class="ln c"></div><div class="ln d"></div>
+        </div>
+
+        <div class="cur-footer">
+          <div class="cur-row">
+            <span style="color:var(--op-good)">●</span>
+            <span style="color:var(--op-fg2);font-size:11px">live</span>
+            <span style="color:var(--op-mute);font-size:11px">ctx 83%</span>
+            <span class="cur-chip" style="border-color:rgba(251,191,36,.35);color:#FBD97D">⚠ 2 locks 32 coord unread</span>
+          </div>
+          <div class="cur-row">
+            <span class="cur-chip">AUTO</span>
+            <span class="cur-chip">GRADE</span>
+            <span class="cur-chip">unclaimed lane</span>
+          </div>
+        </div>
+
+        <div class="op-composer">Message this agent…</div>
+
+        <div class="cur-bar">
+          <span class="cur-btn">Autonomy</span>
+          <span class="cur-btn">Overlays</span>
+          <span class="cur-btn">Grade</span>
+          <span class="cur-btn">↻ Resume in new terminal</span>
+          <span class="cur-btn">⑂ Fork in new terminal</span>
+          <span class="cur-btn">▣ Focus window</span>
+        </div>
+
+        <div class="cur-fleet">
+          <span class="lbl">Fleet</span>
+          <span class="cur-inp">Fleet name</span>
+          <span class="cur-inp">Select plan… ▾</span>
+          <span class="cur-inp">Default ▾</span>
+          <span class="cur-inp">Default account ▾</span>
+          <span class="cur-inp">Headed ▾</span>
+          <span class="cur-inp">1</span>
+          <span class="cur-go">+ Launch fleet</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="note"><span class="pin">2</span>
+      <span><strong>Three unrelated grammars, one visual treatment.</strong>
+      <code>live</code> and <code>ctx 83%</code> are <em>facts</em>.
+      <code>AUTO</code> and <code>GRADE</code> are <em>modes that are currently on</em>.
+      <code>Autonomy</code> and <code>Grade</code> are <em>buttons that change those very modes</em>.
+      <code>Select plan…</code> is <em>a form field awaiting a submit</em>. They are
+      all ~11px, all bordered, all the same radius.</span></div>
+    <div class="note"><span class="pin">2</span>
+      <span><strong><code>GRADE</code> sits 20px from <code>Grade</code>, and they are
+      not the same thing</strong> — one is a badge saying grading is on, one is a
+      button that opens the rubric picker. Same word, same size, different species.
+      Same trap for <code>AUTO</code> / <code>Autonomy</code>.</span></div>
+    <div class="note"><span class="pin">2</span>
+      <span><strong>The one real button in the status row is disguised as a chip.</strong>
+      <code>⚠ 2 locks 32 coord unread</code> is clickable (it opens and scrolls the rail);
+      the chips either side of it are inert.</span></div>
+    <div class="note"><span class="pin">3</span>
+      <span><strong>The fleet form is always open and always empty.</strong> Seven controls
+      with no visible captions — their names live only in <code>aria-label</code>
+      (“Plan the fleet works”, “Account routing for every fleet member”), which is
+      exactly the text you quoted, because that is the only place it exists. Sighted
+      users get six identical grey pills.</span></div>
+    <div class="note"><span class="pin">3</span>
+      <span><strong>~110px of chrome sits between the conversation and the edge</strong> in a
+      popup that is 720px wide and capped at 80vh. Four separator rules in that span,
+      none of which group anything meaningfully.</span></div>
+  </div>
+
+  <div class="plate" style="margin-top:36px">
+    <div class="plate-cap"><b>The rail, to scale</b> <span>AgentDossier — one agent with 38 unread coord messages</span></div>
+    <div class="plate-body" style="background:var(--plate)">
+      <div class="scale">
+        <div class="scale-col">
+          <div class="scale-bar" style="flex-direction:column; height:300px">
+            <div class="scale-seg" style="height:15px;background:#4A5568" title="header + intent"></div>
+            <div class="scale-seg" style="height:33px;background:#5A6478" title="roster meta — 10 rows"></div>
+            <div class="scale-seg" style="height:30px;background:#3F7A8C" title="Health"></div>
+            <div class="scale-seg" style="height:18px;background:#4A5568" title="Native Session"></div>
+            <div class="scale-seg" style="height:25px;background:#5A6478" title="Files (7)"></div>
+            <div class="scale-seg" style="height:13px;background:#4A5568" title="Locks"></div>
+            <div class="scale-seg" style="height:150px;background:var(--mark)" title="Coord — 38 unread rows"></div>
+            <div class="scale-seg" style="height:16px;background:#3F7A8C" title="Events (3 subscribed)"></div>
+          </div>
+          <div class="scale-cap"><b>today</b>≈ 1,800px<br>2.3 screens</div>
+        </div>
+
+        <div class="scale-col">
+          <div class="scale-bar" style="flex-direction:column; height:300px; background:var(--rule-2); border-style:dashed">
+            <div class="scale-seg" style="height:130px;background:transparent"></div>
+          </div>
+          <div class="scale-cap"><b>visible</b>≈ 780px<br>the rail viewport</div>
+        </div>
+
+        <div class="scale-col">
+          <div class="scale-bar" style="flex-direction:column; height:300px">
+            <div class="scale-seg" style="height:15px;background:#4A5568"></div>
+            <div class="scale-seg" style="height:14px;background:#5A6478"></div>
+            <div class="scale-seg" style="height:22px;background:#3F7A8C"></div>
+            <div class="scale-seg" style="height:11px;background:#4A5568"></div>
+            <div class="scale-seg" style="height:16px;background:#5A6478"></div>
+            <div class="scale-seg" style="height:13px;background:#4A5568"></div>
+            <div class="scale-seg" style="height:24px;background:var(--ok)"></div>
+            <div class="scale-seg" style="height:16px;background:#3F7A8C"></div>
+          </div>
+          <div class="scale-cap"><b>with R1</b>≈ 780px<br>fits, exactly</div>
+        </div>
+
+        <div style="flex:1; min-width:250px">
+          <div class="legend">
+            <div class="legend-row"><span class="legend-sw" style="background:var(--mark)"></span>
+              <span><strong>Coord ≈ 900px</strong> — half the rail is one list</span></div>
+            <div class="legend-row"><span class="legend-sw" style="background:#3F7A8C"></span>
+              <span><strong>Health</strong> and <strong>Events</strong> — the two sections that
+                answer “is this agent stuck?”</span></div>
+            <div class="legend-row"><span class="legend-sw" style="background:#5A6478"></span>
+              <span>Reference detail — host, pid, cwd, thread, files</span></div>
+          </div>
+          <p style="margin-top:18px;font-size:14px">
+            <strong>Events is dead last, behind 38 coord rows.</strong> It is the
+            section that tells you what the agent is <em>waiting on</em> — the
+            difference between parked and dead — and you have to scroll past
+            everything else to reach it. Section order is currently
+            declaration order, not importance.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════ CONTROL VOCABULARY ═══ -->
+<section id="vocab">
+  <div class="sec-head">
+    <p class="eyebrow">The system · answers ②</p>
+    <h2>Five shapes, one meaning each</h2>
+    <p>Before choosing a layout, fix the grammar. Every element in the popup is
+       one of five kinds. Each kind gets a form you can identify without reading
+       the label — shape, border, corner radius, and case all carry the
+       distinction, so it survives a greyscale screenshot and a colour-blind
+       operator.</p>
+  </div>
+
+  <div class="plate">
+    <div class="plate-cap"><b>Specimen sheet</b> <span>the vocabulary all three directions use</span></div>
+    <div class="plate-body spec-wrap" style="background:var(--plate)">
+      <table class="spec">
+        <thead>
+          <tr><th>Kind</th><th>Means</th><th style="width:230px">Form</th><th>Specimen</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>State</td>
+            <td>A fact. Read-only. Changes on its own.</td>
+            <td>Full-round pill, <em>no border</em>, tinted fill, lowercase.</td>
+            <td class="dark-cell">
+              <span class="v-state"><span class="dot"></span>live</span>
+              <span class="v-state" style="margin-left:6px">ctx&nbsp;83%</span>
+            </td>
+          </tr>
+          <tr>
+            <td>Mode</td>
+            <td>A state you can change. A switch that is currently on.</td>
+            <td>Pill with a <em>filled cap</em> + caret. Cap on = enabled, grey = off.</td>
+            <td class="dark-cell">
+              <span class="v-mode"><span class="cap">AUTO</span><span class="car">on ▾</span></span>
+              <span class="v-mode off" style="margin-left:6px"><span class="cap">IDEATE</span><span class="car">off ▾</span></span>
+            </td>
+          </tr>
+          <tr>
+            <td>Action</td>
+            <td>Happens the instant you click it.</td>
+            <td>Rectangle, 4px radius, 1px border, icon + Sentence case.</td>
+            <td class="dark-cell">
+              <button type="button" class="v-act"><span class="ic">▣</span>Focus window</button>
+            </td>
+          </tr>
+          <tr>
+            <td>Action&nbsp;→&nbsp;picker</td>
+            <td>Opens a chooser first. Nothing happens yet.</td>
+            <td>Same rectangle, plus a trailing <code>…</code>.</td>
+            <td class="dark-cell">
+              <button type="button" class="v-act"><span class="ic">◆</span>Grade session…</button>
+            </td>
+          </tr>
+          <tr>
+            <td>Alert</td>
+            <td>A state that is <em>also</em> a link to its detail.</td>
+            <td>Warn-tinted pill with a trailing <code>›</code>.</td>
+            <td class="dark-cell">
+              <button type="button" class="v-alert">⚠ 2 locks <span class="car">›</span></button>
+              <button type="button" class="v-alert" style="margin-left:6px">32 coord unread <span class="car">›</span></button>
+            </td>
+          </tr>
+          <tr>
+            <td>Field</td>
+            <td>Part of a form. Nothing happens until you submit.</td>
+            <td>Recessed well with an <em>inset shadow</em> and a caption above it.</td>
+            <td class="dark-cell">
+              <div style="display:flex;gap:10px">
+                <div class="v-field"><span class="cap">Plan</span>
+                  <span class="well empty">Select plan… <span class="car">▾</span></span></div>
+                <div class="v-field"><span class="cap">Members</span>
+                  <span class="well">3</span></div>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="callout">
+    <p><strong>Two rules fall out of the table, and they do most of the work.</strong></p>
+    <p>① <strong>Rounded = the system is telling you something. Rectangular = you
+       are telling the system something.</strong> Once that holds, you never have to
+       ask whether a thing is clickable-to-change or merely true.</p>
+    <p>② <strong>A trailing <code>…</code> means “a chooser opens”; no ellipsis means
+       “it fires now”.</strong> <code>Focus window</code> acts;
+       <code>Grade session…</code> asks first. That one character removes the
+       “I clicked Grade and nothing happened” class of confusion entirely.</p>
+  </div>
+</section>
+
+<!-- ═════════════════════════════════════════════════════ DIRECTION A ═══ -->
+<section id="a">
+  <div class="sec-head">
+    <p class="eyebrow">Direction A · smallest change</p>
+    <h2>Quiet status, loud actions</h2>
+    <p>Keep all three bands and the current information. Change only the
+       <em>forms</em>, add group captions, and put the fleet form behind a
+       disclosure so it stops competing with the session's own controls.</p>
+  </div>
+
+  <div class="plate">
+    <div class="plate-cap"><b>A</b> <span>same components, corrected grammar · fleet collapsed</span></div>
+    <div class="plate-body">
+      <div class="op">
+        <div class="op-title">
+          <span style="color:var(--op-good)">●</span>
+          <span style="font-family:var(--mono)">su-018aa</span>
+          <span style="color:var(--op-mute)">— redesigning the session popup</span>
+          <span class="x">✕</span>
+        </div>
+        <div class="op-tx">
+          <div class="ln a"></div><div class="ln b"></div>
+          <div class="ln c"></div><div class="ln d"></div>
+        </div>
+
+        <div class="band band--status">
+          <span class="v-state"><span class="dot"></span>live</span>
+          <span class="v-state">ctx 83%</span>
+          <span class="v-state">unclaimed lane</span>
+          <span class="v-mode"><span class="cap">AUTO</span><span class="car">on ▾</span></span>
+          <span class="v-mode"><span class="cap">GRADE</span><span class="car">on ▾</span></span>
+          <span style="flex:1"></span>
+          <button type="button" class="v-alert">⚠ 2 locks <span class="car">›</span></button>
+          <button type="button" class="v-alert">32 coord unread <span class="car">›</span></button>
+        </div>
+
+        <div class="op-composer">Message this agent…</div>
+
+        <div class="band band--do">
+          <span class="glabel">This session</span>
+          <button type="button" class="v-act"><span class="ic">◈</span>Set autonomy…</button>
+          <button type="button" class="v-act"><span class="ic">◆</span>Grade…</button>
+          <button type="button" class="v-act"><span class="ic">▨</span>Overlays…</button>
+          <span class="sep"></span>
+          <button type="button" class="v-act ghost"><span class="ic">↻</span>Resume in new terminal</button>
+          <button type="button" class="v-act ghost"><span class="ic">⑂</span>Fork in new terminal</button>
+          <button type="button" class="v-act ghost"><span class="ic">▣</span>Focus window</button>
+        </div>
+
+        <div class="band" style="border-top:1px solid var(--op-border);background:rgba(0,0,0,.16)">
+          <span class="glabel">New work</span>
+          <button type="button" class="v-act"><span class="ic">✛</span>Launch a fleet…</button>
+          <span style="color:var(--op-mute);font-size:10.5px">7 settings · none chosen yet</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>What it fixes</h3>
+      <ul>
+        <li><strong>Pill vs rectangle now separates noun from verb</strong> across the whole strip — you can tell state from action without reading a word.</li>
+        <li><strong><code>AUTO ▾</code> and <code>Autonomy</code> stop being two objects.</strong> The mode pill carries a caret; the button says <code>Set autonomy…</code>. Related, but visibly one badge and one verb.</li>
+        <li><strong>The two clickable warnings look clickable</strong> and are pushed to the right edge, out of the run of inert facts.</li>
+        <li><strong>The fleet form is gone until asked for</strong> — it was always-open and always-empty. Saves ~34px permanently.</li>
+        <li><code>This session</code> / <code>New work</code> captions name the scope split that already exists in the code but was never shown.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>What it costs</h3>
+      <ul>
+        <li>Still <strong>three bands</strong>. The popup's chrome is reduced, not restructured.</li>
+        <li>Mode pill and its button remain <em>two</em> targets for one concept — clearer, but not consolidated. Direction B closes that.</li>
+        <li>Collapsing the fleet row is a real behaviour change: it was made always-visible on purpose (WI-6505) so it stays reachable when the session is dead. The disclosure must stay reachable in exactly those states — it does, because it lives outside the <code>actionCtx</code> gate either way.</li>
+        <li>Roughly a day: new vocabulary CSS + reshaping three existing components. No data-layer change.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═════════════════════════════════════════════════════ DIRECTION B ═══ -->
+<section id="b">
+  <div class="sec-head">
+    <p class="eyebrow">Direction B · the consolidation</p>
+    <h2>The chip <em>is</em> the control</h2>
+    <p>The strongest answer to ②: stop showing a mode and a button that changes
+       that mode as two separate things. Click <code>AUTO</code> to change autonomy.
+       Click <code>GRADE</code> to grade. The action bar then only has to carry what
+       has no status of its own.</p>
+  </div>
+
+  <div class="plate">
+    <div class="plate-cap"><b>B</b> <span>modes become their own controls · session verbs collapse to one menu</span></div>
+    <div class="plate-body">
+      <div class="op">
+        <div class="op-title">
+          <span style="color:var(--op-good)">●</span>
+          <span style="font-family:var(--mono)">su-018aa</span>
+          <span style="color:var(--op-mute)">— redesigning the session popup</span>
+          <span class="x">✕</span>
+        </div>
+        <div class="op-tx">
+          <div class="ln a"></div><div class="ln b"></div>
+          <div class="ln c"></div><div class="ln d"></div>
+        </div>
+
+        <div class="band band--status">
+          <span class="v-state"><span class="dot"></span>live</span>
+          <span class="v-state">ctx 83%</span>
+          <span class="v-state">unclaimed lane</span>
+          <span style="flex:1"></span>
+          <button type="button" class="v-alert">⚠ 2 locks <span class="car">›</span></button>
+          <button type="button" class="v-alert">32 coord unread <span class="car">›</span></button>
+        </div>
+
+        <div class="op-composer">Message this agent…</div>
+
+        <div class="band band--do">
+          <span class="glabel">Modes</span>
+          <span class="v-mode"><span class="cap">AUTO</span><span class="car">on ▾</span></span>
+          <span class="v-mode off"><span class="cap">IDEATE</span><span class="car">off ▾</span></span>
+          <span class="v-mode"><span class="cap">GRADE</span><span class="car">on ▾</span></span>
+          <span class="v-mode off"><span class="cap">DRAIN</span><span class="car">off ▾</span></span>
+          <span class="sep"></span>
+          <button type="button" class="v-act"><span class="ic">▣</span>Focus window</button>
+          <button type="button" class="v-act ghost"><span class="ic">⋯</span>Session…</button>
+          <span style="flex:1"></span>
+          <button type="button" class="v-act"><span class="ic">✛</span>Launch a fleet…</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>What it fixes</h3>
+      <ul>
+        <li><strong>The <code>GRADE</code>/<code>Grade</code> and <code>AUTO</code>/<code>Autonomy</code> duplicates disappear</strong> — there is exactly one object per concept, and it both reports and sets.</li>
+        <li><strong>Every mode is visible, including the off ones.</strong> Today a mode that is off renders nothing, so you cannot tell “IDEATE is off” from “this build has no IDEATE”. The grey cap says which.</li>
+        <li><strong>Down to two bands.</strong> Status describes the conversation above it; the control band holds everything you can do. ~35px saved on top of A.</li>
+        <li><strong>Resume / Fork / Focus stop shouting.</strong> Focus is the common one and stays; the two rarer terminal actions fold into <code>Session…</code>.</li>
+        <li>Fleet sits at the far right, visually separated as the only thing that doesn't act on this session.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>What it costs</h3>
+      <ul>
+        <li><strong>Modes move out of the status row</strong>, where they read as state today. Some of that reading is real: <code>AUTO</code> genuinely <em>is</em> status. The filled cap is doing the work of carrying that meaning into the control band — worth prototyping on a real agent before committing.</li>
+        <li>A <code>⋯ Session…</code> menu hides two actions behind a click. Acceptable for fork/resume; would not be for anything used mid-incident.</li>
+        <li>The <code>ChatAction</code> registry currently assumes “one action = one button”. Mode-actions need a second descriptor shape (current value + options) so <code>PostureActions</code> can render as a pill. That is the one real architectural change in this set.</li>
+        <li>Roughly two days, mostly in the registry.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═════════════════════════════════════════════════════ DIRECTION C ═══ -->
+<section id="c">
+  <div class="sec-head">
+    <p class="eyebrow">Direction C · the restructure</p>
+    <h2>Everything true goes up. Everything you can do goes down.</h2>
+    <p>Stop solving the confusion with shapes and solve it with <em>position</em>.
+       The header describes the agent; the footer operates it. Nothing read-only
+       appears below the transcript, and nothing clickable appears above it — so
+       “is this a label or a button?” is answered before you look at the control.</p>
+  </div>
+
+  <div class="plate">
+    <div class="plate-cap"><b>C</b> <span>status folds into the header · one control band · fleet leaves the popup</span></div>
+    <div class="plate-body">
+      <div class="op">
+        <div style="background:var(--op-panel);border-bottom:1px solid var(--op-border)">
+          <div class="op-title" style="border:0;padding-bottom:5px">
+            <span style="color:var(--op-good)">●</span>
+            <span style="font-family:var(--mono);color:var(--op-fg);font-weight:600">su-018aa</span>
+            <span style="color:var(--op-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              redesigning the HUD session popup</span>
+            <span class="x">✕</span>
+          </div>
+          <div class="band" style="padding:0 12px 9px;gap:6px">
+            <span class="v-state"><span class="dot"></span>live · 4h12m</span>
+            <span class="v-state">ctx 83%</span>
+            <span class="v-state">unclaimed lane</span>
+            <span class="v-state">AUTO</span>
+            <span class="v-state">GRADE</span>
+            <span style="flex:1"></span>
+            <button type="button" class="v-alert">⚠ 2 locks <span class="car">›</span></button>
+            <button type="button" class="v-alert">32 coord unread <span class="car">›</span></button>
+          </div>
+        </div>
+
+        <div class="op-tx" style="padding-top:16px">
+          <div class="ln a"></div><div class="ln b"></div>
+          <div class="ln c"></div><div class="ln d"></div>
+          <div class="ln a" style="width:64%"></div>
+        </div>
+
+        <div class="op-composer">Message this agent…</div>
+
+        <div class="band band--do" style="gap:6px">
+          <button type="button" class="v-act"><span class="ic">◈</span>Set autonomy…</button>
+          <button type="button" class="v-act"><span class="ic">◆</span>Grade…</button>
+          <button type="button" class="v-act"><span class="ic">▨</span>Overlays…</button>
+          <span class="sep"></span>
+          <button type="button" class="v-act ghost"><span class="ic">▣</span>Focus window</button>
+          <button type="button" class="v-act ghost"><span class="ic">↻</span>Resume…</button>
+          <button type="button" class="v-act ghost"><span class="ic">⑂</span>Fork…</button>
+        </div>
+      </div>
+
+      <p style="margin:16px auto 0;max-width:640px;font-size:12.5px;color:var(--mark);text-align:center">
+        <strong>⚠ Superseded [owner 2026-08-02]:</strong> the launcher <strong>stays in the
+        popup</strong>. The board move drawn below was <em>rejected</em> — kept only as the
+        record of what was considered. Build from <a href="#d">Direction D</a>.
+      </p>
+
+      <div class="op" style="margin-top:12px">
+        <div class="op-title" style="background:var(--op-page)">
+          <span style="color:var(--op-mute);font-size:10px;letter-spacing:.11em;text-transform:uppercase">HUD → Sessions</span>
+        </div>
+        <div class="band" style="background:var(--op-panel);border-top:1px solid var(--op-border)">
+          <div class="v-field" style="flex:1;max-width:190px"><span class="cap">New session</span>
+            <span class="well empty">Plan… <span class="car">▾</span></span></div>
+          <button type="button" class="v-act" style="align-self:flex-end"><span class="ic">＋</span>Launch session</button>
+          <span class="sep" style="height:26px;align-self:flex-end"></span>
+          <button type="button" class="v-act primary" style="align-self:flex-end"><span class="ic">✛</span>Launch a fleet…</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>What it fixes</h3>
+      <ul>
+        <li><strong>The question stops being askable.</strong> Above the transcript is description; below it is operation. No shape vocabulary needed to tell them apart — though it still helps, and C uses it too.</li>
+        <li><strong>One band under the transcript</strong>, down from three. The conversation gets ~70px back in an 80vh popup.</li>
+        <li><strong>The header finally earns its space.</strong> Today it reads <code>Chat — su · su-018aa</code> and says nothing you didn't already know from clicking the row.</li>
+        <li><strong>Fleet launch moves to where launching lives.</strong> It sits beside the existing new-session launcher on the Sessions board — the place you'd look for it — instead of inside a popup about one specific agent.</li>
+        <li>Modes render as plain state pills again, which is what they are, because nothing in the header is clickable.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>What it costs</h3>
+      <ul>
+        <li><strong>Changing a mode is now two steps</strong> — read it in the header, change it in the footer. B's single object is genuinely better on that one axis; C is better on every other.</li>
+        <li><strong>Moving the fleet row contradicts WI-6505's stated reason</strong> for putting it here: it was made always-visible so it's reachable exactly when a session is dead or won't start. Moving it to the board arguably serves that better — the board is <em>always</em> reachable — but it is a decision to make deliberately, not a side effect.</li>
+        <li>Touches four components plus the Sessions board. The largest of the three.</li>
+        <li>Roughly three days.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═════════════════════════════════════════════════════ DIRECTION D ═══ -->
+<section id="d">
+  <div class="sec-head">
+    <p class="eyebrow">Direction D · chosen — B + C merged</p>
+    <h2>State in the header, modes in the control band</h2>
+    <p>C's spatial rule (<em>description above the transcript, operation below it</em>)
+       carrying B's consolidation (<em>a mode and the control that sets it are one
+       object</em>). The header holds only facts that change on their own; the
+       control band holds only things you can act on — and the mode pills are
+       controls, so they belong below.</p>
+  </div>
+
+  <div class="plate">
+    <div class="plate-cap"><b>D</b> <span>header = state · one control band · mode pills set their own mode · fleet moves to the board</span></div>
+    <div class="plate-body">
+      <div class="op">
+        <div style="background:var(--op-panel);border-bottom:1px solid var(--op-border)">
+          <div class="op-title" style="border:0;padding-bottom:5px">
+            <span style="color:var(--op-good)">●</span>
+            <span style="font-family:var(--mono);color:var(--op-fg);font-weight:600">su-018aa</span>
+            <span style="color:var(--op-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              redesigning the HUD session popup</span>
+            <span class="x">✕</span>
+          </div>
+          <div class="band" style="padding:0 12px 9px;gap:6px">
+            <span class="v-state"><span class="dot"></span>live · 4h12m</span>
+            <span class="v-state">ctx 83%</span>
+            <span class="v-state">WI-6747 · 18m</span>
+            <span style="flex:1"></span>
+            <button type="button" class="v-alert">⚠ 2 locks <span class="car">›</span></button>
+            <button type="button" class="v-alert">32 coord unread <span class="car">›</span></button>
+          </div>
+        </div>
+
+        <div class="op-tx" style="padding-top:16px">
+          <div class="ln a"></div><div class="ln b"></div>
+          <div class="ln c"></div><div class="ln d"></div>
+          <div class="ln a" style="width:64%"></div>
+        </div>
+
+        <div class="op-composer">Message this agent…</div>
+
+        <div class="band band--do" style="gap:6px">
+          <span class="v-mode"><span class="cap">AUTO</span><span class="car">on ▾</span></span>
+          <span class="v-mode off"><span class="cap">IDEATE</span><span class="car">off ▾</span></span>
+          <span class="v-mode"><span class="cap">GRADE</span><span class="car">on ▾</span></span>
+          <span class="v-mode off"><span class="cap">DRAIN</span><span class="car">off ▾</span></span>
+          <span class="sep"></span>
+          <button type="button" class="v-act"><span class="ic">▣</span>Focus window</button>
+          <button type="button" class="v-act ghost"><span class="ic">⋯</span>Session…</button>
+          <span style="flex:1"></span>
+          <button type="button" class="v-act"><span class="ic">✛</span>Launch a fleet…</button>
+        </div>
+      </div>
+
+      <p style="margin:16px auto 0;max-width:660px;font-size:13px;color:var(--ink-2);text-align:center">
+        <strong>Decided 2026-08-02:</strong> the fleet launcher <strong>stays in the popup</strong>.
+        It sits at the far right of the band — visually separated as the only control that
+        doesn't act on this session — and opens the captioned form below.
+      </p>
+
+      <div class="op" style="margin-top:14px;max-width:660px;margin-left:auto;margin-right:auto">
+        <div class="op-title" style="background:var(--op-panel)">
+          <span style="color:var(--op-accent)">✛</span>
+          <span>Launch a fleet</span>
+          <span class="x">✕</span>
+        </div>
+        <div style="padding:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:11px">
+          <div class="v-field"><span class="cap">Fleet name</span>
+            <span class="well empty">Names the fleet's durable handle</span></div>
+          <div class="v-field"><span class="cap">Plan — the lane members work</span>
+            <span class="well empty">Select plan… <span class="car">▾</span></span></div>
+          <div class="v-field"><span class="cap">Model — every member</span>
+            <span class="well">Default <span class="car">▾</span></span></div>
+          <div class="v-field"><span class="cap">Account routing</span>
+            <span class="well">Default — system account <span class="car">▾</span></span></div>
+          <div class="v-field"><span class="cap">Windows</span>
+            <span class="well">Headed — one terminal each <span class="car">▾</span></span></div>
+          <div class="v-field"><span class="cap">Members</span>
+            <span class="well">3</span></div>
+        </div>
+        <div class="band" style="border-top:1px solid var(--op-border);justify-content:flex-end">
+          <button type="button" class="v-act ghost">Cancel</button>
+          <button type="button" class="v-act primary"><span class="ic">✛</span>Launch fleet</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>Why the merge works</h3>
+      <ul>
+        <li><strong>The one place B and C disagreed is resolved by C's own rule.</strong> C put modes in the header as read-only state; B made them controls. A control belongs below the transcript — so they go in the control band, and C's “nothing clickable above the line” invariant holds intact.</li>
+        <li><strong>The header keeps only genuinely self-changing facts</strong> — liveness, context, the held claim and how long it's been held. Three pills, one line.</li>
+        <li><strong>One band under the transcript</strong>, and it is entirely verbs and switches. Nothing in it is inert.</li>
+        <li><strong>Both duplicate pairs are gone.</strong> No <code>AUTO</code>/<code>Autonomy</code>, no <code>GRADE</code>/<code>Grade</code> — each concept is one object that both reports and sets.</li>
+        <li>Added <code>WI-6747 · 18m</code> to the header: the held claim and its age is the single most useful thing about a working agent, and today it is only in the rail.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>What it needs</h3>
+      <ul>
+        <li><strong>The <code>ChatAction</code> registry needs a second descriptor shape</strong> — a mode-action carrying its current value plus its options, so <code>PostureActions</code> can render as a pill instead of a button. This is the one real architectural change, and it is B's, inherited.</li>
+        <li><strong>The fleet launcher stays put</strong> — decided 2026-08-02. WI-6505's placement stands, so D keeps it in the band as <code>✛ Launch a fleet…</code>. What still has to change is the <em>form</em>: today's seven controls carry no visible captions at all, which is what made the original complaint. The disclosure sits outside the <code>actionCtx</code> gate exactly as the row does now, so WI-6505's real reason — reachable when the session is dead or won't start — survives untouched.</li>
+        <li>Touches all four chat components. ~3 days.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═════════════════════════════════════════════════ RAIL TREATMENTS ═══ -->
+<section id="rails">
+  <div class="sec-head">
+    <p class="eyebrow">Rail R1–R3 · answers ①</p>
+    <h2>Three ways to stop the rail being 2.3 screens tall</h2>
+    <p>Independent of A/B/C — pick one of each. All three reorder the sections by
+       <strong>operational urgency</strong> rather than declaration order, so
+       Events (what the agent is waiting on) is never buried behind a message list.
+       <em>These are live — open them, click them.</em></p>
+  </div>
+
+  <!-- ── R1 ── -->
+  <div class="plate">
+    <div class="plate-cap"><b>R1 · capped lists</b> <span>every section previews 3 rows, then drills in · nothing collapses</span></div>
+    <div class="plate-body">
+      <div class="rail-pair">
+        <div class="rail-stub">
+          <div class="ln" style="height:7px;border-radius:3px;background:var(--op-surface);width:78%"></div>
+          <div class="ln" style="height:7px;border-radius:3px;background:var(--op-surface);width:52%"></div>
+          <div class="ln" style="height:7px;border-radius:3px;background:rgba(56,189,248,.1);width:86%"></div>
+        </div>
+        <div class="rail">
+          <div class="rail-head">
+            <div class="rail-id">su-018aa</div>
+            <div class="rail-intent">redesigning the HUD session popup</div>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Health</div>
+            <div class="rail-kv"><span class="k">loop</span><span class="v" style="color:var(--op-good)">armed · every 60s · next 41s</span></div>
+            <div class="rail-kv"><span class="k">claim</span><span class="v">WI-6747 — redesign the session popup</span></div>
+            <div class="rail-kv"><span class="k">context</span><span class="v">
+              <span style="display:inline-block;width:56px;height:5px;border-radius:3px;background:var(--op-surface);vertical-align:middle;overflow:hidden">
+                <span style="display:block;width:83%;height:100%;background:var(--op-warn)"></span></span>
+              &nbsp;83%</span></div>
+            <div class="rail-kv"><span class="k">last tool</span><span class="v">12s ago</span></div>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Waiting on <span class="n">3</span></div>
+            <div class="rail-row"><span class="dir">◉</span><span class="txt">fleet:hud-redesign:gate-green</span><span class="ts">4m</span></div>
+            <div class="rail-row"><span class="dir">↻</span><span class="txt">work-item:done:WI-6740</span><span class="ts">1h</span></div>
+            <div class="rail-row"><span class="dir">↻</span><span class="txt">release:deploy:staging</span><span class="ts">2h</span></div>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Locks <span class="n hot">2</span></div>
+            <div class="rail-row"><span class="dir" style="color:var(--op-warn)">L</span><span class="txt">…/chat/SessionChatModal.tsx</span><span class="ts">8m</span></div>
+            <div class="rail-row"><span class="dir" style="color:var(--op-warn)">L</span><span class="txt">…/sessions/AgentDossier.tsx</span><span class="ts">8m</span></div>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Coord <span class="n hot">32 unread</span></div>
+            <div class="rail-row"><span class="dir">←</span><span class="who">watchdog</span><span class="txt">MCP proxy failing: 861 hard failures/1h</span><span class="ts">4m</span></div>
+            <div class="rail-row"><span class="dir">←</span><span class="who">su-7854d</span><span class="txt">Restarting papercup-mcp-proxy shortly</span><span class="ts">7m</span></div>
+            <div class="rail-row"><span class="dir">→</span><span class="who">su-4ca24</span><span class="txt">Taking WI-6747, releasing the dossier lock</span><span class="ts">9m</span></div>
+            <button type="button" class="rail-more">Open all 32 ›</button>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Files <span class="n">7</span></div>
+            <div class="rail-row"><span class="txt">…/chat/SessionChatModal.tsx</span><span class="ts">L</span></div>
+            <div class="rail-row"><span class="txt">…/chat/FleetLaunchRow.tsx</span><span class="ts"></span></div>
+            <div class="rail-row"><span class="txt">…/sessions/AgentDossier.tsx</span><span class="ts">L</span></div>
+            <button type="button" class="rail-more">Show 4 more ›</button>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Reference</div>
+            <div class="rail-kv"><span class="k">plan</span><span class="v">hud-redesign-2026-08-01</span></div>
+            <div class="rail-kv"><span class="k">started</span><span class="v">4h12m ago</span></div>
+            <div class="rail-kv"><span class="k">host · pid</span><span class="v">dev-box · 30144</span></div>
+            <button type="button" class="rail-more">Session, host &amp; runtime detail ›</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>What it fixes</h3>
+      <ul>
+        <li><strong>The rail becomes a fixed height by construction</strong> — no section can grow past 3 rows, so no agent's state can make it 2,000px tall.</li>
+        <li><strong>You still see everything at once.</strong> Nothing is hidden behind a click; one scroll from top to bottom covers the whole agent.</li>
+        <li><strong>Ten reference rows (host, pid, cwd, window, thread, user) collapse to one link.</strong> Nobody reads those while watching a conversation.</li>
+        <li><code>Waiting on</code> is promoted to second — it is the answer to “is this thing stuck or just parked?”</li>
+      </ul>
+    </div>
+    <div>
+      <h3>What it costs</h3>
+      <ul>
+        <li><strong>“Open all 32” needs somewhere to go.</strong> Either the rail swaps to a full-height list view, or it opens the existing coord surface. That destination is real work, not a styling change.</li>
+        <li>Three rows is a guess. Coord may want 5, Locks may want all of them (2 locks is not a list problem).</li>
+        <li>Still one long scroll — shorter, but not navigable. R2 and R3 give you jump-to.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ── R2 ── -->
+  <div class="plate" style="margin-top:56px">
+    <div class="plate-cap"><b>R2 · accordion index</b> <span>the rail is a table of contents · counts live in the headers · click to open</span></div>
+    <div class="plate-body">
+      <div class="rail-pair">
+        <div class="rail-stub">
+          <div style="height:7px;border-radius:3px;background:var(--op-surface);width:78%"></div>
+          <div style="height:7px;border-radius:3px;background:var(--op-surface);width:52%"></div>
+          <div style="height:7px;border-radius:3px;background:rgba(56,189,248,.1);width:86%"></div>
+        </div>
+        <div class="rail" data-acc>
+          <div class="rail-head">
+            <div class="rail-id">su-018aa</div>
+            <div class="rail-intent">redesigning the HUD session popup</div>
+          </div>
+
+          <div class="acc">
+            <button type="button" class="acc-btn" aria-expanded="true">Health
+              <span class="n" style="font-family:var(--mono);letter-spacing:0;text-transform:none;color:var(--op-good)">ok</span>
+              <span class="car">▸</span></button>
+            <div class="acc-body">
+              <div class="rail-kv"><span class="k">loop</span><span class="v" style="color:var(--op-good)">armed · every 60s · next 41s</span></div>
+              <div class="rail-kv"><span class="k">claim</span><span class="v">WI-6747 — redesign the session popup</span></div>
+              <div class="rail-kv"><span class="k">context</span><span class="v">83% · 166k / 200k</span></div>
+              <div class="rail-kv"><span class="k">checkpoint</span><span class="v">mockups drafted, awaiting review</span></div>
+              <div class="rail-kv"><span class="k">last tool</span><span class="v">12s ago</span></div>
+            </div>
+          </div>
+
+          <div class="acc">
+            <button type="button" class="acc-btn" aria-expanded="false">Waiting on
+              <span class="n" style="font-family:var(--mono);letter-spacing:0;text-transform:none">3</span>
+              <span class="car">▸</span></button>
+            <div class="acc-body" hidden>
+              <div class="rail-row"><span class="dir">◉</span><span class="txt">fleet:hud-redesign:gate-green</span><span class="ts">4m</span></div>
+              <div class="rail-row"><span class="dir">↻</span><span class="txt">work-item:done:WI-6740</span><span class="ts">1h</span></div>
+              <div class="rail-row"><span class="dir">↻</span><span class="txt">release:deploy:staging</span><span class="ts">2h</span></div>
+            </div>
+          </div>
+
+          <div class="acc">
+            <button type="button" class="acc-btn" aria-expanded="false">Locks
+              <span class="n hot" style="font-family:var(--mono);letter-spacing:0;text-transform:none">2 held</span>
+              <span class="car">▸</span></button>
+            <div class="acc-body" hidden>
+              <div class="rail-row"><span class="dir" style="color:var(--op-warn)">L</span><span class="txt">…/chat/SessionChatModal.tsx</span><span class="ts">8m</span></div>
+              <div class="rail-row"><span class="dir" style="color:var(--op-warn)">L</span><span class="txt">…/sessions/AgentDossier.tsx</span><span class="ts">8m</span></div>
+            </div>
+          </div>
+
+          <div class="acc">
+            <button type="button" class="acc-btn" aria-expanded="false">Coord
+              <span class="n hot" style="font-family:var(--mono);letter-spacing:0;text-transform:none">32 unread</span>
+              <span class="car">▸</span></button>
+            <div class="acc-body" hidden>
+              <div class="rail-row"><span class="dir">←</span><span class="who">watchdog</span><span class="txt">MCP proxy failing: 861 hard failures/1h</span><span class="ts">4m</span></div>
+              <div class="rail-row"><span class="dir">←</span><span class="who">su-7854d</span><span class="txt">Restarting papercup-mcp-proxy shortly</span><span class="ts">7m</span></div>
+              <div class="rail-row"><span class="dir">→</span><span class="who">su-4ca24</span><span class="txt">Taking WI-6747, releasing the lock</span><span class="ts">9m</span></div>
+              <div class="rail-row"><span class="dir">←</span><span class="who">watchdog</span><span class="txt">infra-liveness RECOVERED (panel:bees)</span><span class="ts">11m</span></div>
+              <div class="rail-row"><span class="dir">←</span><span class="who">su-09b55</span><span class="txt">Green gate red — 4 typecheck reds in operator-core</span><span class="ts">18m</span></div>
+              <button type="button" class="rail-more">Open all 32 ›</button>
+            </div>
+          </div>
+
+          <div class="acc">
+            <button type="button" class="acc-btn" aria-expanded="false">Files
+              <span class="n" style="font-family:var(--mono);letter-spacing:0;text-transform:none">7</span>
+              <span class="car">▸</span></button>
+            <div class="acc-body" hidden>
+              <div class="rail-row"><span class="txt">…/chat/SessionChatModal.tsx</span><span class="ts">L</span></div>
+              <div class="rail-row"><span class="txt">…/chat/ChatActionBar.tsx</span><span class="ts"></span></div>
+              <div class="rail-row"><span class="txt">…/chat/FleetLaunchRow.tsx</span><span class="ts"></span></div>
+              <div class="rail-row"><span class="txt">…/sessions/AgentDossier.tsx</span><span class="ts">L</span></div>
+            </div>
+          </div>
+
+          <div class="acc">
+            <button type="button" class="acc-btn" aria-expanded="false">Reference
+              <span class="car">▸</span></button>
+            <div class="acc-body" hidden>
+              <div class="rail-kv"><span class="k">plan</span><span class="v">hud-redesign-2026-08-01</span></div>
+              <div class="rail-kv"><span class="k">started</span><span class="v">4h12m ago</span></div>
+              <div class="rail-kv"><span class="k">host</span><span class="v">dev-box</span></div>
+              <div class="rail-kv"><span class="k">pid</span><span class="v">30144</span></div>
+              <div class="rail-kv"><span class="k">cwd</span><span class="v">~/workspace/papercusp</span></div>
+              <div class="rail-kv"><span class="k">resume</span><span class="v">claude --resume 9f2a…</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>What it fixes</h3>
+      <ul>
+        <li><strong>The whole agent fits on one screen as an index</strong> — six headers, each carrying its own count and health word. That index <em>is</em> the summary.</li>
+        <li><strong>You read the counts without opening anything.</strong> <code>2 held</code>, <code>32 unread</code>, <code>3 waiting</code>, <code>ok</code> — that's most of a triage.</li>
+        <li><strong>Long lists cost nothing when closed.</strong> Coord can render all 32 rows inside its own section and it still never pushes Events off-screen.</li>
+        <li>Open/closed state is per-section and can live in the URL (nuqs), so a link can open a peer straight to Locks.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>What it costs</h3>
+      <ul>
+        <li><strong>A click between you and every detail.</strong> Today the whole dossier is visible if you scroll; here it's visible if you ask.</li>
+        <li>Needs a good default-open rule, or you'll open the same two sections every time. Suggestion: <strong>auto-open any section whose count is “hot”</strong> (locks held, unread &gt; 0, a stalled loop) and leave the calm ones shut.</li>
+        <li>Accordions can feel fussy on a 300px rail if you're opening and closing constantly.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ── R3 ── -->
+  <div class="plate" style="margin-top:56px">
+    <div class="plate-cap"><b>R3 · tabbed inspector</b> <span>one section at a time, each scrolls independently · counts on the tabs</span></div>
+    <div class="plate-body">
+      <div class="rail-pair">
+        <div class="rail-stub">
+          <div style="height:7px;border-radius:3px;background:var(--op-surface);width:78%"></div>
+          <div style="height:7px;border-radius:3px;background:var(--op-surface);width:52%"></div>
+          <div style="height:7px;border-radius:3px;background:rgba(56,189,248,.1);width:86%"></div>
+        </div>
+        <div class="rail" data-tabs>
+          <div class="rail-head">
+            <div class="rail-id">su-018aa</div>
+            <div class="rail-intent">redesigning the HUD session popup</div>
+          </div>
+
+          <div class="rtabs" role="tablist">
+            <button type="button" class="rtab" role="tab" aria-selected="true">Health <span class="n" style="color:var(--op-good)">ok</span></button>
+            <button type="button" class="rtab" role="tab" aria-selected="false">Waiting <span class="n">3</span></button>
+            <button type="button" class="rtab" role="tab" aria-selected="false">Locks <span class="n hot">2</span></button>
+            <button type="button" class="rtab" role="tab" aria-selected="false">Coord <span class="n hot">32</span></button>
+            <button type="button" class="rtab" role="tab" aria-selected="false">Files <span class="n">7</span></button>
+            <button type="button" class="rtab" role="tab" aria-selected="false">Info</button>
+          </div>
+
+          <div class="rpane" role="tabpanel">
+            <div class="rail-kv"><span class="k">loop</span><span class="v" style="color:var(--op-good)">armed · every 60s</span></div>
+            <div class="rail-kv"><span class="k">next fire</span><span class="v">in 41s</span></div>
+            <div class="rail-kv"><span class="k">claim</span><span class="v">WI-6747 — redesign popup</span></div>
+            <div class="rail-kv"><span class="k">context</span><span class="v">83% · 166k / 200k</span></div>
+            <div class="rail-kv"><span class="k">checkpoint</span><span class="v">mockups drafted</span></div>
+            <div class="rail-kv"><span class="k">unanswered</span><span class="v">none</span></div>
+            <div class="rail-kv"><span class="k">last tool</span><span class="v">12s ago</span></div>
+          </div>
+          <div class="rpane" role="tabpanel" hidden>
+            <div class="rail-row"><span class="dir">◉</span><span class="txt">fleet:hud-redesign:gate-green</span><span class="ts">4m</span></div>
+            <div class="rail-row"><span class="dir">↻</span><span class="txt">work-item:done:WI-6740</span><span class="ts">1h</span></div>
+            <div class="rail-row"><span class="dir">↻</span><span class="txt">release:deploy:staging</span><span class="ts">2h</span></div>
+            <div class="rail-empty" style="margin-top:8px">◉ one-shot · ↻ standing watch</div>
+          </div>
+          <div class="rpane" role="tabpanel" hidden>
+            <div class="rail-row"><span class="dir" style="color:var(--op-warn)">L</span><span class="txt">…/chat/SessionChatModal.tsx</span><span class="ts">8m</span></div>
+            <div class="rail-row"><span class="dir" style="color:var(--op-warn)">L</span><span class="txt">…/sessions/AgentDossier.tsx</span><span class="ts">8m</span></div>
+            <div class="rail-empty" style="margin-top:8px">Nothing waiting.</div>
+          </div>
+          <div class="rpane" role="tabpanel" hidden>
+            <div class="rail-row"><span class="dir">←</span><span class="who">watchdog</span><span class="txt">MCP proxy failing: 861/1h</span><span class="ts">4m</span></div>
+            <div class="rail-row"><span class="dir">←</span><span class="who">su-7854d</span><span class="txt">Restarting mcp-proxy shortly</span><span class="ts">7m</span></div>
+            <div class="rail-row"><span class="dir">→</span><span class="who">su-4ca24</span><span class="txt">Taking WI-6747</span><span class="ts">9m</span></div>
+            <div class="rail-row"><span class="dir">←</span><span class="who">watchdog</span><span class="txt">infra-liveness RECOVERED</span><span class="ts">11m</span></div>
+            <div class="rail-row"><span class="dir">←</span><span class="who">su-09b55</span><span class="txt">Green gate red — 4 typecheck reds</span><span class="ts">18m</span></div>
+            <div class="rail-row"><span class="dir">←</span><span class="who">su-4ca24</span><span class="txt">Dossier lock released, yours</span><span class="ts">22m</span></div>
+            <div class="rail-row"><span class="dir">→</span><span class="who">human</span><span class="txt">Mockups ready for review</span><span class="ts">26m</span></div>
+            <div class="rail-row"><span class="dir">←</span><span class="who">watchdog</span><span class="txt">PSI memory full avg60 8.98</span><span class="ts">31m</span></div>
+            <div class="rail-empty" style="margin-top:8px">scrolls within this pane — 24 more</div>
+          </div>
+          <div class="rpane" role="tabpanel" hidden>
+            <div class="rail-row"><span class="txt">…/chat/SessionChatModal.tsx</span><span class="ts">L</span></div>
+            <div class="rail-row"><span class="txt">…/chat/ChatActionBar.tsx</span><span class="ts"></span></div>
+            <div class="rail-row"><span class="txt">…/chat/FleetLaunchRow.tsx</span><span class="ts"></span></div>
+            <div class="rail-row"><span class="txt">…/sessions/AgentDossier.tsx</span><span class="ts">L</span></div>
+            <div class="rail-row"><span class="txt">…/sessions/SessionsRosterView.css</span><span class="ts"></span></div>
+            <div class="rail-row"><span class="txt">…/hud/hud-board-model.ts</span><span class="ts"></span></div>
+            <div class="rail-row"><span class="txt">…/lib/chat-actions/PostureActions.ts</span><span class="ts"></span></div>
+          </div>
+          <div class="rpane" role="tabpanel" hidden>
+            <div class="rail-kv"><span class="k">plan</span><span class="v">hud-redesign-2026-08-01</span></div>
+            <div class="rail-kv"><span class="k">started</span><span class="v">4h12m ago</span></div>
+            <div class="rail-kv"><span class="k">host</span><span class="v">dev-box</span></div>
+            <div class="rail-kv"><span class="k">pid</span><span class="v">30144</span></div>
+            <div class="rail-kv"><span class="k">client</span><span class="v">claude</span></div>
+            <div class="rail-kv"><span class="k">resume</span><span class="v">claude --resume 9f2a…</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>What it fixes</h3>
+      <ul>
+        <li><strong>The rail can never be taller than the rail.</strong> One pane is visible, it scrolls inside itself, and the tab strip stays pinned. This is the only option that is structurally immune to ①.</li>
+        <li><strong>Coord can show all 32 with no drill-in destination to build</strong> — it just scrolls in its own pane. Cheapest of the three to finish.</li>
+        <li><strong>The tab strip is a permanent dashboard.</strong> Counts stay visible whichever pane is open, so <code>2</code> and <code>32</code> are always in view.</li>
+        <li>Matches the HUD's own tab language (Sessions / Plans / Work items), so it looks native.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>What it costs</h3>
+      <ul>
+        <li><strong>You can only see one thing at a time.</strong> “Which file is it editing <em>and</em> what is it waiting on” becomes two clicks. R1 answers both at a glance.</li>
+        <li>Six tabs in a 300px rail will wrap to two rows — workable (the HUD strip already wraps) but it eats ~24px of the header.</li>
+        <li>Loses the scannable-whole-agent read that R1 and R2's index both keep.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════ WHAT ELSE TO ADD ═══ -->
+<section id="add">
+  <div class="sec-head">
+    <p class="eyebrow">Your question 2 · read from the source, not from memory</p>
+    <h2>What the rail is missing</h2>
+    <p>I diffed <code>OrientResult</code> (<code>agent-tools/coordination/tools/orient.ts</code>,
+       24 fields plus 10 handler folds) against <code>AgentDetail</code>
+       (<code>adv-agent-detail.ts</code>) and the roster entry the rail already reads.
+       One gap dominates everything else.</p>
+  </div>
+
+  <div class="callout">
+    <p><strong>The rail shows what the agent is <em>doing</em> and <em>holding</em>.
+       It shows nothing about what the agent has been <em>told</em>.</strong></p>
+    <p>Locks, files, claims, coord, events, loop, context — all of it is behaviour.
+       But an agent's behaviour is driven by standing orders it received outside the
+       conversation: <code>facts</code> folded verbatim into its every orient,
+       registered <code>modes</code> and who set them, and the resolved
+       <code>instructionPrecedence</code> that says which generic rules are
+       <em>suppressed</em> right now. None of that is visible anywhere in the popup —
+       and unlike everything else in the rail, <strong>you cannot recover it by
+       reading the transcript</strong>, because it never appears there. It arrives in
+       the agent's system context.</p>
+  </div>
+
+  <h3 style="margin-top:44px;font-size:19px;font-family:var(--serif);font-weight:400">The diff</h3>
+  <div class="plate" style="margin-top:14px">
+    <div class="plate-cap"><b>coord:orient → rail</b> <span>what it returns · whether the rail shows it · where the data already lives</span></div>
+    <div class="plate-body spec-wrap" style="background:var(--plate)">
+      <table class="matrix" style="min-width:720px">
+        <thead>
+          <tr><th>orient field</th><th>What it carries</th><th>In the rail?</th><th>Source for a third-party read</th></tr>
+        </thead>
+        <tbody>
+          <tr style="background:var(--mark-bg)"><td>facts</td><td>Standing facts folded <em>verbatim</em> into this agent's every orient — scoped, TTL'd, deterministic</td><td class="no">no</td><td>durable, per-owner scope</td></tr>
+          <tr style="background:var(--mark-bg)"><td>instructionPrecedence</td><td>Effective mission + execution-authorization + which generic rules are suppressed, and why</td><td class="no">no</td><td><strong>pure function</strong> of modes + route + scope — all already on the roster entry</td></tr>
+          <tr style="background:var(--mark-bg)"><td>modes</td><td>Registered modes with <em>reason</em> and <em>ownerDirected</em></td><td>name only, as a chip</td><td>durable mode registry</td></tr>
+          <tr style="background:var(--mark-bg)"><td>ownerDirectives</td><td>Open owner directives block</td><td class="no">no</td><td>durable, workspace-scoped</td></tr>
+          <tr><td>planNow</td><td>The plan's <code>## Now</code>, the next actionable item, this agent's claims within it</td><td>slug only</td><td>plans table</td></tr>
+          <tr><td>announcedGates</td><td>Declared-but-unfired gates <em>visible to this agent</em></td><td class="no">no</td><td>durable gate table</td></tr>
+          <tr><td>me · orphaned/stalled</td><td>Whether the held claim is <em>progressing</em> or stalled</td><td class="no">no — shows the claim, not its health</td><td>fleet:assignments</td></tr>
+          <tr><td>fleetControl</td><td>Fleet state when it is <em>not</em> plain active — winding down, paused, and by whom</td><td class="no">no</td><td>agent_fleets registry (mig 575)</td></tr>
+          <tr><td>claimable</td><td>What this agent could pick up next</td><td class="no">no</td><td>work_items</td></tr>
+          <tr><td>fleetHealth</td><td>bees / wake / governor glance</td><td class="no">no</td><td>live glance</td></tr>
+          <tr><td>captureMiss · ideate</td><td>“filed zero observations on a high-signal turn” · “overdue for an ideate pass”</td><td class="no">no</td><td>indexed per-owner reads</td></tr>
+          <tr><td>inbox.summary</td><td>by_kind breakdown, coalesced-dupe count</td><td>count only</td><td>already fetched</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="notes" style="margin-top:22px">
+    <div class="note"><span class="pin" style="background:var(--ink-3)">·</span>
+      <span><strong>Four fields I'd deliberately <em>not</em> add.</strong>
+      <code>memory</code> and <code>recipes</code> are recalled against the
+      <em>caller's</em> intent — they describe the asking session, not the agent, so
+      they're meaningless in a third-party view. <code>recovery</code> only exists on
+      an <code>afterCompaction</code> call. <code>taskToolSchemaPack</code> is
+      plumbing.</span></div>
+    <div class="note"><span class="pin" style="background:var(--ink-3)">·</span>
+      <span><strong>Three that belong to the HUD, not the rail.</strong>
+      <code>pipeline</code> (is the release gate red?), <code>ownerPresent</code>, and
+      <code>host</code> (load, free memory) are <em>global</em> — identical for every
+      agent. Repeating them in each agent's rail is noise; they want to be HUD chrome.
+      <code>pipeline</code> especially: orient's own comment notes an agent that starts
+      editing without knowing the gate is red is working on something that cannot
+      ship.</span></div>
+  </div>
+
+  <h3 style="margin-top:52px;font-size:19px;font-family:var(--serif);font-weight:400">What that looks like in R1</h3>
+  <p style="margin-top:8px">Three new sections, each capped like the rest. <strong>Standing
+     orders</strong> goes first — it is the section that explains everything below it.</p>
+
+  <div class="plate" style="margin-top:18px">
+    <div class="plate-cap"><b>R1 +</b> <span>standing orders · lane · waiting-vs-available</span></div>
+    <div class="plate-body">
+      <div class="rail-pair">
+        <div class="rail-stub">
+          <div style="height:7px;border-radius:3px;background:var(--op-surface);width:78%"></div>
+          <div style="height:7px;border-radius:3px;background:var(--op-surface);width:52%"></div>
+          <div style="height:7px;border-radius:3px;background:rgba(56,189,248,.1);width:86%"></div>
+        </div>
+        <div class="rail" style="height:520px">
+          <div class="rail-head">
+            <div class="rail-id">su-018aa</div>
+            <div class="rail-intent">redesigning the HUD session popup</div>
+          </div>
+
+          <div class="rail-sec" style="background:rgba(56,189,248,.045)">
+            <div class="rail-h">Standing orders <span class="n">4</span></div>
+            <div class="rail-kv"><span class="k">mission</span><span class="v">execute owner-directed scope</span></div>
+            <div class="rail-kv"><span class="k">authority</span><span class="v" style="color:var(--op-warn)">confirm before execution</span></div>
+            <div class="rail-row" style="margin-top:5px"><span class="dir" style="color:var(--op-accent)">◆</span><span class="txt">AUTO — owner-directed, 2h ago</span></div>
+            <div class="rail-row"><span class="dir" style="color:var(--op-mute)">◇</span><span class="txt">suppressed: generic-backlog-selection</span></div>
+            <div class="rail-row"><span class="dir" style="color:var(--op-accent)">§</span><span class="txt">fact: desktop notifications are OFF</span></div>
+            <div class="rail-row"><span class="dir" style="color:var(--op-accent)">§</span><span class="txt">fact: PLUR is decommissioned</span></div>
+            <button type="button" class="rail-more">All 4 facts &amp; directives ›</button>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Health</div>
+            <div class="rail-kv"><span class="k">loop</span><span class="v" style="color:var(--op-good)">armed · every 60s · next 41s</span></div>
+            <div class="rail-kv"><span class="k">claim</span><span class="v">WI-6747 <span style="color:var(--op-good)">· progressing</span></span></div>
+            <div class="rail-kv"><span class="k">context</span><span class="v">83% · 166k / 200k</span></div>
+            <div class="rail-kv"><span class="k">last tool</span><span class="v">12s ago</span></div>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Lane</div>
+            <div class="rail-kv"><span class="k">plan</span><span class="v">hud-redesign-2026-08-01</span></div>
+            <div class="rail-kv"><span class="k">now</span><span class="v">Rail density + control legibility</span></div>
+            <div class="rail-kv"><span class="k">next up</span><span class="v">P-004 — merge B/C into one band</span></div>
+            <div class="rail-kv"><span class="k">claimable</span><span class="v">3 items in this lane</span></div>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Waiting on <span class="n">3</span></div>
+            <div class="rail-row"><span class="dir">◉</span><span class="txt">fleet:hud-redesign:gate-green</span><span class="ts">4m</span></div>
+            <div class="rail-row"><span class="dir">↻</span><span class="txt">work-item:done:WI-6740</span><span class="ts">1h</span></div>
+            <div class="rail-row"><span class="dir">↻</span><span class="txt">release:deploy:staging</span><span class="ts">2h</span></div>
+            <div style="margin-top:7px;padding-top:7px;border-top:1px dashed var(--op-border)">
+              <div class="rail-kv"><span class="k" style="width:auto">available, not awaited</span></div>
+              <div class="rail-row"><span class="dir" style="color:var(--op-mute)">○</span><span class="txt" style="color:var(--op-mute)">fleet:hud-redesign:mockups-approved</span></div>
+            </div>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Locks <span class="n hot">2</span></div>
+            <div class="rail-row"><span class="dir" style="color:var(--op-warn)">L</span><span class="txt">…/chat/SessionChatModal.tsx</span><span class="ts">8m</span></div>
+            <div class="rail-row"><span class="dir" style="color:var(--op-warn)">L</span><span class="txt">…/sessions/AgentDossier.tsx</span><span class="ts">8m</span></div>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Coord <span class="n hot">32 unread</span></div>
+            <div class="rail-row"><span class="dir">←</span><span class="who">watchdog</span><span class="txt">MCP proxy failing: 861/1h</span><span class="ts">4m</span></div>
+            <div class="rail-row"><span class="dir">←</span><span class="who">su-7854d</span><span class="txt">Restarting mcp-proxy shortly</span><span class="ts">7m</span></div>
+            <div class="rail-row"><span class="dir">→</span><span class="who">su-4ca24</span><span class="txt">Taking WI-6747</span><span class="ts">9m</span></div>
+            <button type="button" class="rail-more">Open all 32 ›</button>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Files <span class="n">7</span></div>
+            <div class="rail-row"><span class="txt">…/chat/SessionChatModal.tsx</span><span class="ts">L</span></div>
+            <div class="rail-row"><span class="txt">…/chat/FleetLaunchRow.tsx</span><span class="ts"></span></div>
+            <div class="rail-row"><span class="txt">…/sessions/AgentDossier.tsx</span><span class="ts">L</span></div>
+            <button type="button" class="rail-more">Show 4 more ›</button>
+          </div>
+
+          <div class="rail-sec">
+            <div class="rail-h">Reference</div>
+            <button type="button" class="rail-more">Session, host &amp; runtime detail ›</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>The three new sections</h3>
+      <ul>
+        <li><strong>Standing orders</strong> — resolved mission, current authority
+          (<em>confirm-first</em> vs <em>act-and-report</em>), each active mode with
+          who set it, what is <em>suppressed</em>, and the standing facts. Tinted,
+          because it is the only section that explains the others.</li>
+        <li><strong>Lane</strong> — the plan's <code>## Now</code>, the next actionable
+          item, and how much is claimable. Today the rail shows a plan <em>slug</em>,
+          which tells you where the agent is but not what it's for.</li>
+        <li><strong>Waiting on</strong> gains a second half: gates that were
+          <em>declared and are available</em> but which this agent is not awaiting.
+          An agent parked on a gate nobody declared waits forever — that failure is
+          invisible until you can see both lists together.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Two small upgrades to what's there</h3>
+      <ul>
+        <li><strong><code>claim</code> gains a health word.</strong> Today it reads
+          <code>WI-6747</code>; <code>me</code> already knows whether that claim is
+          orphaned or stalled, so it can read <code>WI-6747 · progressing</code> or
+          <code>· stalled 40m</code>. Same row, decisive difference.</li>
+        <li><strong>Fleet wind-down surfaces.</strong> <code>fleetControl</code> is
+          folded only when the fleet is <em>not</em> active — so if it's present at
+          all, it's news, and it belongs at the top of the rail as a banner rather
+          than a field.</li>
+        <li>Every one of these reads from a durable per-agent source, so this is
+          additive legs on <code>getAgentDetail</code> — not new plumbing.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════ THE REST OF COORD ═══ -->
+<section id="coord">
+  <div class="sec-head">
+    <p class="eyebrow">Your question 1 · the rest of the coord surface</p>
+    <h2>Yes — and one of them is a live bug in this popup</h2>
+    <p>Past <code>orient</code>, the <code>coord:*</code> plane has 57 tools. Six carry
+       per-agent state the rail has no way to show. One of them undermines the
+       popup's own composer.</p>
+  </div>
+
+  <div class="callout">
+    <p><strong><code>coord:wake-mode</code> — an agent can be in <em>manual</em> mode,
+       where wakes are <em>staged for the owner to release</em> rather than
+       delivered.</strong></p>
+    <p>This popup's composer sends a <code>coord:send</code> with
+       <code>wake: 'required'</code>. Send a message to an agent in manual wake-mode
+       and the popup reports <strong>“Sent — the agent is woken if it's live”</strong>
+       — but the wake is sitting in a staging queue, undelivered, and the agent is
+       not working on what you just asked. The banner is not lying, exactly; it says
+       <em>if it's live</em>. It simply cannot see the one state that makes the send
+       a no-op.</p>
+    <p>Wake-mode belongs in the header next to liveness, and the composer should say
+       <strong>“Staged — release it to deliver”</strong> rather than “Sent” when the
+       agent is manual. That is a correctness fix, not a visual one, and I'd do it
+       whichever direction you pick.</p>
+  </div>
+
+  <div class="plate" style="margin-top:34px">
+    <div class="plate-cap"><b>coord:* beyond orient</b> <span>per-agent state with no home in the rail</span></div>
+    <div class="plate-body spec-wrap" style="background:var(--plate)">
+      <table class="matrix" style="min-width:700px">
+        <thead><tr><th>Surface</th><th>What it answers</th><th>Why it matters here</th></tr></thead>
+        <tbody>
+          <tr style="background:var(--mark-bg)"><td>coord:wake-mode</td><td>auto (wakes fire) vs manual (wakes staged for the owner)</td><td>A manual agent silently stages everything you send it from this very popup</td></tr>
+          <tr style="background:var(--mark-bg)"><td>coord:walls</td><td>What is blocked <em>on the owner</em> — the ask verbatim, how long it's waited, and whether the blocked agent is still <strong>alive</strong> or <strong>stranded</strong></td><td>“Stranded” means answering won't resume it — it must be respawned. Nothing in the popup can currently tell you that</td></tr>
+          <tr><td>coord:goal</td><td>The agent's goal <em>derived from what it holds</em>, never prose it typed — plus <code>agreement</code>: corroborated · sole · <strong>divergent</strong>, and every competing ref</td><td><code>divergent</code> means its own claims disagree about what it's doing. The rail shows the intent string the agent <em>declared</em>, which is the unreliable half</td></tr>
+          <tr><td>me · sessionState + verdict</td><td>live · parked · draining · suspect · ended · recorded, and speaking vs silent</td><td>The rail shows <code>liveness</code>. A warm-dead session reads heartbeat-fresh and <code>ended</code> — the classic misread</td></tr>
+          <tr><td>me · intentStale</td><td>A claim that is not progressing</td><td>Distinguishes working from wedged, which liveness cannot</td></tr>
+          <tr><td>coord:conversations-*</td><td>Durable work-item-scoped threads the agent is a participant in</td><td>Survives a spawn boundary, unlike <code>coord:send</code>. Invisible today</td></tr>
+          <tr><td>coord:topics-subscribe</td><td>Standing <em>topic</em> subscriptions</td><td>The Events section reads <code>event_awaits</code> only — topic watches are a second, unshown channel</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════ THE CARRY BRIEF ═══ -->
+<section id="carry">
+  <div class="sec-head">
+    <p class="eyebrow">Your question 3 · what agents track as they work</p>
+    <h2>The carry brief</h2>
+    <p>This is the richest thing you asked about, and it already has a fully-formed
+       shape in the code: <code>CarryBrief</code> (<code>carry-brief.ts</code>) and
+       <code>CompactionRecovery</code>, the block <code>afterCompaction: true</code>
+       returns. It is the agent's working memory made durable — and none of it
+       reaches the popup.</p>
+  </div>
+
+  <div class="plate">
+    <div class="plate-cap"><b>CarryBrief + CompactionRecovery</b> <span>every field, and whether the rail shows it</span></div>
+    <div class="plate-body spec-wrap" style="background:var(--plate)">
+      <table class="matrix" style="min-width:720px">
+        <thead><tr><th>Field</th><th>What it holds</th><th>In the rail?</th></tr></thead>
+        <tbody>
+          <tr><td>heldItems[].checkpoint</td><td>In-flight state left by <code>work_items:checkpoint</code> — the resume point</td><td>only the <em>held claim's</em>, truncated</td></tr>
+          <tr style="background:var(--mark-bg)"><td>checkpointUpdatedAtMs</td><td><strong>When</strong> that checkpoint was written</td><td class="no">no — and this is the one that matters</td></tr>
+          <tr style="background:var(--mark-bg)"><td>loop.carryNote</td><td>The engine loop's carry-note verbatim — <code>did</code> / <code>left</code> / <code>insight</code> / <code>next</code></td><td class="no">no</td></tr>
+          <tr><td>carryNoteUpdatedAtMs</td><td>When the note was written</td><td class="no">no</td></tr>
+          <tr style="background:var(--mark-bg)"><td>walls[]</td><td>Owner-gated blockers, <strong>verbatim</strong> — “open commitments, and prose dissolves them”</td><td class="no">no</td></tr>
+          <tr><td>checks[]</td><td>External-state claims + the probe that re-verifies each</td><td class="no">no</td></tr>
+          <tr style="background:var(--mark-bg)"><td>directives[]</td><td>Open owner directives, verbatim — “the workspace's highest-priority carry class”</td><td class="no">no</td></tr>
+          <tr><td>citedRefs</td><td>Live state of the WI-/EI- ids the carry-note cites</td><td class="no">no</td></tr>
+          <tr><td>postNoteInbox</td><td>Directed mail that landed <em>after</em> the note was written</td><td class="no">no</td></tr>
+          <tr><td>control.carry</td><td><code>warm</code> vs <code>cold</code></td><td class="no">no</td></tr>
+          <tr><td>control.generation</td><td>Generation-stamped mode/loop/route/scope projection</td><td class="no">no</td></tr>
+          <tr><td>staleness_warnings</td><td>Presence/fleet/claims that changed after the summary was written</td><td class="no">no — post-compaction only</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="callout" style="margin-top:30px">
+    <p><strong>Staleness is the whole point of this data, and it is the part with no
+       visual form yet.</strong></p>
+    <p>Three fields exist purely to date the carry — <code>checkpointUpdatedAtMs</code>,
+       <code>carryNoteUpdatedAtMs</code>, <code>postNoteInbox</code> — plus
+       <code>citedRefs</code>, which the code calls
+       <em>“the #1 stale-conclusion tell”</em>: a work-item the note cites that has
+       since changed state. A checkpoint written 40 minutes and a dozen turns ago is
+       nearly worthless, and the model already knows that. So in the panel, the
+       <strong>age is rendered as loudly as the content</strong> — not as a
+       muted timestamp in the corner.</p>
+    <p><strong>And its severity is conditional.</strong> A <code>cold</code>-carry
+       agent rebuilds from its checkpoint on every wake — the checkpoint <em>is</em>
+       its memory, so a stale one is critical. For a <code>warm</code> agent the same
+       staleness is merely unhelpful. Same number, different colour, decided by
+       <code>control.carry</code>.</p>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════ THE SECOND PANEL ═══ -->
+<section id="panel2">
+  <div class="sec-head">
+    <p class="eyebrow">Your question 2 · agreed, with a specific arrangement</p>
+    <h2>Two panels: told on the left, did on the right</h2>
+    <p>Not a second rail bolted to the same edge. Put it on the <strong>left</strong>,
+       and the three columns read in causal order — <em>what the agent was told</em>
+       → <em>the conversation</em> → <em>what the agent did</em>. Inputs, exchange,
+       outputs.</p>
+  </div>
+
+  <div class="plate">
+    <div class="plate-cap"><b>Two-panel shell</b> <span>ORDERS 272px · transcript · ACTIVITY 300px</span></div>
+    <div class="plate-body">
+      <div class="op" style="min-width:920px">
+        <div style="background:var(--op-panel);border-bottom:1px solid var(--op-border)">
+          <div class="op-title" style="border:0;padding-bottom:5px">
+            <span style="color:var(--op-good)">●</span>
+            <span style="font-family:var(--mono);color:var(--op-fg);font-weight:600">su-018aa</span>
+            <span style="color:var(--op-mute)">redesigning the HUD session popup</span>
+            <span class="x">✕</span>
+          </div>
+          <div class="band" style="padding:0 12px 9px;gap:6px">
+            <span class="v-state"><span class="dot"></span>live · 4h12m</span>
+            <span class="v-state">ctx 83%</span>
+            <span class="v-state">WI-6747 · 18m</span>
+            <span class="v-state warn">manual wakes</span>
+            <span style="flex:1"></span>
+            <button type="button" class="v-alert">⚠ 2 locks <span class="car">›</span></button>
+          </div>
+        </div>
+
+        <div class="trio">
+          <!-- ── LEFT: ORDERS ── -->
+          <div class="rail-l">
+            <div class="rail-tag">Orders <span class="sub">— what it was told</span></div>
+
+            <div class="rail-sec" style="border-top:0;background:rgba(56,189,248,.045)">
+              <div class="rail-h">Mission</div>
+              <div class="rail-kv"><span class="k">effective</span><span class="v">execute owner-directed scope</span></div>
+              <div class="rail-kv"><span class="k">authority</span><span class="v" style="color:var(--op-warn)">confirm before execution</span></div>
+              <div class="rail-kv"><span class="k">route</span><span class="v">self · no fleet</span></div>
+              <div class="rail-row" style="margin-top:4px"><span class="dir" style="color:var(--op-mute)">◇</span><span class="txt" style="color:var(--op-mute)">suppressed: generic-backlog-selection</span></div>
+            </div>
+
+            <div class="rail-sec">
+              <div class="rail-h">Modes</div>
+              <div class="rail-row"><span class="dir" style="color:var(--op-accent)">◆</span><span class="txt">AUTO — owner-directed</span><span class="ts">2h</span></div>
+              <div class="rail-row"><span class="dir" style="color:var(--op-mute)">◇</span><span class="txt" style="color:var(--op-mute)">IDEATE · DRAIN off</span></div>
+              <div class="rail-kv" style="margin-top:3px"><span class="k">carry</span><span class="v">warm</span></div>
+            </div>
+
+            <div class="rail-sec">
+              <div class="rail-h">Owner directives <span class="n hot">2</span></div>
+              <div class="verbatim">Confirm approach/route before implementing — the WHAT/HOW/WHO gate.</div>
+              <div class="verbatim">Desktop notifications are OFF — route alerts through coord:escalate.</div>
+            </div>
+
+            <div class="rail-sec">
+              <div class="rail-h">Standing facts <span class="n">4</span></div>
+              <div class="rail-row"><span class="dir" style="color:var(--op-accent)">§</span><span class="txt">PLUR is decommissioned</span></div>
+              <div class="rail-row"><span class="dir" style="color:var(--op-accent)">§</span><span class="txt">npm only — never pnpm/yarn</span></div>
+              <button type="button" class="rail-more">All 4 ›</button>
+            </div>
+
+            <div class="rail-sec">
+              <div class="rail-h">Walls <span class="n hot">1</span></div>
+              <div class="wall-row">
+                <span class="ask">“Need the Apple Developer ID cert before the notarised build can be cut.”</span>
+                <span class="who">waiting 3d 4h · agent <span style="color:var(--op-good)">alive</span></span>
+              </div>
+            </div>
+
+            <div class="rail-sec">
+              <div class="rail-h">Carry <span class="age age--warn">note 41m old</span></div>
+              <div class="verbatim">did: drafted 6 mockups, published artifact
+left: merge B/C into one band
+next: confirm fleet-launcher move w/ owner</div>
+              <div class="rail-kv" style="margin-top:6px"><span class="k">checkpoint</span><span class="v">mockups drafted <span class="age age--fresh">· 4m</span></span></div>
+              <div class="rail-kv"><span class="k">cited</span><span class="v" style="color:var(--op-warn)">WI-6740 changed since ⚠</span></div>
+              <div class="rail-kv"><span class="k">since note</span><span class="v">3 directed messages</span></div>
+            </div>
+          </div>
+
+          <!-- ── CENTER ── -->
+          <div class="rail-stub" style="padding:14px 14px 0">
+            <div style="height:7px;border-radius:3px;background:var(--op-surface);width:78%"></div>
+            <div style="height:7px;border-radius:3px;background:var(--op-surface);width:54%"></div>
+            <div style="height:7px;border-radius:3px;background:rgba(56,189,248,.10);width:88%"></div>
+            <div style="height:7px;border-radius:3px;background:rgba(56,189,248,.10);width:41%"></div>
+            <div style="height:7px;border-radius:3px;background:var(--op-surface);width:66%"></div>
+            <div style="flex:1"></div>
+            <div class="op-composer" style="margin:0 0 9px">Message this agent…</div>
+            <div class="band band--do" style="margin:0 -14px;gap:6px">
+              <span class="v-mode"><span class="cap">AUTO</span><span class="car">on ▾</span></span>
+              <span class="v-mode"><span class="cap">GRADE</span><span class="car">on ▾</span></span>
+              <span class="sep"></span>
+              <button type="button" class="v-act"><span class="ic">▣</span>Focus</button>
+              <button type="button" class="v-act ghost"><span class="ic">⋯</span>Session…</button>
+              <span style="flex:1"></span>
+              <button type="button" class="v-act"><span class="ic">✛</span>Fleet…</button>
+            </div>
+          </div>
+
+          <!-- ── RIGHT: ACTIVITY ── -->
+          <div class="rail" style="height:560px;border-left:1px solid var(--op-border)">
+            <div class="rail-tag">Activity <span class="sub">— what it did</span></div>
+
+            <div class="rail-sec" style="border-top:0">
+              <div class="rail-h">Health</div>
+              <div class="rail-kv"><span class="k">loop</span><span class="v" style="color:var(--op-good)">armed · 60s · next 41s</span></div>
+              <div class="rail-kv"><span class="k">claim</span><span class="v">WI-6747 <span style="color:var(--op-good)">· progressing</span></span></div>
+              <div class="rail-kv"><span class="k">goal</span><span class="v">WI-6747 <span style="color:var(--op-mute)">· corroborated</span></span></div>
+              <div class="rail-kv"><span class="k">state</span><span class="v">live · speaking</span></div>
+              <div class="rail-kv"><span class="k">last tool</span><span class="v">12s ago</span></div>
+            </div>
+
+            <div class="rail-sec">
+              <div class="rail-h">Lane</div>
+              <div class="rail-kv"><span class="k">plan</span><span class="v">hud-redesign-2026-08-01</span></div>
+              <div class="rail-kv"><span class="k">now</span><span class="v">Rail density + legibility</span></div>
+              <div class="rail-kv"><span class="k">next up</span><span class="v">P-004 — merge B/C</span></div>
+            </div>
+
+            <div class="rail-sec">
+              <div class="rail-h">Waiting on <span class="n">3</span></div>
+              <div class="rail-row"><span class="dir">◉</span><span class="txt">fleet:hud:gate-green</span><span class="ts">4m</span></div>
+              <div class="rail-row"><span class="dir">↻</span><span class="txt">work-item:done:WI-6740</span><span class="ts">1h</span></div>
+              <div class="rail-row"><span class="dir" style="color:var(--op-mute)">○</span><span class="txt" style="color:var(--op-mute)">available: mockups-approved</span></div>
+            </div>
+
+            <div class="rail-sec">
+              <div class="rail-h">Locks <span class="n hot">2</span></div>
+              <div class="rail-row"><span class="dir" style="color:var(--op-warn)">L</span><span class="txt">…/SessionChatModal.tsx</span><span class="ts">8m</span></div>
+              <div class="rail-row"><span class="dir" style="color:var(--op-warn)">L</span><span class="txt">…/AgentDossier.tsx</span><span class="ts">8m</span></div>
+            </div>
+
+            <div class="rail-sec">
+              <div class="rail-h">Coord <span class="n hot">32 unread</span></div>
+              <div class="rail-row"><span class="dir">←</span><span class="who">watchdog</span><span class="txt">MCP proxy failing</span><span class="ts">4m</span></div>
+              <div class="rail-row"><span class="dir">←</span><span class="who">su-7854d</span><span class="txt">Restarting mcp-proxy</span><span class="ts">7m</span></div>
+              <button type="button" class="rail-more">Open all 32 ›</button>
+            </div>
+
+            <div class="rail-sec">
+              <div class="rail-h">Files <span class="n">7</span></div>
+              <div class="rail-row"><span class="txt">…/SessionChatModal.tsx</span><span class="ts">L</span></div>
+              <div class="rail-row"><span class="txt">…/FleetLaunchRow.tsx</span><span class="ts"></span></div>
+              <button type="button" class="rail-more">Show 5 more ›</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>Why left, and why this split</h3>
+      <ul>
+        <li><strong>The order is causal.</strong> Orders → conversation → activity. The left panel explains the middle; the right panel is its consequence. Two rails on the same edge would just be a longer scroll with a divider.</li>
+        <li><strong>The two panels change at completely different rates.</strong> Orders shifts when a mode flips or a fact is asserted — minutes to days. Activity shifts every turn. Putting slow and fast content in one column is what made the current rail feel like a wall.</li>
+        <li><strong>It answers a question the popup currently cannot.</strong> “Why is this agent doing that?” is a left-panel question and there is nowhere to look for it today.</li>
+        <li>Left collapses first on a narrow window — it is the more static side, so losing it costs least. Both toggles are <code>nuqs</code>, so a link can open an agent with exactly the panels you want.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Cost and the honest caveats</h3>
+      <ul>
+        <li><strong>Width.</strong> 272 + ~560 + 300 ≈ 1140px, so the modal grows to <code>min(1240px, 96vw)</code> with both open. Fine on a desktop; on anything narrower one panel overlays as a drawer, which the modal already does for the existing rail.</li>
+        <li><strong>This is the largest data-layer addition in the whole redesign.</strong> <code>getAgentDetail</code> gains carry-brief, walls, wake-mode, goal and precedence legs. Every source is durable and per-agent — but it is real server work, not restyling.</li>
+        <li><strong>Some of it is only written if the agent bothered.</strong> A carry-note or checkpoint exists because the agent wrote one. An empty Carry section is itself a finding — but the panel must say <em>“never written”</em>, never render blank, or it repeats the exact failure the dossier's <code>unavailableSignals</code> was added to prevent.</li>
+        <li>I'd build it after D + R1 land, as its own phase.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ PICK & MIX ═══ -->
+<section id="pick">
+  <div class="sec-head">
+    <p class="eyebrow">Decided 2026-08-01</p>
+    <h2>What we're building</h2>
+    <p><strong>Direction D</strong> (B + C merged) for the bottom, <strong>R1</strong>
+       (capped lists) for the rail, plus the three new rail sections. A, B, C and
+       R2/R3 stay below as the record of what was considered.</p>
+  </div>
+
+  <div class="plate" style="margin-bottom:34px">
+    <div class="plate-cap"><b>Scope</b> <span>five components · one new server leg set</span></div>
+    <div class="plate-body spec-wrap" style="background:var(--plate)">
+      <table class="matrix" style="min-width:640px">
+        <thead><tr><th>#</th><th>Change</th><th>Where</th><th>Risk</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Control vocabulary — the five shapes as real CSS</td><td>a new stylesheet the chat surface loads</td><td class="yes">Low</td></tr>
+          <tr><td>2</td><td>State moves into the modal header; footer keeps nothing read-only</td><td>SessionChatModal · SessionFooter</td><td class="yes">Low</td></tr>
+          <tr><td>3</td><td>Mode-actions render as pills that set their own mode</td><td>chat-actions registry · PostureActions · GradeAction</td><td>Medium — new descriptor shape</td></tr>
+          <tr><td>4</td><td>Resume/Fork fold into <code>Session…</code>; Focus stays out</td><td>ChatActionBar · SessionActions</td><td class="yes">Low</td></tr>
+          <tr><td>5</td><td>Fleet launcher <strong>stays in the popup</strong> — becomes <code>✛ Launch a fleet…</code> opening a <strong>captioned</strong> form (today's 7 controls have no visible labels at all)</td><td>FleetLaunchRow</td><td class="yes">Low — no surface moves</td></tr>
+          <tr><td>6</td><td>Rail: cap every section, reorder by urgency, drill-in links</td><td>AgentDossier · SessionsRosterView.css</td><td class="yes">Low</td></tr>
+          <tr><td>7</td><td>Rail: Lane · available-gates · <code>claim</code> gains progressing/stalled · fleet wind-down banner</td><td>adv-agent-detail (new legs) + AgentDossier</td><td>Medium — new reads</td></tr>
+          <tr><td>8</td><td><strong>Wake-mode correctness</strong> — show manual/auto in the header; composer says “Staged”, not “Sent”</td><td>SessionChatModal · coord:wake-mode read</td><td class="yes">Low — but it is a <em>bug</em></td></tr>
+        </tbody>
+      </table>
+      <p style="margin:22px 0 8px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);font-weight:640">Phase 2 — the second panel</p>
+      <table class="matrix" style="min-width:640px">
+        <thead><tr><th>#</th><th>Change</th><th>Where</th><th>Risk</th></tr></thead>
+        <tbody>
+          <tr><td>9</td><td>Three-column shell; both panels <code>nuqs</code>-toggled, left collapses first</td><td>SessionChatModal</td><td class="yes">Low</td></tr>
+          <tr><td>10</td><td><strong>Orders panel</strong> — mission · authority · suppressed rules · modes+why · owner directives · standing facts</td><td>new AgentOrders component + precedence/facts/modes legs</td><td>Medium</td></tr>
+          <tr><td>11</td><td><strong>Walls</strong> — verbatim asks, wait age, alive vs <em>stranded</em></td><td>coord:walls leg</td><td class="yes">Low</td></tr>
+          <tr><td>12</td><td><strong>Carry</strong> — carry-note, checkpoint, cited-ref drift, post-note mail, all age-stamped; severity keyed to warm/cold</td><td>carry-brief leg</td><td>Medium — the staleness rules are the design</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="callout" style="border-left-color:var(--ok);background:rgba(46,125,91,.08)">
+    <p><strong>Item 5 is decided — the fleet launcher stays in the popup.</strong>
+       [owner 2026-08-02] WI-6505's placement stands and nothing moves to the Sessions
+       board. D now keeps it in the band as <code>✛ Launch a fleet…</code>.</p>
+    <p>That settles <em>where</em>, not <em>how</em>. The row is still the thing that
+       produced complaint ③: seven controls, always open, always empty, and with no
+       visible captions — their names exist only in <code>aria-label</code>, which is
+       why the original message quoted “Plan the fleet works” and “Account routing for
+       every fleet member.” That text appears nowhere on screen. So the captions get
+       fixed regardless of which form wins, and the disclosure keeps WI-6505's actual
+       guarantee intact: it sits outside the <code>actionCtx</code> gate exactly as the
+       row does today, so it is still there when the session is dead, still starting,
+       or failed to resolve.</p>
+    <p><strong>One decision still open: the execution route</strong> — a single session
+       or a fleet.</p>
+  </div>
+
+  <p style="margin-top:34px;font-size:13px;color:var(--ink-3);border-top:1px solid var(--rule);padding-top:20px">
+    Everything below is the option set as first presented — kept so the reasoning
+    behind D and R1 stays legible.
+  </p>
+</section>
+
+<section id="archive">
+  <div class="sec-head">
+    <p class="eyebrow">Record</p>
+    <h2>The full option set</h2>
+  </div>
+
+  <div class="plate">
+    <div class="plate-cap"><b>Comparison</b></div>
+    <div class="plate-body spec-wrap" style="background:var(--plate)">
+      <table class="matrix">
+        <thead>
+          <tr><th>Option</th><th>One-line</th><th>Bands / clicks</th><th>Risk</th><th>Size</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>A</td><td>Same layout, corrected grammar</td><td>3 bands</td><td class="yes">Low</td><td>~1 day</td></tr>
+          <tr><td>B</td><td>Modes become their own controls</td><td>2 bands</td><td>Medium — registry change</td><td>~2 days</td></tr>
+          <tr><td>C</td><td>State up top, actions below, fleet moves out</td><td>1 band</td><td>Medium — moves a surface</td><td>~3 days</td></tr>
+          <tr><td>R1</td><td>Every section capped at 3 rows</td><td class="no">0 clicks</td><td>Needs a drill-in destination</td><td>~1 day</td></tr>
+          <tr><td>R2</td><td>Accordion index with live counts</td><td>1 click</td><td class="yes">Low</td><td>~1 day</td></tr>
+          <tr><td>R3</td><td>Tabbed panes, each scrolls itself</td><td>1 click</td><td class="yes">Low</td><td>~1 day</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="callout" style="border-left-color:var(--ink-3);background:var(--rule-2)">
+    <p style="color:var(--ink-2)"><strong>What I originally recommended, and what you
+       chose instead.</strong> I argued for B + R2. You took <strong>R1</strong> and
+       asked for <strong>B and C together</strong> — which is the combination I'd
+       flagged as real but hadn't drawn. It's the better call on both counts: R1
+       keeps the whole-agent read that R2 trades away for an index, and the B/C merge
+       gets C's spatial rule <em>and</em> B's de-duplication instead of choosing
+       between them. Drawn as <a href="#d">Direction D</a>.</p>
+    <p style="color:var(--ink-2)">R1's one open cost stands: <strong>“Open all 32” needs
+       a destination.</strong> Cheapest honest answer is to let the section expand in
+       place to a scrolling sub-list — R3's mechanism, borrowed for one section
+       instead of applied to all of them.</p>
+  </div>
+</section>
+
+</div>
+
+<script>
+(function () {
+  // R2 — accordion
+  document.querySelectorAll('[data-acc] .acc-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var open = btn.getAttribute('aria-expanded') === 'true';
+      btn.setAttribute('aria-expanded', String(!open));
+      var body = btn.nextElementSibling;
+      if (body) body.hidden = open;
+    });
+  });
+
+  // R3 — tabs
+  document.querySelectorAll('[data-tabs]').forEach(function (rail) {
+    var tabs = Array.prototype.slice.call(rail.querySelectorAll('.rtab'));
+    var panes = Array.prototype.slice.call(rail.querySelectorAll('.rpane'));
+    tabs.forEach(function (tab, i) {
+      tab.addEventListener('click', function () {
+        tabs.forEach(function (t, j) { t.setAttribute('aria-selected', String(i === j)); });
+        panes.forEach(function (p, j) { p.hidden = i !== j; });
+      });
+    });
+  });
+})();
+</script>

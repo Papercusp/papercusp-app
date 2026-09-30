@@ -1,0 +1,43 @@
+{
+  "_doc-portal-dark": {
+    "$description": "Portal dark — Papercusp semantic colors matched to the hosted portal's dark token set. Used by portalEmbed and available as a built-in theme."
+  },
+  "portal-dark": {
+    "bg-deepest":       { "$value": "#11100F", "$type": "color" },
+    "bg-deeper":        { "$value": "#141312", "$type": "color" },
+    "bg-deep":          { "$value": "#171615", "$type": "color" },
+    "bg":               { "$value": "#191817", "$type": "color", "$description": "Portal dark paper" },
+    "bg-1":             { "$value": "#201F1D", "$type": "color", "$description": "Portal dark panel" },
+    "bg-2":             { "$value": "rgba(255, 255, 255, 0.040)", "$type": "color" },
+    "bg-3":             { "$value": "rgba(255, 255, 255, 0.070)", "$type": "color" },
+    "bg-4":             { "$value": "rgba(255, 255, 255, 0.110)", "$type": "color" },
+    "bg-popover":       { "$value": "#262523", "$type": "color" },
+    "bg-raised":        { "$value": "#262523", "$type": "color" },
+    "bg-raised-high":   { "$value": "#2E2C29", "$type": "color" },
+    "fg":               { "$value": "#ECE9E2", "$type": "color", "$description": "Portal dark ink" },
+    "fg-dim":           { "$value": "#C9C4BA", "$type": "color" },
+    "fg-mute":          { "$value": "#ABA79E", "$type": "color", "$description": "AA-safe muted copy on layered portal surfaces" },
+    "border-muted":     { "$value": "rgba(201, 196, 186, 0.09)", "$type": "color" },
+    "border":           { "$value": "rgba(201, 196, 186, 0.17)", "$type": "color" },
+    "border-strong":    { "$value": "rgba(201, 196, 186, 0.31)", "$type": "color" },
+    "accent":           { "$value": "#5FAE9F", "$type": "color", "$description": "Portal dark accent" },
+    "accent-rgb":       { "$value": "95, 174, 159", "$type": "color" },
+    "accent-strong":    { "$value": "#85C5B8", "$type": "color" },
+    "accent-strong-rgb":{ "$value": "133, 197, 184", "$type": "color" },
+    "accent-cool":      { "$value": "#A7D6CC", "$type": "color" },
+    "accent-soft":      { "$value": "#B7DED5", "$type": "color" },
+    "accent-soft-rgb":  { "$value": "183, 222, 213", "$type": "color" },
+    "accent-deep":      { "$value": "#3D8376", "$type": "color" },
+    "accent-deeper":    { "$value": "#28594F", "$type": "color" },
+    "accent-ink":       { "$value": "#10211E", "$type": "color" },
+    "good":             { "$value": "#70B89E", "$type": "color" },
+    "warn":             { "$value": "#D1A65A", "$type": "color" },
+    "bad":              { "$value": "#DA7A72", "$type": "color" },
+    "warn-bg":          { "$value": "rgba(209, 166, 90, 0.11)", "$type": "color" },
+    "warn-border":      { "$value": "rgba(209, 166, 90, 0.34)", "$type": "color" },
+    "good-bg":          { "$value": "rgba(112, 184, 158, 0.11)", "$type": "color" },
+    "bad-bg":           { "$value": "rgba(218, 122, 114, 0.11)", "$type": "color" },
+    "card-shadow":      { "$value": "0 20px 58px rgba(0, 0, 0, 0.46)", "$type": "shadow" },
+    "frost":            { "$value": "linear-gradient(180deg, rgba(255,255,255,0.050), rgba(255,255,255,0.018))", "$type": "other" }
+  }
+}

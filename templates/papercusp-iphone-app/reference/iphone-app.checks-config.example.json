@@ -1,0 +1,25 @@
+{
+  "$doc": "Neutral answer record for the exact papercusp-iphone-app@0.1.0 closure. Replace every answer; never add secrets, signing values, provisioning profiles, or remote-host credentials.",
+  "app": { "name": "harbor-mobile", "root": "." },
+  "composition": {
+    "templateYamls": [
+      "template.yaml",
+      "template-manifests/papercusp-mobile-base.yaml",
+      "template-manifests/papercusp-iphone-shell.yaml"
+    ],
+    "decisionPointAnswers": {
+      "papercusp-iphone-app:iphone-app-purpose": "Harbor Mobile is an offline-first field-log app; this record supplies every base and iPhone-shell decision for the first iPhone release.",
+      "papercusp-mobile-base:product-domain": "Validated field-log entries, synchronization state transitions, serialization, and error taxonomy live in Rust; SwiftUI owns presentation and iPhone lifecycle.",
+      "papercusp-mobile-base:rust-msrv": "Rust 1.88 across the workspace and CI.",
+      "papercusp-mobile-base:license-and-repository": "Apache-2.0, Harbor Mobile contributors, and the final public repository URL replace all neutral starter metadata.",
+      "papercusp-mobile-base:design-token-source": "design/mobile-tokens.json is the single source for product colors, spacing, radii, and typography; generated Kotlin and Swift outputs are drift-checked.",
+      "papercusp-mobile-base:optional-capabilities": "Credentials and deep links are selected; push, analytics, crash reporting, camera, microphone, media playback, and local networking are not selected.",
+      "papercusp-mobile-base:runtime-configuration": "Non-secret service endpoints are runtime inputs; device credentials use platform secure storage and no provider value enters this file.",
+      "papercusp-iphone-shell:iphone-identity": "Bundle ID dev.harbor.mobile, product and scheme Harbor, core module HarborCore, generated project Harbor.xcodeproj, and versions from HARBOR_IOS_RELEASE_VERSION plus HARBOR_IOS_BUILD_NUMBER.",
+      "papercusp-iphone-shell:iphone-os-floor": "Keep the iPhone deployment target at 17.0.",
+      "papercusp-iphone-shell:iphone-capabilities": "Declare the selected credentials and deep-link seams only; keep entitlement, privacy, background-mode, URL-scheme, associated-domain, and Swift-package inputs empty unless selected.",
+      "papercusp-iphone-shell:iphone-test-host": "Run XcodeGen, XCFramework, Swift module, XCTest, XCUITest, privacy, and archive preflight on a local macOS host; Linux reports host-constrained rather than green.",
+      "papercusp-iphone-shell:iphone-release": "Use external HARBOR_IOS_RELEASE_* team, identity, and provisioning input names, bind archive/export provenance to the requested version and clean source, use development export for the starter, and perform no upload."
+    }
+  }
+}

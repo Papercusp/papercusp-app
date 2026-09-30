@@ -1,0 +1,54 @@
+# The `single-agent` blueprint — unify-agent-spawn-chokepoint-2026-06-06 (P-014, D-006).
+#
+# ABSTRACT PARENT for "run-one-role-to-done" launches. Extends `base` and adds the
+# shared SINGLE-ROLE SPINE that implement / scan / merge-resolution / deploy each
+# used to re-declare verbatim: a single `decider` role + the trivial DONE/ESCALATE/
+# IDLE edges + an inline planner. A concrete single-agent blueprint
+# `extends: single-agent` and supplies ONLY {spine.decider, workItem, roles, prompt,
+# dependencies, triggers, gate/knobs} — it inherits the run-to-done edges + planner
+# from here.
+#
+# It is ALSO the declarative home for the governed + durable launch CONTRACT
+# (Phases 1-2 of the plan): every single-agent launch passes through the one
+# `spawnInvokeOnce` chokepoint, so it inherits brain-decided admission (P-005) + the
+# deterministic safety floor (P-007) + class-gated durability (P-010) WITHOUT each
+# blueprint re-wiring it. The NON-pure single-role blueprints — `audit` (verdict
+# gate), `vote`/`deliberate` (coord-op programs), `pot` (a wake-loop) — are
+# deliberately NOT children: they are not run-one-role-to-done.
+#
+# Like `base`, ABSTRACT — declares no `workItem` (and no `spine.decider`), so loading
+# it standalone throws; it only ever appears as a parent in an `extends` merge.
+# Merge semantics (loader.mergeRaw): objects deep-merge (child wins on leaf keys);
+# arrays + scalars are replaced wholesale by the child.
+id: single-agent
+extends: base
+version: 0.1.0
+description: >-
+  Abstract parent for single-role run-to-done launches — the shared single-role
+  spine (one decider role + DONE/ESCALATE/IDLE edges + inline planner) plus the
+  governed + durable launch contract. Not directly runnable; extended by
+  implement / scan / merge-resolution / deploy.
+
+# The shared single-role spine. A child supplies only `decider` (which role runs)
+# and may TIGHTEN `maxTurns`; the trivial run-to-done edges + the idle default are
+# inherited from here.
+#
+# `spine.maxTurns` composes MOST-RESTRICTIVE (identities-v1-2026-08-30 D-003 /
+# D-017 §4 / D-020, `merge-rules.ts`): the tighter layer wins regardless of order,
+# so a child can only LOWER what a parent sets. This parent therefore carries the
+# LOOSEST bound any child needs — 200, the schema default and coding-solo's value —
+# and every child states its own tighter budget (content-fix 15 … implement 80).
+# It used to be 40 with children "raising" it under last-writer-wins; re-authored
+# by P-019 so no child's effective budget moved when the declared rule took effect.
+spine:
+  maxTurns: 200
+  default:
+    to: idle
+  edges:
+    DONE: { to: done }
+    ESCALATE: { to: escalate, reasonFrom: arg }
+    IDLE: { to: idle }
+
+# Single-role launches plan inline (no separate planner role).
+planner:
+  kind: inline

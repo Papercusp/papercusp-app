@@ -1,0 +1,27 @@
+event: heartbeat
+data: {"tsMs":1778741244692}
+
+event: heartbeat
+data: {"tsMs":1778741260047}
+
+event: heartbeat
+data: {"tsMs":1778741275453}
+
+event: heartbeat
+data: {"tsMs":1778741291268}
+
+id: 1
+event: delta
+data: {"text":"<say"}
+
+id: 2
+event: delta
+data: {"text":">Welcome back. Want to pick up where we left off, or check what"}
+
+id: 3
+event: delta
+data: {"text":"'s flagged in the workspace?</say>"}
+
+event: done
+data: {"costUsd":0}
+

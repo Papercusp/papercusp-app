@@ -1,0 +1,37 @@
+# Project Spec
+
+> This file is the input to the autonomous harness. Edit it, then start the
+> harness from the Papercusp operator (the "Start" button).
+
+## Goal
+
+<!-- One paragraph. What does the user get when this is done? -->
+
+## Scope (in)
+
+<!-- Bullet list of features / capabilities that MUST work. -->
+
+-
+
+## Scope (out)
+
+<!-- Bullet list of things deliberately excluded, to avoid scope creep. -->
+
+-
+
+## Constraints
+
+<!-- Tech stack, deployment target, perf targets, budget ceilings, etc. -->
+
+-
+
+## Acceptance bar
+
+<!-- High-level "how do we know it's done?" — the planner will convert this
+into a detailed validation-contract.md. Be concrete. Things like:
+- "Signed-in user can submit a quote and receive an email within 5s"
+- "All happy-path flows work in Chrome + Firefox latest"
+- "API endpoints respond in <200ms p95 under 50 rps"
+-->
+
+-

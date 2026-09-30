@@ -1,0 +1,78 @@
+# papercusp-release-pipeline — 'Papercusp Official: Release Pipeline' (scope: aspect,
+# category: release; owner directive 2026-07-04 / P-023). tauri-release-kit as
+# a composable aspect: the release DANCE (version bump, channel→tag, target
+# matrix, artifact classification, latest.json updater manifest, gh release
+# upload, Mac/Windows VM orchestration over an SSH frame) owned by the kit;
+# the app injects ONLY its sidecar build + a TauriReleaseConfig. Same 0.1.0
+# pin the papercusp-tauri-desktop-shell template carries — composing both stays
+# pin-consistent. Machine twin: @papercusp/template-kit
+# src/reference-templates.ts RELEASE_PIPELINE_TEMPLATE — the kit's suite pins
+# this file to it.
+id: papercusp-release-pipeline
+version: "0.1.0"
+scope: aspect
+category: release
+summary: >-
+  The desktop release plane: @papercusp/tauri-release-kit — provider-agnostic
+  build+release orchestration (version bump across versionFiles, channel→tag
+  resolution, tauri build target matrix, artifact classification, latest.json
+  updater-manifest generation, gh release upload, Mac/Windows VM drivers over
+  an SSH frame) with the app-specific sidecar build injected via the
+  buildSidecar() seam and all side effects behind Exec/Fs/Log ports. The shell
+  template already pins the kit; THIS aspect is the deepened release guidance
+  — channels, signing, updater feed, target matrix — for apps that ship for
+  real.
+components:
+  - { id: tauri-release-kit, version: 0.1.0 }
+contracts: []
+decisionPoints:
+  - id: release-channels
+    prompt: >-
+      Which release channels does the app ship (stable only? stable+beta?) and
+      what tag scheme names them? The kit's channel→tag resolution
+      (defaultTagFor) encodes the answer; every channel needs its own updater
+      feed URL.
+  - id: release-targets
+    prompt: >-
+      What is the target matrix — linux-x86_64 (deb/AppImage) built locally,
+      mac universal (dmg) and windows (msi/nsis) on VMs over the kit's SSH
+      frame? Which targets are release-blocking vs best-effort?
+  - id: signing-and-updater
+    prompt: >-
+      Where does the Tauri signing key live (keyPath + passwordEnv — the key
+      and password are NEVER committed; keychain/keyfile per platform), and
+      where do updater manifests point (latestJsonUrl — usually the gh
+      release asset URL)? A desktop app without signing/updater wiring is a
+      prototype.
+  - id: sidecar-build
+    prompt: >-
+      What does buildSidecar(ctx) do for THIS app — the ONE injected seam
+      (worked instances range from ~42 lines of esbuild to a ~1,070-line bundler)?
+      Keep it a pure function of the repo tree; everything else is the kit's.
+composesWith:
+  - papercusp-tauri-desktop-shell
+  - papercusp-app
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+  - build-system/tauri-release-kit-proposal
+checks:
+  - id: components-integrated
+    run: checks/components-integrated.test.ts
+    summary: >-
+      every pinned component package is a declared dependency of the composed
+      app (config section: components)
+musts:
+  - id: no-signing-material-in-repo
+    rule: "Signing material never enters the repo — signing.keyPath points outside it"
+    enforcedBy: prose-only
+  - id: kit-bumps-versions
+    rule: "The kit bumps versions, never by hand — every file carrying the version is listed in its config"
+    enforcedBy: prose-only
+  - id: generated-updater-manifests
+    rule: "Updater manifests are generated, never hand-rolled — latest.json comes from the kit"
+    enforcedBy: prose-only
+  - id: buildsidecar-only-seam
+    rule: "buildSidecar() stays the ONLY app-specific code path in the release plane"
+    enforcedBy: prose-only

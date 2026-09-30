@@ -1,0 +1,111 @@
+{
+  "plan": "shared-pot-dao-cupboard-v1-2026-09-04",
+  "item": "P-013",
+  "workItem": "WI-2145116",
+  "pot": "pilot-pot",
+  "cohortSize": 5,
+  "doors": [
+    "status",
+    "start",
+    "promotion",
+    "scheduled",
+    "run-now",
+    "autostart",
+    "fleet-launch"
+  ],
+  "verdict": {
+    "enforcementActivatable": false,
+    "historical": true,
+    "asOf": "P-013 before P-037/WI-2146857",
+    "reason": "the pre-P-037 build had no production certificate producer, so every door refused missing-certificate when governance.planAdmission was set",
+    "recommendation": "historical: run mode:'shadow' until a FinalizationCertificate→AdmissionCertificate producer is wired",
+    "supersededBy": "P-037/WI-2146857 wires the production governance-event source; current seven-door coverage is plan-admission-certificate-source.test.ts"
+  },
+  "legs": {
+    "governance-round": {
+      "attempted": 2,
+      "succeeded": 2,
+      "refused": 0,
+      "refusalCodes": {}
+    },
+    "federation": {
+      "attempted": 4,
+      "succeeded": 1,
+      "refused": 3,
+      "refusalCodes": {
+        "round-quarantined": 1,
+        "foreign-pot": 1,
+        "unverified-signature": 1
+      }
+    },
+    "enforce-production-wiring": {
+      "attempted": 7,
+      "succeeded": 0,
+      "refused": 7,
+      "refusalCodes": {
+        "missing-certificate": 7
+      }
+    },
+    "no-policy-passthrough": {
+      "attempted": 7,
+      "succeeded": 7,
+      "refused": 0,
+      "refusalCodes": {}
+    },
+    "enforce-with-bridge": {
+      "attempted": 7,
+      "succeeded": 7,
+      "refused": 0,
+      "refusalCodes": {}
+    },
+    "enforce-with-bridge-moved-revision": {
+      "attempted": 1,
+      "succeeded": 0,
+      "refused": 1,
+      "refusalCodes": {
+        "revision-mismatch": 1
+      }
+    },
+    "owner-control-pause": {
+      "attempted": 1,
+      "succeeded": 0,
+      "refused": 1,
+      "refusalCodes": {
+        "plan-paused": 1
+      }
+    },
+    "owner-control-revoke": {
+      "attempted": 1,
+      "succeeded": 0,
+      "refused": 1,
+      "refusalCodes": {
+        "plan-revoked": 1
+      }
+    },
+    "shadow-production-wiring": {
+      "attempted": 7,
+      "succeeded": 7,
+      "refused": 0,
+      "refusalCodes": {}
+    },
+    "shadow-would-refuse": {
+      "attempted": 7,
+      "succeeded": 0,
+      "refused": 7,
+      "refusalCodes": {
+        "missing-certificate": 7
+      }
+    }
+  },
+  "cupboardLegsMeasuredElsewhere": {
+    "submission": "apps/operator-public/src/__tests__/creator-drafts.test.ts",
+    "review": "apps/operator-public/src/__tests__/review.test.ts",
+    "publish": "apps/operator-public/src/__tests__/listings.test.ts",
+    "browse": "packages/operator-core/lib/cupboard/browse-listings.test.ts",
+    "purchase": "packages/operator-core/lib/cupboard/commerce-door-journeys.test.ts",
+    "refund": "packages/operator-core/lib/cupboard/commerce-door-journeys.test.ts",
+    "delivery": "packages/operator-core/lib/cupboard/entitled-delivery.test.ts",
+    "install-free": "packages/operator-core/lib/cupboard/install-blueprint-core.test.ts",
+    "install-paid": "packages/operator-core/lib/cupboard/commerce-door-journeys.test.ts (D-048 wall: refused, no release chain)"
+  }
+}

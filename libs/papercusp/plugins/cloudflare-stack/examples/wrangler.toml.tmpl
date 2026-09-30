@@ -1,0 +1,31 @@
+# wrangler.toml.tmpl — committed; rendered to wrangler.toml at fork-time setup.
+# Do NOT commit the rendered wrangler.toml; add it to .gitignore.
+#
+# All ${...} placeholders are substituted by the cloudflare-stack plugin's
+# setup.sh after CF resources are provisioned. See plugin README.
+
+name           = "${OUTPUT_workerName}"
+main           = "src/index.ts"
+account_id     = "${USER_VAR_ACCOUNTID}"
+compatibility_date = "2026-04-01"
+
+# D1 database binding — ID assigned by Cloudflare at fork-time create.
+[[d1_databases]]
+binding       = "DB"
+database_name = "${OUTPUT_d1DatabaseName}"
+database_id   = "${OUTPUT_d1DatabaseId}"
+
+# R2 bucket binding.
+[[r2_buckets]]
+binding     = "ASSETS"
+bucket_name = "${OUTPUT_r2BucketName}"
+
+# KV namespace binding.
+[[kv_namespaces]]
+binding = "SESSIONS"
+id      = "${OUTPUT_kvNamespaceId}"
+
+# Public-facing URL the frontend reads.
+[vars]
+PUBLIC_API_URL  = "${OUTPUT_workerUrl}"
+PUBLIC_SITE_URL = "${OUTPUT_pagesUrl}"

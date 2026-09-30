@@ -1,0 +1,110 @@
+# Testing shared-pot/substrate federation via direct PG? Set fed_ts, not just ts
+URL: /internal/docs/agent-insights/testing-federation-set-fed-ts
+
+The federated last-writer-wins merge is guarded by the fed_ts column, not ts/updated_ts. writeToPg upserts with ON CONFLICT DO UPDATE WHERE EXCLUDED.fed_ts >= table.fed_ts, so a raw PG INSERT/UPDATE that sets ts and updated_ts but leaves fed_ts stale gives the merge inconsistent ordering keys. The visible symptom is a FALSE convergence bug — two peers concurrently updating the same federated row appear to diverge permanently, and rows can look internally inconsistent (vanished row, author/title mismatch). It is the test write that is wrong, not the merge. Set fed_ts to the intended LWW timestamp on every direct write to a federated consolidated table (harness_features_consolidated, harness_issues_consolidated) and concurrent conflicts converge in seconds, as the real app does (its projection writeToPg sets fed_ts for you).
+
+When you exercise shared-pot federation by writing directly to the consolidated
+PG tables (a fast way to drive two live instances without the UI), the merge can
+look badly broken: two peers that update the **same row** at the **same time**
+diverge and never reconcile, and the row state can go internally inconsistent.
+That is almost always a **test artifact**, not a merge bug.
+
+## Why
+
+Federated LWW is keyed on the **`fed_ts`** column, not `ts`/`updated_ts`. The
+projection's `writeToPg` upserts with:
+
+```sql
+ON CONFLICT (...) DO UPDATE SET ... WHERE EXCLUDED.fed_ts >= <table>.fed_ts
+```
+
+So an op only lands if its `fed_ts` is at least the row's current `fed_ts`. The
+op's wire `ts` becomes `fed_ts` on the receiving side. A raw `UPDATE ... SET
+title=..., ts=..., updated_ts=...` that **omits `fed_ts`** leaves the local row's
+`fed_ts` stale, so each peer's guard rejects the other's incoming op — they
+diverge, and downstream you can see a vanished row or a row whose `author_pubkey`
+and content disagree.
+
+## The fix (for your test)
+
+Set `fed_ts` to the LWW timestamp you intend, on every direct write:
+
+```sql
+UPDATE harness_shared.harness_features_consolidated
+  SET title=$1, ts=$2, updated_ts=$2, fed_ts=$2   -- fed_ts is the one that matters
+  WHERE feature_id=$3;
+```
+
+With `fed_ts` set, a concurrent same-field conflict converges to a single value
+on both peers in a few seconds (verified live, two `.deb` instances). The real
+app never hits this — its write path goes through the projection, which stamps
+`fed_ts`. Only direct-PG test harnesses need to remember it.
+
+## Companion gotcha: editing a remote-origin row needs `origin='local'`
+
+The same "mimic the app's local-write stamp" rule has a second half. The
+capture trigger (`capture_substrate_outbox_trg`) has an **echo-loop guard** so
+the projection's own remote-apply writes don't re-federate:
+
+```sql
+-- in the trigger function:
+IF COALESCE(NEW.origin, 'local') <> 'local' THEN
+  RETURN NEW;   -- skip: this is a remote-origin write (an echo), don't enqueue
+END IF;
+```
+
+A row that arrived via federation lands on the receiver with `origin='remote'`.
+If your test then **edits that received row** (e.g. peer B claims a work item
+peer A created — moving it `todo → in-progress`) with a raw `UPDATE` that leaves
+`origin` alone, the trigger sees `origin='remote'`, treats your genuine local
+edit as an echo, and **never federates it back**. The visible symptom: the edit
+sticks locally but never reaches the other peer — looks like a one-way /
+broken-claim bug.
+
+The fix: set `origin='local'` (alongside `fed_ts`) on every direct-PG edit that
+represents a real local mutation:
+
+```sql
+UPDATE harness_shared.harness_features_consolidated
+  SET status='in-progress', origin='local',          -- both matter
+      ts=$1, updated_ts=$1, fed_ts=$1
+  WHERE feature_id=$2;
+```
+
+With `origin='local'` the claim propagates peer→peer in a few seconds (and the
+receiver re-stamps it back to `origin='remote'` on its side — that asymmetry is
+correct). The real app sets `origin='local'` on every local write for you; only
+direct-PG harnesses editing a received row need to remember it. Verified live on
+two `.deb` instances: work item A→B backlog, then claim B→A, both \~4s.
+
+## Also worth knowing
+
+* The federated set is the tables carrying a `capture_..._outbox_trg` (per-table
+  variants of `capture_substrate_outbox`), not just the consolidated ones.
+  Confirmed live (2026-06-16): `harness_features_consolidated`,
+  `harness_issues_consolidated`, **`harness_plans`** (plan sharing), and
+  **`plan_item_assignments`** (collaborative-plan item assignments) all cross.
+  The registry's `sync:'peer-log'` set (`table-registry.ts` `PEER_LOG_TABLES`)
+  has since grown well beyond these four — `engineer_issues`, the `coord_*`
+  tables, `bee_claim_specs`, and the whole `hive_*` family — each with its own
+  capture trigger; check `pg_trigger` for the specific table, not this list,
+  before assuming it does or doesn't cross.
+  **`harness_plan_parts` now carries a real capture trigger too**
+  (`271-harness-plan-parts-capture.sql`, `capture_harness_plan_parts_outbox_trg`)
+  — it fires on any `origin='local'` insert/update today. The plan-part
+  *federation feature* itself is still DARK behind `papercusp-plan-part-federation`
+  (nothing writes the table with `origin='local'` outside that flag's own
+  reconcile path yet), but that's a statement about what writes the table, not
+  about the trigger — a direct-PG test write with `origin='local'` **will**
+  federate. Don't assume it's inert. The other `*_consolidated` tables (messages,
+  agent\_chats, supervisor\_notes, …) and most other `plan_*` / `work_item_*`
+  tables (`plan_item_claims`, `work_item_claims`, …) remain local-only by
+  design — no capture trigger exists for them.
+* `harness_plans` carries a `version` column that is a **local CAS counter**
+  (INSERT sets `0`, `ON CONFLICT DO UPDATE SET version = version + 1`), so it
+  legitimately differs across peers even when the plan's `content` /
+  `content_hash` are byte-identical. Compare `content_hash`, not `version`, to
+  judge plan convergence.
+* `author_pubkey` is empty on the author's own local row and stamped with the
+  author's device pubkey on the receiver (provenance, P-002) — that asymmetry is
+  correct, not a mismatch.

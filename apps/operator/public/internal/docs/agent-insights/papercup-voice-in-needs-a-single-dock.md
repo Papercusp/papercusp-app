@@ -1,0 +1,49 @@
+# Papercup voice-in keys off a single global dock registration — so there must be ONE dock
+URL: /internal/docs/agent-insights/papercup-voice-in-needs-a-single-dock
+
+~/.papercusp/papercup-pane is a single global file every psu-papercup launch overwrites; with several live pui-dock sessions the last writer wins and voice goes to a background window. reap.rs now enforces one chat dock at a time.
+
+## The race
+
+Voice-in writes an STT utterance to the Papercup pane via
+`~/.papercusp/papercup-pane` — a **single global file** holding
+`<zellij-session> <pane-id>`, written by the `psu-papercup` wrapper at every dock
+launch. The endpoint (`routes/operator/papercup-input.ts`) delegates to the
+shared `papercup-pane-input.ts` module (`writeToSentinelPane()`) which reads the
+file and runs `zellij -s <session> action write-chars --pane-id <id>`.
+
+But the desktop can have **several live `pui-dock-*` sessions** at once — multiple
+desktop windows/workspaces (`:3170`, `:3270`, …), plus `tauri dev`
+recompile-relaunches and crashed instances that never ran their clean-exit
+teardown (`main.rs` `ExitRequested`→`child.kill()` only fires on a graceful
+exit). Every one of those docks' `psu-papercup` **overwrites the same global
+file**, so the *last* dock to launch owns voice-in — even if it's a background or
+orphaned window. The user talks to the dock they SEE; voice lands in a different
+pane; nothing happens.
+
+`reap.rs` did not help: it only kills sessions whose **owner pid is dead**, and
+these orphans' `pui chat` owners stay **alive**.
+
+## The fix — one chat dock at a time (owner decision 2026-06-25)
+
+`reap::plan` now takes the session being launched (`own`) and, **when launching a
+dock**, also `KillAndDelete`s every *other* live `pui-dock-*` session — not just
+dead-owner ones. So exactly one chat dock exists, the global registration is
+unambiguous, and voice-in always targets it. Scope guards:
+
+* Only a **dock** launch enforces this (`session_kind(own) == "dock"`); a `wb`
+  (workbench) or `reap` pass keeps the old dead-owner-only behaviour.
+* `pui-wb-*` and foreign (non-`pui-`) sessions are never touched.
+
+This **supersedes the per-window-dock decision of 2026-06-17**: a second desktop
+window now supersedes the first window's dock instead of running a parallel one.
+That's the accepted trade-off for unambiguous voice routing. Takes effect on the
+next dock launch after `cargo install --path apps/tui` (the desktop relaunches the
+dock frequently, so it converges on its own).
+
+## If voice-in still misses after this
+
+Check the live invariant: `zellij list-sessions | grep pui-dock` should show
+**one** session, and `cat ~/.papercusp/papercup-pane` should name it. More than
+one live `pui-dock-*` means a dock launched with a stale `pui` binary (reinstall)
+or a foreign session is mis-prefixed.

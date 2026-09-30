@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Bring up the operator dev stack as systemd --user transient units so it
+# survives shell exits / sandboxed agent turns:
+#
+#   papercup-dev      Vite frontend dev server   :3055   (npm run dev:operator)
+#   papercup-dev-api  Hono API host              :3070   (tsx bin/hono-host.ts)
+#
+# The Vite frontend proxies /api/* -> :3070, so BOTH must run. If the API
+# host is down, every API call ECONNREFUSEs, the app retry-loops, and the
+# whole UI grinds to a halt (looks like "the dev build is slow").
+#
+# Usage:   bin/dev
+# Status:  systemctl --user status papercup-dev papercup-dev-api
+# Stop:    systemctl --user stop papercup-dev papercup-dev-api
+# Tail:    tail -f /tmp/dev.log /tmp/dev-api.log
+#
+# The API host runs plain `tsx` (no watch) so it stays stable in this
+# multi-agent checkout. After editing API code (apps/operator/app/api,
+# lib/, _hono/) restart just the host:
+#   systemctl --user restart papercup-dev-api
+#
+# Next.js is retired — see apps/operator/next.config.js for the guard
+# that blocks an accidental `next dev`/`next start`.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+LOG="${LOG:-/tmp/dev.log}"
+API_LOG="${API_LOG:-/tmp/dev-api.log}"
+PORT="${PORT:-3055}"
+API_PORT="${API_PORT:-3070}"
+PTY="${PTY:-3056}"
+UNIT="${UNIT:-papercup-dev}"
+API_UNIT="${API_UNIT:-papercup-dev-api}"
+
+echo "==> stopping prior units (if any)"
+systemctl --user stop "$UNIT" "$API_UNIT" 2>/dev/null
+fuser -k "$PORT/tcp" "$API_PORT/tcp" "$PTY/tcp" 2>/dev/null
+sleep 2
+
+echo "==> starting $UNIT — Vite frontend on :$PORT"
+: > "$LOG"
+systemd-run --user \
+  --unit="$UNIT" \
+  --setenv=PATH="$PATH" \
+  --setenv=PAPERCUSP_PTY_WS_PORT="$PTY" \
+  --working-directory="$REPO" \
+  --property=StandardOutput=append:"$LOG" \
+  --property=StandardError=append:"$LOG" \
+  --property=Restart=always \
+  --property=RestartSec=5 \
+  -- bash -c 'npm run dev:operator'
+
+echo "==> starting $API_UNIT — Hono API host on :$API_PORT"
+: > "$API_LOG"
+systemd-run --user \
+  --unit="$API_UNIT" \
+  --setenv=PATH="$PATH" \
+  --setenv=PAPERCUSP_HONO_PORT="$API_PORT" \
+  --setenv=PAPERCUSP_BIND_HOST="${PAPERCUSP_BIND_HOST:-127.0.0.1}" \
+  --setenv=PAPERCUSP_PTY_WS_PORT="$PTY" \
+  --working-directory="$REPO/apps/operator" \
+  --property=StandardOutput=append:"$API_LOG" \
+  --property=StandardError=append:"$API_LOG" \
+  --property=Restart=always \
+  --property=RestartSec=5 \
+  -- bash -c 'set -a; [ -f .env.local ] && . ./.env.local; set +a; exec npx tsx bin/hono-host.ts'
+
+echo "==> dev stack started — surviving shell exit"
+echo "==> status:  systemctl --user status $UNIT $API_UNIT"
+echo "==> stop:    systemctl --user stop $UNIT $API_UNIT"
+echo "==> tailing $LOG + $API_LOG (Ctrl-C stops the tail; servers keep running)"
+tail -F "$LOG" "$API_LOG"

@@ -1,0 +1,45 @@
+From: Papercusp release engineering
+Subject: Read idskb32 slice headers at their actual 64-bit width
+
+Applies to upstream 376a13e7c41cc5528b6088d0dd16ec1b323a8d37.
+Inno Setup is-6_7_3 Shared.Struct.pas declares idskb32 and Int64 TotalSize.
+Reading only 32 bits leaves four header bytes in the next slice's payload,
+so the first file crossing a slice boundary fails its genuine checksum.
+Also bound the magic-table loop: its missing comparison otherwise reads
+past the table and can accidentally accept an unsupported magic.
+Keep idska16/idska32 on their original 32-bit format and all integrity checks.
+
+--- a/src/stream/slice.cpp
++++ b/src/stream/slice.cpp
+@@ -46,6 +46,7 @@
+ const char slice_ids[][8] = {
+ 	{ 'i', 'd', 's', 'k', 'a', '1', '6', 0x1a },
+ 	{ 'i', 'd', 's', 'k', 'a', '3', '2', 0x1a },
++	{ 'i', 'd', 's', 'k', 'b', '3', '2', 0x1a },
+ };
+ 
+ } // anonymous namespace
+@@ -110,9 +111,11 @@
+ 		throw slice_error("could not read slice magic number in \"" + file.string() + "\"");
+ 	}
+ 	bool found = false;
+-	for(size_t i = 0; boost::size(slice_ids); i++) {
++	bool wide_size = false;
++	for(size_t i = 0; i < boost::size(slice_ids); i++) {
+ 		if(!std::memcmp(magic, slice_ids[i], 8)) {
+ 			found = true;
++			wide_size = (magic[4] == 'b');
+ 			break;
+ 		}
+ 	}
+@@ -121,7 +124,9 @@
+ 		throw slice_error("bad slice magic number in \"" + file.string() + "\"");
+ 	}
+ 	
+-	slice_size = util::load<boost::uint32_t>(ifs);
++	// idskb32 uses an Int64 TotalSize; idska16/32 retain the old 32-bit header.
++	slice_size = wide_size ? util::load<boost::uint64_t>(ifs)
++	                       : util::load<boost::uint32_t>(ifs);
+ 	if(ifs.fail()) {
+ 		ifs.close();
+ 		throw slice_error("could not read slice size in \"" + file.string() + "\"");

@@ -1,0 +1,117 @@
+# Extend a multi-entry route with a body-discriminator + a helper-per-entry + a shared error vocabulary
+URL: /internal/docs/agent-insights/route-discriminator-extension-pattern
+
+POST /harness/projects now accepts 3 entry shapes (Entry 1/2/3). The pattern that scales — discriminate on body, delegate to a per-entry helper, surface errors with a shared .code vocabulary the UI handles uniformly.
+
+import { Aside } from '@astrojs/starlight/components';
+
+## The pattern
+
+`POST /harness/projects` started as a single-shape handler: `{ slug, path }` for "register an existing folder." It now accepts three shapes (Entry 1/2/3 from the dogfood v5 §3 spec):
+
+```ts
+// Entry 1 — new local dir   (init-local-dir.ts helper, P-010)
+{ slug, parentDir, folderName }
+
+// Entry 2 — GitHub URL      (clone-github.ts helper, P-008)
+{ slug, githubUrl, shallow? }
+
+// Entry 3 — existing folder (in-route path resolve)
+{ slug, path }
+```
+
+Three rules made this scale cleanly:
+
+### 1. Discriminate on body, not on a `kind:` field
+
+The handler picks the entry by which fields are present:
+
+```ts
+if (parentDir && folderName) {
+  // Entry 1
+} else if (githubUrl) {
+  // Entry 2
+} else if (rawPath) {
+  // Entry 3
+} else {
+  return Response.json({ error: 'one of `parentDir+folderName`, `githubUrl`, or `path` required' }, { status: 400 });
+}
+```
+
+No `body.kind === 'local_init'` discriminator. Why: callers can paste a `{ githubUrl }` body without remembering to set `kind: 'github'`; the shape *is* the kind. Less ceremony, fewer bugs.
+
+The trade-off: the body must be unambiguous (you can't paste both `path` and `githubUrl` and expect a predictable winner). The handler enforces this implicitly by check-order — if you do mix them, Entry 1 → Entry 2 → Entry 3 priority applies. Document the priority in the route's leading comment; callers shouldn't rely on it.
+
+### 2. Each entry has a dedicated helper module
+
+Entry 1 → `packages/operator-core/lib/harness/init-local-dir.ts` exports `initLocalHarnessDir({parentDir, folderName})`.
+Entry 2 → `packages/operator-core/lib/harness/clone-github.ts` exports `cloneGithubRepo(url, opts)`.
+Entry 3 → in-route path resolve (small; no helper warranted).
+
+The route handler is thin: it picks the entry, calls the helper, handles errors, falls through to the shared scaffold path. The helpers are independently testable (init-local-dir: 20 tests; clone-github: 65 tests) without the HTTP layer.
+
+When Entry 4 lands (harness link via Hyperswarm, Phase 1b P-009), it'll be `lib/harness/join-shared-harness.ts`. Same pattern.
+
+### 3. Errors share a `.code` vocabulary
+
+Both helpers throw a structured error class:
+
+```ts
+class InitLocalDirError extends Error {
+  code: 'invalid_path' | 'parent_missing' | 'dest_exists' | 'git_missing' | 'unknown';
+  detail?: string;
+}
+
+class CloneGithubError extends Error {
+  code: 'invalid_url' | 'dest_exists' | 'auth_required' | 'not_found' | 'git_missing' | 'unknown';
+  detail?: string;
+}
+```
+
+Overlapping codes (`dest_exists`, `git_missing`, `unknown`) map to the *same* HTTP status across entries. New codes (`invalid_path` vs `invalid_url`, `parent_missing` vs `auth_required`) cover the entry-specific cases.
+
+The route's error mapping is a single switch:
+
+```ts
+const httpStatus =
+  e.code === 'invalid_url' || e.code === 'invalid_path' ? 400 :
+  e.code === 'parent_missing'                          ? 400 :
+  e.code === 'dest_exists'                             ? 409 :
+  e.code === 'auth_required'                           ? 401 :
+  e.code === 'not_found'                               ? 404 :
+  e.code === 'git_missing'                             ? 500 :
+                                                          502;
+```
+
+The UI's error handler (P-012 picker, when it lands) reads `response.code` and renders the matching copy — no per-entry switch needed because the codes overlap where the meaning overlaps.
+
+## Why this scales
+
+A new entry (Entry 4, 5, 6 …) adds:
+
+* One helper module + its tests.
+* One `if` branch in the route handler discriminator.
+* Maybe one new error code if it has a genuinely novel failure mode.
+
+It does NOT add:
+
+* Per-entry route paths (they all live at `POST /harness/projects`).
+* Per-entry response schemas (one shared `{ ok, project, provisioning, init?, clone? }`).
+* Per-entry UI error switches (the shared `.code` vocabulary covers it).
+
+The handler's complexity grows linearly with entry count; the rest of the system doesn't grow at all.
+
+## When NOT to use this pattern
+
+If your entries have *fundamentally different response shapes* (e.g. one is a streaming response, one is sync JSON), don't try to unify them into one route. Split into `POST /harness/projects/stream-clone` vs `POST /harness/projects/create`. The body-discriminator approach only works when the success shape is shared.
+
+If your entries have *security boundaries* (Entry A is public, Entry B requires admin), don't discriminate on body — discriminate on auth. The route's `auth:` declaration should match the most-restrictive entry, with looser entries enforcing their own checks. Mixing auth modes in one route is a privesc hazard.
+
+The discriminator-extension pattern works because POST /harness/projects's entries all do roughly the same thing: "produce a path on disk, then scaffold." If a future entry doesn't fit that shape, that's the signal it needs its own route, not another branch.
+
+## See also
+
+* `packages/operator-core/lib/endpoint-route/routes/harness/projects.ts` — the canonical example, three entries.
+* `packages/operator-core/lib/harness/init-local-dir.ts` — Entry 1 helper + structured error.
+* `packages/operator-core/lib/harness/clone-github.ts` — Entry 2 helper + structured error.
+* [`verification-signal-on-the-row`](/internal/docs/agent-insights/verification-signal-on-the-row/) — sister principle: signals belong on the entity they describe; the same instinct applied to error shapes here.

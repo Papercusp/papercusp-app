@@ -1,0 +1,156 @@
+# Harness-provided dispatched ops — a blueprint declares an op, the operator dispatches it to the harness runtime
+URL: /internal/docs/agent-insights/harness-provided-dispatched-ops
+
+How a blueprint's `ops:` manifest becomes a runnable deterministic cadence step the HARNESS owns (not operator-core): on admission the operator registers a PROXY CoordOp per op whose run() POSTs /api/op/<name> to the harness sidecar, which executes against its own connectors/DB and returns a result validated against the manifest resultSchema. Covers the two registration timings, the transport resolution order, the work-items enqueue seam, and a worked prospect/ingest example.
+
+## The shape
+
+A deterministic cadence step-op used to be either a built-in coord-op (compiled into
+operator-core) or — for `myapp:prospect` — a hard-coded operator-core file that bridged
+into a separate repo. That was a **platform leak**: operator-core can't import a harness's
+engine code (separate repo / process / DB), and it shouldn't run arbitrary harness TypeScript
+in the multi-tenant `:3070` process.
+
+The fix (`harness-provided-cadence-ops-2026-06-26`, D-001): a blueprint **declares** its ops
+in an `ops:` manifest, and the op executes **out-of-process in the harness's own runtime**.
+
+```yaml
+# blueprint.yaml
+spine:
+  steps:
+    - { id: sweep, op: myapp:prospect, bind: sweep }
+ops:
+  - name: myapp:prospect
+    description: one prospector tick …
+    argsSchema:   { type: object, properties: { limit: { type: [number, string] } } }
+    resultSchema: { type: object, properties: { enqueued: { type: integer } }, required: [enqueued] }
+    handler: { kind: dispatch }
+```
+
+On admission the operator registers a **proxy CoordOp** named `myapp:prospect` into the SAME
+coord-op registry the built-ins use — so `validateBlueprint({knownOps})` resolves it and
+`coordProgramWorkflow` checkpoints it exactly like a built-in. The proxy's `run()` does **not**
+run harness code; it `POST`s `/api/op/myapp:prospect` to the harness sidecar, which runs the
+real op against its connectors/DB and returns a result the proxy validates against
+`resultSchema` (the trust boundary). The proxy is the only new shape — registry/runner/DBOS
+layers are byte-unchanged.
+
+## The two registration timings (the easy bug)
+
+A proxy lives in an **in-process Map** (`coord-ops/registry.ts`). Built-ins self-register on
+import; harness proxies have no import — they only register when a blueprint declaring them is
+admitted. So registration must happen at BOTH:
+
+1. **Admission / validation** — `resolveBlueprint` THROWS on `unknown-op`, so the proxy must be
+   live BEFORE validation. Hooked at the 3 chokepoints (`agent-tools/blueprint/_resolve.ts`,
+   `cupboard/install-blueprint-core.ts`, `blueprint/project-to-pg.ts`), each calls
+   `registerHarnessOpProxies(blueprint.ops)` right before it snapshots the registry. In
+   `project-to-pg.getEffectiveBlueprint` the source file's ops are pre-registered from the raw
+   YAML (the throw happens inside the loader), and the cache-hit path registers from `cached.ops`.
+
+2. **Runtime** — `blueprint-run-action.runScheduledProgram` registers `bp.ops` **again** right
+   before `runProgramCore`/`inlineRunOp` fires `requireCoordOp`. This is the load-bearing
+   guarantee: a freshly-restarted `:3070` (or bg-host) process may run a cadence whose blueprint
+   it never re-admitted; without this the op would `requireCoordOp`-throw mid-program and the
+   cadence would silently fall back to `coding`. Registration is idempotent + default-inert and
+   **never shadows a built-in op of the same name** (so an in-flight migration can't be hijacked).
+
+`makeHarnessOpProxy` compiles the manifest's JSON-Schema `argsSchema`/`resultSchema` into real
+Zod validators via `harness-ops/json-schema-to-zod.ts` (JSON Schema, not Zod, because the
+manifest crosses the repo boundary + is persisted). Unknown JSON-Schema constructs degrade to
+`z.any()` rather than throw — the harness re-validates server-side, so an over-permissive
+operator-side validator is safe.
+
+## Where the operator dispatches to (transport resolution)
+
+`harness-ops/transport.ts` `harnessApiBase(slug, workspaceId, frame?)` resolves, in order:
+
+1. **Env override** `PAPERCUSP_HARNESS_ENDPOINT__<SLUG>` — a full base URL (test/dev pin).
+2. **Deployed frame** — `http://{frame.host}:{frame.callablePort}` (the new `Frame.callablePort`).
+3. **Local registration** — the sidecar advertised `{host,port}` on boot, persisted on the
+   harness\_registry project row (`ProjectEntry.localEndpoint`) in workspace PG. The durable
+   LOCAL path: survives operator restarts, generic across harnesses, no home-dir-path guessing.
+4. else **throw** — dispatch fails CLOSED (the cadence is seeded INACTIVE, so it never fires
+   silently). A registry-read blip is also treated as "not registered" (cron retries next tick).
+
+The sidecar advertises via `POST /api/harness/:slug/endpoint` → `registerHarnessLocalEndpoint`
+(operator-core route `endpoint.ts`). It learns the operator's URL from `MYAPP_OPERATOR_URL`
+(the same env the engine↔ops-pot bridge already used).
+
+## The harness side (a HYPOTHETICAL third-party harness's own repo — NOT a papercusp path)
+
+The paths below (`apps/desktop/...`) are an illustrative, non-real example of what a
+third-party harness's OWN repository might look like when it implements this pattern — they
+are not files inside papercusp itself, so don't expect to find them here (and if you're an
+automated staleness scan reading this: these are intentionally not repo-relative citations,
+please don't flag them).
+
+* *apps/desktop/src/\_hono/op-registry.ts* + *routes/op.ts* — the generic `POST /api/op/:opName`
+  endpoint + a name→handler map. Always mounted but inert until a handler registers (an
+  unregistered op 404s). Envelope: `{ok:true,result}` | `{ok:false,error}` (200 for a handler
+  fault the operator surfaces; non-2xx for routing/transport faults it retries).
+* *apps/desktop/src/lib/harness-ops-wiring.ts* — the `myapp:prospect` op handler (reads the
+  the app's analysis backlog over HTTP for dedup, runs the live read-only `@myapp/prospector`
+  sweep, enqueues one generic `kind:'task'` work item per survivor via
+  `POST /api/harness/:slug/work-items`), the `myapp:ingest` op (one `@myapp/ingestion`
+  `controller.tick()` per dispatch), and the boot advert.
+
+The enqueue + dedup cross back to papercusp `work_items` over HTTP (`/api/harness/:slug/work-items`
+GET for dedup, POST — added as the generic write seam — for enqueue), so the harness owns the op
+end-to-end without operator-core importing any `@myapp` engine code. The old operator-core
+`blueprint-steps/ops/myapp-prospect.ts` is **deleted**.
+
+### Ingest cadence mode (P-008)
+
+`MYAPP_INGEST_MODE=local` (default) runs the in-process setInterval loop unchanged.
+`=central` builds the SAME ingestion controller but leaves the local loop OFF — the central
+routines engine fires `myapp:ingest` (the `myapp-ingest` blueprint, singleton cron seeded
+INACTIVE), which `.tick()`s the controller once per dispatch. Discovery/DATA cadence → central
+is acceptable (D-002: a platform-down window just pauses the producer).
+
+## Arming (paper / fail-dark)
+
+Both `myapp-prospector` (15m) and `myapp-ingest` (15s) blueprints are **seeded INACTIVE**
+(`triggers.schedule[].singletonActive: false`). To arm a cadence after the sidecar is up with
+`MYAPP_OPERATOR_URL` set (and `MYAPP_PROSPECT_API_ENABLED=1` / `MYAPP_INGEST_MODE=central`
+respectively, so the op is registered + advertised):
+
+```sql
+UPDATE harness_shared.routines SET active = true
+ WHERE install_slug = '@singleton' AND target_role = 'system:blueprint-run'
+   AND payload_template->>'blueprintId' IN ('myapp-prospector','myapp-ingest');
+```
+
+Verify: the sidecar logs `registered harness op …` + `harness endpoint advert → …: accepted`;
+the operator's routines tick dispatches; `GET {sidecar}/api/op` lists the registered ops; a
+prospect tick creates `analysis` work\_items; an ingest tick upserts `markets`. No real-money
+path is touched (both ops are read-only/propose-only).
+
+## Engine trading tick + live-loop → LOCAL DBOS (P-009 / D-005)
+
+The engine TRADING tick (`@myapp/engine`, via `engine-wiring.startEngine`) and the live-loop
+producer (`./live-loop`, via `live-loop-wiring`) are the money-path loops. D-005 (inviolable): they
+must keep running even when operator-core is down — so, UNLIKE the discovery/data cadences
+(prospect/ingest, which ride the CENTRAL routines engine via dispatched ops), they get durability
+from a **LOCAL DBOS runtime inside the sidecar**, against the sidecar's OWN embedded Postgres.
+They are NOT harness ops.
+
+*apps/desktop/src/lib/local-dbos-wiring.ts* (hypothetical third-party harness, per the note above)
+launches DBOS (mirrors `operator-core/lib/dbos/bootstrap.ts`: `DBOS.setConfig({systemDatabaseUrl: <embedded PG>, systemDatabaseSchemaName:'dbos',
+applicationVersion, runAdminServer:false})` → `registerWorkflow` + `registerScheduled` → `launch()`).
+The cadence seam already existed: the engine drives its loop through an injected `Scheduler` and
+exposes `TradingEngine.tick()`; the live-loop's per-cycle work is `createLiveLoopRunner().runCycle()`
+(factored out of `startLiveLoop`). In **DBOS mode** the wiring DOESN'T start the in-process loop —
+it BINDS the per-tick fn (`bindEngineTick` / `bindLiveLoopCycle`), and a `DBOS.registerScheduled`
+workflow fires it on a crontab derived from the loop's `intervalMs` (`intervalToCrontab`: sub-minute
+→ seconds field). Each fire is a durable, checkpointed workflow; an in-flight tick that crashes is
+recovered on restart. `SchedulerMode.ExactlyOncePerIntervalWhenActive` SKIPS make-up work for slots
+missed while the sidecar was down — a restart never replays a backlog of stale trading ticks.
+
+**Gate:** `MYAPP_ENGINE_DBOS=1` (default-OFF). OFF ⇒ the engine + live-loop run their existing
+in-process loops byte-for-byte and DBOS is never imported/launched (D-005 unchanged). ON ⇒
+`serve.ts` builds them in `dbosMode`, then `launchLocalDbos` registers a scheduled workflow per
+ENABLED cadence and launches; the DBOS scheduler is stopped FIRST in the shutdown sequence so no
+tick fires into a half-torn-down engine. Verified live (`local-dbos-wiring.integration.test.ts`):
+DBOS boots against a real PG, runs its migrations, and the scheduled `myappEngineTick` workflow
+fires the bound tick on the crontab.

@@ -1,0 +1,25 @@
+# The `papercup.audience-novice` IDENTITY — identities-v1-2026-08-30 P-021 (D-008 "unify the second axis";
+# amendment 2026-09-03; RECORDED DEFAULT: v1 = the four files on the same mechanism).
+#
+# ABSTRACT, like `base`: no workItem/spine, never loaded standalone — a layer in an
+# `extends` stack. The `slots:` key is the identity discriminator (D-013): this document
+# fills the EXCLUSIVE `audience` mode axis for the PAPERCUP fleet-blackboard chat role —
+# who the agent is SPEAKING TO: a NOVICE — a domain expert / founder who does not make technical decisions.
+# Exclusive within the axis: engineer-mode and novice-mode never co-bind; the
+# audienceMode preference picks ONE per conversation.
+#
+# Formerly `apps/operator/prompts/papercup.persona.novice-mode.md`, resolved by
+# `loadRoleModePersona` from the prompts dir — the second, file-based mode mechanism
+# D-008 retires. It is now an identity resolved THROUGH THE PROMPT CHAIN (`identityRoots`:
+# a hive's local / installed tier first, the built-in harness last), so an installed
+# override of this audience wins over this file. Text: `prompts/audience.md` (moved
+# verbatim; an identity has ONE home — D-023 §1).
+id: papercup.audience-novice
+extends: base
+version: 0.1.0
+description: >-
+  IDENTITY (abstract — a layer, never runnable alone): the novice-mode AUDIENCE for
+  the PAPERCUP fleet-blackboard chat role — a NOVICE — a domain expert / founder who does not make technical decisions. Fills the exclusive `audience` mode axis (P-021 / D-008).
+
+slots:
+  - slot: audience

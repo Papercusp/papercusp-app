@@ -1,0 +1,16 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Papercusp GUI Nightly",
+  "identifier": "com.papercusp.gui.nightly",
+  "bundle": {
+    "shortDescription": "Papercusp GUI — nightly channel (installs alongside the stable app)",
+    "longDescription": "The nightly build of the Papercusp GUI, cut daily from main. It is a SEPARATE application: its own bundle id, its own name, and its own data home (~/.papercusp-nightly), so it never reads or writes the state of the Papercusp you use for real work. Install it beside the stable app, not instead of it.",
+    "icon": [
+      "icons/nightly/32x32.png",
+      "icons/nightly/128x128.png",
+      "icons/nightly/128x128@2x.png",
+      "icons/nightly/icon.icns",
+      "icons/nightly/icon.ico"
+    ]
+  }
+}

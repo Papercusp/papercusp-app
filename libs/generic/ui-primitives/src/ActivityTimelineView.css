@@ -1,0 +1,599 @@
+/* @papercusp/ui-primitives — ActivityTimelineView stylesheet.
+ *
+ * Layout A of the Project History tab (plan project-history-tab-desktop-and-portal-2026-09-16,
+ * P-010 / D-002), parameterised on the SAME `--ph-*` token contract as ProjectHistoryView.css —
+ * deliberately not one token wider, so the bindings P-002 (desktop) and P-003 (portal) already
+ * wrote theme this view too with no extra work. The four event kinds and four status colours map
+ * onto existing tokens rather than introducing `--ph-warning` etc.
+ *
+ * The :where(:root) block supplies zero-specificity fallbacks so the view renders standalone; any
+ * host declaration wins. Only `--ph-*` tokens may be referenced here — ActivityTimelineView.css.test.ts
+ * enforces that, that every consumed token has a fallback, and that every class the component
+ * emits is styled.
+ */
+:where(:root) {
+  --ph-border: #e4e4e7;
+  --ph-surface: #ffffff;
+  --ph-surface-sunken: #f4f4f5;
+  --ph-surface-soft: #fafafa;
+  --ph-muted: #71717a;
+  --ph-text: #18181b;
+  --ph-danger: #dc2626;
+  --ph-danger-text: #b91c1c;
+  --ph-success: #16a34a;
+  --ph-accent: #facc15;
+  --ph-on-accent: #1c1917;
+  --ph-accent-text: #a16207;
+  --ph-brand: #dc2626;
+  --ph-control-h: 32px;
+  --ph-shadow-float: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.atl-root {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--ph-surface-sunken);
+  color: var(--ph-text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* ── toolbar ─────────────────────────────────────────────────────────────── */
+
+.atl-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 20px;
+  background: var(--ph-surface);
+  border-bottom: 1px solid var(--ph-border);
+}
+
+.atl-toolbar-left,
+.atl-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.atl-search {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.atl-search-input {
+  height: var(--ph-control-h);
+  width: 210px;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0 10px;
+  border-radius: 4px;
+  border: 1px solid var(--ph-border);
+  background: var(--ph-surface-soft);
+  color: var(--ph-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.atl-search-input::placeholder {
+  color: var(--ph-muted);
+}
+
+.atl-search-input:focus-visible {
+  outline: 2px solid var(--ph-accent);
+  outline-offset: 1px;
+}
+
+.atl-live {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ph-muted);
+  white-space: nowrap;
+}
+
+.atl-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ph-muted);
+}
+
+.atl-live[data-live='on'] .atl-live-dot {
+  background: var(--ph-success);
+}
+
+.atl-live-label {
+  color: var(--ph-muted);
+}
+
+.atl-live-age {
+  color: var(--ph-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── filter chips ────────────────────────────────────────────────────────── */
+
+.atl-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 20px;
+  background: var(--ph-surface);
+  border-bottom: 1px solid var(--ph-border);
+}
+
+.atl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  border-radius: 12px;
+  border: 1px solid var(--ph-border);
+  background: var(--ph-surface-soft);
+  color: var(--ph-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.atl-chip:hover {
+  color: var(--ph-text);
+  border-color: color-mix(in srgb, var(--ph-accent) 40%, var(--ph-border));
+}
+
+.atl-chip[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--ph-accent) 16%, var(--ph-surface));
+  border-color: color-mix(in srgb, var(--ph-accent) 45%, var(--ph-border));
+  color: var(--ph-text);
+}
+
+.atl-chip:focus-visible {
+  outline: 2px solid var(--ph-accent);
+  outline-offset: 1px;
+}
+
+.atl-chip-count {
+  color: var(--ph-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── shared timeline gutter ──────────────────────────────────────────────── */
+
+.atl-gutter {
+  position: relative;
+  display: block;
+  height: 36px;
+}
+
+.atl-rail {
+  position: absolute;
+  left: 15px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--ph-border);
+}
+
+.atl-node {
+  position: absolute;
+  left: 12px;
+  top: 15px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ph-accent);
+}
+
+.atl-node-skeleton {
+  background: var(--ph-border);
+}
+
+/* ── loading skeleton ────────────────────────────────────────────────────── */
+
+.atl-skeleton {
+  display: flex;
+  flex-direction: column;
+}
+
+.atl-skeleton-row {
+  display: grid;
+  grid-template-columns: 32px 46px 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px;
+  height: 36px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ph-border) 55%, transparent);
+}
+
+.atl-bar {
+  height: 9px;
+  border-radius: 3px;
+  background: var(--ph-surface-soft);
+  border: 1px solid color-mix(in srgb, var(--ph-border) 60%, transparent);
+}
+
+.atl-bar-time {
+  width: 34px;
+}
+
+.atl-bar-pill {
+  width: 30px;
+  background: color-mix(in srgb, var(--ph-border) 45%, var(--ph-surface-soft));
+}
+
+.atl-bar-title {
+  width: 100%;
+  max-width: 520px;
+}
+
+.atl-bar-actor {
+  width: 62px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .atl-bar {
+    animation: atl-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes atl-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* ── empty state ─────────────────────────────────────────────────────────── */
+
+.atl-empty {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 48px 20px;
+  text-align: center;
+}
+
+.atl-empty-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ph-accent-text);
+}
+
+.atl-empty-body {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ph-muted);
+}
+
+.atl-ghost-button {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 11px;
+  box-sizing: border-box;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--ph-accent) 40%, var(--ph-border));
+  color: var(--ph-accent-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.atl-ghost-button:hover {
+  background: color-mix(in srgb, var(--ph-accent) 10%, transparent);
+}
+
+.atl-ghost-button:focus-visible {
+  outline: 2px solid var(--ph-accent);
+  outline-offset: 1px;
+}
+
+/* ── timeline ────────────────────────────────────────────────────────────── */
+
+.atl-timeline {
+  flex-grow: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.atl-day {
+  display: block;
+}
+
+.atl-day-separator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 9px 20px 7px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ph-muted);
+  background: var(--ph-surface-sunken);
+  border-bottom: 1px solid var(--ph-border);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.atl-day-label {
+  white-space: nowrap;
+}
+
+.atl-day-rule {
+  flex-grow: 1;
+  height: 1px;
+  background: var(--ph-border);
+}
+
+.atl-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.atl-item {
+  display: block;
+}
+
+.atl-row {
+  display: grid;
+  grid-template-columns: 32px 46px 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 0 20px;
+  height: 36px;
+  box-sizing: border-box;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--ph-border) 55%, transparent);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.atl-row:hover {
+  background: var(--ph-surface-soft);
+}
+
+.atl-row:focus-visible {
+  outline: 2px solid var(--ph-accent);
+  outline-offset: -2px;
+}
+
+.atl-row[data-open='true'] {
+  background: var(--ph-surface-soft);
+  border-bottom-color: transparent;
+}
+
+.atl-row[data-kind='work-item'] .atl-node {
+  background: var(--ph-accent);
+}
+
+.atl-row[data-kind='plan'] .atl-node {
+  background: var(--ph-brand);
+}
+
+.atl-row[data-kind='decision'] .atl-node {
+  background: var(--ph-accent-text);
+}
+
+.atl-row[data-kind='checkpoint'] .atl-node {
+  background: var(--ph-muted);
+}
+
+.atl-time {
+  font-size: 12px;
+  color: var(--ph-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.atl-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  padding: 0 7px;
+  box-sizing: border-box;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  background: color-mix(in srgb, var(--ph-accent) 18%, var(--ph-surface));
+  color: var(--ph-on-accent);
+}
+
+.atl-row[data-kind='plan'] .atl-pill {
+  background: transparent;
+  color: var(--ph-brand);
+  border: 1px solid color-mix(in srgb, var(--ph-brand) 40%, var(--ph-border));
+}
+
+.atl-row[data-kind='decision'] .atl-pill {
+  background: color-mix(in srgb, var(--ph-accent-text) 16%, var(--ph-surface));
+  color: var(--ph-accent-text);
+}
+
+.atl-row[data-kind='checkpoint'] .atl-pill {
+  background: var(--ph-surface-soft);
+  color: var(--ph-muted);
+  border: 1px solid var(--ph-border);
+}
+
+.atl-title {
+  display: block;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--ph-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atl-ref {
+  color: var(--ph-accent-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.atl-sep {
+  color: var(--ph-muted);
+  padding: 0 4px;
+}
+
+.atl-plan-item {
+  color: var(--ph-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.atl-title-text {
+  color: var(--ph-text);
+}
+
+.atl-transition {
+  color: var(--ph-muted);
+}
+
+.atl-arrow {
+  color: var(--ph-muted);
+  padding: 0 4px;
+}
+
+.atl-status {
+  color: var(--ph-muted);
+}
+
+.atl-status[data-status='wip'],
+.atl-status[data-status='active'] {
+  color: var(--ph-accent-text);
+}
+
+.atl-status[data-status='done'],
+.atl-status[data-status='passed'],
+.atl-status[data-status='resolved'] {
+  color: var(--ph-success);
+}
+
+.atl-status[data-status='blocked'],
+.atl-status[data-status='failed'],
+.atl-status[data-status='dropped'] {
+  color: var(--ph-danger-text);
+}
+
+.atl-actor {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border-radius: 10px;
+  font-size: 11px;
+  background: var(--ph-surface-soft);
+  color: var(--ph-accent-text);
+  border: 1px solid var(--ph-border);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.atl-actor[data-human='true'] {
+  background: color-mix(in srgb, var(--ph-brand) 14%, var(--ph-surface));
+  color: var(--ph-brand);
+  border-color: color-mix(in srgb, var(--ph-brand) 32%, var(--ph-border));
+}
+
+/* ── expanded row ────────────────────────────────────────────────────────── */
+
+.atl-detail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 28px;
+  margin: 0 20px 10px 84px;
+  padding: 16px 18px;
+  background: var(--ph-surface);
+  border: 1px solid var(--ph-border);
+  border-radius: 5px;
+  box-shadow: var(--ph-shadow-float);
+}
+
+.atl-detail-main {
+  min-width: 0;
+}
+
+.atl-detail-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ph-text);
+}
+
+.atl-excerpt {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ph-accent-text);
+}
+
+.atl-detail-list {
+  display: grid;
+  gap: 7px 14px;
+  margin: 0;
+  align-content: start;
+  font-size: 12px;
+}
+
+.atl-detail-pair {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.atl-detail-term {
+  color: var(--ph-muted);
+}
+
+.atl-detail-value {
+  margin: 0;
+  color: var(--ph-accent-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atl-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+/* ── a11y helper ─────────────────────────────────────────────────────────── */
+
+.atl-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

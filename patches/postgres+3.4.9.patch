@@ -1,0 +1,627 @@
+diff --git a/node_modules/postgres/cf/src/connection.js b/node_modules/postgres/cf/src/connection.js
+index 8e79170..4e46011 100644
+--- a/node_modules/postgres/cf/src/connection.js
++++ b/node_modules/postgres/cf/src/connection.js
+@@ -88,6 +88,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     , statements = {}
+     , statementId = Math.random().toString(36).slice(2)
+     , statementCount = 1
++    , queryDiagnosticId = 0
+     , closedTime = 0
+     , remaining = 0
+     , hostIndex = 0
+@@ -242,7 +243,18 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       ? statements[q.signature]
+       : { string, types, name: q.prepare ? statementId + statementCount++ : '' }
+ 
+-    typeof options.debug === 'function' && options.debug(id, string, parameters, types)
++    // PAPERCUSP PATCH (WI-10000316): preserve one diagnostic identity and
++    // start time across postgres.js's transparent prepared-statement retry.
++    q.resultDiagnostic = q.resultDiagnostic || {
++      queryId: ++queryDiagnosticId,
++      context: q.diagnosticContext,
++      query: string,
++      startedAt: performance.now(),
++      rowCount: 0,
++      wireBytes: 0
++    }
++
++    typeof options.debug === 'function' && options.debug(id, string, parameters, types, q.resultDiagnostic.queryId)
+   }
+ 
+   function write(x, fn) {
+@@ -254,6 +266,22 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function nextWrite(fn) {
++    // PAPERCUSP PATCH (WI-1048027): the socket can be torn down between write()
++    // scheduling this immediate and the immediate firing -- e.g. pgbouncer
++    // closing an idle server connection, after which closed() sets socket = null
++    // and reconnect() waits out a backoff during which queued queries still
++    // reach write(). Without this guard socket.write() raises
++    //   TypeError: Cannot read properties of null (reading 'write')
++    // from inside the Immediate, i.e. out of band: no query-level try/catch and
++    // no promise rejection handler can observe it, so it terminates the process.
++    // The close itself is already surfaced through
++    // closed() -> error(Errors.connection('CONNECTION_CLOSED', ...)), so
++    // dropping the unsendable chunk here loses no error signal.
++    if (socket === null) {
++      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
++      chunk = nextWriteTimer = null
++      return false
++    }
+     const x = socket.write(chunk, fn)
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
+@@ -426,7 +454,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     if (stream || query || initial || sent.length)
+       error(Errors.connection('CONNECTION_DESTROYED', options))
+ 
++    // PAPERCUSP PATCH (WI-1048027): same deferred-write state reset as closed().
+     clearImmediate(nextWriteTimer)
++    chunk = nextWriteTimer = null
+     if (socket) {
+       socket.removeListener('data', data)
+       socket.removeListener('connect', connected)
+@@ -439,7 +469,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     incoming = Buffer.alloc(0)
+     remaining = 0
+     incomings = null
++    // PAPERCUSP PATCH (WI-1048027): reset the deferred-write STATE, not just the
++    // timer handle. reconnect() reuses this same closure and connected() resets
++    // neither field, so leaving nextWriteTimer non-null permanently wedges
++    // write()'s `nextWriteTimer === null` scheduling guard (deferred writes are
++    // never re-armed), and leaving `chunk` set prepends bytes buffered for the
++    // dead socket onto the next connection's StartupMessage.
+     clearImmediate(nextWriteTimer)
++    chunk = nextWriteTimer = null
+     socket.removeListener('data', data)
+     socket.removeListener('connect', connected)
+     idleTimer.cancel()
+@@ -497,6 +534,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     let column
+     let value
+ 
++    if (query.resultDiagnostic) {
++      query.resultDiagnostic.rowCount++
++      query.resultDiagnostic.wireBytes += x.length
++    }
++
+     const row = query.isRaw ? new Array(query.statement.columns.length) : {}
+     for (let i = 0; i < query.statement.columns.length; i++) {
+       column = query.statement.columns[i]
+@@ -534,15 +576,41 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     }
+   }
+ 
++  function reportQueryResult(error) {
++    const diagnostic = query && query.resultDiagnostic
++    if (!diagnostic || typeof options.onresult !== 'function')
++      return
++
++    const terminalResult = results ? results[results.length - 1] : result
++    try {
++      options.onresult({
++        connectionId: id,
++        queryId: diagnostic.queryId,
++        backendPid: backend.pid,
++        query: diagnostic.query,
++        command: terminalResult && terminalResult.command || null,
++        rowCount: diagnostic.rowCount,
++        wireBytes: diagnostic.wireBytes,
++        elapsedMs: Math.max(0, performance.now() - diagnostic.startedAt),
++        status: error ? 'error' : 'ok',
++        errorCode: error && typeof error.code === 'string' ? error.code : null,
++        context: diagnostic.context
++      })
++    } catch (_) {
++      // Diagnostics must never affect query success or failure.
++    }
++  }
++
+   function ReadyForQuery(x) {
+     if (query) {
+       if (errorResponse) {
+         query.retried
+-          ? errored(query.retried)
++          ? (reportQueryResult(query.retried), errored(query.retried))
+           : query.prepared && retryRoutines.has(errorResponse.routine)
+             ? retry(query, errorResponse)
+-            : errored(errorResponse)
++            : (reportQueryResult(errorResponse), errored(errorResponse))
+       } else {
++        reportQueryResult(null)
+         query.resolve(results || result)
+       }
+     } else if (errorResponse) {
+diff --git a/node_modules/postgres/cf/src/index.js b/node_modules/postgres/cf/src/index.js
+index ffbe7ae..33caa30 100644
+--- a/node_modules/postgres/cf/src/index.js
++++ b/node_modules/postgres/cf/src/index.js
+@@ -108,13 +108,23 @@ function Postgres(a, b) {
+       return new Parameter(value, type)
+     }
+ 
++    function withContext(query) {
++      // Capture before pool queuing: connection callbacks can run in another
++      // caller's async context. Keep the SAME lazy Query, not a Promise wrapper.
++      if (query instanceof Query && typeof options.onquerycontext === 'function') {
++        try { query.diagnosticContext = options.onquerycontext() }
++        catch (_) { query.diagnosticContext = null }
++      }
++      return query
++    }
++
+     function sql(strings, ...args) {
+       const query = strings && Array.isArray(strings.raw)
+         ? new Query(strings, args, handler, cancel)
+         : typeof strings === 'string' && !args.length
+           ? new Identifier(options.transform.column.to ? options.transform.column.to(strings) : strings)
+           : new Builder(strings, args)
+-      return query
++      return withContext(query)
+     }
+ 
+     function unsafe(string, args = [], options = {}) {
+@@ -124,7 +134,7 @@ function Postgres(a, b) {
+         ...options,
+         simple: 'simple' in options ? options.simple : args.length === 0
+       })
+-      return query
++      return withContext(query)
+     }
+ 
+     function file(path, args = [], options = {}) {
+@@ -141,7 +151,7 @@ function Postgres(a, b) {
+         ...options,
+         simple: 'simple' in options ? options.simple : args.length === 0
+       })
+-      return query
++      return withContext(query)
+     }
+   }
+ 
+@@ -491,6 +501,8 @@ function parseOptions(a, b) {
+     target_session_attrs: tsa(o, url, env),
+     onnotice        : o.onnotice,
+     onnotify        : o.onnotify,
++    onquerycontext  : o.onquerycontext,
++    onresult        : o.onresult,
+     onclose         : o.onclose,
+     onparameter     : o.onparameter,
+     socket          : o.socket,
+diff --git a/node_modules/postgres/cjs/src/connection.js b/node_modules/postgres/cjs/src/connection.js
+index 07f6716..c8b3b87 100644
+--- a/node_modules/postgres/cjs/src/connection.js
++++ b/node_modules/postgres/cjs/src/connection.js
+@@ -86,6 +86,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     , statements = {}
+     , statementId = Math.random().toString(36).slice(2)
+     , statementCount = 1
++    , queryDiagnosticId = 0
+     , closedTime = 0
+     , remaining = 0
+     , hostIndex = 0
+@@ -240,7 +241,18 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       ? statements[q.signature]
+       : { string, types, name: q.prepare ? statementId + statementCount++ : '' }
+ 
+-    typeof options.debug === 'function' && options.debug(id, string, parameters, types)
++    // PAPERCUSP PATCH (WI-10000316): preserve one diagnostic identity and
++    // start time across postgres.js's transparent prepared-statement retry.
++    q.resultDiagnostic = q.resultDiagnostic || {
++      queryId: ++queryDiagnosticId,
++      context: q.diagnosticContext,
++      query: string,
++      startedAt: performance.now(),
++      rowCount: 0,
++      wireBytes: 0
++    }
++
++    typeof options.debug === 'function' && options.debug(id, string, parameters, types, q.resultDiagnostic.queryId)
+   }
+ 
+   function write(x, fn) {
+@@ -252,6 +264,22 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function nextWrite(fn) {
++    // PAPERCUSP PATCH (WI-1048027): the socket can be torn down between write()
++    // scheduling this immediate and the immediate firing -- e.g. pgbouncer
++    // closing an idle server connection, after which closed() sets socket = null
++    // and reconnect() waits out a backoff during which queued queries still
++    // reach write(). Without this guard socket.write() raises
++    //   TypeError: Cannot read properties of null (reading 'write')
++    // from inside the Immediate, i.e. out of band: no query-level try/catch and
++    // no promise rejection handler can observe it, so it terminates the process.
++    // The close itself is already surfaced through
++    // closed() -> error(Errors.connection('CONNECTION_CLOSED', ...)), so
++    // dropping the unsendable chunk here loses no error signal.
++    if (socket === null) {
++      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
++      chunk = nextWriteTimer = null
++      return false
++    }
+     const x = socket.write(chunk, fn)
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
+@@ -424,7 +452,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     if (stream || query || initial || sent.length)
+       error(Errors.connection('CONNECTION_DESTROYED', options))
+ 
++    // PAPERCUSP PATCH (WI-1048027): same deferred-write state reset as closed().
+     clearImmediate(nextWriteTimer)
++    chunk = nextWriteTimer = null
+     if (socket) {
+       socket.removeListener('data', data)
+       socket.removeListener('connect', connected)
+@@ -437,7 +467,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     incoming = Buffer.alloc(0)
+     remaining = 0
+     incomings = null
++    // PAPERCUSP PATCH (WI-1048027): reset the deferred-write STATE, not just the
++    // timer handle. reconnect() reuses this same closure and connected() resets
++    // neither field, so leaving nextWriteTimer non-null permanently wedges
++    // write()'s `nextWriteTimer === null` scheduling guard (deferred writes are
++    // never re-armed), and leaving `chunk` set prepends bytes buffered for the
++    // dead socket onto the next connection's StartupMessage.
+     clearImmediate(nextWriteTimer)
++    chunk = nextWriteTimer = null
+     socket.removeListener('data', data)
+     socket.removeListener('connect', connected)
+     idleTimer.cancel()
+@@ -495,6 +532,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     let column
+     let value
+ 
++    if (query.resultDiagnostic) {
++      query.resultDiagnostic.rowCount++
++      query.resultDiagnostic.wireBytes += x.length
++    }
++
+     const row = query.isRaw ? new Array(query.statement.columns.length) : {}
+     for (let i = 0; i < query.statement.columns.length; i++) {
+       column = query.statement.columns[i]
+@@ -532,15 +574,41 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     }
+   }
+ 
++  function reportQueryResult(error) {
++    const diagnostic = query && query.resultDiagnostic
++    if (!diagnostic || typeof options.onresult !== 'function')
++      return
++
++    const terminalResult = results ? results[results.length - 1] : result
++    try {
++      options.onresult({
++        connectionId: id,
++        queryId: diagnostic.queryId,
++        backendPid: backend.pid,
++        query: diagnostic.query,
++        command: terminalResult && terminalResult.command || null,
++        rowCount: diagnostic.rowCount,
++        wireBytes: diagnostic.wireBytes,
++        elapsedMs: Math.max(0, performance.now() - diagnostic.startedAt),
++        status: error ? 'error' : 'ok',
++        errorCode: error && typeof error.code === 'string' ? error.code : null,
++        context: diagnostic.context
++      })
++    } catch (_) {
++      // Diagnostics must never affect query success or failure.
++    }
++  }
++
+   function ReadyForQuery(x) {
+     if (query) {
+       if (errorResponse) {
+         query.retried
+-          ? errored(query.retried)
++          ? (reportQueryResult(query.retried), errored(query.retried))
+           : query.prepared && retryRoutines.has(errorResponse.routine)
+             ? retry(query, errorResponse)
+-            : errored(errorResponse)
++            : (reportQueryResult(errorResponse), errored(errorResponse))
+       } else {
++        reportQueryResult(null)
+         query.resolve(results || result)
+       }
+     } else if (errorResponse) {
+diff --git a/node_modules/postgres/cjs/src/index.js b/node_modules/postgres/cjs/src/index.js
+index f09c61c..2711402 100644
+--- a/node_modules/postgres/cjs/src/index.js
++++ b/node_modules/postgres/cjs/src/index.js
+@@ -107,13 +107,23 @@ function Postgres(a, b) {
+       return new Parameter(value, type)
+     }
+ 
++    function withContext(query) {
++      // Capture before pool queuing: connection callbacks can run in another
++      // caller's async context. Keep the SAME lazy Query, not a Promise wrapper.
++      if (query instanceof Query && typeof options.onquerycontext === 'function') {
++        try { query.diagnosticContext = options.onquerycontext() }
++        catch (_) { query.diagnosticContext = null }
++      }
++      return query
++    }
++
+     function sql(strings, ...args) {
+       const query = strings && Array.isArray(strings.raw)
+         ? new Query(strings, args, handler, cancel)
+         : typeof strings === 'string' && !args.length
+           ? new Identifier(options.transform.column.to ? options.transform.column.to(strings) : strings)
+           : new Builder(strings, args)
+-      return query
++      return withContext(query)
+     }
+ 
+     function unsafe(string, args = [], options = {}) {
+@@ -123,7 +133,7 @@ function Postgres(a, b) {
+         ...options,
+         simple: 'simple' in options ? options.simple : args.length === 0
+       })
+-      return query
++      return withContext(query)
+     }
+ 
+     function file(path, args = [], options = {}) {
+@@ -140,7 +150,7 @@ function Postgres(a, b) {
+         ...options,
+         simple: 'simple' in options ? options.simple : args.length === 0
+       })
+-      return query
++      return withContext(query)
+     }
+   }
+ 
+@@ -490,6 +500,8 @@ function parseOptions(a, b) {
+     target_session_attrs: tsa(o, url, env),
+     onnotice        : o.onnotice,
+     onnotify        : o.onnotify,
++    onquerycontext  : o.onquerycontext,
++    onresult        : o.onresult,
+     onclose         : o.onclose,
+     onparameter     : o.onparameter,
+     socket          : o.socket,
+diff --git a/node_modules/postgres/src/connection.js b/node_modules/postgres/src/connection.js
+index 1b1cccd..19e97b7 100644
+--- a/node_modules/postgres/src/connection.js
++++ b/node_modules/postgres/src/connection.js
+@@ -86,6 +86,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     , statements = {}
+     , statementId = Math.random().toString(36).slice(2)
+     , statementCount = 1
++    , queryDiagnosticId = 0
+     , closedTime = 0
+     , remaining = 0
+     , hostIndex = 0
+@@ -240,7 +241,18 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       ? statements[q.signature]
+       : { string, types, name: q.prepare ? statementId + statementCount++ : '' }
+ 
+-    typeof options.debug === 'function' && options.debug(id, string, parameters, types)
++    // PAPERCUSP PATCH (WI-10000316): preserve one diagnostic identity and
++    // start time across postgres.js's transparent prepared-statement retry.
++    q.resultDiagnostic = q.resultDiagnostic || {
++      queryId: ++queryDiagnosticId,
++      context: q.diagnosticContext,
++      query: string,
++      startedAt: performance.now(),
++      rowCount: 0,
++      wireBytes: 0
++    }
++
++    typeof options.debug === 'function' && options.debug(id, string, parameters, types, q.resultDiagnostic.queryId)
+   }
+ 
+   function write(x, fn) {
+@@ -252,6 +264,22 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function nextWrite(fn) {
++    // PAPERCUSP PATCH (WI-1048027): the socket can be torn down between write()
++    // scheduling this immediate and the immediate firing -- e.g. pgbouncer
++    // closing an idle server connection, after which closed() sets socket = null
++    // and reconnect() waits out a backoff during which queued queries still
++    // reach write(). Without this guard socket.write() raises
++    //   TypeError: Cannot read properties of null (reading 'write')
++    // from inside the Immediate, i.e. out of band: no query-level try/catch and
++    // no promise rejection handler can observe it, so it terminates the process.
++    // The close itself is already surfaced through
++    // closed() -> error(Errors.connection('CONNECTION_CLOSED', ...)), so
++    // dropping the unsendable chunk here loses no error signal.
++    if (socket === null) {
++      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
++      chunk = nextWriteTimer = null
++      return false
++    }
+     const x = socket.write(chunk, fn)
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
+@@ -424,7 +452,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     if (stream || query || initial || sent.length)
+       error(Errors.connection('CONNECTION_DESTROYED', options))
+ 
++    // PAPERCUSP PATCH (WI-1048027): same deferred-write state reset as closed().
+     clearImmediate(nextWriteTimer)
++    chunk = nextWriteTimer = null
+     if (socket) {
+       socket.removeListener('data', data)
+       socket.removeListener('connect', connected)
+@@ -437,7 +467,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     incoming = Buffer.alloc(0)
+     remaining = 0
+     incomings = null
++    // PAPERCUSP PATCH (WI-1048027): reset the deferred-write STATE, not just the
++    // timer handle. reconnect() reuses this same closure and connected() resets
++    // neither field, so leaving nextWriteTimer non-null permanently wedges
++    // write()'s `nextWriteTimer === null` scheduling guard (deferred writes are
++    // never re-armed), and leaving `chunk` set prepends bytes buffered for the
++    // dead socket onto the next connection's StartupMessage.
+     clearImmediate(nextWriteTimer)
++    chunk = nextWriteTimer = null
+     socket.removeListener('data', data)
+     socket.removeListener('connect', connected)
+     idleTimer.cancel()
+@@ -495,6 +532,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     let column
+     let value
+ 
++    if (query.resultDiagnostic) {
++      query.resultDiagnostic.rowCount++
++      query.resultDiagnostic.wireBytes += x.length
++    }
++
+     const row = query.isRaw ? new Array(query.statement.columns.length) : {}
+     for (let i = 0; i < query.statement.columns.length; i++) {
+       column = query.statement.columns[i]
+@@ -532,15 +574,41 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     }
+   }
+ 
++  function reportQueryResult(error) {
++    const diagnostic = query && query.resultDiagnostic
++    if (!diagnostic || typeof options.onresult !== 'function')
++      return
++
++    const terminalResult = results ? results[results.length - 1] : result
++    try {
++      options.onresult({
++        connectionId: id,
++        queryId: diagnostic.queryId,
++        backendPid: backend.pid,
++        query: diagnostic.query,
++        command: terminalResult && terminalResult.command || null,
++        rowCount: diagnostic.rowCount,
++        wireBytes: diagnostic.wireBytes,
++        elapsedMs: Math.max(0, performance.now() - diagnostic.startedAt),
++        status: error ? 'error' : 'ok',
++        errorCode: error && typeof error.code === 'string' ? error.code : null,
++        context: diagnostic.context
++      })
++    } catch (_) {
++      // Diagnostics must never affect query success or failure.
++    }
++  }
++
+   function ReadyForQuery(x) {
+     if (query) {
+       if (errorResponse) {
+         query.retried
+-          ? errored(query.retried)
++          ? (reportQueryResult(query.retried), errored(query.retried))
+           : query.prepared && retryRoutines.has(errorResponse.routine)
+             ? retry(query, errorResponse)
+-            : errored(errorResponse)
++            : (reportQueryResult(errorResponse), errored(errorResponse))
+       } else {
++        reportQueryResult(null)
+         query.resolve(results || result)
+       }
+     } else if (errorResponse) {
+diff --git a/node_modules/postgres/src/index.js b/node_modules/postgres/src/index.js
+index c7fba3d..0dce660 100644
+--- a/node_modules/postgres/src/index.js
++++ b/node_modules/postgres/src/index.js
+@@ -107,13 +107,23 @@ function Postgres(a, b) {
+       return new Parameter(value, type)
+     }
+ 
++    function withContext(query) {
++      // Capture before pool queuing: connection callbacks can run in another
++      // caller's async context. Keep the SAME lazy Query, not a Promise wrapper.
++      if (query instanceof Query && typeof options.onquerycontext === 'function') {
++        try { query.diagnosticContext = options.onquerycontext() }
++        catch (_) { query.diagnosticContext = null }
++      }
++      return query
++    }
++
+     function sql(strings, ...args) {
+       const query = strings && Array.isArray(strings.raw)
+         ? new Query(strings, args, handler, cancel)
+         : typeof strings === 'string' && !args.length
+           ? new Identifier(options.transform.column.to ? options.transform.column.to(strings) : strings)
+           : new Builder(strings, args)
+-      return query
++      return withContext(query)
+     }
+ 
+     function unsafe(string, args = [], options = {}) {
+@@ -123,7 +133,7 @@ function Postgres(a, b) {
+         ...options,
+         simple: 'simple' in options ? options.simple : args.length === 0
+       })
+-      return query
++      return withContext(query)
+     }
+ 
+     function file(path, args = [], options = {}) {
+@@ -140,7 +150,7 @@ function Postgres(a, b) {
+         ...options,
+         simple: 'simple' in options ? options.simple : args.length === 0
+       })
+-      return query
++      return withContext(query)
+     }
+   }
+ 
+@@ -490,6 +500,8 @@ function parseOptions(a, b) {
+     target_session_attrs: tsa(o, url, env),
+     onnotice        : o.onnotice,
+     onnotify        : o.onnotify,
++    onquerycontext  : o.onquerycontext,
++    onresult        : o.onresult,
+     onclose         : o.onclose,
+     onparameter     : o.onparameter,
+     socket          : o.socket,
+diff --git a/node_modules/postgres/types/index.d.ts b/node_modules/postgres/types/index.d.ts
+index 13c3432..32a4d44 100644
+--- a/node_modules/postgres/types/index.d.ts
++++ b/node_modules/postgres/types/index.d.ts
+@@ -74,8 +74,23 @@ interface BaseOptions<T extends Record<string, postgres.PostgresType>> {
+   onnotice: (notice: postgres.Notice) => void;
+   /** (key; value) when a server param change */
+   onparameter: (key: string, value: any) => void;
+-  /** Is called with (connection; query; parameters) */
+-  debug: boolean | ((connection: number, query: string, parameters: any[], paramTypes: any[]) => void);
++  /** Papercusp patch: capture local diagnostic context at query construction. */
++  onquerycontext: (() => unknown) | undefined;
++  /**
++   * Papercusp patch: custom socket factory. Supported at RUNTIME — `src/index.js` passes
++   * `socket: o.socket` straight through to the connection — but absent from upstream's
++   * types. Because `Options<T> extends Partial<BaseOptions<T>>`, an undeclared key makes
++   * an object literal fail the excess-property check, so BOTH object overloads are
++   * discarded and tsc reports against the LAST overload instead: "Argument of type
++   * '{ ... socket: ... }' is not assignable to parameter of type 'string'". That error
++   * names the string overload and reads like a wrong-argument bug, which is why it is
++   * easy to misread as a broken call site rather than a missing declaration.
++   */
++  socket: ((options: unknown) => unknown) | undefined;
++  /** Is called with (connection; query; parameters; paramTypes; queryId) */
++  debug: boolean | ((connection: number, query: string, parameters: any[], paramTypes: any[], queryId: number) => void);
++  /** Papercusp patch: terminal ReadyForQuery diagnostics (fail-soft). */
++  onresult: ((result: postgres.QueryResultDiagnostic) => void) | undefined;
+   /** Transform hooks */
+   transform: {
+     /** Transforms outcoming undefined values */
+@@ -198,6 +213,20 @@ type Return<T, K extends readonly any[]> =
+   postgres.Helper<T, K>
+ 
+ declare namespace postgres {
++  interface QueryResultDiagnostic {
++    connectionId: number;
++    queryId: number;
++    backendPid: number | null;
++    query: string;
++    command: string | null;
++    rowCount: number;
++    wireBytes: number;
++    elapsedMs: number;
++    status: 'ok' | 'error';
++    errorCode: string | null;
++    context?: unknown;
++  }
++
+   class PostgresError extends Error {
+     name: 'PostgresError';
+     severity_local: string;

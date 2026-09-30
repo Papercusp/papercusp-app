@@ -1,0 +1,19 @@
+{
+  "name": "@papercusp/activity-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Normalize cross-CLI coding-agent hook events (native tool calls / lifecycle / todo snapshots, across Claude/Codex/OMP-style CLIs) into a uniform { kind, summary, detail } activity record, and persist them through an injected TelemetryStore port. Pure normalizer + a narrow ingest seam; zero host coupling — the consumer supplies the store (PG, SQLite, memory, …).",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

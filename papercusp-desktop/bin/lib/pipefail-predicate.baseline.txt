@@ -1,0 +1,6 @@
+# pipefail-predicate baseline — seeded from the measured selftest population.
+# NEVER hand-add a new identity: this is SHRINK-ONLY. A new site is a regression
+# and must be fixed by capturing the producer before matching.
+#
+# Identity is selftest filename::physical line observed by run-selftests.sh.
+# The current population is empty after the residual predicate sweep.

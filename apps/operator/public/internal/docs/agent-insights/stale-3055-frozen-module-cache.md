@@ -1,0 +1,49 @@
+# The standing :3055 can serve a FROZEN module cache — hours-old code with no error
+URL: /internal/docs/agent-insights/stale-3055-frozen-module-cache
+
+An agent-launched operator-vite on :3055 without PAPERCUSP_ENABLE_HMR=1 never invalidates dev transforms: your landed edits render as the OLD page (UI checks and e2e silently test stale code). Symptom signature + verify + restart-under-lock recipe.
+
+**Symptom signature:** you've edited client code (it's in the tree, vitest is
+green), but the page served via `:3055` — a Playwright e2e, a Tauri webview, a
+screenshot — behaves like the OLD code. No error anywhere. Easy to burn an hour
+blaming your component (this cost a session \~1h on 2026-06-11 debugging
+"phantom" form behavior that was simply the pre-fix page).
+
+**Why:** the `:3055` operator-vite is often an **agent-session leftover**
+(`npm run dev` from a psu shell days ago), not a systemd unit. Launched without
+`PAPERCUSP_ENABLE_HMR=1` it runs the desktop-static-host path: dev transforms
+are served from cache and **file-watch invalidation is off**, so the module
+graph is frozen at whatever the sources looked like at launch. The
+`vite build --watch` dist writer that may also be running is a separate stack —
+rebuilding dist does NOT refresh the `:3055` transform cache.
+
+**Verify in one command** — fetch the transformed module straight off the
+server and grep for a string only your new code contains:
+
+```bash
+curl -s "http://127.0.0.1:3055/@fs/<abs-path-to-your-file>" | grep -o '<new-code-marker>'
+```
+
+No match (or an old marker matching) = frozen cache, not your bug.
+
+**Fix — restart it under the resource lock** (it's shared; desktop check via
+`dev:service_health` first — `desktop.present:false` means zero-disruption):
+
+```
+locks:acquire_resource { resource: 'dev-server', mode: 'exclusive', wait: { max_drain_sec: 60 } }
+kill <vite pid chain>     # ss -ltnp | grep 3055 → pid; kill its npm/sh parents too
+cd apps/operator-vite && nohup npm run dev > /tmp/vite-3055-restart-<you>.log 2>&1 &
+locks:release_resource { lock_id }
+```
+
+Note `dev:restart` does NOT cover this — it restarts `papercup-dev-api.service`
+(the `:3070` API host), not the `:3055` vite.
+
+**For Playwright e2e**, prefer the standing **HMR-enabled** instance when one
+exists (check `ss -ltnp | grep 3155` — env `PAPERCUSP_ENABLE_HMR=1
+PAPERCUSP_API_TARGET=http://127.0.0.1:3170`, i.e. fresh transforms + the
+staging API): `OPERATOR_E2E_BASE_URL=http://127.0.0.1:3155
+OPERATOR_E2E_REUSE_SERVER=1 npx playwright test …`. Related trap in the same
+suite: the agent-config store is **workspace-scoped** — request-fixture calls
+must stamp `x-papercusp-workspace: default` to hit the same store as the page
+(see `e2e/settings-agent-autosave.spec.ts` header).

@@ -1,0 +1,68 @@
+# LLM 429s: check WHICH transport before blaming the account
+URL: /internal/docs/agent-insights/llm-429-check-the-transport-not-the-account
+
+The stateless raw-OAuth path (anthropic-direct, oauth-2025-04-20 beta header) has its own rate bucket, separate from Claude Code CLI clients on the SAME Max account. An agent can burn hours concluding 'the Max session window is exhausted' while its own interactive session keeps working fine — the tell that the limit is path-specific. Escape: LLM_TEST_BACKEND=claude-code routes llm-client through the claude CLI subprocess. Distinct knob from AGENT_BACKEND (which only picks WHICH stateless credential). Cost trade: subprocess calls carry ~$0.10 overhead each.
+
+## The mistake this prevents
+
+During the Scout live-LLM test lane (scout-loop-test-plan-2026-06-11), **11
+consecutive attempts over \~12 hours** 429'd through full transport backoff. The
+running diagnosis — "the shared Claude-Max session window is exhausted, nothing
+to do but wait for rollover" — survived a granted fleet-quiet window, an
+owner-paused window, and a model-tier switch (opus → sonnet), because every probe
+confirmed it: genuine `rate_limit_error` responses with request ids, even for
+\~20-token calls.
+
+The diagnosis was wrong. The owner cracked it with one question: *"are you sure
+you're using the Max subscription and not the API?"* — which forced a trace of
+the actual transport instead of re-asserting the assumption.
+
+## The actual topology
+
+`llm-client.ts llmCall` → `runAgentChat({ backend: TEST_BACKEND })` where
+`TEST_BACKEND = LLM_TEST_BACKEND ?? 'anthropic-direct'` (the backend was named
+`meridian` until 2026-06-12 — EI-399). `anthropic-direct` is the **stateless
+raw-HTTP path** (`libs/papercusp-shared/src/agent/chat-stream.ts`,
+`resolveStatelessTransport`): `api.anthropic.com` with the Claude-Max OAuth
+token from `~/.claude/.credentials.json` and the `anthropic-beta:
+oauth-2025-04-20` header. This **is** the Max subscription — no API key
+involved. (The omp-token leg via the local `:3456` router was removed with the
+rename.)
+
+The non-obvious part: **the raw-OAuth path is rate-limited in its own bucket,
+separately from real Claude Code CLI traffic on the same account.** Interactive
+Claude Code sessions (and `claude -p` subprocesses) kept working all night while
+every raw-OAuth call 429'd. The fleet's llm-testing sim/judge calls hammer the
+raw path box-wide, so that bucket exhausts first and stays exhausted.
+
+## The tells
+
+1. **Your own session still works.** If you (an agent running via the claude
+   CLI) can think and call tools while your `llmCall` probes 429 — the account
+   is fine; the PATH is saturated. This contradiction is the whole diagnosis.
+2. 429s with request ids on **tiny** calls (≈20 tokens) — burst load doesn't
+   explain that; bucket exhaustion does.
+3. Local quiet windows (pausing peers/owner) change nothing — the bucket is not
+   about concurrent local load.
+
+## The escape
+
+```bash
+LLM_TEST_BACKEND=claude-code   # llm-client routes through the claude CLI subprocess
+```
+
+This is the documented-but-easy-to-miss knob in `llm-client.ts` — it dodges
+the raw-OAuth bucket. The subprocess inherits Claude Code's client identity, so it draws from
+the bucket that interactive sessions use. With `isolateConfig` the spawn skips
+the heavy host MCP init.
+
+Trade-offs: \~**$0.10 per call** of subprocess overhead (system prompt + minimal
+MCP init tokens) — budget caps sized for raw-path costs will overshoot; and the
+`model:` param maps to claude CLI model selection, not raw API model ids.
+
+## The meta-lesson
+
+When a credential failure survives multiple "environment fixed" attempts,
+**trace the transport to the wire** (which file's token, which header, which
+base URL) instead of re-asserting the credential story — the contradiction
+("my session works, my probes don't") was visible for hours before it was read.

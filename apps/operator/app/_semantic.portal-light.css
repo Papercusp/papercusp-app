@@ -1,0 +1,42 @@
+/**
+ * Do not edit directly, this file was auto-generated.
+ */
+
+[data-theme="portal-light"], [data-theme-base="portal-light"] {
+  --bg-deepest: #d8d2c7;
+  --bg-deeper: #e3ddd3;
+  --bg-deep: #eae4da;
+  --bg: #f4f0e8; /** Portal paper */
+  --bg-1: #fffefa; /** Portal panel */
+  --bg-2: rgba(32, 32, 30, 0.035);
+  --bg-3: rgba(32, 32, 30, 0.065);
+  --bg-4: rgba(32, 32, 30, 0.105);
+  --bg-popover: #ffffff;
+  --bg-raised: #fffefa;
+  --bg-raised-high: #f8f5ef;
+  --fg: #20201e; /** Portal ink */
+  --fg-dim: #4d4a45;
+  --fg-mute: #56534c; /** AA-safe muted copy on layered portal surfaces */
+  --border-muted: rgba(77, 74, 69, 0.1);
+  --border: rgba(77, 74, 69, 0.2);
+  --border-strong: rgba(77, 74, 69, 0.34);
+  --accent: #28655a; /** Portal light accent */
+  --accent-rgb: 40, 101, 90;
+  --accent-strong: #1f544b;
+  --accent-strong-rgb: 31, 84, 75;
+  --accent-cool: #4c8177;
+  --accent-soft: #dfeee8;
+  --accent-soft-rgb: 223, 238, 232;
+  --accent-deep: #1f544b;
+  --accent-deeper: #163d36;
+  --accent-ink: #fffefa;
+  --good: #34755f;
+  --warn: #80560f; /** AA-safe warning copy on portal paper */
+  --bad: #9c3b36;
+  --warn-bg: rgba(148, 103, 27, 0.1);
+  --warn-border: rgba(148, 103, 27, 0.34);
+  --good-bg: rgba(52, 117, 95, 0.1);
+  --bad-bg: rgba(156, 59, 54, 0.1);
+  --card-shadow: 0 18px 52px rgba(43, 39, 31, 0.14);
+  --frost: linear-gradient(180deg, rgba(255,255,255,0.72), rgba(255,255,255,0.30));
+}

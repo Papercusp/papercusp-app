@@ -1,0 +1,90 @@
+-- 797-guard-engineer-issues-terminal-state.sql
+--
+-- PENDING-CODE-DEPLOY: keep parked; arm only after the base-table lifecycle
+-- writer named below is present in the deployed release checkout.
+-- REQUIRES-DEPLOYED: packages/operator-core/lib/issues-engineer.ts#EI-20092514168581881
+--
+-- EI-20092514168581881 — the pre-unification `work_items` union-view report
+-- named migration 159, but the live topology is now the unified work_items BASE
+-- table with `engineer_issues` as its issue-family compatibility view. Its
+-- INSTEAD OF UPDATE trigger still copied NEW.state into the base row without
+-- entering the work-items lifecycle writer, so a raw view UPDATE could create a
+-- terminal issue with no owner, completion reference, or completion authority.
+--
+-- The lifecycle writer is the only supported terminal-state path. Refuse a view
+-- UPDATE that changes a non-terminal issue into a terminal state and direct the
+-- caller to work_items:set_state / work_items:complete. Existing terminal rows
+-- remain editable for non-lifecycle fields, and INSERTs from federation/legacy
+-- replication are intentionally not gated here. `setIssueState` is migrated to
+-- update the unified base table directly (while retaining its application-level
+-- completion gate), so trusted skipCompletionGate paths continue to work without
+-- making an exception in this compatibility trigger.
+--
+-- SURGERY, NOT A FULL FUNCTION RESTATEMENT. The trigger has accumulated the
+-- federated-row guard, payload normalization, claim-race guard, authority
+-- passthrough, and stored-row RETURNING fix in separate migrations. Patch the
+-- installed definition and assert the post-condition so this migration cannot
+-- silently revert a sibling fix.
+
+DO $mig797$
+DECLARE
+  def       text;
+  patched   text;
+  a_marker  CONSTANT text := 'EI-20092514168581881: refuse ungated terminal transitions';
+  a_insert  CONSTANT text := '  IF TG_OP = ''INSERT'' THEN';
+BEGIN
+  SELECT pg_get_functiondef(p.oid)
+    INTO def
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'harness_shared'
+     AND p.proname = 'engineer_issues_view_dml';
+
+  IF def IS NULL THEN
+    RAISE EXCEPTION '797: harness_shared.engineer_issues_view_dml() not found — expected the unified issue compatibility view to exist first';
+  END IF;
+
+  IF position(a_marker IN def) > 0 THEN
+    RAISE NOTICE '797: engineer_issues_view_dml already rejects ungated terminal transitions — no-op';
+    RETURN;
+  END IF;
+
+  IF position(a_insert IN def) = 0 THEN
+    RAISE EXCEPTION '797: INSERT-branch anchor not found in engineer_issues_view_dml — the function was restructured; re-derive the surgery anchor instead of forcing this migration';
+  END IF;
+
+  patched := replace(
+    def,
+    a_insert,
+    $$  -- EI-20092514168581881: refuse ungated terminal transitions. The issue
+  -- compatibility view is a read/field-edit surface, not a lifecycle writer;
+  -- terminal state must pass through setIssueState/work_items:set_state so the
+  -- owner + completion evidence/authority gate is evaluated before storage.
+  IF TG_OP = 'UPDATE'
+     AND NEW.state IN ('resolved', 'closed', 'done', 'dropped')
+     AND COALESCE(OLD.state, '') NOT IN ('resolved', 'closed', 'done', 'dropped')
+  THEN
+    RAISE EXCEPTION 'engineer_issues terminal transition refused — use setIssueState/work_items:set_state or work_items:complete so completion integrity is enforced (issue %) ', NEW.issue_id;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN$$
+  );
+
+  EXECUTE patched;
+
+  SELECT pg_get_functiondef(p.oid)
+    INTO def
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'harness_shared'
+     AND p.proname = 'engineer_issues_view_dml';
+
+  IF position(a_marker IN def) = 0
+     OR position('NEW.state IN (''resolved'', ''closed'', ''done'', ''dropped'')' IN def) = 0
+  THEN
+    RAISE EXCEPTION '797: post-condition failed — engineer_issues_view_dml does not contain the terminal-transition guard';
+  END IF;
+
+  RAISE NOTICE '797: engineer_issues_view_dml now refuses ungated terminal transitions';
+END
+$mig797$;

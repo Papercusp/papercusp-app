@@ -1,0 +1,23 @@
+/* PlanKanbanView — plan-specific dressing on the Kanban primitives
+ * (@/app/harness/Kanban.css owns the board/column/card chrome). */
+
+.pk-plan-kanban .pk-kanban__card.is-saving {
+  opacity: 0.6;
+}
+
+.pk-plan-kanban__count {
+  font-weight: 400;
+  color: var(--fg-mute);
+}
+
+.pk-plan-kanban__id {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--fg-mute);
+  font-size: 0.85em;
+}
+
+.pk-plan-kanban__text {
+  line-height: 1.4;
+  color: var(--fg-dim);
+}

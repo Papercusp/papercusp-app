@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" aria-label="Operator logo concept — Command Plate">
+  <defs>
+    <linearGradient id="plateFrame" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ebfbff"/>
+      <stop offset="44%" stop-color="#6fe0ff"/>
+      <stop offset="100%" stop-color="#258db4"/>
+    </linearGradient>
+    <linearGradient id="plateFill" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#122235"/>
+      <stop offset="100%" stop-color="#07101d"/>
+    </linearGradient>
+    <linearGradient id="cupShell" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#f4effa" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#cbc5d8" stop-opacity="0.76"/>
+    </linearGradient>
+  </defs>
+  <rect x="18" y="18" width="92" height="92" rx="24" fill="url(#plateFill)" stroke="url(#plateFrame)" stroke-width="4"/>
+  <rect x="28" y="28" width="72" height="72" rx="18" fill="none" stroke="rgba(235,251,255,0.16)" stroke-width="1.5"/>
+  <path d="M41 43h46l-5 37c0 5-8 9-18 9s-18-4-18-9z" fill="url(#cupShell)" fill-opacity="0.16" stroke="#d9f5ff" stroke-opacity="0.84" stroke-width="2.3" stroke-linejoin="round"/>
+  <ellipse cx="64" cy="43" rx="23" ry="5" fill="url(#cupShell)" fill-opacity="0.18" stroke="#d9f5ff" stroke-opacity="0.84" stroke-width="2.3"/>
+  <ellipse cx="64" cy="43" rx="17.5" ry="3.2" fill="#ba8a61" fill-opacity="0.88"/>
+  <path d="M47 57c9-2.4 25-2.4 34 0" fill="none" stroke="#ba8a61" stroke-opacity="0.72" stroke-width="2.1" stroke-linecap="round"/>
+  <path d="M64 17c0 7-8 11-15 17" fill="none" stroke="#d9a977" stroke-width="3.1" stroke-linecap="round"/>
+  <path d="M64 17c0 7 8 11 15 17" fill="none" stroke="#d9a977" stroke-width="3.1" stroke-linecap="round"/>
+  <path d="M64 53a15 15 0 1 1 0 30" fill="none" stroke="#7ce2ff" stroke-width="4" stroke-linecap="round"/>
+  <path d="M90 35h8" stroke="#7ce2ff" stroke-opacity="0.7" stroke-width="3" stroke-linecap="round"/>
+  <path d="M90 45h6" stroke="#7ce2ff" stroke-opacity="0.46" stroke-width="3" stroke-linecap="round"/>
+  <path d="M30 83h10" stroke="#7ce2ff" stroke-opacity="0.46" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="92" cy="92" r="3.5" fill="#7ce2ff"/>
+</svg>

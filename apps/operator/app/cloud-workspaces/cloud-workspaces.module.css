@@ -1,0 +1,1848 @@
+/*
+ * Cloud Workspaces — the guided rail shell.
+ *
+ * Two structural changes from the pre-redesign stylesheet:
+ *
+ *  - the page is a TWO-COLUMN app layout (persistent rail + one stage) rather
+ *    than three stacked full-width sections;
+ *  - the type floor is raised from 8.5–10.5px to 10.5–11.5px throughout. The
+ *    old sheet leaned on 8.5px metadata to fit everything on screen at once,
+ *    which the rail makes unnecessary: only one stage is on screen now, so the
+ *    space exists to set text at a size people can actually read.
+ *
+ * No new design tokens — the semantic set (--bg, --bg-1, --bg-2, --bg-deeper,
+ * --border, --fg, --fg-dim, --fg-mute, --accent, --good, --warn, --bad) is
+ * reused as-is.
+ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+  padding: 22px 24px 40px;
+  color: var(--fg);
+  background:
+    radial-gradient(
+      circle at 88% -8%,
+      color-mix(in srgb, var(--accent), transparent 92%),
+      transparent 34%
+    ),
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--bg-1), transparent 82%),
+      transparent 240px
+    );
+  container-type: inline-size;
+  container-name: cw-page;
+}
+
+/* ── Page header ──────────────────────────────────────────────────────────── */
+
+.pageHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.pageHeaderCopy h1 {
+  margin: 6px 0 0;
+  font-size: 26px;
+  font-weight: 620;
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent), var(--fg-mute) 48%);
+}
+
+.intro {
+  margin: 8px 0 0;
+  max-width: 62ch;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--fg-dim);
+}
+
+.pageHeaderActions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.pageHeaderActions small {
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+
+.spin {
+  animation: cw-spin 1s linear infinite;
+}
+
+@keyframes cw-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-1);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+}
+
+.notice strong {
+  display: block;
+  font-size: 12.5px;
+  color: var(--fg);
+}
+
+.notice p {
+  margin: 3px 0 0;
+}
+
+.noticeError {
+  border-color: color-mix(in srgb, var(--bad), transparent 55%);
+  background: color-mix(in srgb, var(--bad), var(--bg-1) 88%);
+}
+
+/* ── Shell: rail + stage ──────────────────────────────────────────────────── */
+
+.shell {
+  display: grid;
+  grid-template-columns: 268px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.stageArea {
+  min-width: 0;
+}
+
+/* ── The rail ─────────────────────────────────────────────────────────────── */
+
+.rail {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--border), var(--accent) 8%);
+  border-radius: 12px;
+  background:
+    linear-gradient(
+      155deg,
+      color-mix(in srgb, var(--accent), var(--bg-1) 96%),
+      var(--bg-1) 42%,
+      color-mix(in srgb, var(--bg-deeper), var(--bg-1) 62%)
+    );
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--fg), transparent 95%),
+    0 22px 54px -46px color-mix(in srgb, var(--accent), transparent 28%);
+}
+
+.railSteps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.railStep {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--fg-dim);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.railStep:hover:not([aria-disabled="true"]) {
+  background: var(--bg-2);
+  color: var(--fg);
+}
+
+.railStep:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A step whose precondition does not hold is inert, and reads that way.
+   Keyed on `aria-disabled`, not `:disabled`: the step stays hoverable and
+   focusable so the tooltip carrying WHY it is inert can actually open, which
+   a natively disabled button makes impossible. See WorkspaceRail.tsx. */
+.railStep[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.railStep[data-active="true"] {
+  border-color: color-mix(in srgb, var(--accent), transparent 55%);
+  background: color-mix(in srgb, var(--accent), var(--bg-1) 88%);
+  color: var(--fg);
+  box-shadow:
+    inset 3px 0 0 color-mix(in srgb, var(--accent), transparent 10%),
+    0 10px 24px -20px color-mix(in srgb, var(--accent), transparent 18%);
+}
+
+.railStepIcon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg), transparent 94%);
+}
+
+.railStep[data-active="true"] .railStepIcon {
+  border-color: color-mix(in srgb, var(--accent), transparent 45%);
+  color: var(--accent);
+}
+
+.railStepBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.railStepIndex {
+  font-size: 10.5px;
+  font-weight: 650;
+  color: var(--fg-mute);
+}
+
+.railStepLabel {
+  font-size: 13px;
+  font-weight: 570;
+  color: inherit;
+}
+
+/* Evidence, never a bare tick. */
+.railStepEvidence {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--fg-mute);
+}
+
+.railStepDot {
+  position: absolute;
+  top: 12px;
+  right: 10px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+  opacity: 0.5;
+}
+
+.railStep[data-status="done"] .railStepDot {
+  background: var(--good);
+  opacity: 1;
+}
+
+.railStep[data-status="current"] .railStepDot {
+  background: var(--accent);
+  opacity: 1;
+}
+
+.railStep[data-status="attention"] .railStepDot {
+  background: var(--warn);
+  opacity: 1;
+}
+
+.railStats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.railStat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--bg-2), var(--accent) 3%),
+    var(--bg-2)
+  );
+}
+
+.railStat span {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+.railStat strong {
+  font-size: 15px;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+
+.railStat[data-tone="warn"] strong {
+  color: var(--warn);
+}
+
+.railActivity {
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.railActivityHeading {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 640;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+.railActivityEmpty {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-mute);
+}
+
+.railActivityList {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  max-height: 286px;
+  margin: 0;
+  padding: 0 4px 0 0;
+  list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.railActivityList li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.activityDot {
+  flex: 0 0 auto;
+  margin-top: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+}
+
+.activityBody {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.activityBody strong {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.activityBody span {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+}
+
+.activityBody time {
+  font-size: 10.5px;
+  color: var(--fg-mute);
+}
+
+/*
+ * Medium shell: rail disclosure and its grid track collapse in the SAME
+ * container query. The tooltip and the button's own aria-label carry the
+ * hidden evidence, so nothing is lost to keyboard or screen-reader users.
+ */
+@container cw-page (max-width: 1100px) {
+  .shell {
+    grid-template-columns: 74px minmax(0, 1fr);
+    gap: 14px;
+  }
+
+  .rail {
+    padding: 10px 8px;
+  }
+
+  .railStepBody,
+  .railStepDot,
+  .railStats,
+  .railActivity {
+    display: none;
+  }
+
+  .railStep {
+    justify-content: center;
+    padding: 9px 0;
+  }
+}
+
+@container cw-page (max-width: 760px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .rail {
+    position: static;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    padding: 10px;
+  }
+
+  .railSteps {
+    flex-direction: row;
+    gap: 6px;
+  }
+
+  .railStep {
+    justify-content: flex-start;
+    align-items: center;
+    gap: 8px;
+    min-height: 48px;
+    padding: 7px 8px;
+  }
+
+  .railStep[data-active="true"] {
+    box-shadow:
+      inset 0 -3px 0 color-mix(in srgb, var(--accent), transparent 10%),
+      0 10px 24px -20px color-mix(in srgb, var(--accent), transparent 18%);
+  }
+
+  .railStepBody {
+    display: flex;
+    gap: 0;
+  }
+
+  .railStepEvidence,
+  .railStepDot,
+  .railActivity {
+    display: none;
+  }
+
+  .railStepIcon {
+    width: 24px;
+    height: 24px;
+  }
+
+  .railStepIndex {
+    font-size: 10.5px;
+  }
+
+  .railStepLabel {
+    font-size: 12px;
+  }
+
+  .railStats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+    padding-top: 10px;
+  }
+
+  .railStat {
+    min-width: 0;
+    padding: 6px 7px;
+  }
+
+  .railStat span {
+    font-size: 10.5px;
+  }
+
+  .railStat strong {
+    font-size: 13px;
+  }
+
+  .hostRow {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    padding: 5px;
+  }
+
+  .hostRowMain {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 10px;
+    width: 100%;
+    padding: 9px;
+  }
+
+  .hostCost {
+    grid-row: 2;
+    grid-column: 2;
+    margin-top: 2px;
+  }
+
+  .hostRowActions {
+    justify-content: flex-end;
+    padding: 0 8px 7px;
+  }
+}
+
+@container cw-page (max-width: 500px) {
+  .railStep {
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+    text-align: center;
+  }
+
+  .railStepIndex {
+    display: none;
+  }
+
+  .railStats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ── Stage chrome ─────────────────────────────────────────────────────────── */
+
+.stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 20px 22px 24px;
+  border: 1px solid color-mix(in srgb, var(--border), var(--accent) 6%);
+  border-radius: 12px;
+  background:
+    linear-gradient(
+      155deg,
+      color-mix(in srgb, var(--accent), var(--bg-1) 97%),
+      var(--bg-1) 38%,
+      color-mix(in srgb, var(--bg-deeper), var(--bg-1) 70%)
+    );
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--fg), transparent 95%),
+    0 24px 70px -56px color-mix(in srgb, var(--accent), transparent 18%);
+}
+
+.stage::before {
+  position: absolute;
+  top: -1px;
+  right: 22px;
+  left: 22px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent), transparent 44%),
+    transparent
+  );
+  content: "";
+  pointer-events: none;
+}
+
+.stageHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.stageHeaderCopy h2 {
+  margin: 5px 0 0;
+  font-size: 20px;
+  font-weight: 610;
+}
+
+.stageEyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 11px;
+  font-weight: 640;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+.stageNumber {
+  display: grid;
+  place-items: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-dim);
+}
+
+.stageDescription {
+  margin: 6px 0 0;
+  max-width: 74ch;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg-dim);
+}
+
+.stageHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Fields ───────────────────────────────────────────────────────────────── */
+
+.fieldGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 15px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.fieldGroupHeading h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.fieldGroupHeading p {
+  margin: 3px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-mute);
+}
+
+.fieldGroupBody {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.fieldLabel {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg-dim);
+}
+
+.fieldHint {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-mute);
+}
+
+.field :global(.pc-text-input),
+.field input {
+  width: 100%;
+  font-size: 12.5px;
+}
+
+/* ── Badges ───────────────────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-2);
+  font-size: 11px;
+  font-weight: 560;
+  white-space: nowrap;
+  color: var(--fg-dim);
+}
+
+.good {
+  border-color: color-mix(in srgb, var(--good), transparent 60%);
+  background: color-mix(in srgb, var(--good), var(--bg-1) 86%);
+  color: var(--good);
+}
+
+.warn {
+  border-color: color-mix(in srgb, var(--warn), transparent 60%);
+  background: color-mix(in srgb, var(--warn), var(--bg-1) 86%);
+  color: var(--warn);
+}
+
+.bad {
+  border-color: color-mix(in srgb, var(--bad), transparent 60%);
+  background: color-mix(in srgb, var(--bad), var(--bg-1) 86%);
+  color: var(--bad);
+}
+
+.neutral {
+  color: var(--fg-mute);
+}
+
+.planned {
+  border-style: dashed;
+  color: var(--fg-mute);
+}
+
+/* ── 01 Connect ───────────────────────────────────────────────────────────── */
+
+.connectLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.connectLayout[data-panel-open="true"] {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+}
+
+@media (max-width: 900px) {
+  .connectLayout[data-panel-open="true"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.providerRows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Rows, not cards: three providers fit in the space one card used to take. */
+.providerRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.providerRow[data-ready="true"] {
+  border-color: color-mix(in srgb, var(--good), transparent 65%);
+}
+
+.providerRow[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--accent), transparent 50%);
+  background: color-mix(in srgb, var(--accent), var(--bg) 92%);
+}
+
+.providerRow[data-supported="false"] {
+  opacity: 0.72;
+}
+
+.providerIcon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--fg-dim);
+}
+
+.providerIdentity {
+  min-width: 0;
+}
+
+.providerName {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 590;
+}
+
+.providerMark {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 650;
+  color: var(--fg-mute);
+}
+
+.providerFacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 3px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--fg-mute);
+}
+
+.providerFacts code {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.providerStatus,
+.providerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The connect form is a PANEL beside the rows, not a modal over them. */
+.connectPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 15px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 60%);
+  border-radius: 11px;
+  background: var(--bg);
+}
+
+.connectPanelHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.connectPanelHeader h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 610;
+}
+
+.connectPanelHeader p {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-mute);
+}
+
+.connectPanelActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+/* ── 02 Configure ─────────────────────────────────────────────────────────── */
+
+.provisionForm {
+  display: block;
+}
+
+.configureColumns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1000px) {
+  .configureColumns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.configureFields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.configureSummary {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: sticky;
+  top: 16px;
+}
+
+.sizeFieldset {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* Sizes as comparable cards: the alternatives you are choosing between stay
+   on screen, each carrying its own capacity and price. */
+.sizeCards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.sizeCard {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sizeCard[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--accent), transparent 45%);
+  background: color-mix(in srgb, var(--accent), var(--bg) 91%);
+}
+
+.sizeCard:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.sizeCardBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sizeCardBody strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.sizeCardBody span {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+.sizeCardBody em {
+  font-size: 11px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-mute);
+}
+
+.sizeCardTick {
+  margin-left: auto;
+  color: var(--accent);
+  opacity: 0;
+}
+
+.sizeCard[data-selected="true"] .sizeCardTick {
+  opacity: 1;
+}
+
+.estimate {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 15px 16px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+}
+
+.estimateIcon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--bg-2);
+  color: var(--accent);
+}
+
+.estimateTotal span {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+.estimateTotal strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 23px;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+}
+
+.estimateTotal small {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-mute);
+}
+
+.estimateTotal p {
+  margin: 5px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-mute);
+}
+
+.estimateFacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.estimateFacts dt {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+.estimateFacts dd {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+/*
+ * The readiness checklist. One line per condition, each independently
+ * pass/fail — this replaces the semicolon-joined "Required: a; b; c."
+ * sentence, in which a four-condition failure read as one wall of text.
+ */
+.readiness {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.readinessHeading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.readinessList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.readinessList li {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.readinessMark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--bg-2);
+  color: var(--fg-mute);
+}
+
+.readinessList li[data-ok="true"] .readinessMark {
+  background: color-mix(in srgb, var(--good), var(--bg-1) 82%);
+  color: var(--good);
+}
+
+.readinessList li[data-ok="false"] .readinessMark {
+  background: color-mix(in srgb, var(--warn), var(--bg-1) 82%);
+  color: var(--warn);
+}
+
+.readinessBody {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.readinessBody span {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+}
+
+.readinessList li[data-ok="false"] .readinessBody span {
+  color: var(--fg);
+}
+
+.readinessBody em {
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.45;
+  color: var(--fg-mute);
+}
+
+/* ── 03 Operate ───────────────────────────────────────────────────────────── */
+
+.driftBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 14px;
+  border: 1px solid color-mix(in srgb, var(--warn), transparent 52%);
+  border-left-width: 3px;
+  border-radius: 10px;
+  background: linear-gradient(
+    110deg,
+    color-mix(in srgb, var(--warn), var(--bg-1) 86%),
+    color-mix(in srgb, var(--warn), var(--bg-1) 94%) 72%
+  );
+  color: var(--warn);
+  box-shadow: 0 16px 34px -30px color-mix(in srgb, var(--warn), transparent 8%);
+}
+
+.driftBanner strong {
+  display: block;
+  font-size: 12.5px;
+  color: var(--fg);
+}
+
+.driftList {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.driftList li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+.driftLink {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 11.5px;
+  font-weight: 620;
+  color: var(--fg);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.driftLink:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.hostRows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hostRowItem {
+  border: 1px solid color-mix(in srgb, var(--border), var(--accent) 4%);
+  border-radius: 10px;
+  background: linear-gradient(
+    150deg,
+    color-mix(in srgb, var(--bg), var(--accent) 2%),
+    var(--bg) 54%,
+    color-mix(in srgb, var(--bg-deeper), var(--bg) 64%)
+  );
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg), transparent 96%);
+  overflow: hidden;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.hostRowItem:hover {
+  border-color: color-mix(in srgb, var(--border), var(--accent) 18%);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--fg), transparent 95%),
+    0 14px 34px -30px color-mix(in srgb, var(--accent), transparent 22%);
+}
+
+/* Row scale, not 400–900px cards: the fleet is legible at a glance. */
+.hostRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 4px;
+}
+
+.hostRow[data-expanded="true"] {
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.hostRowMain {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hostRowMain:hover {
+  background: var(--bg-2);
+}
+
+.hostRowMain:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.hostIcon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--fg-dim);
+}
+
+.hostIdentity {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.hostIdentity strong {
+  font-size: 13px;
+  font-weight: 590;
+}
+
+.hostIdentity span {
+  font-size: 11px;
+  color: var(--fg-mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ONE chip per host. It states the divergence rather than implying it. */
+.stateChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-2);
+  font-size: 11px;
+  font-weight: 570;
+  white-space: nowrap;
+}
+
+.stateChip[data-drifting="true"] {
+  font-variant-numeric: tabular-nums;
+  font-weight: 620;
+}
+
+.hostCost {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--fg-mute);
+}
+
+.hostRowActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.overflow {
+  position: relative;
+}
+
+.overflowMenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 168px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-1);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 38%);
+}
+
+.overflowItem {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font-size: 12px;
+  text-align: left;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.overflowItem:hover:not(:disabled) {
+  background: var(--bg-2);
+  color: var(--fg);
+}
+
+.overflowItem:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.overflowItem:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.overflowItem[data-destructive="true"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bad), var(--bg-1) 84%);
+  color: var(--bad);
+}
+
+.hostPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 15px 16px;
+}
+
+/* Tabs replace the single <details> that used to dump every panel at once. */
+.hostTabs {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-2);
+  align-self: flex-start;
+  flex-wrap: wrap;
+}
+
+.hostTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--fg-mute);
+  cursor: pointer;
+}
+
+.hostTab[aria-selected="true"] {
+  background: var(--bg-1);
+  color: var(--fg);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 26%);
+}
+
+.hostTab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.hostTab small {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hostTabPanel {
+  min-width: 0;
+}
+
+.tabStack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.hostFacts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+}
+
+.hostFacts dt {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+.hostFacts dd {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+}
+
+.hostPanelFooter {
+  display: flex;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+/* ── Shared detail surfaces ───────────────────────────────────────────────── */
+
+.recoverability,
+.dangerNotice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-2);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+}
+
+.recoverability strong {
+  display: block;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.recoverability span {
+  font-size: 11.5px;
+  color: var(--fg-mute);
+}
+
+.dangerNotice {
+  border-color: color-mix(in srgb, var(--bad), transparent 58%);
+  background: color-mix(in srgb, var(--bad), var(--bg-1) 88%);
+}
+
+.operation {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 13px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-2);
+}
+
+.operationHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+.operationHeader code {
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+
+.operationHeader strong {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.operation progress {
+  width: 100%;
+  height: 5px;
+}
+
+.operationPayloads {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.operationPayloads strong {
+  display: block;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+.operationPayloads code {
+  display: block;
+  margin-top: 3px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: var(--bg-deeper);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  color: var(--fg-dim);
+}
+
+.eventStream {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.eventStream li {
+  display: grid;
+  grid-template-columns: 8px auto auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+.eventStream time {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-mute);
+}
+
+.eventStream strong {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.eventStream small {
+  display: block;
+  font-size: 10.5px;
+  color: var(--fg-mute);
+}
+
+.eventDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg-mute);
+}
+
+.telemetryPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-2);
+}
+
+.telemetryHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.telemetryHeading h4 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.telemetryHeading > span:not(.badge) {
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+
+.telemetryPanel h5 {
+  margin: 4px 0 0;
+  font-size: 11px;
+  font-weight: 640;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+.telemetryEmpty {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-mute);
+}
+
+.signalList,
+.resourceList,
+.logList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.signalList li,
+.signalCode {
+  display: block;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: var(--bg-deeper);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  color: var(--fg-dim);
+}
+
+.resourceList li {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.resourceList li > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.resourceList strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.resourceList code,
+.resourceList small,
+.resourceList em {
+  font-size: 11px;
+  color: var(--fg-mute);
+  overflow-wrap: anywhere;
+}
+
+.resourceList em {
+  font-style: normal;
+  color: var(--bad);
+}
+
+.logList li {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 11.5px;
+}
+
+.logList time {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-mute);
+}
+
+.logList strong {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.logList code {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  color: var(--fg-dim);
+}
+
+/* ── Empty states ─────────────────────────────────────────────────────────── */
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 34px 24px;
+  border: 1px dashed var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+  text-align: center;
+}
+
+.emptyIcon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  background: var(--bg-2);
+  color: var(--fg-mute);
+}
+
+.emptyState h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.emptyState p {
+  margin: 0;
+  max-width: 46ch;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg-mute);
+}
+
+/* ── Modal ────────────────────────────────────────────────────────────────── */
+
+.modal {
+  max-width: 560px;
+}
+
+.modalBody {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.modalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dispositionGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.disposition {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.disposition strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.disposition span {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--fg-mute);
+}
+
+.disposition[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--accent), transparent 45%);
+  background: color-mix(in srgb, var(--accent), var(--bg) 90%);
+}
+
+.disposition:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── Motion ───────────────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+
+  .railStep,
+  .hostRowMain,
+  .sizeCard,
+  .providerRow {
+    transition: none;
+  }
+}

@@ -1,0 +1,513 @@
+# Repo conventions — the long form
+URL: /internal/docs/system/repo-conventions
+
+The full detail behind CLAUDE.md's pointers — deployment model, retired surfaces, borrowable libs, branch/commit discipline, two-port model, database topology, test infrastructure.
+
+# Repo conventions — the long form
+
+> `CLAUDE.md` at the repo root carries the **invariants + pointers** every agent
+> loads on every session. This page carries the **long-form detail** behind those
+> pointers (moved here 2026-06-10, plan `token-usage-reduction-audit-2026-06-09`
+> P-004). If a rule here contradicts CLAUDE.md, CLAUDE.md wins — update both.
+
+## Deployment model — desktop is the product
+
+**Source of truth: `apps/operator/providers/HarnessSyncProvider.tsx` lines 3–33**
+(the doc-comment — "Transport: SSE for every runtime (desktop Tauri shell *and*
+plain browser)").
+
+The shipping target is the **Tauri desktop app**, and it is also the only
+supported test surface. The old `next dev` / `bin/prod` standalone webapp path
+(running `apps/operator` directly and opening `localhost:3055` in a browser) is
+**retired as of 2026-05-14** — the `apps/operator/bin/{dev,prod}` standalone
+entrypoints are gone (the root `bin/dev`/`bin/prod`, which boot the Vite SPA +
+Hono host and invoke no Next, remain), and a `PreToolUse` hook blocks browser nav
+to its ports.
+
+`cd papercusp-desktop && npm run dev` boots embedded Postgres (writes
+`~/.papercusp/embedded-pg.json`), starts the operator sidecar against it, applies
+pending SQL migrations, and opens the Tauri webview. There is no "just the
+webapp" mode.
+
+Internal ports (do not open in a browser; the desktop drives them):
+
+* `:3055` — the operator's **Vite** dev server (TanStack-Router SPA,
+  `@papercusp/operator-vite`) consumed by the Tauri webview. **Next.js is
+  retired** for the operator (`next dev`/`next start` blocked). ⚠ But
+  `apps/operator/app/**` is **NOT** dead code — operator-vite still imports its
+  live page implementations from there via the `@/app` alias + `next/*` compat
+  shims (verified 2026-06-01; see plan `finish-next-removal-2026-06-01`).
+* `:3070` — operator harness sidecar API + these docs at `/internal/docs`.
+
+### Transport / persistence by deployment context
+
+| Concern            | Desktop (production)                                                            | Browser (test/dev)                                  |
+| ------------------ | ------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Sync transport     | **SSE** (`/api/zero-harness/sse` pushes invalidate/update via PG LISTEN/NOTIFY) | **SSE** — same transport, no runtime branch         |
+| Persistence        | embedded-pg (real PG 17 via libs/papercusp/packages/embedded-postgres-server)   | Same — embedded-pg, NOT pglite                      |
+| zero-cache process | **Not run** — operator sidecar serves SSE itself                                | **Not run** — retired in the 2026-05-07 SSE cutover |
+| Degraded fallback  | POLLING (via `useTransportFallback` after sustained SSE failure)                | Same — POLLING                                      |
+| Runtime detection  | **None** — transport is not runtime-selected                                    | **None**                                            |
+
+`HarnessSyncProvider` passes a literal `syncType="SSE"` unconditionally — there
+is **no** Tauri-vs-browser branch and **no** runtime detection driving transport
+selection. SSE is the transport in both the desktop Tauri shell and a plain
+browser; POLLING is the degraded fallback in both (dropped to only after
+sustained SSE failure). The Zero-WebSocket branch was retired in the SSE cutover
+(zero-cache 2026-05-07), and the `/api/runtime-config` / `zeroServer` plumbing
+that fed it was removed 2026-06-03. There is **no** `localStorage` knob (no
+`harnessSyncTransport` override) to force a desktop-vs-browser path — the
+operator's transport is fixed. (The generic `@papercusp/sync` `SyncProvider`
+still *understands* a `'WEBSOCKETS'` `syncType` prop for other apps, but
+`HarnessSyncProvider` never passes it.)
+
+**Stale docs to mistrust** (cross-checked 2026-05-11):
+
+* `libs/generic/sync/PASS_2_1_DECISION.md` (2026-05-06) declared "stop SSE" —
+  **SUPERSEDED 2026-05-07** by the HarnessSyncProvider decision to make SSE
+  primary on desktop. The doc has a header banner now but is otherwise frozen.
+* `libs/generic/sync/src/transports/sse/SSEAdapter.tsx`'s header still says
+  "Browser (test / dev) defaults to Zero WS; SSE acts as a fallback there" — that
+  is **stale** (it appears to be the source the old transport table copied). The
+  operator no longer selects Zero WS for any runtime; SSE is primary in both.
+* Any code comment or memory note that says "Zero WS is primary everywhere",
+  "Browser defaults to Zero WS", or "SSE is dead" predates 2026-05-07 and is
+  wrong — SSE is the only selected transport now.
+* Older text saying native PG was renamed `papercusp_legacy` to make standalone
+  boots fail loudly is **stale** — native `papercusp` on `:5432` is alive and is
+  the dev box's substrate (see Database topology below).
+
+**When designing new sync-touching features:** SSE is the path that matters —
+it's the transport in both desktop and browser, so a feature that works in a
+normal browser tab is on the same transport as production. POLLING is only the
+degraded fallback; if a feature only works under POLLING (or assumes the retired
+Zero WS), it's incomplete for production.
+
+## Retired / preserved-not-active surfaces
+
+Some code is **retired but deliberately kept** in the tree for reference — not
+deleted, not deployed, not tested, and not to be extended. Agents repeatedly
+mis-read these as active because they still look like workspaces, carry deploy
+config, or have recent commits. **Treat everything in this list as dead:** do not
+write tests for it, wire new code to it, or "revive" it without an explicit ask.
+
+| Surface                                                                                                                                                                                                                                                                                                                                                                                                                                    | Location                                                                                                                                           | Status                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Restore                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `@papercup/web` — papercupai.com public site                                                                                                                                                                                                                                                                                                                                                                                               | `_retired/papercup/`                                                                                                                               | Retired 2026-05-30. Dropped from the workspace glob + root scripts; `docker-compose.papercup.prod.yml` + `Dockerfile.papercup` bannered (preserved, not deployed).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | `_retired/papercup/RESTORE.md` + git tag `papercup-web-retired-2026-05-30`                                                       |
+| Standalone operator webapp (`apps/operator` opened on `:3055` in a browser)                                                                                                                                                                                                                                                                                                                                                                | `apps/operator` — run **only** via the Tauri shell                                                                                                 | Retired 2026-05-14; a `PreToolUse` hook blocks browsing its ports.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | n/a — the operator still ships, just not as a standalone webapp                                                                  |
+| `libs/zero-harness` — Zero ZQL schema/queries                                                                                                                                                                                                                                                                                                                                                                                              | `libs/zero-harness`                                                                                                                                | On the Zero-retirement path; the ZQL package has **0 live importers** (only dead surfaces reference it: `libs/papercusp-shared/**/*View.tsx` + the retired `@papercusp/web`). **Migrate off, don't add tests.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | n/a                                                                                                                              |
+| `libs/papercusp-db` — fictional-org demo schema                                                                                                                                                                                                                                                                                                                                                                                            | `libs/papercusp-db`                                                                                                                                | Demo data; only consumed by `_retired/papercup` + a vendored submodule. Deletion candidate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | n/a                                                                                                                              |
+| `libs/holepunch-spike` — P2P spike                                                                                                                                                                                                                                                                                                                                                                                                         | `libs/holepunch-spike`                                                                                                                             | Phase-0 spike. The `@papercup/holepunch-spike` package has **no real importers** — only textual comment mentions (e.g. `packages/operator-core/lib/voice-node/manager.ts`). But its `holepunch.d.ts` shim *type* surface is mirrored by `packages/operator-core/lib/sync/hyperbee/swarm.ts` (the "Minimal Hyperswarm-like surface — matches the holepunch.d.ts shim"), whose consumers (cross-pot transport, authority RPC wiring, pot-directory-boot, feature-claim / distributed-claim, …) all live under `packages/operator-core/lib/`. Treat the *package* as a spike; don't extend it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | n/a                                                                                                                              |
+| `libs/papercusp-shared/**/*View.tsx`                                                                                                                                                                                                                                                                                                                                                                                                       | `libs/papercusp-shared`                                                                                                                            | The read-only `*View.tsx` components render the retired web surface; the non-view helpers (e.g. `_admin-paths`) are still shared and live.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | n/a                                                                                                                              |
+| Legacy `@papercusp/orchestrator` run-loop (`runMainLoop` + the `pre-loop`/`synthesizer`/`actions-block`/`checkpoints(-pg)`/`snapshot-state`/`snapshots-pg`/`mission-state-pg`/`dispatches-pg`/`distributed-claim-fetch` cluster + `bin/run.ts`, plus `git.ts`/`branch-iso.ts`)                                                                                                                                                             | `libs/papercusp/_retired/orchestrator-run-loop/` (+ superproject `_retired/orchestrator-run-loop/apps-operator-test/` for the 4 integration tests) | Retired 2026-06-06 (`archive-legacy-orchestrator-deadcode`). 0 live importers; superseded by the DBOS pipeline. Barrel + 4 package.json subpath exports pruned; the `cost-cap.ts`→`mission-state-pg` cross-edge severed (cost-cap is now FS-only). `lint:no-retired` guards against re-imports + a reappearing `/api/plugins/orchestrator/spawn` fetch.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | `libs/papercusp/_retired/orchestrator-run-loop/RESTORE.md` + submodule git tag `legacy-orchestrator-run-loop-retired-2026-06-06` |
+| `@papercupai/orchestrator-spawn` plugin (never installed)                                                                                                                                                                                                                                                                                                                                                                                  | `libs/papercusp/_retired/orchestrator-spawn-plugin/`                                                                                               | Retired 2026-06-06. Superseded by `fleet/operator-spawn.ts`; its `/api/plugins/orchestrator/spawn` path 404'd.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | `libs/papercusp/_retired/orchestrator-spawn-plugin/RESTORE.md`                                                                   |
+| The harness-snapshot system (`@papercusp/export-state` FS-tarball lib + `snapshots:*` tools + `/api/snapshots/*` routes + the Cupboard `kind=snapshot` path + worker R2 blob store + the `SNAPSHOTS` flag + `snapshot_index` PG table)                                                                                                                                                                                                     | `_retired/snapshot-system/`                                                                                                                        | Retired 2026-06-09 (`retire-snapshots-instance-spec`). A monolithic-era abstraction; its jobs re-homed — distribution→blueprints, backup→git+PG, reproducible clone→the lightweight `InstanceSpec` (`packages/operator-core/lib/instance-spec/`, capture/boot/vary). `@papercusp/export-state` dropped from the workspace glob + lockfile; migration 199 drops `snapshot_index`. NOT the legacy `harness_snapshots(_consolidated)` iteration-snapshot tables (still live). `lint:no-retired` guards re-imports.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | `_retired/snapshot-system/RESTORE.md` + git tag `snapshot-system-retired-2026-06-09`                                             |
+| Legacy web chats (`OracleDock` chat dock + inner `OperatorChat` + `TutorialButton` — **`OperatorChatSidebar` was REVIVED 2026-07-13** and is live again as the primary chat surface)                                                                                                                                                                                                                                                       | `_retired/legacy-web-chats/`                                                                                                                       | Retired 2026-07-09 (design-simplification-2026-07-09 P-003, owner D1: the only chat surface is the terminal-native pui chat pane in the zellij dock). **Reversed for the sidebar 2026-07-13** (operator-chat-sidebar-revival-2026-07-13, owner decision): `OperatorChatSidebar` moved back to `apps/operator/app/_components/`, mounts in ChromeShell behind `FLAGS.OPERATOR_CHAT_SIDEBAR` (default ON), and the zellij dock is now the TESTING-gated dev surface (P-014/D-004 — bundled but dark by default; Rust spawns it only via the webview's `native_terminal_set_enabled` relay). `OracleDock`/`TutorialButton` stay retired. The former operator-local `chat/ChatConversation` renderer is deleted. The shared `PapercupChat` view in `packages/operator-ui/src/papercup-chat/PapercupChat.tsx` is the sole transcript renderer. Other shared chat infrastructure stays live (`OperatorConversationProvider`, `@papercusp/chat-cards`, `AudienceModeSelector`, `ChatwootWidget`; `SupportChatButton` self-falls-back to `/support`).                                                                                                                                                                                                                                                                                                                                                                                                                                           | `_retired/legacy-web-chats/RESTORE.md`                                                                                           |
+| Legacy per-slug harness dashboard (`/harness/$slug` dock shell `HarnessDockShell` + insights/projects pages, `dock/sample-panels` + the `Real*`/`Pinned*` dock data panels, shell-only dock chrome (`DockNavChevrons`/`DockOnboarding`/`LayoutsMenu`/`useDockLayout`), orphaned dashboard tabs (`InsightsPanel`/`MemoryBrowser`/`PromptsTab`/`PromptBudgetView`), `h-proposals.css`, the vite `/harness/$slug` routes, `e2e/dock.spec.ts`) | `_retired/harness-dashboard/`                                                                                                                      | Retired 2026-07-09 (design-simplification-2026-07-09 P-008, owner D2: `app/harness/` dashboard is legacy; `/adv` is the harness surface). Retire set derived by per-file importer inventory + reachability closure. **Stays live in `apps/operator/app/harness/`:** the design-system primitives (`Button`/`Checkbox`/`Modal`/`Select`/`Tooltip`/`Popover`/`Kanban`/`theme.ts`/`primitives.tsx`/`harness.css`, …) AND the dock ENGINE (`HarnessDock`/`panel-registry`/`dock-actions`/…) — `/adv` + `/workbench` are built on it — plus every audit-listed component the inventory proved live (`AgentInspectorModal`, `TrustBadge`, `PrsTab`, `FeatureEditor`, `InsightsTab`, the dogfood-substrate insights cards, `PiTerminalsDock`/`PiPanel`). Old `/harness/<slug>` deep links translate via the `routes/harness/$.tsx` splat redirect → `/adv`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | `_retired/harness-dashboard/RESTORE.md`                                                                                          |
+| Mug/Kettle left-rail tabs (`MugTab` queen steering panel + `OverwatchTab` kettle supervisor panel + their private sub-components `MugHeartbeat`/`ModelTiersOverride`/`ThrottleSection`/`AutonomySurfacing`/`HiveSteeringTree`/`hive-steering-tree.ts`, with tests)                                                                                                                                                                         | **LIVE** at `apps/operator-vite/src/components/left-sidebar/` — GATED, never moved                                                                 | ⚠ **CORRECTED 2026-08-10 — this row used to say these were retired to `_retired/mug-kettle-rail-tabs/`. They are not: that directory does not exist, and `MugTab.tsx` / `OverwatchTab.tsx` / `MugHeartbeat.tsx` are live files with live tests.** They were retired 2026-07-14 (WI-4778), then RESTORED by owner ask, and are now **GATED** on `papercusp-mug-kettle-system` (`LeftSidebar.tsx:292`; the `queen` + `overwatch` TABS entries at `:159`/`:160`). Default-OFF is the delivered end state, so they do not mount — but a GATE IS NOT A `_retired/` MOVE: the code stays live, tested and extendable. See [the Mug · Kettle · Cup tier is retired](/agent-insights/mug-kettle-cup-tier-is-retired) and plan `retire-mug-kettle-su-only-2026-08-09` D-020/D-029. Historical context for the original 2026-07-14 retirement (owner decision: *"I don't like there being a kettle and mug chat at all"* — Papercup is the ONE persona). Their decision-INPUT reads render in the chat sidebar's full-height **Pot Health view** (`PotHealthPane`, 🫖 header toggle / `?opcv=pot`); the steering WRITE controls they carried have no other GUI — the owner steers by talking to Papercup (`pot:set-steering` / `kettle:start`/`kettle:pause` tools). **Stays live:** `ModelOverride` + `useModelOverride` (PapercupTab uses them), `resolveHomeHive` (extracted to `left-sidebar/resolve-home-hive.ts`), and the interleaved `pc-queen__*` style primitives PapercupTab consumes. | n/a — nothing was moved. To see the tabs, flip `papercusp-mug-kettle-system` ON at `/admin/features`                             |
+| Chat sidebar's human Inbox face (`InboxPane.tsx` + test + `inbox-pane.css`, `?opcv=inbox`)                                                                                                                                                                                                                                                                                                                                                 | `_retired/inbox-pane/`                                                                                                                             | Retired 2026-07-26 (`hud-consolidation-2026-07-26` D-001, owner directive: *"remove the inbox pane from the left-hand toolbar and re-wire everything that opened the inbox to open the conversation in the HUD tab"*). Gated on P-002 first proving the HUD board covers every ask the Inbox covered, including attention items with no `ownerAgentId` (`HudBoard.tsx`'s `.hud__unattributed` lane). P-004 rewired the curator-card drill-in from `opcv=inbox` to `router.push('/adv?tab=hud&hudsession=<ownerAgentId>')` — the SAME `SessionChatModal` open-path `HudView.tsx` already uses. **Stays live:** the data layer (`use-inbox-pending.ts` — `useInboxAttention`/`useInboxPendingCount`/`usePlansNeedingYouCount`/`scopeInboxItems`), which the HUD board consumes directly, and `chat-seed.ts` (shared with `OperatorChat.tsx`'s composer).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | `_retired/inbox-pane/RESTORE.md`                                                                                                 |
+| `topics:subscribe` tool door (+ its handler test)                                                                                                                                                                                                                                                                                                                                                                                          | `_retired/topics-subscribe/`                                                                                                                       | Retired 2026-08-09 (`coordination-spec-adoption-2026-08-03` **D-102**). The named sugar for `watch:create { pattern: topic, targetKind:'topic', wake:false }` — **0 calls in 30 days while prescribed BY NAME in seven role prompts**, which is this plan's D-001 ("prompt text is not an enforcement tier") on one verb. The DOOR only: the base primitive and the whole subscription substrate (`subscribeTopic`, `coord_entity_subscriptions`, full/digest/mention, TTLs, `topics:unsubscribe`, `topics:list`) are untouched, so zero capability was lost. ⚠ D-102 also records the five retirements that were **wrong** — a zero call-count has at least four other holders, and each of these had one: `coord:catch-up` (orient's fold covers `@fleet:` only = 451 of \~28,700 audience-addressed msgs; it is the sole `coord:read`-tier door to the rest), `watch:create` (the BASE, not the duplicate — `state:subscribe` imports its handler), `coord:message-agent` (a live human UI action via `MessageOwnerThread.tsx`), `coord:couple` (declared edges union with derived in `presence.ts`), and `coord:handoff` (deferred into `coord:dispatch`'s 30-day re-measure).                                                                                                                                                                                                                                                                                                      | `_retired/topics-subscribe/RESTORE.md`                                                                                           |
+
+**Convention for retiring-but-keeping a surface:** (0) FIRST, scan for the
+surface's live references — **don't grep a bare word.** WI-6097 (retiring the
+work-item-mail surface) grepped `messages` and got 68-113 files back that read
+as catastrophic residue, because the word also matched the live `coord:*`
+plane (`coord/messages.ts`, `coord_event_log`, `coord-inbox-bus`); even the
+full identifier `messages:send` matched an unrelated Google FCM endpoint URL
+in `device-push-dispatcher.ts`. Use
+**`npm run scan:retirement-surface -- --surface <config.json>`**
+(`node scripts/scan-retirement-surface.mjs`) instead: write a small JSON
+surface config naming the exact identifiers being retired (tool names,
+table/view names, op-codes — see the header comment in the script for the
+shape and `scripts/retirement-surfaces/work-item-mail-2026-07-26.json` for a
+worked example), run it, and triage every hit — a genuine reference to
+re-point/remove, or a false positive you add to the config's `allowlist` (with
+a reason) so a re-run doesn't re-flag it. This also gives the sweep a durable,
+re-runnable completion check instead of a one-off manual grep. Then: (1) move
+it under `_retired/` — this drops it from the `apps/*` / `packages/*`
+workspace globs so npm, the affected-test runner, knip, and nx stop treating
+it as live (the structural signal that fools agents, not a prose note); (2)
+remove its root `package.json` scripts and banner any deploy config —
+**preserve, don't delete**; (3) add a `RESTORE.md` in the moved directory with
+the exact re-wiring steps + the last-active commit, and cut a
+`git tag <name>-retired-<date>` restore point; (4) add a row to the table
+above. Restoration is then `git mv _retired/<x> <orig>` + re-apply the
+RESTORE.md steps.
+
+⚠ **When the retired surface is (or is reached through) an agent-facing
+TOOL/verb, code removal alone is not "done" — DECLARATION and PROMPT
+surfaces must be swept too, or the retirement is silent-broken instead of
+clean.** Removing the implementation leaves two classes of dangling
+reference that step (0)'s scan config must also name as identifiers: a
+**blueprint `dependencies.tools` list** that still declares the retired verb
+hard-reds `blueprint-deps-catalog.test.ts`
+(`packages/operator-core/lib/__tests__/`) at commit time — loud, at least; a
+**prompt** (`<role>.md` / `<role>.persona.md` / `<role>.tools.md`, or a
+blueprint's own `prompts/*.md`) that still *instructs* an agent to call it
+fails silently, only when some spawned agent actually reaches that step
+mid-procedure. WI-6097 (retiring work-item-mail) is the reason this line
+exists — its code sweep was clean but never checked these two surfaces.
+Before calling a tool/verb retirement done:
+
+* **Include `libs/papercusp/packages/harness/blueprints/**/*.{yaml,md}` and
+  `apps/operator/prompts/**/*.md` in the step (0) scan config** alongside the
+  code paths — both the `dependencies.tools` declarations and prose telling
+  an agent to call the retired verb. Triage every hit the same way: a
+  same-shaped but genuinely unrelated `capability`/permission-tier vocabulary
+  string (e.g. a generic `<namespace>:read`/`<namespace>:write` tier label
+  that isn't actually a callable tool name) is a false positive, not a fix
+  target — allowlist it, don't "correct" it into something wrong.
+* **Re-run `blueprint-deps-catalog.test.ts`** — it validates every built-in
+  blueprint's `dependencies.tools` against the live static tool catalog and
+  will hard-red a dangling declaration.
+* **Don't stop at the bundled/packaged sidecar copies**
+  (`apps/operator/dist-sidecar/`,
+  `papercusp-desktop/src-tauri/{sidecar,env-sidecars}/`) — they are
+  generated, gitignored build output mirroring the canonical
+  `libs/papercusp/packages/harness/blueprints` / `apps/operator/prompts`
+  sources, so hand-editing them is pointless (the next build overwrites
+  them), but a *stale, unregenerated* copy can still ship a dead verb to a
+  packaged desktop agent between builds. Fix the canonical source, then
+  rebuild (`papercusp-desktop/bin/build-desktop-sidecar.sh`) before treating
+  the retirement as verified end-to-end on desktop.
+
+⚠ **`libs/zero-harness` and `libs/papercusp-db` have NOT had step (1) applied.**
+Unlike the `_retired/`-moved surfaces, both are still members of the root
+`package.json` `workspaces` glob verbatim — so npm, knip, nx, and the
+affected-test runner all still treat them as **live** workspaces. They are
+migrate-off targets, not yet *structurally* retired; the "drop from the workspace
+glob" step is still pending for them.
+
+## Borrowable libraries — generic, domain-free, reusable anywhere
+
+A growing set of our libraries carry **zero Papercusp domain coupling** —
+any project can borrow them. Where a host-specific value is needed it's injected
+through a small seam (a `configure*()` call or a prop); Papercusp maps its own
+domain onto that seam in the operator, so the lib itself names no consuming app.
+
+**The catalog is `BORROWABLE.md` at the repo root** (generated — `npm run
+gen:borrowable`; source of truth `scripts/gen-borrowable-catalog.mjs`). It lists
+each borrowable lib with its description + repo, grouped by domain, plus a
+"reusable with host wiring" section for libs that keep a Papercusp tie-in by
+design (`locks`, `coordination`, `backup`, `docs-engine`, `host-platform`).
+As of 2026-05-31, **every borrowable lib is its own standalone (private)
+submodule under `libs/generic/*` → `github.com/Papercusp/<name>`** — the
+borrowable submodules were physically regrouped there, and the borrowable
+in-repo `packages/*` libs (rrf, search, memory, ipc-framing, ipc-endpoint-server,
+desktop-ipc, rate-limit, plan-parser, embedded-pg-discovery) were promoted to
+their own private repos. Only the kept-tie-in libs stay in `packages/` / `libs/`.
+Consumers import by package name (`@papercusp/<name>`), so the location is
+transparent. When you make a lib generic — or notice domain coupling leaking into
+one — add/adjust it in the generator and re-run. See
+`papercusp-systems-abstraction-2026-05-29`.
+
+**Creating a brand-new borrowable submodule? Add its `.gitignore` in the SAME
+breath as the initial commit/push — before running `npm install`, a test, or a
+build inside it.** git-sync auto-commits the superproject *and every submodule*
+on a schedule with no per-repo opt-out and no grace period, so a fresh submodule
+with no `.gitignore` yet is one stray `npx vitest run` away from leaking
+`node_modules/`/build artifacts into its own history within minutes (EI-14414,
+live 2026-07-17 extracting `@papercusp/model-pricing`). Copy the standard
+template from an existing lib (e.g. `libs/generic/rate-limit/.gitignore` —
+`node_modules/`, `dist/`, `*.tsbuildinfo`, `coverage/`, `junit.xml`, `.DS_Store`,
+plus the WI-4419 `.papercusp/` scratch-dir guards) rather than writing one from
+scratch. Enforced going forward by
+`packages/operator-core/lib/harness/gitmodules-invariants.test.ts`'s "submodule
+.gitignore invariants" check, which fails the build if any npm-managed
+submodule lacks a `node_modules/`-ignoring `.gitignore`.
+
+**Generic-first — write it in `libs/generic` from the start, don't migrate it
+later.** A genuinely domain-free algorithm (a textbook concurrency /
+distributed-systems / data-structure core: a supervision tree, fencing tokens, a
+topological sort, a token-bucket rate limiter, φ-accrual, a saga…) **must START
+as `libs/generic/<name>` behind a `configure*()`/port seam** — not written inside
+`packages/operator-core/lib` to be extracted in a later pass. The 2026-06-05
+audit (`generalize-libs-to-generic-2026-06-05`) found a large batch of exactly
+that debt and had to migrate \~12 cores out of the app; the discipline below stops
+it re-accruing:
+
+* **`npm run lint:generic-first`** (advisory; `:all` for a full-tree sweep) flags
+  a *substantial, zero-coupling* file that *names a generic CS concept* and
+  landed in `operator-core/lib` / `apps/operator/lib`, and nudges it toward
+  `libs/generic`. It's informational by default (like `lint:knip` — it advises,
+  never gates), since the signal is a heuristic. Both signals are required on
+  purpose: structural decoupling alone flags \~200 files, so the concept name is
+  the precision filter.
+* A genuinely app-local file whose concept keyword is incidental (e.g.
+  "backpressure" describing browser audio buffering) goes in the `ALLOW` set in
+  `scripts/check-generic-first.mjs` — don't silence the whole lint.
+* The seam pattern itself:
+  [generalizing-a-lib-host-seam-pattern](/internal/docs/agent-insights/generalizing-a-lib-host-seam-pattern).
+
+## Branch + commit discipline — the long form
+
+The branch model since the staging→main cutover
+(`staging-branch-pipeline-2026-06-06`):
+
+* **`staging`** — the integration branch / agent firehose. The repo at
+  `/home/dev/papercupai-workspace/papercup` is the canonical shared
+  checkout and **must always have `staging` checked out**. Other agents
+  (paperclip, the operator UI, dev servers, the harness fleet) all assume this.
+  Branch-switching there breaks them all.
+* **`main`** — the GREEN branch. It only ever **fast-forwards** to a `staging`
+  commit that passed the green-checkpoint suite (run in an isolated checkout).
+  **Nothing and no one pushes `main` directly** — not you, not git-sync; only the
+  green-checkpoint automation advances it. A fresh clone of `origin/main` is
+  always a tested state, and the live `:3070` operator auto-serves it.
+
+We deliberately run one shared tree rather than many diverging worktrees: it's
+simpler, and it spares everyone the merge-reconciliation tax later. The tradeoff
+is a messy history — your work gets swept into other agents' commits and theirs
+into yours — and that's expected and fine. Coordinate through **`locks:*`** (a
+`PreToolUse` hook claims files per-edit automatically; call `locks:acquire` by
+hand only for a multi-file change held across several edits) and **`coord:*`**
+(`coord:declare-intent` announces what you're working on; handoffs + messages).
+
+**Symptoms that you've forgotten the branch rule:**
+
+* `git status` shows `On branch <not-staging>` in the shared checkout — switch
+  back to `staging` immediately and recover any in-flight work via `git stash`.
+* Paperclip starts editing files that look stale or wrong — it almost certainly
+  thinks it's on a different branch than you.
+* Dev/prod servers start serving 404s or HMR-error pages for routes that exist
+  on disk — branch divergence between server and source.
+
+**git-sync owns commit + push.** A background routine commits the whole shared
+tree (every agent's work) and merges + pushes it to **`origin/staging`** on a
+schedule — the superproject **and** every submodule (each to its own default
+branch). You never `git add` / `git commit` / `git push`; just leave your work in
+the tree and it lands on origin within a few minutes. Don't stash, branch, or
+scope pathspecs to isolate "your" diff — there are no per-agent commits; the
+routine packages whatever's in the tree. An auto-merge conflict it can't take is
+resolved by a `merge-resolver` agent, not you. The per-edit file-lock hook still
+serializes concurrent edits to the same file.
+
+From `staging`, work reaches `main` automatically: **green-checkpoint** (hourly)
+runs the suite on staging HEAD in an isolated checkout and fast-forwards `main`
+when green; **release-trigger** (every 15 min) then auto-deploys green `main` to
+the live `:3070` operator (drain → swap → migrate → restart → health-check,
+auto-rollback). Your change being "in the tree" means it reaches `origin/main` +
+the live host as soon as the suite is green — and NOT before. The `/admin/git`
+tab shows the whole pipeline. To pause sync for ONE tree, take its scoped
+resource lock — `locks:acquire_resource { resource: 'git-sync:<slug>', mode:
+'exclusive', ttl_sec: 1200 }` (scoped to that tree, TTL-bounded, audited; release
+with `locks:release_resource`). Do **not** `UPDATE harness_shared.routines SET
+active=false WHERE name='git-sync'` — the routine name is identical across every
+install, so it freezes every tree's sync fleet-wide (no TTL/audit/broadcast).
+Design: `git-sync-auto-commit-2026-06-03` + `staging-branch-pipeline-2026-06-06`
+
+* `git-sync-dx-hardening-2026-06-17` (F3).
+
+(Submodules are unchanged: each stays on its own default branch. The
+staging→main gate applies to the superproject; `main` only advances to staging
+commits whose pinned submodule SHAs passed the suite, so green `main` always
+resolves to a tested combination.)
+
+**A long-running interpreted script executing directly out of this tree is at risk
+from concurrent edits, not just concurrent readers of its *output*.** The file-lock
+hook only serializes edits to the same file against each other — it does not stop a
+`bash`/`node`/`python` process from being mid-*execution* of a file another agent
+edits in place. bash in particular re-reads a plain script by byte offset as
+execution proceeds rather than slurping it up front, so an in-place edit (not an
+atomic rename-swap) to a script a multi-hour `Type=oneshot` job has open can shift
+those offsets under the running interpreter and crash it with a spurious syntax
+error partway through — even though the file was, and remains, syntactically valid
+on disk (observed live 2026-07-19, EI-16828, on `bin/live-federation-gate.sh`).
+Any script expected to run for more than a few minutes over this tree should
+**snapshot itself into a private tmp copy and `exec` from that copy** at the very
+top of its own execution (see `bin/live-federation-gate.sh`'s `GATE_SELF_SNAPSHOT`
+guard for the pattern) rather than relying on the live tree path staying byte-stable
+for its whole run.
+
+## The two-port model — where a server-side edit goes live
+
+**Server-side code has no hot-reload.** The **Hono host** (`bin/hono-host.ts` —
+the MCP tools, the `lib/endpoint-route` handlers, and everything in
+`apps/operator/lib/**` they import) runs under `tsx` with no file-watch. How an
+edit goes live depends on which host:
+
+* **`:3070` (`papercup-dev-api`) is the GREEN/stable operator** — it runs from
+  the separate **release checkout** (`papercupai-workspace/papercup-release`),
+  pinned to the green **`main` branch**. Restarting it just reboots the same
+  green snapshot; **your `staging` edits are invisible to it** until the
+  auto-serve pipeline carries them (green-checkpoint hourly FF, then
+  release-trigger ≤15 min auto-deploy). A manual `npx tsx
+  apps/operator/lib/release/deploy-cli.ts --execute` still works for an immediate
+  deploy. See `apps/operator/lib/release/README.md`.
+* **`:3170` (`papercup-staging-api`) is the staging operator** — it runs from
+  an ISOLATED `papercusp-staging` checkout (not the shared integration tree
+  directly), which `papercup-staging-sync.timer` auto-fast-forwards to the
+  latest COMMITTED `staging` HEAD roughly every 5 minutes (isolated-staging-
+  tier-2026-06-21). To test YOUR OWN uncommitted server-side edit live:
+  `dev:restart { target: 'staging', confirm: true, authorize: true, reason: 'reload the staging operator with updated code' }`, then probe `:3170`.
+  **Never** a raw `systemctl --user restart papercup-staging-api.service` — on a
+  heavily-parallel fleet that fired every \~5-6min for hours with zero
+  coordination (WI-4221); `dev:restart` drains concurrent users first and
+  coalesces a restart requested within \~2min of a peer's real one.
+  * ⚠ **`:3170` also self-restarts independently of any human/agent action,
+    roughly every 5-7 minutes.** Whenever `staging` has advanced (true almost
+    continuously — git-sync auto-commits the whole fleet's work on a schedule),
+    the sync timer rebuilds the isolated checkout and cycles the unit —
+    outside `dev:restart`'s drain/coalesce path, so it's a real (if brief,
+    \~10-13s) hard-down/`ERR_CONNECTION_REFUSED` window each time (EI-13221).
+    This is expected freshness behavior, not a crash or a load signal — a
+    session actively probing `:3170` for more than a couple of minutes can
+    legitimately see one. Before concluding `:3170` is down or overloaded,
+    check **`dev:service_health`**: its `supervision` entry for `staging-api`
+    carries `secondsSinceStart` + a `recentRestartNote` whenever the unit came
+    up in the last \~20s, naming the sync timer as the likely cause instead of
+    leaving you to guess. (The sync script also skips its own restart when the
+    unit already cycled in the last \~45s, so it doesn't compound with a
+    concurrent `dev:restart`.)
+* **The Tauri dev shell** spawns its own operator from the integration tree —
+  reloading the desktop shell picks up `staging` edits in that context.
+
+(The `:3055` **Vite** dev server *does* hot-reload its own routes/components.)
+The tell that you're testing stale server code: a probe lands in the *old* place
+— e.g. during the coord FS→PG cutover a `coord:send` kept writing `coord/*.jsonl`
+instead of Postgres because the host hadn't reloaded. Probe where the write
+actually lands; if it's stale, restart the *right* host (or deploy) and re-probe
+before trusting any result.
+
+## Database topology — the long form
+
+The **shipping** product is a desktop app backed by **embedded Postgres**
+(`embedded-postgres-server`, per-harness instance), discovered through
+`~/.papercusp/embedded-pg.json`. That remains the product direction, and code
+must keep working under it.
+
+**Reality on the standing dev box (verified 2026-06-01): the operator runs
+against NATIVE Postgres `papercusp` on `localhost:5432`, not embedded-pg.**
+`apps/operator/.env.local` pins
+`DATABASE_URL=postgresql://harness_admin:…@localhost:5432/papercusp`; the `:5432`
+cluster holds the live databases `papercusp` (operator), `papercusp_su`, and
+`papercusp_test`; **no embedded-pg is running** here. The old claim that native
+`papercusp` was renamed `papercusp_legacy` is **stale/false**.
+
+Practical implications:
+
+* **Never hardcode `localhost:5432`.** Resolve the admin DSN through
+  `getHarnessAdminUrl()` so a code path works whether the box is on embedded-pg
+  (discovery file) or the native-PG `DATABASE_URL` override.
+* **SQL migrations** in `libs/papercusp/libs/db/sql/<NNN>-*.sql` are applied
+  automatically by the embedded-pg boot runner
+  (`libs/papercusp/packages/embedded-postgres-server/src/migration-runner.js`).
+  Native `:5432` has **no** auto-runner.
+* ⚠ **A raw `psql "$DATABASE_URL" -f <file>` runs the DDL but does NOT record
+  the migration in `harness_shared.schema_migrations`** — only the RUNNER
+  records. An applied-but-unrecorded migration stays "pending" to the runner
+  forever: the deploy's migrate step re-runs it every deploy, and an idempotent
+  re-run that contends for a lock (e.g. `ALTER … ENABLE ROW LEVEL SECURITY` on a
+  live table) trips the deploy's 15s `lock_timeout` and ROLLS BACK — this wedged
+  the whole fleet's deploys for \~1h on 2026-06-09 (migration `208-scout-ticks`,
+  applied out-of-band, unrecorded). Apply via the runner (`db:migrate`, which
+  records atomically) — or, if you must use `psql -f`, append `INSERT INTO
+  harness_shared.schema_migrations (filename, sha256) VALUES ('<NNN>-….sql',
+  '<sha256-of-file-contents>')` in the same transaction.
+* **Don't add features that only make sense against native PG** (cross-database
+  queries, `pg_extension` not available in embedded-pg, OS-level pg tooling). If
+  embedded-pg can't run it, the product can't ship it.
+
+See [storage policy](/internal/docs/system/storage-policy) for the PG-by-default
+rule, the acceptable-file-uses list, and the two-axes model (runtime
+store-of-record vs sync authority).
+
+## Test infrastructure — the long form
+
+* Test runner: **Vitest 4** (all layers). Shared config:
+  `@papercusp/test-config` exports `defineVitestConfig`, `getTestPg` /
+  `withTestSchema` (testcontainers-node Postgres), and `setupMsw` / `msw`.
+* Integration tests get a per-file Postgres schema (`t_<hex>`) on a reused
+  (`.withReuse()`) `pgvector/pgvector:pg18` testcontainer — the squashed
+  `000-baseline.sql` schema has `vector(N)` columns a plain `postgres:18-alpine`
+  can't build. Bumped from pg16 → pg18 (WI-2942, 2026-07-05) to match the
+  shipped/embedded operator (PostgreSQL 18.3): PG16 silently allowed behavior
+  PG18 rejects (e.g. a `DELETE` against a `REPLICA IDENTITY FULL` table with a
+  generated column in a delete-publishing publication — WI-2914), so testing
+  against PG16 let a PG18-only bug ship to the packaged desktop uncaught.
+  **Docker must be running locally** for integration tests. Run `npm run
+  test:doctor` to verify your environment.
+* CI: per-PR `.github/workflows/test.yml` runs the affected unit + integration
+  suites (results as a PR comment via JUnit); nightly
+  `.github/workflows/test-nightly.yml` runs everything.
+* **Property-based tests:** use `fast-check` for invariant-style tests where
+  examples undercount — encoders/decoders, slug rewrites, hash canonicalisation,
+  validator predicates. Pattern: `<source>.property.test.ts` colocated with
+  source. See `libs/papercusp-shared/src/_admin-paths.property.test.ts`.
+* **knip** (`npm run lint:knip`, `:fix` to auto-remove): runs in CI
+  **informationally** — never gates a merge. False positives live in
+  `knip.json`'s `ignoreDependencies` allow-list.
+* **Flaky-test quarantine:** `quarantine.txt` at the repo root, one entry per
+  line as `<workspace-name>::<file>`. A `quarantine.txt` entry does **not**
+  exclude a workspace from running — the affected-test walker runs *every*
+  affected workspace including the quarantined ones (the quarantine set is never
+  merged into the `--exclude` set, despite a stale in-script comment claiming so).
+  Only the *outcome* is non-gating: a quarantined workspace's failure is logged
+  (`quarantined failure — not gating`) and does not make the run exit non-zero.
+  The per-file `::<glob>` suffix is purely informational — vitest has no per-file
+  skip flag the runner can pass from outside. A PR that touches a quarantined
+  test's source must either de-quarantine it or document why it stays.
+* **Test secrets:** `TEST_<SERVICE>_KEY` naming, stored in GH Actions repository
+  secrets. Do **not** check live keys into fixtures.
+* The affected-test walker (`scripts/affected-tests.mjs`) diffs against
+  `origin/main`, maps changed files to npm workspaces, computes the
+  reverse-dependency closure, and runs every affected workspace's `test` (and
+  optionally `test:integration`) script. If your edit touches
+  `libs/papercusp/libs/db/**` (schema / migrations) → run `npm run
+  test:all:integration` — schema changes affect every workspace and the
+  dependency graph won't catch them. `infra/**` / `Procfile*` → no automated
+  coverage; verify manually.
+
+## Prompts are auto-generated — the long form
+
+Every agent-facing prompt is ASSEMBLED at launch/spawn time from source files;
+the text an agent receives is a rendered artifact, regenerated on the next launch
+(a direct edit there is clobbered and never reaches anyone). The sources:
+
+* **Chat-surface role prompts** (operator, oracle, …) — assembled per-launch by
+  `packages/operator-core/lib/prompt-assembly.ts` from three source layers in
+  `apps/operator/prompts/`: `<role>.persona.md` (behavior) + the tools catalog
+  (per-tool guidance from the **projection registry** — the single source of
+  truth, authored on each tool's `defineTool({ guidance })`) + `<role>.tools.md`
+  (cross-tool workflows). The catalog is rendered **per-call for only the tools
+  the caller passes** to the assembler — not the whole tool surface. Pick the
+  lowest layer that fits — per-tool guidance belongs on the `defineTool` call,
+  not in prose. (Prompt-assembly locates `apps/operator/prompts` by walking **up
+  from cwd** — and, failing that, up from its own module path — so the personas
+  resolve even when operator-core's own package tests run from
+  `packages/operator-core`.)
+* **psu / SU collaborator playbooks** — sources are
+  `apps/operator/prompts/papercusp-su-{engineer,power}.tools.md`, rendered
+  per-launch by `renderSuPlaybook`
+  (`packages/operator-core/lib/desktop-install/papercusp-files.ts`), which also
+  splices the repo `CLAUDE.md` in as the "Project guide" section — a
+  repo-convention change belongs in CLAUDE.md and reaches every psu session
+  automatically. The live `:3070` psu serves the **release checkout's** copy, so
+  an edit reaches new psu launches only after the staging→green deploy carries
+  it.
+* **Autonomous harness spawn prompts** (scoper → worker → validator → reviewer
+  …) — sources live under
+  `libs/papercusp/packages/harness/blueprints/<blueprintId>/prompts/<role>.md`,
+  resolved by walking the blueprint's `extends`-chain (its own override, then
+  each ancestor, then the universal `blueprints/base/prompts/<role>.md`
+  library — always consulted, even with no blueprint) via
+  `resolvePromptFiles`/`promptCandidates` in
+  `libs/papercusp/packages/orchestrator/src/prompt-resolve.ts`. A handful of
+  roles (worker/validator/documenter/orchestrator/summarizer) also compose a
+  generic `<role>.base.md` prefix from `blueprints/base/prompts/`. The legacy
+  global `prompts/$phase/…` / `prompts/department/…` override axis (and its
+  README) was **deleted** (`blueprint-role-bundling-2026-06-15` Phase 5) — the
+  `staging` phase-variant collapsed into `base` as canonical, so `ctx.phase` /
+  `ctx.dept` are no longer consulted. PROMPT files (not code/templates)
+  resolve from the staging/integration tree via `promptHarnessRoot()`, so a
+  prompt edit goes live without a code-release
+  (`decouple-agent-prompts-from-release-gate-2026-06-20`).
+* **Never edit rendered outputs:** `~/.papercusp/*-collaborator*.md` (vestigial
+  installer dumps, not read at launch), anything under the `papercup-release`
+  checkout, or an assembled prompt captured from a live session.
+
+In dev, prompt-source edits load immediately (`PAPERCUSP_RELOAD_PROMPTS=1`,
+default in development). After editing a `<role>.tools.md`, run the sync test:
+`cd packages/operator-core && npx vitest run tools-md-sync`. After a substantial
+edit to the SU engineer playbook, run the behavioral suite (`npm --prefix
+apps/operator run llm-test -- --target su`).

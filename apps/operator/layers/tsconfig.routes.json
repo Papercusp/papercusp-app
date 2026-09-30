@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "$comment": "Layer: routes. Transport-shaped code — Next route.ts handlers under app/api, Hono routers under app/api/_hono. May import next/* (NextRequest, cookies(), etc.) and Hono types. Imports host + core for the actual work; the route is the shim, not the business logic. Empty include in v1; route.ts files migrate in as Phase 4 dispatches them through the endpoint system.",
+  "extends": "./tsconfig.base.json",
+  "include": [],
+  "exclude": ["node_modules", "../.next"],
+  "references": [
+    { "path": "./tsconfig.core.json" },
+    { "path": "./tsconfig.host.json" }
+  ]
+}

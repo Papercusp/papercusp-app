@@ -1,0 +1,65 @@
+# A deploy-gate attribution split does not automatically cover a sibling alarm
+URL: /internal/docs/agent-insights/infra-liveness-alarm-ambient-vs-operator-attribution
+
+D-007 taught evaluatePerfSignals to split infra-crit reasons into operatorDefect vs ambientHost so the deploy gate never blocks on ordinary multi-tenant PSI load — but the infra-liveness ALARM's catch-all never inherited that split, so it kept paging a blocker escalation on every threshold crossing of expected fleet-load memory pressure.
+
+## What happened
+
+`EI-21025158485847408` reported "Host memory-pressure PSI thrashing recurred after WI-5471 was
+closed" — a watchdog kept opening `panel:infra` **blocker** escalations (fleet-wide pages) for
+`PSI memory full avg60 ≥ 5`, and cited the same class as `WI-5471`. But `WI-5471` was a *different*,
+already-fixed bug (bg-host event-loop/PG-pool starvation from a blocking disk-usage scan). The
+recurrence had nothing to do with that fix regressing.
+
+Roughly a dozen agent wakes across a day-plus of checkpoints investigated this and got nowhere —
+every wake concluded "root cause still unattributed" and "no matched process/cgroup delta". That
+is the tell in retrospect: there was no operator-side root cause to find. `PSI memory full avg60`
+genuinely does sit at 2–10%+ on this box under ordinary multi-tenant fleet load (dozens of agents
+sharing one host) — it is *expected*, not a regression, and it will cross any fixed threshold and
+cross back as load ebbs and flows. The alarm was treating a normal, load-correlated reading as an
+operator defect worth paging a human for, repeatedly.
+
+## The actual defect: an attribution split that only ever reached ONE of its two consumers
+
+`evaluatePerfSignals` (perf-budgets.ts) already classifies every infra-crit reason into exactly one
+of two buckets at the point it is raised — `operatorDefect` (our process is provably broken: event-
+loop lag, CLOSE\_WAIT storm, unreachable, a live wedge) vs `ambientHost` (multi-tenant load no
+candidate caused and no release can fix: PSI cpu/memory, host-total inotify exhaustion). That split
+was built (`WI-38449`/`D-007`) **specifically because it was measured live**: on 2026-08-16 the
+*sole* crit reason on a real capture was ambient PSI memory pressure, "nothing wrong with any
+candidate" — and it was wired into exactly one place, the **deploy gate**
+(`evaluatePerfGate`), so a release is never held for a condition its author cannot fix.
+
+The **infra-liveness alarm** (`system-health/liveness-alarm.ts`'s `evaluateLivenessAlarm`) is a
+structurally separate consumer of the *same* `PerfVerdict` — its catch-all (§6) pages a `blocker`
+for **any** panel self-reporting `crit`, with no attribution check at all. It was never touched by
+the D-007 work, because that work's own scope was "the deploy gate", and nobody traced the second
+consumer of the same crit signal. The fix (**not** WI-5471, and not this alarm's own prior authors'
+fault — it's a genuinely separate consumer that quietly diverged) was to give the alarm the same
+attribution-aware downgrade: an infra crit caused ONLY by `ambientHost` reasons, with an *empty*
+`operatorDefect` list and every other independently-crit leg (broken tool handler, MCP-proxy SLO
+breach, disk, gateway-down) also clean, now fires as a visible, non-paging `advisory` instead of a
+fleet-wide `blocker`. Anything that also carries an operator-defect leg still pages exactly as
+before.
+
+## The generalizable lesson
+
+**A classification/attribution mechanism built to fix consumer A does not automatically reach
+consumer B, even when B reads the exact same upstream verdict object.** Before concluding "this
+already has a fix" for a signal, check *every* place that branches on it — `rg` for the field name
+(here, `critAttribution`) across the repo, not just the one call site the original fix touched. A
+long, multi-wake investigative trail that keeps concluding "root cause unattributed" on a reading
+that is *supposed* to fluctuate under normal load is itself a strong hint that the bug is in the
+**detector's classification**, not in the subsystem it's reading from — the fix is very often
+"reuse the attribution someone already built elsewhere," not "find a new root cause in the metric
+itself."
+
+## Where the split now lives
+
+* `evaluatePerfSignals` (perf-budgets.ts) — the ORIGINAL split; `PerfVerdict.critAttribution`
+  has `{ operatorDefect: string[]; ambientHost: string[] }`, consumed by the deploy gate.
+* `infraCritAmbientOnly` (thresholds.ts) — the generalized leg-by-leg check (perf attribution +
+  every OTHER independently-crit infra leg), consumed by the infra-liveness alarm's catch-all.
+
+If a THIRD consumer of infra-crit ever needs the same distinction, reuse `infraCritAmbientOnly`
+rather than re-deriving it — that is exactly the gap this insight documents.

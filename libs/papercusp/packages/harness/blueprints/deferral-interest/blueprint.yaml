@@ -1,0 +1,59 @@
+# The `deferral-interest` blueprint — deterministic-blueprints-migration-2026-06-13 (bucket A).
+#
+# The deferral-interest pricing refit (backfill realized deferral costs from
+# history + re-fit the learned pricing model the queue ranker reads) as a
+# SCHEDULED DETERMINISTIC blueprint, mirroring the negative-space pilot (P-110).
+# A program-mode spine whose single step fires a registered typed function
+# (`deferral-interest:refit`) wrapping the shipped refit logic — same flag, same
+# governor budget, same tick (behavior-neutral, D-004). No decision gate ⇒ a
+# DETERMINISTIC PIPELINE. The bespoke `system:deferral-interest-refit` routine
+# action delegates to the SAME shared orchestration (`runDeferralInterestRefitGated`).
+#
+# Dark stays dark: the op runs the SAME `papercusp-deferral-interest` flag +
+# learning-governor preflight the routine did — the loop is triple-gated
+# (inactive seed + dark flag + unbudgeted governor) until the self-learning-frontier
+# P-001 arming gate closes.
+id: deferral-interest
+extends: base
+version: 0.1.0
+description: >-
+  Deterministic learning loop: backfill realized deferral costs from history and
+  re-fit the learned deferral-pricing model the queue ranker reads (the
+  deferral-interest refit) on a cadence. Pure SQL + math, no agent.
+
+# A descriptive work-item kind (the deterministic pipeline does not create rows —
+# it appends a model version directly); the schema requires the field.
+workItem:
+  kind: mining-run
+  idPrefix: DIR
+
+# Program-mode spine (P-010): one deterministic step, NO gate ⇒ deterministic
+# pipeline. The refit is a full-corpus recompute with no payload tunables, so the
+# step declares no args.
+spine:
+  steps:
+    - id: refit
+      op: deferral-interest:refit
+      bind: refit
+
+knobs:
+  harnessKind: learning
+  # SQL-only refit needs no repo.
+  requiresRepo: false
+
+# Scheduled trigger (D-004): the refit cadence, byte-identical to the bespoke
+# `system:deferral-interest-refit` routine (nightly at 03:35, offset from the
+# deploy rhythm). The routine fires `system:blueprint-run` with
+# `{ blueprintId: deferral-interest }`; the handler detects program-mode and runs
+# the steps inline. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 35 3 * * *"
+      action: system:blueprint-run
+      singleton: true  # P-144/D-018: workspace-singleton cadence — one dark @singleton routine per workspace
+
+# No agent roles (pure-deterministic) and no agent-tool deps — the step calls a
+# registered function, not an agent.
+dependencies:
+  tools: []
+  plugins: []

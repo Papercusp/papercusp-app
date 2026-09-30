@@ -1,0 +1,660 @@
+<title>Session popup — C3 across the whole popup</title>
+
+<style>
+  :root {
+    --ground: #f6f7f9; --raised: #ffffff; --ink: #101720; --ink-2: #3d4a58;
+    --muted: #5b6875; --rule: #dfe4ea; --rule-2: #c8d1db;
+    --accent: #0a6f9e; --accent-wash: #e8f2f8;
+    --good: #1a7f52; --warn: #9a6a06; --bad: #a83232;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0a0e14; --raised: #111821; --ink: #e4ecf4; --ink-2: #b3c2d0;
+      --muted: #8496a8; --rule: #1c242e; --rule-2: #2b3743;
+      --accent: #5cc6f5; --accent-wash: #10202c;
+      --good: #4ec98d; --warn: #e0b45c; --bad: #f08a8a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0a0e14; --raised: #111821; --ink: #e4ecf4; --ink-2: #b3c2d0;
+    --muted: #8496a8; --rule: #1c242e; --rule-2: #2b3743;
+    --accent: #5cc6f5; --accent-wash: #10202c;
+    --good: #4ec98d; --warn: #e0b45c; --bad: #f08a8a;
+  }
+  :root[data-theme="light"] {
+    --ground: #f6f7f9; --raised: #ffffff; --ink: #101720; --ink-2: #3d4a58;
+    --muted: #5b6875; --rule: #dfe4ea; --rule-2: #c8d1db;
+    --accent: #0a6f9e; --accent-wash: #e8f2f8;
+    --good: #1a7f52; --warn: #9a6a06; --bad: #a83232;
+  }
+
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 15px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 40px 24px 96px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(26px, 3.4vw, 38px); line-height: 1.15; font-weight: 680;
+    letter-spacing: -0.02em; text-wrap: balance; margin: 0 0 14px;
+  }
+  .lede { max-width: 66ch; font-size: 16.5px; color: var(--ink-2); margin: 0; }
+  .lede strong { color: var(--ink); font-weight: 620; }
+  h2 { font-size: 21px; font-weight: 660; letter-spacing: -0.01em; margin: 0 0 6px; text-wrap: balance; }
+  p { margin: 0 0 12px; max-width: 70ch; }
+  section { margin-top: 54px; }
+  .sec-head { border-top: 2px solid var(--ink); padding-top: 12px; margin-bottom: 20px; }
+  .sec-head .eyebrow { margin-bottom: 6px; }
+  .sec-head p { color: var(--muted); margin: 4px 0 0; font-size: 14.5px; }
+  code, .m { font-family: var(--mono); font-size: 0.88em; }
+  code { background: var(--accent-wash); color: var(--accent); padding: 1px 5px; border-radius: 3px; }
+
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--accent-wash);
+    padding: 14px 17px; border-radius: 0 5px 5px 0; font-size: 14.5px;
+    color: var(--ink-2); margin: 20px 0 0;
+  }
+  .callout strong { color: var(--ink); }
+  .callout p:last-child { margin-bottom: 0; }
+
+  .look-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  .look-tag {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .pick-flag {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--accent);
+    border: 1px solid currentColor; border-radius: 2px; padding: 0 5px;
+  }
+  .spec {
+    display: flex; gap: 22px; flex-wrap: wrap; margin: 12px 0 16px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  }
+  .spec b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* ══════════ POPUP MOCK — locked to the operator's real dark palette ══════════
+     Three looks, ONE markup: only the tokens on `.pop` change. That is the
+     argument as much as the pictures are — if a look needed different markup it
+     would be a different design, not a different skin. */
+  .stage { overflow-x: auto; padding-bottom: 4px; }
+  .pop {
+    --rail-bg: #0d1829;
+    --convo-bg: #0d1829;
+    --card: #1d3048;
+    --edge: #5182a0;
+    --zone-rule: rgba(125,211,252,0.15);
+    --cap-bg: #38bdf8;
+    --cap-fg: #051827;
+    --fg: #e7f7ff; --fg-dim: #b9d4e8; --fg-mute: #7f9bb4;
+    --accent-sp: #38bdf8; --warn-sp: #fbbf24; --good-sp: #34d399;
+    display: grid;
+    grid-template-columns: 196px minmax(300px, 1fr) 200px;
+    min-width: 880px;
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 10.5px;
+    line-height: 1.5;
+    color: var(--fg);
+    background: var(--convo-bg);
+    border: 1px solid var(--edge);
+  }
+  .pop-rail { background: var(--rail-bg); padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .pop-rail--l { border-right: 1px solid var(--zone-rule); }
+  .pop-rail--r { border-left: 1px solid var(--zone-rule); }
+  .pop-mid { display: flex; flex-direction: column; min-width: 0; background: var(--convo-bg); }
+
+  /* zone frame headers (FRAMED look only, but declared once) */
+  .zone-title {
+    display: none;
+    font-size: 8.5px; text-transform: uppercase; font-weight: 700;
+    color: var(--cap-fg); background: var(--edge);
+    margin: -8px -8px 2px; padding: 3px 8px;
+  }
+
+  .cluster { font-size: 8.5px; text-transform: uppercase; font-weight: 700; color: var(--fg-mute); margin: 3px 0 0; padding: 0 2px; }
+  .cluster:first-of-type { margin-top: 0; }
+
+  .sec { border: 1px solid var(--edge); border-radius: 4px; background: var(--card); overflow: hidden; }
+  .sec-cap {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 8px; margin: 0;
+    background: var(--cap-bg); color: var(--cap-fg);
+    font-size: 9px; text-transform: uppercase; font-weight: 700;
+  }
+  .sec-n {
+    margin-left: auto; font-family: var(--mono); font-size: 8.5px; font-weight: 700;
+    font-variant-numeric: tabular-nums; padding: 0 4px; border-radius: 999px;
+    background: rgba(0,0,0,0.20); color: inherit;
+  }
+  .sec-body { padding: 5px 8px 6px; }
+  .kv { display: flex; gap: 6px; padding: 1px 0; }
+  .kv .k { flex: none; width: 52px; color: var(--fg-mute); }
+  .kv .v { min-width: 0; color: var(--fg-dim); }
+  .line { color: var(--fg-dim); margin: 0; padding: 1px 0; }
+  .quiet {
+    display: flex; align-items: baseline; gap: 6px; padding: 1px 4px;
+    font-size: 9.5px; color: var(--fg-mute);
+  }
+  .quiet b { font-weight: 700; text-transform: uppercase; font-size: 8.5px; }
+  .quiet i { font-style: italic; }
+  .quiet::before {
+    content: ""; flex: none; width: 4px; height: 4px; border-radius: 50%;
+    background: currentColor; opacity: 0.5; transform: translateY(-1px);
+  }
+  .sec[data-attn] { border-color: var(--warn-sp); }
+  .sec[data-attn] .sec-cap { background: var(--warn-sp); color: #051827; }
+
+  /* top bar */
+  .pop-top {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 6px 9px; border-bottom: 1px solid var(--zone-rule);
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 7px; border-radius: 999px; font-size: 9.5px;
+    background: rgba(255,255,255,0.07); color: var(--fg-dim);
+  }
+  .chip--live { background: color-mix(in oklab, transparent, #34d399 15%); color: #b7f0d8; }
+  .chip--attn { background: color-mix(in oklab, transparent, #fbbf24 16%); color: #ffe4a3; }
+  .chip .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .tb-btn {
+    padding: 2px 7px; border: 1px solid var(--edge); border-radius: 3px;
+    font-size: 9.5px; color: var(--fg-dim); background: rgba(255,255,255,0.03);
+  }
+  .grow { flex: 1 1 auto; }
+
+  /* transcript */
+  .pop-convo { flex: 1 1 auto; padding: 9px; display: flex; flex-direction: column; gap: 7px; min-height: 132px; }
+  .msg { display: flex; gap: 7px; }
+  .msg-gut { flex: none; width: 3px; border-radius: 2px; background: var(--edge); }
+  .msg-b { min-width: 0; color: var(--fg-dim); }
+  .msg-b b { color: var(--fg); font-weight: 650; }
+  .msg code {
+    background: rgba(255,255,255,0.07); color: var(--fg); font-size: 9.5px;
+    padding: 0 3px; border-radius: 2px;
+  }
+
+  /* composer */
+  .pop-composer {
+    display: flex; align-items: center; gap: 6px; margin: 0 9px 8px;
+    padding: 5px 8px; border: 1px solid var(--edge); border-radius: 5px;
+    background: rgba(0,0,0,0.28);
+  }
+  .pop-composer .ph { flex: 1 1 auto; color: var(--fg-mute); font-size: 10px; }
+  .send { padding: 2px 8px; border-radius: 3px; background: var(--cap-bg); color: var(--cap-fg); font-size: 9.5px; font-weight: 700; }
+
+  /* control band + fleet strip */
+  .pop-band {
+    display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+    padding: 6px 9px; border-top: 1px solid var(--zone-rule);
+  }
+  .pill { display: inline-flex; border-radius: 999px; overflow: hidden; font-size: 9.5px; }
+  .pill .cap { padding: 2px 6px; background: var(--cap-bg); color: var(--cap-fg); font-weight: 700; }
+  .pill .val { padding: 2px 6px; background: color-mix(in oklab, transparent, #38bdf8 14%); color: #bae6fd; }
+  .pill--off .cap { background: #24384f; color: var(--fg-dim); }
+  .pill--off .val { background: rgba(255,255,255,0.06); color: var(--fg-mute); }
+  .act {
+    padding: 3px 7px; border: 1px solid var(--edge); border-radius: 3px;
+    font-size: 9.5px; color: var(--fg); background: rgba(255,255,255,0.04);
+  }
+  .sep { width: 1px; height: 14px; background: var(--zone-rule); margin: 0 2px; }
+  .fleet {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 6px 9px; border-top: 1px solid var(--zone-rule);
+  }
+  .fl-lab { font-size: 8.5px; text-transform: uppercase; font-weight: 700; color: var(--fg-mute); }
+  .fl-f { display: flex; align-items: center; gap: 4px; }
+  .fl-f .c { font-size: 8.5px; text-transform: uppercase; color: var(--fg-mute); font-weight: 620; }
+  .fl-f .w {
+    padding: 2px 6px; border: 1px solid var(--edge); border-radius: 3px;
+    background: rgba(0,0,0,0.28); color: var(--fg-dim); font-size: 9.5px;
+  }
+  .launch { margin-left: auto; padding: 3px 9px; border-radius: 3px; background: var(--cap-bg); color: var(--cap-fg); font-size: 9.5px; font-weight: 700; }
+
+  /* ── LOOK 1 · INSTRUMENT — default tokens above. Accent cap everywhere. ── */
+
+  /* ── LOOK 2 · SIGNAL — caps go neutral; accent is spent only on what is live. ── */
+  .pop--signal { --cap-bg: #24384f; --cap-fg: #e7f7ff; }
+  .pop--signal .sec-n { background: rgba(255,255,255,0.10); }
+  .pop--signal .sec[data-live] { border-color: var(--accent-sp); }
+  .pop--signal .sec[data-live] .sec-cap { background: var(--accent-sp); color: #051827; }
+  .pop--signal .pill .cap { background: var(--accent-sp); color: #051827; }
+  .pop--signal .send, .pop--signal .launch { background: var(--accent-sp); color: #051827; }
+
+  /* ── LOOK 3 · FRAMED — the three columns become titled, ruled zones. ── */
+  .pop--framed { --rail-bg: #081220; --convo-bg: #142339; --zone-rule: #5182a0; }
+  .pop--framed .zone-title { display: block; }
+  .pop--framed .pop-rail { padding-top: 8px; }
+  .pop--framed .sec { border-color: #44708c; }
+  .pop--framed .pop-composer { background: rgba(0,0,0,0.34); }
+
+  .foot { margin-top: 60px; padding-top: 16px; border-top: 1px solid var(--rule); font-size: 12.5px; color: var(--muted); }
+  .foot p { max-width: none; }
+</style>
+
+<div class="wrap">
+
+  <p class="eyebrow">Session chat popup · C3 whole-popup · 2026-08-02</p>
+  <h1>C3 everywhere, in three characters</h1>
+  <p class="lede">
+    Same treatment you picked, now carried across the top bar, both rails, the transcript, the
+    composer, the control band and the fleet strip. All three looks below are
+    <strong>one markup with one set of tokens swapped</strong> — which is the point: if a look needed
+    different structure it would be a different design, not a different skin, and you could not
+    change your mind later for free.
+  </p>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The constraint that shapes all three</p>
+      <h2>Fills are a dead end at every scale here</h2>
+      <p>The same measurement that sank C v1 also rules out the obvious way to separate the columns.</p>
+    </div>
+    <p>
+      The natural way to make three columns read as three zones is to tone them differently — rails
+      darker, conversation lifted. Measured on this ground that gets you
+      <strong>1.19:1</strong> between a <span class="m">#081220</span> rail and a
+      <span class="m">#142339</span> conversation. Invisible, exactly like the 1.11:1 card fill was.
+    </p>
+    <p>
+      So every look below separates zones with a <em>rule</em>, not a tone — and
+      <span class="m">#5182a0</span> against a deep rail measures <strong>4.52:1</strong>. Same
+      lesson as the rails: on this palette, structure comes from <strong>stroke, cap and type</strong>.
+      Tone is a garnish that cannot carry meaning.
+    </p>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Look 1</p>
+      <div class="look-head"><h2>Instrument</h2><span class="look-tag">accent cap on every section</span></div>
+      <p>C3 taken literally and applied everywhere. Every section announces itself.</p>
+    </div>
+    <div class="spec">
+      <span>cap <b>8.40:1</b></span><span>cap block vs card <b>6.25:1</b></span>
+      <span>edge <b>3.22:1</b></span><span>ladder <b>1.40× / 1.88×</b></span>
+    </div>
+    <div class="stage">
+      <div class="pop">
+        <div class="pop-rail pop-rail--l">
+          <p class="zone-title">Orders — what it was told</p>
+          <p class="cluster">What it was told</p>
+          <div class="sec" data-live>
+            <p class="sec-cap">Mission</p>
+            <div class="sec-body">
+              <div class="kv"><span class="k">effective</span><span class="v">execute-owner-directed-scope</span></div>
+              <div class="kv"><span class="k">authority</span><span class="v">act-with-disclosure</span></div>
+              <div class="kv"><span class="k">route</span><span class="v">self</span></div>
+            </div>
+          </div>
+          <div class="sec">
+            <p class="sec-cap">Modes <span class="sec-n">2</span></p>
+            <div class="sec-body">
+              <p class="line">AUTO — act, don't ask</p>
+              <p class="line">GRADE — fleet-execution-health</p>
+            </div>
+          </div>
+          <p class="quiet"><b>Directives</b> <i>none open</i></p>
+          <p class="quiet"><b>Facts</b> <i>none in scope</i></p>
+          <p class="cluster">What it's carrying</p>
+          <div class="sec" data-attn>
+            <p class="sec-cap">Walls <span class="sec-n">1</span></p>
+            <div class="sec-body"><p class="line">P-006 — owner must settle</p></div>
+          </div>
+          <p class="quiet"><b>Carry</b> <i>no note written</i></p>
+        </div>
+
+        <div class="pop-mid">
+          <div class="pop-top">
+            <span class="tb-btn">‹ Orders</span>
+            <span class="chip chip--live"><span class="dot"></span>live · 2h</span>
+            <span class="chip">ctx 22%</span>
+            <span class="grow"></span>
+            <span class="chip chip--attn">19 coord unread ›</span>
+            <span class="tb-btn">⤢</span><span class="tb-btn">⛶</span>
+            <span class="tb-btn">Activity ›</span>
+          </div>
+          <div class="pop-convo">
+            <div class="msg"><span class="msg-gut"></span><div class="msg-b">
+              <b>desktop-window-fullscreen.ts</b> — drives the Tauri window: <code>setFullscreen</code>,
+              reads the result back to confirm it moved, and tracks ownership.
+            </div></div>
+            <div class="msg"><span class="msg-gut"></span><div class="msg-b">
+              <b>SessionChatModal.tsx</b> — <code>toggleScreen</code> picks the mechanism on the
+              conversation region, so maximize stays structural.
+            </div></div>
+          </div>
+          <div class="pop-composer">
+            <span class="ph">Type to wake su · su-4ef7f…</span>
+            <span class="send">Send</span>
+          </div>
+          <div class="pop-band">
+            <span class="pill"><span class="cap">Auto</span><span class="val">on ▾</span></span>
+            <span class="pill pill--off"><span class="cap">Ideate</span><span class="val">off ▾</span></span>
+            <span class="pill pill--off"><span class="cap">Drain</span><span class="val">off ▾</span></span>
+            <span class="pill"><span class="cap">Grade</span><span class="val">on ▾</span></span>
+            <span class="sep"></span>
+            <span class="act">↻ Resume</span><span class="act">⑂ Fork</span>
+            <span class="act">Focus window</span><span class="act">Grade session…</span>
+          </div>
+          <div class="fleet">
+            <span class="fl-lab">Fleet</span>
+            <span class="fl-f"><span class="c">Name</span><span class="w">durable handle</span></span>
+            <span class="fl-f"><span class="c">Plan</span><span class="w">Select… ▾</span></span>
+            <span class="fl-f"><span class="c">Model</span><span class="w">Default ▾</span></span>
+            <span class="fl-f"><span class="c">Members</span><span class="w">1</span></span>
+            <span class="launch">+ Launch fleet</span>
+          </div>
+        </div>
+
+        <div class="pop-rail pop-rail--r">
+          <p class="zone-title">Activity — what it's doing</p>
+          <p class="cluster">Right now</p>
+          <div class="sec" data-live>
+            <p class="sec-cap">Health</p>
+            <div class="sec-body">
+              <div class="kv"><span class="k">loop</span><span class="v">no loop</span></div>
+              <div class="kv"><span class="k">claim</span><span class="v">none held</span></div>
+              <div class="kv"><span class="k">context</span><span class="v">22%</span></div>
+            </div>
+          </div>
+          <p class="quiet"><b>Waiting on</b> <i>no event</i></p>
+          <div class="sec">
+            <p class="sec-cap">Gates <span class="sec-n">1</span></p>
+            <div class="sec-body"><p class="line">critical-bug-wave-complete</p></div>
+          </div>
+          <p class="quiet"><b>Locks</b> <i>none held</i></p>
+          <p class="cluster">Inbound</p>
+          <div class="sec" data-attn>
+            <p class="sec-cap">Coord <span class="sec-n">19</span></p>
+            <div class="sec-body">
+              <p class="line">Autonomous cron routines burning…</p>
+              <p class="line">WI-5756 → done: migration</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Look 2</p>
+      <div class="look-head"><h2>Signal</h2><span class="pick-flag">recommended</span><span class="look-tag">accent spent only where something is true</span></div>
+      <p>Caps go neutral by default. Accent marks what's live; amber marks what wants you.</p>
+    </div>
+    <div class="spec">
+      <span>neutral cap text <b>10.92:1</b></span><span>live cap <b>8.40:1</b></span>
+      <span>edge <b>3.22:1</b></span><span>accent instances <b>11 → 4</b></span>
+    </div>
+    <div class="stage">
+      <div class="pop pop--signal">
+        <div class="pop-rail pop-rail--l">
+          <p class="zone-title">Orders — what it was told</p>
+          <p class="cluster">What it was told</p>
+          <div class="sec" data-live>
+            <p class="sec-cap">Mission</p>
+            <div class="sec-body">
+              <div class="kv"><span class="k">effective</span><span class="v">execute-owner-directed-scope</span></div>
+              <div class="kv"><span class="k">authority</span><span class="v">act-with-disclosure</span></div>
+              <div class="kv"><span class="k">route</span><span class="v">self</span></div>
+            </div>
+          </div>
+          <div class="sec">
+            <p class="sec-cap">Modes <span class="sec-n">2</span></p>
+            <div class="sec-body">
+              <p class="line">AUTO — act, don't ask</p>
+              <p class="line">GRADE — fleet-execution-health</p>
+            </div>
+          </div>
+          <p class="quiet"><b>Directives</b> <i>none open</i></p>
+          <p class="quiet"><b>Facts</b> <i>none in scope</i></p>
+          <p class="cluster">What it's carrying</p>
+          <div class="sec" data-attn>
+            <p class="sec-cap">Walls <span class="sec-n">1</span></p>
+            <div class="sec-body"><p class="line">P-006 — owner must settle</p></div>
+          </div>
+          <p class="quiet"><b>Carry</b> <i>no note written</i></p>
+        </div>
+
+        <div class="pop-mid">
+          <div class="pop-top">
+            <span class="tb-btn">‹ Orders</span>
+            <span class="chip chip--live"><span class="dot"></span>live · 2h</span>
+            <span class="chip">ctx 22%</span>
+            <span class="grow"></span>
+            <span class="chip chip--attn">19 coord unread ›</span>
+            <span class="tb-btn">⤢</span><span class="tb-btn">⛶</span>
+            <span class="tb-btn">Activity ›</span>
+          </div>
+          <div class="pop-convo">
+            <div class="msg"><span class="msg-gut"></span><div class="msg-b">
+              <b>desktop-window-fullscreen.ts</b> — drives the Tauri window: <code>setFullscreen</code>,
+              reads the result back to confirm it moved, and tracks ownership.
+            </div></div>
+            <div class="msg"><span class="msg-gut"></span><div class="msg-b">
+              <b>SessionChatModal.tsx</b> — <code>toggleScreen</code> picks the mechanism on the
+              conversation region, so maximize stays structural.
+            </div></div>
+          </div>
+          <div class="pop-composer">
+            <span class="ph">Type to wake su · su-4ef7f…</span>
+            <span class="send">Send</span>
+          </div>
+          <div class="pop-band">
+            <span class="pill"><span class="cap">Auto</span><span class="val">on ▾</span></span>
+            <span class="pill pill--off"><span class="cap">Ideate</span><span class="val">off ▾</span></span>
+            <span class="pill pill--off"><span class="cap">Drain</span><span class="val">off ▾</span></span>
+            <span class="pill"><span class="cap">Grade</span><span class="val">on ▾</span></span>
+            <span class="sep"></span>
+            <span class="act">↻ Resume</span><span class="act">⑂ Fork</span>
+            <span class="act">Focus window</span><span class="act">Grade session…</span>
+          </div>
+          <div class="fleet">
+            <span class="fl-lab">Fleet</span>
+            <span class="fl-f"><span class="c">Name</span><span class="w">durable handle</span></span>
+            <span class="fl-f"><span class="c">Plan</span><span class="w">Select… ▾</span></span>
+            <span class="fl-f"><span class="c">Model</span><span class="w">Default ▾</span></span>
+            <span class="fl-f"><span class="c">Members</span><span class="w">1</span></span>
+            <span class="launch">+ Launch fleet</span>
+          </div>
+        </div>
+
+        <div class="pop-rail pop-rail--r">
+          <p class="zone-title">Activity — what it's doing</p>
+          <p class="cluster">Right now</p>
+          <div class="sec" data-live>
+            <p class="sec-cap">Health</p>
+            <div class="sec-body">
+              <div class="kv"><span class="k">loop</span><span class="v">no loop</span></div>
+              <div class="kv"><span class="k">claim</span><span class="v">none held</span></div>
+              <div class="kv"><span class="k">context</span><span class="v">22%</span></div>
+            </div>
+          </div>
+          <p class="quiet"><b>Waiting on</b> <i>no event</i></p>
+          <div class="sec">
+            <p class="sec-cap">Gates <span class="sec-n">1</span></p>
+            <div class="sec-body"><p class="line">critical-bug-wave-complete</p></div>
+          </div>
+          <p class="quiet"><b>Locks</b> <i>none held</i></p>
+          <p class="cluster">Inbound</p>
+          <div class="sec" data-attn>
+            <p class="sec-cap">Coord <span class="sec-n">19</span></p>
+            <div class="sec-body">
+              <p class="line">Autonomous cron routines burning…</p>
+              <p class="line">WI-5756 → done: migration</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Look 3</p>
+      <div class="look-head"><h2>Framed</h2><span class="look-tag">the three columns become named, ruled zones</span></div>
+      <p>Each column gets a titled header and a real 1px rule. You always know which panel you're in.</p>
+    </div>
+    <div class="spec">
+      <span>zone rule <b>4.52:1</b></span><span>cap <b>8.40:1</b></span>
+      <span>edge <b>2.51:1</b></span><span>zone tone alone would be <b>1.19:1</b></span>
+    </div>
+    <div class="stage">
+      <div class="pop pop--framed">
+        <div class="pop-rail pop-rail--l">
+          <p class="zone-title">Orders — what it was told</p>
+          <p class="cluster">What it was told</p>
+          <div class="sec" data-live>
+            <p class="sec-cap">Mission</p>
+            <div class="sec-body">
+              <div class="kv"><span class="k">effective</span><span class="v">execute-owner-directed-scope</span></div>
+              <div class="kv"><span class="k">authority</span><span class="v">act-with-disclosure</span></div>
+              <div class="kv"><span class="k">route</span><span class="v">self</span></div>
+            </div>
+          </div>
+          <div class="sec">
+            <p class="sec-cap">Modes <span class="sec-n">2</span></p>
+            <div class="sec-body">
+              <p class="line">AUTO — act, don't ask</p>
+              <p class="line">GRADE — fleet-execution-health</p>
+            </div>
+          </div>
+          <p class="quiet"><b>Directives</b> <i>none open</i></p>
+          <p class="quiet"><b>Facts</b> <i>none in scope</i></p>
+          <p class="cluster">What it's carrying</p>
+          <div class="sec" data-attn>
+            <p class="sec-cap">Walls <span class="sec-n">1</span></p>
+            <div class="sec-body"><p class="line">P-006 — owner must settle</p></div>
+          </div>
+          <p class="quiet"><b>Carry</b> <i>no note written</i></p>
+        </div>
+
+        <div class="pop-mid">
+          <div class="pop-top">
+            <span class="tb-btn">‹ Orders</span>
+            <span class="chip chip--live"><span class="dot"></span>live · 2h</span>
+            <span class="chip">ctx 22%</span>
+            <span class="grow"></span>
+            <span class="chip chip--attn">19 coord unread ›</span>
+            <span class="tb-btn">⤢</span><span class="tb-btn">⛶</span>
+            <span class="tb-btn">Activity ›</span>
+          </div>
+          <div class="pop-convo">
+            <div class="msg"><span class="msg-gut"></span><div class="msg-b">
+              <b>desktop-window-fullscreen.ts</b> — drives the Tauri window: <code>setFullscreen</code>,
+              reads the result back to confirm it moved, and tracks ownership.
+            </div></div>
+            <div class="msg"><span class="msg-gut"></span><div class="msg-b">
+              <b>SessionChatModal.tsx</b> — <code>toggleScreen</code> picks the mechanism on the
+              conversation region, so maximize stays structural.
+            </div></div>
+          </div>
+          <div class="pop-composer">
+            <span class="ph">Type to wake su · su-4ef7f…</span>
+            <span class="send">Send</span>
+          </div>
+          <div class="pop-band">
+            <span class="pill"><span class="cap">Auto</span><span class="val">on ▾</span></span>
+            <span class="pill pill--off"><span class="cap">Ideate</span><span class="val">off ▾</span></span>
+            <span class="pill pill--off"><span class="cap">Drain</span><span class="val">off ▾</span></span>
+            <span class="pill"><span class="cap">Grade</span><span class="val">on ▾</span></span>
+            <span class="sep"></span>
+            <span class="act">↻ Resume</span><span class="act">⑂ Fork</span>
+            <span class="act">Focus window</span><span class="act">Grade session…</span>
+          </div>
+          <div class="fleet">
+            <span class="fl-lab">Fleet</span>
+            <span class="fl-f"><span class="c">Name</span><span class="w">durable handle</span></span>
+            <span class="fl-f"><span class="c">Plan</span><span class="w">Select… ▾</span></span>
+            <span class="fl-f"><span class="c">Model</span><span class="w">Default ▾</span></span>
+            <span class="fl-f"><span class="c">Members</span><span class="w">1</span></span>
+            <span class="launch">+ Launch fleet</span>
+          </div>
+        </div>
+
+        <div class="pop-rail pop-rail--r">
+          <p class="zone-title">Activity — what it's doing</p>
+          <p class="cluster">Right now</p>
+          <div class="sec" data-live>
+            <p class="sec-cap">Health</p>
+            <div class="sec-body">
+              <div class="kv"><span class="k">loop</span><span class="v">no loop</span></div>
+              <div class="kv"><span class="k">claim</span><span class="v">none held</span></div>
+              <div class="kv"><span class="k">context</span><span class="v">22%</span></div>
+            </div>
+          </div>
+          <p class="quiet"><b>Waiting on</b> <i>no event</i></p>
+          <div class="sec">
+            <p class="sec-cap">Gates <span class="sec-n">1</span></p>
+            <div class="sec-body"><p class="line">critical-bug-wave-complete</p></div>
+          </div>
+          <p class="quiet"><b>Locks</b> <i>none held</i></p>
+          <p class="cluster">Inbound</p>
+          <div class="sec" data-attn>
+            <p class="sec-cap">Coord <span class="sec-n">19</span></p>
+            <div class="sec-body">
+              <p class="line">Autonomous cron routines burning…</p>
+              <p class="line">WI-5756 → done: migration</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Choosing</p>
+      <h2>What actually separates them</h2>
+    </div>
+    <p>
+      All three fix the same things: sections are bounded by a stroke that clears the floor, headings
+      sit in a cap instead of being the quietest text in their own section, settled sections collapse
+      to one dim line, and the control band, composer and fleet strip stop being visually unrelated
+      to the rails.
+    </p>
+    <p>
+      <strong>Instrument</strong> is the most literal reading of C3 and the loudest. Count the accent
+      blocks: eleven, all equally bright, which re-creates the flatness at higher volume — the wall
+      you need and the mission you don't are equally vivid.
+    </p>
+    <p>
+      <strong>Signal</strong> keeps every structural gain and spends accent only where something is
+      actually true: four instances instead of eleven. A neutral cap still measures 10.92:1 for its
+      text, so nothing is harder to read — the section names simply stop competing with the states.
+      This is the one I'd ship.
+    </p>
+    <p>
+      <strong>Framed</strong> is the most opinionated. Naming the zones is a real usability gain when
+      both rails are open, and it is the only look where the three-column architecture is stated
+      rather than implied. It costs a header row per rail and reads more like an IDE than a chat
+      popup — worth it if you keep both rails open, over-built if you mostly run with them closed.
+    </p>
+    <div class="callout">
+      <p>
+        <strong>These compose.</strong> Signal's cap policy and Framed's zone titles are independent
+        — you can have named zones with quiet caps. If you want that, say so and it's the same build
+        with both token sets applied, since all three are one markup.
+      </p>
+    </div>
+  </section>
+
+  <div class="foot">
+    <p>
+      Ratios are sRGB relative luminance per WCAG 2.1 against the surface each element sits on.
+      Mockups use the live token values from <span class="m">app/_semantic.css</span> and the real
+      rail content; the three looks share one markup and differ only in the tokens set on
+      <span class="m">.pop</span>. Nothing here is implemented yet — the quiet-empty rule is a render
+      branch in the rail components, everything else is CSS.
+    </p>
+  </div>
+
+</div>

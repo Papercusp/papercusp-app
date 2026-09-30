@@ -1,0 +1,58 @@
+.plan-cleanup-report__subtitle {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.plan-cleanup-report__error {
+  color: var(--bad);
+}
+
+.plan-cleanup-report__loading {
+  display: flex;
+  min-height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-mute);
+  background: var(--bg);
+}
+
+.review-report__footer code {
+  color: var(--fg);
+  font-size: 0.95em;
+}
+
+.plan-cleanup-report__recovery {
+  display: grid;
+  gap: 10px;
+}
+
+.plan-cleanup-report__recovery-copy {
+  color: var(--fg-mute);
+  line-height: 1.45;
+}
+
+.plan-cleanup-report__recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.plan-cleanup-report__recovery-actions button {
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 10px;
+  color: var(--fg);
+  background: var(--bg-2);
+  cursor: pointer;
+}
+
+.plan-cleanup-report__recovery-actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.plan-cleanup-report__recovery-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}

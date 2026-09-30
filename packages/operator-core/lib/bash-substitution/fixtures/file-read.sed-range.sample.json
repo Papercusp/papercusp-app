@@ -1,0 +1,128 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 P-005 / pair file-read.sed-range (re-drawn for EI-18799531134810488: single-file-operand pattern) (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T13:34:00Z",
+  "totalAtoms": 3783,
+  "totalSessions": 76,
+  "sample": [
+    {
+      "sid": "su-b0971728-8161-44b0-9e6a-9adbe4d42cd6",
+      "ts": "2026-07-26T07:24:05.164Z",
+      "atom": "sed -n '1,100p' apps/operator/app/_components/chat/SessionChatModal.test.tsx"
+    },
+    {
+      "sid": "su-73565638-a17a-4be4-adfd-86a6750ac1c1",
+      "ts": "2026-07-26T06:07:38.393Z",
+      "atom": "sed -n '1,140p' packages/operator-core/lib/coord-ops/ops/compose.ts"
+    },
+    {
+      "sid": "su-73565638-a17a-4be4-adfd-86a6750ac1c1",
+      "ts": "2026-07-26T07:37:49.313Z",
+      "atom": "sed -n '1,250p' packages/operator-core/lib/scheduler/claim-spec.ts"
+    },
+    {
+      "sid": "su-a8557b00-55fb-4438-a7bd-f269a7a3bf6c",
+      "ts": "2026-07-26T04:36:50.914Z",
+      "atom": "sed -n '1,40p' apps/operator/scripts/hooks/cc/pretooluse-secrets-guard.mjs"
+    },
+    {
+      "sid": "su-7905fadc-2ba3-4492-897d-99d351a64a68",
+      "ts": "2026-07-26T07:16:36.106Z",
+      "atom": "sed -n '1,50p' /home/dev/.papercusp/scratch/papercusp-workspace/work_items:get/26e6ad1c-776f-4b32-81c9-9e99fc552fc6/result-door-1785050182648.md 2>/dev/null"
+    },
+    {
+      "sid": "su-c12c22d8-2503-489d-8649-bdfcb3d68910",
+      "ts": "2026-07-26T03:10:20.375Z",
+      "atom": "sed -n '1,60p' libs/papercusp/libs/db/sql/143-agent-activity.sql"
+    },
+    {
+      "sid": "su-d93ac1bf-d48f-420d-8136-dea6de467e7f",
+      "ts": "2026-07-20T20:58:21.155Z",
+      "atom": "sed -n '1,60p' papercusp-desktop/bin/two-instance-content-matrix-smoke.sh"
+    },
+    {
+      "sid": "su-a7d08fd3-ba65-45d3-a07f-a335b9004454",
+      "ts": "2026-07-20T20:49:42.527Z",
+      "atom": "sed -n '1,80p' packages/operator-core/lib/agent-tools/setup/status.ts"
+    },
+    {
+      "sid": "su-b0971728-8161-44b0-9e6a-9adbe4d42cd6",
+      "ts": "2026-07-26T06:46:22.362Z",
+      "atom": "sed -n '100,135p' packages/operator-core/lib/agent-tools/coordination/presence-payload.ts"
+    },
+    {
+      "sid": "su-e044d888-c238-4311-8eb0-aef7896b3e92",
+      "ts": "2026-07-19T23:54:53.268Z",
+      "atom": "sed -n '120,135p' packages/operator-core/lib/operator-state-pg.ts"
+    },
+    {
+      "sid": "su-143b12bd-edcc-4af5-b983-3ec8f258b992",
+      "ts": "2026-07-19T20:41:27.408Z",
+      "atom": "sed -n '140,175p' apps/operator-vite/src/components/adv/FleetRateControl.tsx"
+    },
+    {
+      "sid": "su-e044d888-c238-4311-8eb0-aef7896b3e92",
+      "ts": "2026-07-20T04:21:53.007Z",
+      "atom": "sed -n '160,250p' packages/operator-core/lib/knowledge-packs/pack-format.ts"
+    },
+    {
+      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
+      "ts": "2026-07-21T09:28:12.255Z",
+      "atom": "sed -n '190,260p' /home/dev/papercupai-workspace/papercusp/papercusp-desktop/bin/lib/deb-hetzner-rig.sh"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T08:28:05.948Z",
+      "atom": "sed -n '20735,20748p' serve-a-042035.log"
+    },
+    {
+      "sid": "su-7a80832c-ade5-4ed2-9a08-43f72fbbdae4",
+      "ts": "2026-07-26T02:17:08.141Z",
+      "atom": "sed -n '2440,2500p' apps/operator/lib/release/green-checkpoint.ts"
+    },
+    {
+      "sid": "su-794899a8-2470-4901-9f0b-4cb285ed3046",
+      "ts": "2026-07-20T03:26:40.279Z",
+      "atom": "sed -n '273,330p' packages/operator-core/lib/sync/hyperbee/replication-liveness.ts"
+    },
+    {
+      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
+      "ts": "2026-07-26T14:37:41.910Z",
+      "atom": "sed -n '314,345p' bin/lib/deb-hetzner-rig.sh"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-20T05:12:47.506Z",
+      "atom": "sed -n '380,430p' papercusp-desktop/bin/live-federation-gate.sh"
+    },
+    {
+      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
+      "ts": "2026-07-26T15:25:00.654Z",
+      "atom": "sed -n '440,460p' node_modules/hyperswarm/index.js"
+    },
+    {
+      "sid": "su-63f9b336-5b17-461a-b12e-a8421de9a09b",
+      "ts": "2026-07-26T07:40:28.188Z",
+      "atom": "sed -n '52,60p' packages/operator-core/lib/rubrics.ts"
+    },
+    {
+      "sid": "su-63f9b336-5b17-461a-b12e-a8421de9a09b",
+      "ts": "2026-07-26T06:12:01.390Z",
+      "atom": "sed -n '60,160p' packages/operator-core/lib/agent-tools/locks/coordination-domain.ts"
+    },
+    {
+      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
+      "ts": "2026-07-26T01:02:24.033Z",
+      "atom": "sed -n '70,135p' hive-epoch-boot-deps.ts"
+    },
+    {
+      "sid": "su-e3b21216-e294-4a92-b8f8-5a73a244ff09",
+      "ts": "2026-07-25T21:45:37.925Z",
+      "atom": "sed -n '80,200p' apps/operator-docs/src/content/docs/agent-insights/absorbing-state-guards-and-self-report-detectors.mdx"
+    },
+    {
+      "sid": "su-b0971728-8161-44b0-9e6a-9adbe4d42cd6",
+      "ts": "2026-07-26T06:05:11.461Z",
+      "atom": "sed -n '95,125p' apps/operator/app/adv/hud/HudView.tsx"
+    }
+  ]
+}

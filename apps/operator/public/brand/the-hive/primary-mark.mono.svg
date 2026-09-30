@@ -1,0 +1,27 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The Swarm primary mark monochrome">
+  <path d="M64 8 113 36v56l-49 28-49-28V36z" stroke="currentColor" stroke-width="3.2" stroke-linejoin="round"/>
+  <path d="M64 20 101 41v43l-37 22-37-22V41z" stroke="currentColor" stroke-opacity=".55" stroke-width="1.6"/>
+  <path d="M25 78c21-26 52-37 80-30M25 52c27 13 50 33 68 57M44 103c17-36 31-54 60-67" stroke="currentColor" stroke-opacity=".35" stroke-width="1.6" stroke-linecap="round"/>
+  <g stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g transform="translate(57 48) rotate(-8) scale(1.25)">
+      <path d="M-7-3c-7-7-15-6-20 1 6 3 14 2 20-1ZM7-3c7-7 15-6 20 1-6 3-14 2-20-1Z" stroke-opacity=".70" stroke-width="1.3"/>
+      <path d="M0-12c6 5 9 11 9 19 0 10-4 18-9 18S-9 17-9 7c0-8 3-14 9-19Z" stroke-width="1.5"/>
+    </g>
+    <g transform="translate(87 31) rotate(24) scale(.74)">
+      <path d="M-7-2c-6-5-12-4-16 1 5 2 11 2 16-1ZM7-2c6-5 12-4 16 1-5 2-11 2-16-1Z" stroke-opacity=".70" stroke-width="1.4"/>
+      <path d="M0-10c5 4 8 9 8 16 0 9-3 16-8 16S-8 15-8 6c0-7 3-12 8-16Z" stroke-width="1.8"/>
+    </g>
+    <g transform="translate(34 72) rotate(-38) scale(.68)">
+      <path d="M-7-2c-6-5-12-4-16 1 5 2 11 2 16-1ZM7-2c6-5 12-4 16 1-5 2-11 2-16-1Z" stroke-opacity=".70" stroke-width="1.4"/>
+      <path d="M0-10c5 4 8 9 8 16 0 9-3 16-8 16S-8 15-8 6c0-7 3-12 8-16Z" stroke-width="1.8"/>
+    </g>
+    <g transform="translate(82 88) rotate(31) scale(.82)">
+      <path d="M-7-2c-6-5-12-4-16 1 5 2 11 2 16-1ZM7-2c6-5 12-4 16 1-5 2-11 2-16-1Z" stroke-opacity=".70" stroke-width="1.4"/>
+      <path d="M0-10c5 4 8 9 8 16 0 9-3 16-8 16S-8 15-8 6c0-7 3-12 8-16Z" stroke-width="1.8"/>
+    </g>
+    <g transform="translate(39 35) rotate(49) scale(.58)">
+      <path d="M-7-2c-6-5-12-4-16 1 5 2 11 2 16-1ZM7-2c6-5 12-4 16 1-5 2-11 2-16-1Z" stroke-opacity=".70" stroke-width="1.4"/>
+      <path d="M0-10c5 4 8 9 8 16 0 9-3 16-8 16S-8 15-8 6c0-7 3-12 8-16Z" stroke-width="1.8"/>
+    </g>
+  </g>
+</svg>

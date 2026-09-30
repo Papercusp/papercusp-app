@@ -1,0 +1,19 @@
+ornith COMPREHENSION-test fixture C1 — throwaway, safe to overwrite between runs.
+
+BUG: classify(15) must return "fizzbuzz", but right now it returns "fizz".
+The function below has a LOGIC-ORDERING bug. Read it, understand why 15 hits the
+wrong branch, and fix it so the expectations below all pass. Change ONLY what is
+needed to fix the bug — do not rename anything or rewrite the whole function.
+
+function classify(n) {
+  if (n % 3 === 0) return "fizz";
+  if (n % 5 === 0) return "buzz";
+  if (n % 3 === 0 && n % 5 === 0) return "fizzbuzz";
+  return "none";
+}
+
+EXPECTED after fix:
+  classify(15) === "fizzbuzz"
+  classify(9)  === "fizz"
+  classify(10) === "buzz"
+  classify(7)  === "none"

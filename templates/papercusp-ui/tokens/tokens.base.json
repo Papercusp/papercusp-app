@@ -1,0 +1,115 @@
+{
+  "$description": "Papercusp app-family semantic theme tokens (D-011, plan unified-web-portal-2026-08-29). One DTCG source of truth for the warm paper/ink palette shared by every papercusp-app-composed surface (portal, email, calendar, dashboard per D-013). `$value` is the LIGHT mode value; dark lives in $extensions['com.papercusp.modes'].dark. Regenerate tokens.css with: node generate-tokens.mjs (or --check to verify drift). Apps consume the GENERATED tokens.css and never hardcode these values — a raw hex in app CSS is the defect this package exists to remove.",
+  "color": {
+    "paper": {
+      "$type": "color",
+      "$value": "#f4f0e8",
+      "$description": "CSS var --paper: app/page background",
+      "$extensions": { "com.papercusp.modes": { "dark": "#191817" } }
+    },
+    "ink": {
+      "$type": "color",
+      "$value": "#20201e",
+      "$description": "CSS var --ink: primary text",
+      "$extensions": { "com.papercusp.modes": { "dark": "#ece9e2" } }
+    },
+    "ink-soft": {
+      "$type": "color",
+      "$value": "#4d4a45",
+      "$description": "CSS var --ink-soft: secondary text (nav items, de-emphasized labels)",
+      "$extensions": { "com.papercusp.modes": { "dark": "#c9c4ba" } }
+    },
+    "muted": {
+      "$type": "color",
+      "$value": "#77736b",
+      "$description": "CSS var --muted: tertiary/metadata text",
+      "$extensions": { "com.papercusp.modes": { "dark": "#9b968c" } }
+    },
+    "line": {
+      "$type": "color",
+      "$value": "#d8d2c7",
+      "$description": "CSS var --line: default hairline border",
+      "$extensions": { "com.papercusp.modes": { "dark": "#38352f" } }
+    },
+    "line-soft": {
+      "$type": "color",
+      "$value": "#e3ddd3",
+      "$description": "CSS var --line-soft: subtle separators (list-row borders, inner card rules)",
+      "$extensions": { "com.papercusp.modes": { "dark": "#2e2b27" } }
+    },
+    "line-strong": {
+      "$type": "color",
+      "$value": "#c9c2b7",
+      "$description": "CSS var --line-strong: emphasized border (composer, focused chrome)",
+      "$extensions": { "com.papercusp.modes": { "dark": "#454138" } }
+    },
+    "panel": {
+      "$type": "color",
+      "$value": "#fffefa",
+      "$description": "CSS var --panel: primary content surface",
+      "$extensions": { "com.papercusp.modes": { "dark": "#201f1d" } }
+    },
+    "panel-dim": {
+      "$type": "color",
+      "$value": "#f8f5ef",
+      "$description": "CSS var --panel-dim: secondary surface between paper and panel (list panes)",
+      "$extensions": { "com.papercusp.modes": { "dark": "#1c1b19" } }
+    },
+    "panel-raised": {
+      "$type": "color",
+      "$value": "#ffffff",
+      "$description": "CSS var --panel-raised: highest surface (cards, popovers, composer)",
+      "$extensions": { "com.papercusp.modes": { "dark": "#262523" } }
+    },
+    "rail": {
+      "$type": "color",
+      "$value": "#eae4da",
+      "$description": "CSS var --rail: navigation rail / sidebar background",
+      "$extensions": { "com.papercusp.modes": { "dark": "#141312" } }
+    },
+    "chip": {
+      "$type": "color",
+      "$value": "#f1eee8",
+      "$description": "CSS var --chip: chip/inline-button fill on panel surfaces",
+      "$extensions": { "com.papercusp.modes": { "dark": "#2a2825" } }
+    },
+    "accent": {
+      "$type": "color",
+      "$value": "#28655a",
+      "$description": "CSS var --accent: primary interactive accent (per-app accents override this in an app overlay layer, never here)",
+      "$extensions": { "com.papercusp.modes": { "dark": "#5fae9f" } }
+    },
+    "accent-soft": {
+      "$type": "color",
+      "$value": "#dfeee8",
+      "$description": "CSS var --accent-soft: accent tint fill (badges, selected chips)",
+      "$extensions": { "com.papercusp.modes": { "dark": "#24423b" } }
+    },
+    "danger": {
+      "$type": "color",
+      "$value": "#9c3b36",
+      "$description": "CSS var --danger: destructive/error foreground",
+      "$extensions": { "com.papercusp.modes": { "dark": "#da7a72" } }
+    },
+    "danger-soft": {
+      "$type": "color",
+      "$value": "#f8dedb",
+      "$description": "CSS var --danger-soft: destructive/error tint fill",
+      "$extensions": { "com.papercusp.modes": { "dark": "#402320" } }
+    }
+  },
+  "shadow": {
+    "soft": {
+      "$type": "color",
+      "$value": "rgba(70, 63, 52, 0.08)",
+      "$description": "CSS var --shadow-soft: low-elevation shadow color",
+      "$extensions": { "com.papercusp.modes": { "dark": "rgba(0, 0, 0, 0.35)" } }
+    },
+    "strong": {
+      "$type": "color",
+      "$value": "rgba(43, 39, 31, 0.14)",
+      "$description": "CSS var --shadow-strong: high-elevation shadow color",
+      "$extensions": { "com.papercusp.modes": { "dark": "rgba(0, 0, 0, 0.5)" } }
+    }
+  }
+}

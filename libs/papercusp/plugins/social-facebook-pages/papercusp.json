@@ -1,0 +1,258 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/social-facebook-pages",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Facebook Pages platform trigger pack: Watches a Facebook Page for its own posts and for comments and replies on them. Records each event and publishes nothing.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": {
+    "mode": "exact"
+  },
+  "capabilities": [],
+  "oauth": [
+    {
+      "provider": "facebook",
+      "scopes": [
+        "pages_show_list",
+        "pages_read_engagement",
+        "pages_read_user_content",
+        "pages_manage_posts",
+        "pages_manage_engagement"
+      ],
+      "fieldName": "facebookPages"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "facebookPages"
+    ],
+    "properties": {
+      "pageId": {
+        "type": "string",
+        "title": "Facebook Page id",
+        "shareable": true,
+        "description": "The Page to watch. Public, so it travels with a share."
+      },
+      "facebookPages": {
+        "type": "string",
+        "title": "Facebook connection",
+        "secret": true,
+        "shareable": false,
+        "snapshotPolicy": "strip",
+        "description": "OAuth credential for the Page. Requires Meta app review before the scopes are granted.",
+        "oauth": {
+          "provider": "facebook",
+          "scopes": [
+            "pages_show_list",
+            "pages_read_engagement",
+            "pages_read_user_content",
+            "pages_manage_posts",
+            "pages_manage_engagement"
+          ]
+        }
+      }
+    }
+  },
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "escalationGuidance": {
+          "type": "string",
+          "title": "What needs a human",
+          "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said.",
+          "maxLength": 1000
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 1,
+      "windowSeconds": 300
+    },
+    "targets": [
+      {
+        "id": "record-facebook-pages-event",
+        "kind": "plan",
+        "path": "plan.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "trigger"
+          ],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": [
+                "key",
+                "source",
+                "event",
+                "sourceId",
+                "externalId",
+                "dedupeKey",
+                "payload"
+              ],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "pattern": "^ext:facebook-pages:(post|comment|reply)$"
+                },
+                "source": {
+                  "type": "string",
+                  "const": "facebook-pages"
+                },
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "post",
+                    "comment",
+                    "reply"
+                  ]
+                },
+                "sourceId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "externalId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dedupeKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "payload": {
+                  "type": "object",
+                  "datatype": "social-post",
+                  "additionalProperties": true,
+                  "required": [
+                    "id",
+                    "text"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "replyToId": {
+                      "type": "string"
+                    },
+                    "occurredAt": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "escalationGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said."
+            }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "facebook-pages-post",
+        "source": {
+          "kind": "external",
+          "sourceKind": "facebook-pages",
+          "oauthField": "facebookPages"
+        },
+        "target": "record-facebook-pages-event",
+        "eventPattern": "ext:facebook-pages:post",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      },
+      {
+        "id": "facebook-pages-comment",
+        "source": {
+          "kind": "external",
+          "sourceKind": "facebook-pages",
+          "oauthField": "facebookPages"
+        },
+        "target": "record-facebook-pages-event",
+        "eventPattern": "ext:facebook-pages:comment",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      },
+      {
+        "id": "facebook-pages-reply",
+        "source": {
+          "kind": "external",
+          "sourceKind": "facebook-pages",
+          "oauthField": "facebookPages"
+        },
+        "target": "record-facebook-pages-event",
+        "eventPattern": "ext:facebook-pages:reply",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      }
+    ],
+    "edges": []
+  },
+  "icon": "Facebook"
+}

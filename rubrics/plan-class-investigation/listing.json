@@ -1,0 +1,10 @@
+{
+  "ref": "plan-class-investigation",
+  "id": "plan-class-investigation",
+  "title": "Plan class: investigation (shared acceptance invariants)",
+  "description": "Class rubric for investigation-only plans' acceptance rubrics (5 criteria, pass/partial/fail/unknown): findings durable with evidence, numbers verified at their writer, rulings recorded as decisions, discoveries filed, and the independent grader spot-checks the implementer's audit citations. May stand alone (zero bespoke criteria) per D-009.",
+  "category": "plan-acceptance",
+  "scope": "rubric",
+  "version": "0.2.0",
+  "source": "first-party"
+}

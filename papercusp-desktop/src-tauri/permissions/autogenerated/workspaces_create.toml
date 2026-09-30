@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspaces-create"
+description = "Enables the workspaces_create command without any pre-configured scope."
+commands.allow = ["workspaces_create"]
+
+[[permission]]
+identifier = "deny-workspaces-create"
+description = "Denies the workspaces_create command without any pre-configured scope."
+commands.deny = ["workspaces_create"]

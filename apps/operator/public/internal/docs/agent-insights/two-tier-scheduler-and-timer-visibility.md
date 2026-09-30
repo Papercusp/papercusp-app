@@ -1,0 +1,99 @@
+# The scheduler layer model — two execution tiers + universal timer visibility
+URL: /internal/docs/agent-insights/two-tier-scheduler-and-timer-visibility
+
+How recurring work runs in the operator host — the DBOS durable tier, the in-process tier (managedSetInterval / ex-in-process-periodic / the ephemeral blueprint cadence), the per-harness routines DECLARATION surface, and why EVERY host setInterval is now named + listable in schedule:inventory. Read this before adding a recurring timer or "a new scheduler."
+
+If you're about to add a recurring timer — or worse, "a little scheduler" — stop and place
+it in the model below. There are exactly **TWO execution mechanisms** and **ONE declaration
+surface**, and a hard guard that keeps every host timer visible. (D-006 of
+`schedule-inventory-and-ephemeral-tier-2026-06-26`: net two mechanisms, not three.)
+
+## The two execution mechanisms
+
+1. **DBOS scheduled workflows — the DURABLE tier.** Postgres-backed, exactly-once,
+   survives restarts. This is the home for durable operator maintenance crons
+   (telemetry / GC / backup) AND for `routinesTick` (`dbos/routines-workflow.ts`), which
+   every \~30s fires the **durable** routine rows (`harness_shared.routines` where
+   `tier='durable'`, via `listDueCronRoutines`). Use it for periodic, durable,
+   Postgres-read/write maintenance.
+
+2. **`@papercusp/scheduled-registry` (`managedSetInterval`) — the IN-PROCESS tier.** A
+   generic, named, listable wrapper over `setInterval` (`libs/generic/scheduled-registry`).
+   It supplies an unref'd timer, a per-timer **re-entrancy guard** (a slow tick never piles
+   up a second run), an optional **shed** gate, and per-timer armed/last-fire/last-error
+   tracking. THREE kinds of in-process work register here:
+   * the **global host sweeps** (ex-`in-process-periodic`, category `global-sweep`);
+   * the **ephemeral blueprint cadences** (category `ephemeral-harness`, see below);
+   * the \~56 **bespoke** host timers (watchdogs / per-connection lifecycle / cache
+     refreshers) — they register **only for visibility**. *Visibility ≠ control* (D-001): a
+     watchdog still runs as its own out-of-band interval; registering does NOT move it onto
+     a central scheduler. The `category` records why.
+
+`harness_shared.routines` is the per-harness **DECLARATION + persistence** surface for BOTH
+tiers (durable cron rows + ephemeral rows) — it is **never an executor**. A blueprint's
+`triggers.schedule[]` materializes into it (`materialize-triggers.ts`).
+
+## Universal visibility — every host setInterval is named + listed
+
+A bare `setInterval(...)` is runtime-INVISIBLE (no name, no fire history). Every operator-host
+timer now goes through `managedSetInterval`, so it appears in `schedule:inventory` /
+`/admin/schedules` with a name + category + last-fire. This is **enforced**: the
+`scripts/check-no-raw-setinterval.mjs` guard (npm `lint:no-raw-setinterval`, wired in CI) fails
+the build on a NEW bare `setInterval` outside the allow-list. Its grandfather BASELINE is now
+**EMPTY** — a new bare `setInterval` is a hard failure, not a quiet exception. ALLOW-listed
+only: the registry impl itself, domain-free generic libs (sse/tooldef/p2p-voice), **browser/
+renderer** `.ts`/`.tsx` (run in the webview, can't reach the host registry), and genuine
+**separate processes** (the inference gateway, the psu-launcher — see *external-process* below).
+
+`collectScheduleInventory` (`schedule-inventory.ts`) unions FIVE sources into one row shape:
+`dbos` (DBOS.getAssociatedInfo) + `routines` (the table) + `managed` (`listManaged()`) +
+`in-process` (a static fallback for a request-only process that hasn't armed the sweeps) +
+`external-process` (a static manifest of separate-process timers — see below).
+
+## The ephemeral tier (tier:'durable' vs tier:'ephemeral')
+
+The ephemeral tier is the FREQUENT, sub-cron, non-DBOS cadence class — for in-process sweeps
+too frequent or too in-memory for a 30s DBOS tick. A blueprint declares it on a schedule entry:
+
+```yaml
+triggers:
+  schedule:
+    - { tier: ephemeral, intervalSec: 5, action: "system:my-bounded-sweep" }
+    - { cron: "0 0 9 * * *", action: "system:blueprint-run" }   # tier:durable (default)
+```
+
+The **ephemeral contract** (enforced by `blueprint:validate` / `validateBlueprint`): a
+deterministic `action` only — a concrete `system:<x>`, **never** the default
+`system:blueprint-run` (which launches a whole run); plus `intervalSec` with a ≥1s floor.
+`materializeBlueprintTriggers` writes it as a routine row with `tier='ephemeral'`, the cadence
+in `trigger_config.interval_sec`, no cron, `next_fire_at NULL`.
+
+Two executors, by tier:
+
+* **durable** → DBOS `routinesTick` (cron). `listDueCronRoutines` filters `tier='durable'`,
+  so DBOS **never** fires an ephemeral row.
+* **ephemeral** → the per-host **`ephemeral-executor.ts`**, armed on boot under the
+  single-owner gate (`backgroundWorkers && !utilityHost`). It arms ONE `managedSetInterval`
+  per active ephemeral routine (so each cadence is individually visible), fires the action via
+  the `getSystemAction` dispatch registry, and records **durable per-schedule liveness** by
+  UPDATEing the ONE routine row (`recordEphemeralFire`) — **never an INSERT per fire** (D-004:
+  the EI-1622 `workflow_status` bloat avoided by construction). Re-sync on a routine edit is
+  event-driven (`syncEphemeralRoutine`/`unarmEphemeralRoutine`), not a polling rescan.
+
+## external-process timers
+
+Timers in a SEPARATE process can't reach the host registry: the inference gateway (`:8788` —
+`inference-gateway/{gateway,launch}.ts`, `watchdog.mjs`) and the `psu-launcher.mjs`. They are
+allow-listed in the guard and surface as category **`external-process`** via a **STATIC manifest**
+(`EXTERNAL_PROCESS_TIMERS` in `schedule-inventory.ts`) — `armed` and `lastFire` are `null` in
+the inventory row because live fire-state requires per-process federation over each process's
+own admin/IPC, which is the documented follow-on. The static list is the current OR-clause:
+visibility is guaranteed even before that federation lands.
+
+## The rule of thumb
+
+Adding recurring work? **Don't write a new scheduler.** Pick: durable + Postgres-backed →
+DBOS scheduled workflow (or a `tier:durable` routine). Frequent in-process bounded sweep →
+declare a `tier:ephemeral` blueprint schedule. A watchdog / per-connection / cache timer that
+must stay bespoke → `managedSetInterval(name, ms, fn, { category })` so it is at least VISIBLE.
+A bare `setInterval` will fail `lint:no-raw-setinterval`.

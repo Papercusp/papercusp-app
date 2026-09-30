@@ -1,0 +1,47 @@
+{
+  "rubricId": "plan-class-migration",
+  "title": "Plan class: migration (shared acceptance invariants)",
+  "characteristic": "plan-acceptance",
+  "description": "The CLASS rubric schema/data-migration plans' acceptance rubrics reference (acceptance-rubrics-on-every-plan-2026-08-11 D-006): migrations land through the allocator + runner with consumers updated and integrity proven. Graded at plan completion by a NON-implementer.",
+  "methodRef": null,
+  "ratingScale": ["pass", "partial", "fail", "unknown"],
+  "version": "0.2.0",
+  "source": "first-party",
+  "criteria": [
+    {
+      "key": "migration-landed-cleanly",
+      "title": "Allocator-numbered, runner-applied, no runtime DDL",
+      "model": "The migration's number came from the atomic allocator (never ls-by-eye), it iterated as .DRAFT, was armed at libs/papercusp/libs/db/sql/, and applies via the runner — no ensureXxx()/inline CREATE TABLE anywhere in the change.",
+      "method": "Check migration_reservations for the number; confirm the .sql is armed and applied (schema present); grep the change for runtime DDL.",
+      "driftMarkers": "Hand-picked NNN; a .DRAFT left unarmed while code assumes the schema; DDL executed from app code."
+    },
+    {
+      "key": "consumers-updated",
+      "title": "Schema consumers and fixtures updated",
+      "model": "pull-schema.mjs was re-run and every consumer of the changed shape is updated — including hand-rolled integration-test fixtures that mirror the table, and sites stranded by a new required field.",
+      "method": "Confirm the regenerated schema artifact is in the change; run lint:required-field-strands --typecheck for tightened shapes; grep sibling *.integration.test.ts fixtures naming the table.",
+      "driftMarkers": "A fixture one column behind; a stranded constructor found later by the fleet gate."
+    },
+    {
+      "key": "data-integrity-proven",
+      "title": "Integrity verified; destructive change snapshotted first",
+      "model": "For a data-moving/destructive migration, a backup snapshot preceded it and pre/post invariants (counts, checksums, spot rows) were compared — integrity is measured, not assumed.",
+      "method": "Find the backup:snapshot_create id in the record; read the pre/post verification queries and their outputs.",
+      "driftMarkers": "Destructive DDL with no snapshot id on record; 'looks right' in place of a compared invariant."
+    },
+    {
+      "key": "rollback-story",
+      "title": "The reversal path is stated before arming",
+      "model": "The record states how to undo: a down-path, a restore point, or an explicit 'irreversible — owner-acknowledged' marker set BEFORE the migration armed.",
+      "method": "Read the plan/work-item for the reversal note; for irreversible changes, find the acknowledgement preceding the arm.",
+      "driftMarkers": "Rollback reasoned about only after something breaks."
+    },
+    {
+      "key": "audit-citations-spot-checked",
+      "title": "The independent grader audits the audit",
+      "model": "The independent grader opens a sample of the implementer's plan-audit citations and confirms each sampled code/test reference resolves against the current tree and actually supports the audited item — the audit verdict itself is never accepted as proof.",
+      "method": "Read the subject plan's effective per-item audit. Spot-check at least one resolving code/test citation (and expand the sample after any mismatch): open the cited current blob, compare it with the item requirement and audit claim, and record what was checked. Treat doc, workitem, and none citations as declarations of non-verification, never substitutes for code truth.",
+      "driftMarkers": "A grade copied from the audit's PASS label; no cited blob opened; a stale blob hash ignored; doc/work-item prose treated as proof that code exists."
+    }
+  ]
+}

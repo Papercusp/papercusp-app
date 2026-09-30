@@ -1,0 +1,21 @@
+{
+  "name": "@papercusp/scheduled-registry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic managed-setInterval registry: wraps setInterval with a name, a category, and per-timer last-fire / last-error / armed tracking, a re-entrancy guard, an injectable shed-gate, and an injectable timer seam — then exposes listManaged() so EVERY interval is visible in one inventory. visibility != control: a registered timer keeps its own behavior (a watchdog stays out-of-band); registration only makes it listable. Pure registry over injected time + timers; zero domain coupling. Its one dependency is @papercusp/module-singleton (itself domain-free and dependency-free), which pins this registry's state to the realm so a duplicated module record cannot split the inventory in half. Consumed by papercusp (host health sweeps + the ephemeral blueprint cadence tier) and any host that wants total timer visibility.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@papercusp/module-singleton": "*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  }
+}

@@ -1,0 +1,17 @@
+ornith COMPREHENSION-test fixture RC-C2 — throwaway, safe to overwrite between runs.
+
+BUG: maxOf(arr) must return the largest number in a non-empty array, but for an
+array of all-negative numbers it wrongly returns 0. Read it, understand why the
+starting value breaks the all-negative case, and fix it so the expectations below
+all pass. Assume arr is always non-empty. Change ONLY what is needed.
+
+function maxOf(arr) {
+  let m = 0;
+  for (const x of arr) if (x > m) m = x;
+  return m;
+}
+
+EXPECTED after fix:
+  maxOf([-5, -2, -9]) === -2
+  maxOf([3, 7, 1])    === 7
+  maxOf([0, -1])      === 0

@@ -1,0 +1,39 @@
+# A \"coord_event_log furnace\" EI is usually stale pg_stat_statements debris, not a live bug
+URL: /internal/docs/agent-insights/coord-log-furnace-ei-is-usually-stale-pgss-debris
+
+Triage recipe for the recurring \"coord invariant: unbounded coord_event_log read pattern (furnace class)\" EI — verify against live pg_stat_statements min_exec_time before assuming a live unbounded scan.
+
+The `system:coord-invariant-monitor` routine re-mints a **"coord invariant: unbounded coord\_event\_log read pattern (furnace class)"** EI (major) periodically. It has fired as EI-9525 → EI-9539 → EI-9543 (and counting) — each an **exact duplicate** flagging the **same 4 queryids**. Each firing auto-dispatches an implement worker who re-derives, from scratch, that it is already fixed. Read this first and resolve in one pass.
+
+## The pattern: stale lifetime stats, not a live scan
+
+The detector reads `pg_stat_statements`, which aggregates each statement's stats over its **whole lifetime since the last reset** (hours/days). A query that was **already bounded weeks ago** (a `LIMIT` / `ts >=` bound / an index added) keeps a catastrophic **lifetime `mean_exec_time`** forever — dragged up purely by historical pre-fix calls. The fingerprint is *frozen* (current code no longer generates it), but its bad mean never decays until a `pg_stat_statements_reset()`.
+
+`evaluateInvariants` already accounts for this with two guards:
+
+* **EI-9420 proven-fast-path suppression** — the mean-exec leg (>2000ms) is suppressed when the statement's `min_exec_time` is under `coordLogFurnaceProvenFastPathMs` (500ms). A single fast call proves the deployed code has a bounded/indexed route; the alarming mean is history.
+* **EI-9506/EI-9533 backup/maintenance exemption** — `isBackupOrMaintenanceStatement` (a leading `COPY` / `VACUUM` / `ANALYZE`) is excluded from *both* the gather SQL and the judge. A `pg_dump` `COPY … TO stdout` returns \~100k rows/call by design and the rows/call leg (immune to min\_exec suppression) would flag it forever.
+
+**The EI fires anyway because the *deployed* `:3070` monitor runs pre-fix code** (its snapshot's furnace entries carry no `minExecMs`, so nothing can be proven fast). That is **deploy-lag**, not a code bug — and the deploy machinery is out of scope for auto-implement.
+
+## Triage recipe (≈2 min → resolve `fixed`)
+
+1. Run the current detector logic against **live** data:
+   ```sql
+   SELECT queryid::text, LEFT(query,90) q, calls,
+          round((rows::numeric/GREATEST(calls,1)),0) rows_per_call,
+          round(mean_exec_time::numeric,0) mean_ms,
+          round(min_exec_time::numeric,1) min_ms
+   FROM pg_stat_statements
+   WHERE query ILIKE '%coord_event_log%' AND calls > 0
+     AND query NOT ILIKE 'COPY %' AND query NOT ILIKE 'VACUUM %' AND query NOT ILIKE 'ANALYZE %'
+   ORDER BY (rows::float8/GREATEST(calls,1)) DESC LIMIT 15;
+   ```
+   (via `dev:pg_query`.)
+2. Apply `evaluateInvariants`' thresholds (`DEFAULT_THRESHOLDS`): a row is a furnace only if `rows_per_call > 50000`, **or** `mean_ms > 2000` **and** `min_ms > 500`. If every offender has `min_ms < 500` (typical — they all have a fast path now) and nothing clears 50k rows/call, the current detector yields **zero** furnaces.
+3. Confirm the regression guard is green: `npx vitest run lib/harness/routines/coord-invariant-actions.test.ts` (packages/operator-core). The test *"EI-9525/EI-9539: the exact 4-furnace snapshot … no longer alarms under the CURRENT detector"* pins the identical snapshot to `evaluateInvariants(...) === []`.
+4. Resolve `improvements:resolve { outcome: 'fixed' }` citing the live min\_exec evidence — it is a duplicate of the prior furnace EIs.
+
+## When it *would* be a real bug
+
+If a coord\_event\_log statement shows **`min_exec_time` also high** (no fast path ever existed) **or `rows_per_call > 50000` and it is not a `COPY`/`VACUUM`/`ANALYZE`**, that is a genuine still-unbounded scan — find the source (`grep coord_event_log` under `packages/operator-core/lib/agent-tools/coordination/`) and add a `LIMIT` + `ts >=`/id-cursor bound, mirroring `readInbox` (WI-3825, `messages.ts`) and `readConditionEnvelopes` (EI-9447, `tools/conditions.ts`).

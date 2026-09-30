@@ -1,0 +1,74 @@
+# A new authoritative gate marker fixes the reader you tested, not the ones you forgot — checkpoint-run vs dev:pipeline_position disagreeing on the judged candidate
+URL: /internal/docs/agent-insights/new-gate-marker-must-be-wired-into-every-reader-not-just-one
+
+release:checkpoint-run's already_running reply and dev:pipeline_position's checkpointRunInFlight leg both answer \"which sha is the in-flight green-checkpoint run judging\" from the SAME gate_health markers, but only the latter was updated to read the inFlightCandidate marker (EI-19931692050586322) — the former still fell back to the unreliable checkout-HEAD inference for an ordinary (non-refiring) run, so the two tools reported different candidates for the same live run (EI-21044758600216699). Same shape as WI-7035's inFlightRetriage fix. The lesson: when you add or start trusting a new authoritative marker, grep for every OTHER call site answering the same question before calling the fix done.
+
+## What happened
+
+`gate_health.inFlightCandidate` (EI-19931692050586322) was added specifically so an
+*ordinary, non-refiring* green-checkpoint run — the common case, especially on the hourly
+cron path — could publish an authoritative answer to "which sha am I judging right now?"
+instead of every reader falling back to an inference (the checkpoint checkout's live HEAD,
+re-read after the fact, which "changes silently between reads").
+
+`git-pipeline-position.ts`'s `mapCheckpointRunInFlight` (the function behind
+`dev:pipeline_position`'s `gate.checkpointRunInFlight` leg) was updated to read it, with the
+correct 3-tier precedence:
+
+1. `gate_health.inFlightRetriage` (only exists after an auto-refire) — most authoritative
+2. `gate_health.inFlightCandidate` (published on EVERY invocation, including the first)
+3. the checkout-HEAD / log-parsed probe — an inference, least authoritative
+
+But `release:checkpoint-run`'s `already_running` reply — a *different* tool answering the
+*exact same question* about the *exact same live run* — was never updated. It only ever
+consulted tier 1 (`readInFlightRetriage`), and when that was absent (the common case: no
+refire has happened) it fell straight to tier 3, skipping tier 2 entirely.
+
+Result: for an ordinary cron-held run, `release:checkpoint-run`'s receipt named one sha as
+`candidate: "active"`, while a `dev:pipeline_position` call seconds later — reading the SAME
+underlying marker row, just through the code path that actually consulted it — named a
+*different* sha, with `judgingContainsPath:false` computed against the wrong one. An agent
+trusting the receipt could conclude its just-landed fix was NOT being judged when it actually
+was (or vice versa).
+
+This is the same shape as **WI-7035**, which fixed the identical gap for the *retriage*
+marker: `checkpointRunInFlight.candidateSource` in `dev:pipeline_position` had it, the
+`checkpoint-run.ts` reply didn't, until WI-7035 wired it through. The candidate-marker
+addition (EI-19931692050586322) repeated the mistake for its own new field — it updated the
+one reader that was being worked on (`mapCheckpointRunInFlight`) and missed the sibling
+reader that asks the identical question through a different tool.
+
+## The generalizable lesson
+
+**When you introduce (or newly start trusting) an authoritative marker for "what is this
+live process doing right now", find and update EVERY reader that currently answers the same
+question via a weaker inference — not just the one you happen to be working in.**
+
+Before considering such a change done:
+
+```
+grep -rn '<the old inference field/function>' --include='*.ts' packages/ apps/
+```
+
+and check whether each hit is answering the *same* question the new marker now answers
+authoritatively. In this codebase, two independently-alive readers of "is a checkpoint run
+in flight, and what is it judging" are `git-pipeline-position.ts` (→ `dev:pipeline_position`,
+`coord:orient`, `/admin/git`) and `checkpoint-run.ts`'s `already_running` refusal reply (the
+single highest-harm reader, per its own comments — it is the tool an agent fires precisely
+when the gate "looks stuck"). A change to one without the other reproduces this bug class.
+
+## Fix landed
+
+`packages/operator-core/lib/agent-tools/release/checkpoint-run.ts`'s `already_running` branch
+now reads `readInFlightCandidate()` with the identical precedence `mapCheckpointRunInFlight`
+already applies (only consulted when no retriage marker exists — a refire supersedes the
+candidate a run started on). The resolved marker feeds both the reply's top-level `candidate`
+field and the `candidateSha` given to `checkpointCandidateContainment`, and is treated as an
+OBSERVATION (not an inference), so `candidateIsInferred` now requires *both* markers to be
+absent before containment is refused.
+
+Regression test: `checkpoint-run.test.ts`, "EI-21044758600216699: an ordinary cron-held run
+reports its OWN published candidate marker, not the checkout-HEAD inference" — mocks
+`readInFlightCandidate` to return a marker with a sha deliberately different from the mocked
+`a.candidate` checkout-HEAD inference, and asserts the reply and the containment call both
+use the marker's sha.

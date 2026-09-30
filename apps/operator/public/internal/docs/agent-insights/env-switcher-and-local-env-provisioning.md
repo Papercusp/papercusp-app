@@ -1,0 +1,192 @@
+# The cross-platform env switcher (dev/prod/staging/local + release) and its enabled-state
+URL: /internal/docs/agent-insights/env-switcher-and-local-env-provisioning
+
+How the in-webview EnvSwitcherBar works on every platform — the GET /api/desktop/dev-operators discovery feed (server-side reachability, CORS-safe, plus the sourceTree/omitted readback that says WHY dev/local are absent), the \"release\" escape env (the immutable bundled package code), and how an agent reads + toggles which envs are enabled (POST /api/desktop/dev-operators/set-enabled). Read this before touching the env bar or the planned install-time local-operator provisioning.
+
+## What this is
+
+The env switcher started as a **Linux-only native GTK bar** (`dev_wrapper.rs`, now retired —
+superseded 2026-06-30 by `env_switch.rs`) that navigated the webview between four operator
+stacks on fixed local ports — `prod :3070` (green/release tree), `staging :3170` (staging
+tree), `dev :3270` (working tree), and `local :3055` (Vite HMR). `EnvSwitcherBar` is now the
+**single, cross-platform, in-webview** bar (data-driven, ships in public builds, works on
+macOS/Windows/Linux); `env_switch.rs` is its Rust-side plumbing (the authoritative `list_envs`
+probe, `/api` retargeting, persisted-target restore, and the native menu/shortcut backstop) —
+not a second visible bar.
+
+It is mounted **ungated** in `apps/operator-vite/src/routes/__root.tsx` and shows **whenever
+there is ANY env to switch to** (`barVisible = envOps.length > 0`). On the desktop the Tauri
+`list_envs` floor always supplies all four envs, so the bar **never self-hides there** — even
+if `/api` is misrouted or the HTTP enrichment 404s; unreachable envs just render greyed. Off
+the desktop (a plain browser, or a build without the endpoint) there are no envs from either
+source, so it stays hidden where the feature doesn't apply.
+
+**Source-tree-only envs are OMITTED on a packaged install (WI-3284).** `dev` (:3270, the
+working tree) and `local` (:3055, the Vite HMR frontend) carry `requiresSourceTree` in
+`DEV_OPERATORS`; `resolveDevOperators` drops them from the resolved list entirely when no
+runnable **source tree** exists (`defaultDetectSourceRoot() == null` — the SAME detection
+`launchEnvOperators` uses, so a packaged install's first-boot extracted tree
+`PAPERCUSP_DEV_SOURCE_ROOT` counts too; the earlier raw `detectPapercupRoot()` wrongly
+dropped `dev`/`local` while `local` was literally running, WI-3307 mac verify 2026-07-07) —
+a button for an env that *cannot* exist is noise, not a "disabled" state (the owner-reported
+greyed-button wall on the mac build). `prod`/`staging` always stay: a packaged install runs them from the
+**per-branch bundled sidecars** (owner directive 2026-07-06), no source needed. The Rust
+`env_switch.rs::list_envs` mirrors this — on the dev box it lists all 4 targets (the
+never-hide floor; unreachable ones render greyed), on a packaged (release) build it lists
+only the REACHABLE/self envs (`env_visible(dev_build, reachable, is_self)`).
+
+The omission is deliberate and stays. What it long LACKED was a **readback**: the response
+recorded nothing about the drop, so an absent `dev` was indistinguishable between "no source
+shipped (expected)", "a shipped archive failed to extract (a real bug)", "half-extracted, so
+the marker check rejected the tree", and "the endpoint itself is broken" — diagnosable only by
+SSHing to the machine and grepping the operator log for `[dev-source]`, which CI, a remote
+acceptance check and the UI cannot do (EI-19421499550693822). `sourceTree` + `omitted` now
+report that axis explicitly; see the contract below.
+
+## The contract — `GET /api/desktop/dev-operators`
+
+Returns `{ ok, operators, selfPort, sourceTree, omitted }`. Each operator:
+
+```ts
+{ id, label, port, tooltip, origin, reachable, sha, isSelf, kind, enabled }
+```
+
+* **Reachability is probed SERVER-side.** A webview served from one origin (`:3070`) cannot
+  cross-origin `fetch` a sibling operator's `/version` (CORS), so the operator itself probes
+  the localhost ports. The **switch** is a top-level `window.location` navigation (carrying
+  the current route + query), which is **not** CORS-bound.
+* **`kind: 'env' | 'release'`.** The four branch operators are `kind:'env'`. There is also one
+  `kind:'release'` entry — the **"release" button**: it switches to the **unchanged code from
+  the installed release package** (the immutable bundled operator, which local edits can't
+  break — the always-good escape hatch). Its origin = `PAPERCUSP_RELEASE_ORIGIN` (set by the
+  Tauri host / provisioning), resolved by `resolveReleaseOrigin()`. **On a packaged desktop
+  (`PAPERCUSP_DESKTOP=1`) with no explicit origin it now resolves to SELF** — the running
+  bundled primary IS the release code and its port is DYNAMIC, so the old unconditional
+  `:3070` fallback pointed at a non-existent port and rendered the escape-hatch button
+  permanently dead (WI-3284, owner-reported on the mac build 2026-07-06). The `:3070`
+  fallback is kept only on the **dev box** (its operators run without `PAPERCUSP_DESKTOP`, and
+  the green release really is `:3070` there). There is **no** remote-main git-reset button (the
+  `POST /api/desktop/git/reset-to-remote-main` endpoint still exists as a backend-only recovery
+  API).
+* **`sourceTree` + `omitted` — the source-tree READBACK (EI-19421499550693822).** Diagnostic
+  only; the bar renders neither. They exist so a machine reader can tell an EXPECTED omission
+  from a BROKEN one without a log grep on the target host:
+
+  ```ts
+  sourceTree: { status: 'measured'; present: boolean }
+            | { status: 'not_measured'; reason: 'vm-release-distribution' }
+  omitted:    { id: string; reason: 'no-source-tree' | 'source-tree-pending' | 'vm-release-distribution' }[]
+  ```
+
+  * **Branch on `reason`, never on absence.** `no-source-tree` is TERMINAL for this boot;
+    `source-tree-pending` means a shipped `source.tar.zst` has not finished extracting YET
+    (first boot runs for MINUTES) and the env is expected to appear on a later pass. The two
+    values are `Extract`ed from the launcher's own `SkipReason` union, so the endpoint and
+    `planEnvOperatorLaunch` cannot drift into disagreeing about the same condition, and
+    `isTransientSkip(reason)` from `env-operator-launcher.ts` is the predicate that separates
+    them — reading the transient one as terminal already produced a false FAIL in the WI-3307
+    acceptance gate (EI-19442842364710969).
+  * **`status:'not_measured'` is not `present:false`.** The vm-release single-operator path
+    returns before any filesystem detection runs, so a bare boolean there would report a
+    measurement that was never taken (D-052 — the same corrective `StagingBuildIdentity` in
+    this module already uses). That path still NAMES every canonical env in `omitted`, so an
+    empty list never has to stand for "and also these".
+  * **An empty `omitted` is an assertion, not a silence** — it means nothing was dropped.
+
+## Enabling / disabling envs — and how an AGENT does it
+
+A user can **right-click an env** in the bar to turn it off (it won't be provisioned/started,
+and renders struck-through). This is persisted **per-machine** in
+`~/.papercusp/env-switcher-prefs.json` (`{ disabled: string[] }`, via `env-switcher-prefs.ts`)
+— **not** in browser localStorage — precisely so it's legible + controllable outside the UI.
+
+An agent can therefore **see and change** which envs are on:
+
+* **Read:** `GET /api/desktop/dev-operators` → each op's `enabled` flag.
+* **Toggle:** `POST /api/desktop/dev-operators/set-enabled` with `{ id, enabled }` (loopback +
+  a cross-site CSRF guard). e.g. re-enable staging: `{ "id": "staging", "enabled": true }`.
+* **Why an env is MISSING rather than disabled:** a disabled env is still present with
+  `enabled:false`; an env that cannot exist is absent from `operators` and named in `omitted`
+  with its reason. Check `omitted` before concluding the endpoint or the extraction is broken.
+
+The **`release`** env is the immutable escape hatch and can **never** be disabled (the toggle
+and the prefs reader both refuse it).
+
+## Install-time provisioning (P-017) — the launcher
+
+The launcher that brings the env operators up lives in
+`packages/operator-core/lib/harness/env-operator-launcher.ts` (owner chose full parity with
+per-env disable; D-006/D-007). It spawns each **enabled, not-yet-running** env on its fixed
+port, sharing the one embedded Postgres. `PROVISIONABLE_ENV_OPERATORS` is `dev :3270` /
+`prod :3070` / `staging :3170` / **`local :3055` (`run:'vite'`, WI-3285)** — `local` is now
+provisioned as the **Vite SPA dev server** run from the working tree (its `/api` proxies to
+THIS primary via `PAPERCUSP_API_TARGET`); the old "maps to prod or is omitted" left its button
+permanently dead. Only **`release`** (the immutable bundled sidecar — it IS the running
+package) is excluded and never spawned here.
+
+**Two spawn modes (WI-3285, owner directive 2026-07-06 — "all installs are dogfood installs"):**
+
+* **Bundled** (`spawnMode:'bundled'`) — the packaged-install path. Each env spawns from a
+  bundled **per-env `serve.mjs`** at the PINNED packaging contract (`resolveBundledSidecar`;
+  owner directive 2026-07-06, plan `env-switcher-packaged-all-platforms-2026-07-06`):
+  `<sidecarDir>/env-sidecars/<envId>/serve.mjs`, where `<sidecarDir> = dirname(PAPERCUSP_SIDECAR_BIN)`
+  (`PAPERCUSP_ENV_SIDECARS_DIR` overrides explicitly; the running `serve.mjs`'s own dir,
+  `process.argv[1]`, is the last-resort fallback). It is keyed on **`envId`**, not the branch,
+  and each env dir is a full SIDECAR-SHAPED bundle (`serve.mjs` + `spa/` + `db-sql/` …). Run with
+  the SAME node that runs the primary (`process.execPath` — always present, PATH-independent; no
+  per-env node). Needs **NO source tree and NO toolchain** — verified on the real packaged
+  Linux deb (WI-3287), whose bundle ships a bare node (no npm/npx/tsx) and an empty clone stub.
+  **V1 packaging ships exactly one extra bundle (`env-sidecars/staging/`).** PROD special case:
+  when `env-sidecars/prod/` is absent (the V1 default), `prod` resolves to the primary's own
+  `<sidecarDir>/serve.mjs` — the installed release IS green `main`, so the prod button serves the
+  same code on its fixed :3070 port.
+
+* **Source** (`spawnMode:'source'`) — `node` + the tree's own `tsx` against
+  `bin/hono-host.ts` (mirroring `bin/dev-operator-ifneeded.sh`), where a runnable source tree +
+  installed deps exist. The source root is resolved by `defaultDetectSourceRoot`
+  (`env-operator-launcher.ts`, WI-3306/WI-3308): `PAPERCUSP_DEV_SOURCE_ROOT` first — the tree the
+  serve-side first-boot extracted from the packaged `source.tar.zst` (exact-checked for marker
+  files, no walk-up) — else the dev-box walk (`detectPapercupRoot`). So source mode is **no longer
+  the dev box only**: it also runs from an EXTRACTED tree on a packaged install. Each source-spawned
+  child gets its OWN tree as `PAPERCUSP_INTEGRATION_ROOT` + the bundled node dir prepended to `PATH`
+  (`sourceChildEnv`), so its prompt/capability/git internals resolve to the tree it serves, never the
+  primary's. `run:'vite'` envs are **source-only** (the SPA dev server transforms the tree).
+
+* **Pure planner** — `planEnvOperatorLaunch(...)` decides spawn-or-skip per env with a
+  deterministic reason: `disabled` → `is-self` → `already-reachable` → **\[bundled? spawn]** →
+  `no-source-tree` → `no-toolchain` → `spawn (source)`. A bundled per-branch sidecar spawns
+  REGARDLESS of source/toolchain; those gates apply only to an env it would otherwise run from
+  the tree. It is idempotent (an already-served port + this operator's own port are skipped) and
+  graceful (a missing toolchain/source tree marks the env unavailable, never an error). Fully
+  unit-tested (`env-operator-launcher.test.ts`).
+
+* **Effectful launcher** — `launchEnvOperators(...)` reads the enabled prefs, probes the ports,
+  runs the planner, then spawns each planned operator **staggered** (default 4s, only between
+  real boots) to avoid cold-boot migration contention. Probe / spawn / source-detect / toolchain
+  / tree-prepare are all injected seams.
+
+* **EI-126 single-writer safety** — every spawned operator is **request-only**
+  (`PAPERCUSP_BACKGROUND_WORKERS=0`, DBOS off, IPC off): only the PRIMARY runs the shared-DB
+  background machinery, so the extra envs can't re-create the double-writer substrate echo. They
+  are reached by top-level navigation, not the primary's IPC fast path.
+
+**DEFAULT-ON under the desktop (WI-3285).** The boot integration (`apps/operator/bin/host-bootstrap.ts`)
+runs the launcher on **every `PAPERCUSP_DESKTOP=1` boot** unless explicitly opted out
+(`PAPERCUSP_PROVISION_ENV_OPERATORS=0`); it is fire-and-forget + non-fatal, deferred \~20s so the
+primary's migrations/substrate win the boot race. It originally shipped **dark** behind an opt-IN
+`PAPERCUSP_PROVISION_ENV_OPERATORS=1`, which meant every packaged install rendered the switcher with
+all-dead buttons (owner-reported on the Windows build: "the buttons should all be operational") — the
+opt-in was flipped to opt-out. It **never** runs on a non-desktop host (the dev box's dev/prod/staging
+operators are managed by their own launchers and must not be hijacked).
+
+**Branch differentiation is built (`env-tree-prepare.ts`).** The launcher's default `prepareTree`
+gives each env its real D-006 tree: `dev` runs the working tree in place; a **`run:'vite'` env
+(`local`) also runs the working tree in place** (WI-3285 — the Vite SPA serves the same tree the dev
+operator runs; a separate worktree would just double the checkout); `prod` / `staging` each get their
+own **git worktree** on `main` / `staging` under `~/.papercusp/env-trees/<id>` (outside the repo, so
+the git-sync auto-commit never sweeps it in). It is idempotent (reuses an existing worktree),
+best-effort fetches the branch first (a shallow single-branch dogfood clone may not have it), and
+returns `null` on any git failure so that env is skipped gracefully (the switcher self-hides it). All
+unit-tested (`env-tree-prepare.test.ts`). What still needs a real packaged build is only the **live
+spawn verify** — that the spawned operators actually come up + the switcher lights up cross-platform
+(P-008/P-010).

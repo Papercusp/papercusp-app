@@ -1,0 +1,259 @@
+/* Support surface stylesheet — carried by the surface (imported from support/page.tsx, like
+   dev/dev.css and settings/settings.css) so every host that mounts it natively gets it.
+   Extracted from globals.css (portal-parity-with-papercusp-2026-09-03 P-003). */
+
+
+
+.pc-support-actions .pc-btn,
+.pc-support-resources,
+.pc-support-faq {
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.pc-support-actions .pc-btn:hover,
+.pc-support-resources:hover,
+.pc-support-faq:hover {
+  transform: translateY(-1px);
+}
+.pc-support-faq {
+  overflow: hidden;
+}
+.pc-support-faq-summary {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.pc-support-faq-chevron {
+  display: inline-flex;
+  transition: transform var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.pc-support-faq[open] .pc-support-faq-chevron {
+  transform: rotate(90deg);
+  color: var(--accent);
+}
+.pc-support-faq[open] .pc-support-faq-answer {
+  animation: pc-slide-up-in var(--dur-normal) var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .pc-marketplace-dialog-backdrop,
+  .pc-marketplace-dialog,
+  .pc-support-faq[open] .pc-support-faq-answer,
+  .pc-header::after,
+  .pc-header-nav-link.is-route-pending::after,
+  .pc-header-nav-link[data-route-pending="true"]::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+.pc-support-shell {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border: 1px solid rgb(from var(--accent-strong) r g b / 0.1);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 12% 0%, rgb(from var(--accent-strong) r g b / 0.09), transparent 26rem),
+    radial-gradient(circle at 88% 0%, rgb(from var(--amber-400) r g b / 0.06), transparent 20rem),
+    linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)),
+    color-mix(in srgb, var(--bg-deep), transparent 18%);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+.pc-support-shell::before,
+.pc-support-shell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.pc-support-shell::before {
+  background:
+    repeating-linear-gradient(90deg, rgb(from var(--accent-strong) r g b / 0.035) 0 1px, transparent 1px 72px),
+    repeating-linear-gradient(180deg, rgb(from var(--accent-strong) r g b / 0.025) 0 1px, transparent 1px 58px);
+  opacity: 0.34;
+}
+.pc-support-shell::after {
+  inset: 14px;
+  border: 1px solid rgb(from var(--accent-strong) r g b / 0.12);
+  clip-path: polygon(16px 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%, 0 16px);
+}
+.pc-support-shell > * {
+  position: relative;
+  z-index: 1;
+}
+.pc-support-shell .pc-support-actions .pc-btn,
+.pc-support-shell .pc-support-resources,
+.pc-support-shell .pc-support-faq {
+  border-radius: 0 !important;
+  clip-path: polygon(12px 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%, 0 12px);
+}
+.pc-support-shell .pc-support-actions .pc-btn,
+.pc-support-shell .pc-support-resources {
+  box-shadow: 0 16px 34px rgba(0,0,0,0.16);
+}
+.pc-support-shell .pc-support-faq {
+  position: relative;
+  isolation: isolate;
+}
+.pc-support-shell .pc-support-faq::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(120deg, transparent 0 38%, rgba(255,255,255,0.12) 46%, transparent 52%) -100% 0 / 36% 100% no-repeat,
+    linear-gradient(180deg, rgb(from var(--accent-strong) r g b / 0.06), rgba(255,255,255,0.01));
+  /* WI-6542: always-on beam dropped. The sweep layer is parked off-canvas by its own
+     `-100% 0` background-position; opacity is pinned to the old cycle's mid value so the
+     static tint layer keeps its perceived strength instead of jumping to full. */
+  opacity: 0.4;
+  pointer-events: none;
+}
+.pc-support-shell .pc-support-faq[open] {
+  box-shadow: 0 16px 32px rgba(0,0,0,0.18), 0 0 0 1px rgb(from var(--accent-strong) r g b / 0.08);
+}
+.pc-support-shell .pc-support-faq-summary {
+  position: relative;
+  z-index: 1;
+}
+.pc-support-shell .pc-support-faq-answer {
+  position: relative;
+  z-index: 1;
+}
+.pc-support-shell .pc-support-resources a {
+  text-shadow: 0 0 10px rgb(from var(--accent) r g b / 0.14);
+}
+@media (max-width: 760px) {
+  .pc-support-shell {
+    border-radius: 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-telemetry-marquee__track,
+  .operator-reactor-shell__backplate,
+  .operator-reactor-core__flare,
+  .operator-panel--maximal-hud .operator-panel__metric-card,
+  .operator-panel--maximal-hud .operator-panel__metric-card::before,
+  .operator-hud-scan-beam,
+  .pc-header-hud-line,
+  .pc-marketplace-list--maximal-hud .pc-marketplace-card::before,
+  .pc-marketplace-list--maximal-hud .pc-marketplace-dialog::before,
+  .pc-support-shell .pc-support-faq::before {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+.pc-support-shell::before {
+  background:
+    repeating-linear-gradient(90deg, rgb(from var(--accent-strong) r g b / 0.045) 0 1px, transparent 1px 72px),
+    repeating-linear-gradient(180deg, rgb(from var(--accent-strong) r g b / 0.030) 0 1px, transparent 1px 58px),
+    radial-gradient(circle at 50% 0%, rgb(from var(--accent-strong) r g b / 0.13), transparent 34rem);
+  /* WI-6542: always-on loop dropped — background-position-only drift, rests at `from`. */
+}
+
+.pc-support-shell h1 {
+  position: relative;
+  text-shadow:
+    0 0 22px rgb(from var(--accent-strong) r g b / 0.20),
+    0 0 42px rgb(from var(--emerald-400) r g b / 0.08);
+}
+
+.pc-support-shell h1::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 36%;
+  bottom: -6px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(226, 252, 255, 0.92), rgb(from var(--accent-strong) r g b / 0.42), transparent);
+  box-shadow: 0 0 14px rgb(from var(--accent-strong) r g b / 0.54);
+}
+
+.pc-support-shell .pc-support-actions {
+  position: relative;
+  isolation: isolate;
+}
+
+.pc-support-shell .pc-support-actions::before {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgb(from var(--accent-strong) r g b / 0.12), transparent);
+  filter: blur(8px);
+  /* WI-6542: always-on sweep dropped. Sheen-only pseudo-element, opacity:0 at both ends
+     of the old cycle, so it rests invisible rather than parking a lit bar on screen. */
+  opacity: 0;
+}
+
+.pc-support-shell .pc-support-faq::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 0;
+  width: 2px;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent, rgb(from var(--accent-strong) r g b / 0.54), rgb(from var(--emerald-400) r g b / 0.38), transparent);
+  opacity: 0.28;
+  filter: drop-shadow(0 0 8px rgb(from var(--accent-strong) r g b / 0.28));
+}
+
+.pc-support-shell .pc-support-faq[open]::after {
+  opacity: 0.9;
+  filter: drop-shadow(0 0 14px rgb(from var(--accent-strong) r g b / 0.54));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pc-marketplace-list--maximal-hud::before,
+  .pc-marketplace-list--maximal-hud .pc-marketplace-toolbar-copy::after,
+  .pc-marketplace-list--maximal-hud .pc-marketplace-search::after,
+  .pc-marketplace-list--maximal-hud .pc-marketplace-card-icon::after,
+  .pc-marketplace-list--maximal-hud .pc-marketplace-card:hover .pc-marketplace-meta span::after,
+  .pc-support-shell::before,
+  .pc-support-shell .pc-support-actions::before {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .pc-marketplace-dialog-backdrop,
+  .pc-marketplace-dialog,
+  .pc-support-faq[open] .pc-support-faq-answer,
+  .oracle-fab.has-unread .oracle-fab-badge,
+  .pc-header::after,
+  .pc-header-nav-link.is-route-pending::after,
+  .pc-header-nav-link[data-route-pending="true"]::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-telemetry-marquee__track,
+  .operator-reactor-shell__backplate,
+  .operator-reactor-core__flare,
+  .operator-panel--maximal-hud .operator-panel__metric-card,
+  .operator-panel--maximal-hud .operator-panel__metric-card::before,
+  .operator-hud-scan-beam,
+  .pc-header-hud-line,
+  .oracle-fab--maximal-hud::before,
+  .oracle-hud-scanline,
+  .pc-marketplace-list--maximal-hud .pc-marketplace-card::before,
+  .pc-marketplace-list--maximal-hud .pc-marketplace-dialog::before,
+  .pc-support-shell .pc-support-faq::before {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

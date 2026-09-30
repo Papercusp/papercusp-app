@@ -1,0 +1,6 @@
+id: coding
+title: Generic coding learnings
+description: Default starting wisdom for a coding hive — coordination discipline, knowledge hygiene, and engineering judgment carried as DISCOVERY RULES ("find how this project runs tests", not "use Vitest"), never stack bindings. Generic engineering knowledge, not project-specific; project specifics belong in the per-hive override and a separate project pack. Every learning is editable and deletable per hive.
+version: 1.1.0
+author: Papercusp
+okf_version: "0.2"

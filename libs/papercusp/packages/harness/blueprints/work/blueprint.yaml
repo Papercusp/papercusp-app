@@ -1,0 +1,93 @@
+# generic-hive — a non-coding Hive blueprint (hive-blueprint-generalization Phase 1).
+#
+# The de-coded sibling of the coding `hive`: the SAME Queen/bee fleet + self-declared
+# wake machinery (inherited via `extends: hive`), but a generic DOMAIN PROFILE —
+#   • work is JUDGED against a rubric, not verified by a test suite (acceptance.kind: judge);
+#   • deliverables land in the ARTIFACTS store, not as repo commits (output.kind: artifacts);
+#   • the Queen co-locates/decomposes by TOPIC overlap, not file overlap (affinity.kind);
+#   • a bee's structured sub-work spins up research / review / vote harnesses, not coding
+#     pipelines (dependencies.blueprints — the memberBlueprints closure, P-007).
+# Repo-less (inherited requiresRepo:false). Proves the schema generalization end-to-end:
+# acceptance / output / affinity / lexicon / learning / dependencies.blueprints are all
+# honored by the engine. The non-coding counterpart of the coding `hive`.
+id: work
+visibility: public
+extends: coding
+# Inherited from `hive`, restated for clarity: the privileged Queen blueprint, launchable
+# only as a ROOT (hives are flat peers, never nested).
+kind: pot
+version: 0.1.0
+description: >-
+  A generic (non-coding) Hive — the Queen places research / analysis / deliberation work
+  onto a fleet of bees that produce DELIVERABLES (reports, decisions, documents). "Done"
+  is decided by an LLM judge against a rubric; output lands in the artifacts store; the
+  Queen co-locates work by topic, not file. Repo-less. The non-coding counterpart of the
+  coding `hive`.
+
+# ─── Knobs ──────────────────────────────────────────────────────────────────────────
+# `work` extends `coding`, which now sets requiresRepo:true + releaseGate.enabled:true
+# (per-hive-git-and-release-gate-2026-06-29 D-002). A non-coding hive is NOT a code repo:
+# its deliverables land in the artifacts store (output.kind:artifacts) and "done" is a
+# judge verdict (acceptance.kind:judge) — there is no test suite to gate on. So RE-SET both
+# off here: no forced repo, and NO staging→main green gate. A repo, if the owner opts in
+# later, is backup-only (git-sync → staging) and never gated.
+knobs:
+  requiresRepo: false
+  releaseGate:
+    enabled: false
+
+# ─── Domain profile (the hive-blueprint-generalization Phase 3/4 schema) ───────────────
+
+# Acceptance: a deliverable has no test suite, so "done" is a judge verdict against a
+# rubric (reuses the gym judge). The coding `hive` leaves this undeclared ⇒ the pipeline's
+# own validator/tests gate it.
+acceptance:
+  kind: judge
+  rubric:
+    dimensions:
+      accuracy: Are the claims correct, sourced, and free of fabrication?
+      completeness: Does the deliverable address every part of the brief?
+      clarity: Is the result clear, well-structured, and usable as-is?
+    weights:
+      accuracy: 0.5
+      completeness: 0.3
+      clarity: 0.2
+
+# Output: deliverables persist to the artifacts store (a report/document), not a repo commit.
+output:
+  kind: artifacts
+
+# Affinity: a generic bee shares a SUBJECT, not files — the Queen ranks placement by topic
+# overlap, the de-coding of "cut briefs on file-scope" into "cut on <scope-seam>".
+affinity:
+  kind: topic-overlap
+
+# Lexicon: the domain nouns personas + UI read in (vs the coding "feature"/"PR").
+lexicon:
+  workUnit: deliverable
+  reviewGate: review
+
+# Knowledge: a fresh work pot seeds the generic `work` knowledge pack
+# (domain-generic-hive-architecture-2026-06-18 P-017, D-010) — generic work
+# wisdom, NOT project-specific. `pack: work` overrides the inherited
+# `pack: coding` (the extends deep-merge replaces the scalar).
+#
+# The seed pack moved `learning.pack` → `knowledge.pack` in the
+# learning→knowledge-packs rename (cupboard-public-release-2026-07-12 P-001).
+# The learning LOOPS are a different system and keep the `learning:` block.
+knowledge:
+  pack: work
+
+# Learning: the scout ideation loop (no coding gym); `loops: [scout]` is work-only.
+learning:
+  loops:
+    - scout
+
+# memberBlueprints — the work-blueprints this hive's bees may spawn as structured sub-work
+# (P-007 spawned-blueprint closure). Declared as `dependencies.blueprints`; the extends
+# merge keeps `hive`'s inherited tool deps (only the `blueprints` key is added here).
+dependencies:
+  blueprints:
+    - research
+    - review
+    - vote

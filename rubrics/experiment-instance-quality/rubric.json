@@ -1,0 +1,19 @@
+{
+  "rubricId": "experiment-instance-quality",
+  "title": "Experiment instance quality",
+  "characteristic": "experiment-instance",
+  "description": "Grades completed whole-instance experiments by the selected arm's composite score so instance-level experiments become trendable scorecards.",
+  "methodRef": null,
+  "ratingScale": ["healthy", "degraded", "broken", "unknown"],
+  "criteria": [
+    {
+      "key": "composite",
+      "title": "Whole-instance composite",
+      "model": "The selected instance variant improves or preserves the whole-instance judged composite without hiding failures in unscored cells.",
+      "method": "Read selected-arm mean composite, scored/cell counts, and baseline comparison from the experiment scorecard evidence.",
+      "driftMarkers": "Composite is degraded, no cells scored, or winners are selected with weak evidence."
+    }
+  ],
+  "version": "0.1.0",
+  "source": "first-party"
+}

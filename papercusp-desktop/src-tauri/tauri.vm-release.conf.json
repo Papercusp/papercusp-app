@@ -1,0 +1,45 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Papercusp Server",
+  "mainBinaryName": "papercusp-server",
+  "identifier": "com.papercusp.server",
+  "app": {
+    "windows": []
+  },
+  "bundle": {
+    "shortDescription": "Papercusp backend service (immutable VM runtime)",
+    "longDescription": "The immutable Papercusp VM runtime. Updates replace this signed package; editable source, environment sidecars, bootstrap seeds and development resources are excluded.",
+    "resources": [
+      "sidecar/apps/**/*",
+      "sidecar/bin/**/*",
+      "sidecar/build-provenance.json",
+      "sidecar/cpu-task-worker.script.mjs",
+      "sidecar/db-seed.dump",
+      "sidecar/db-sql/**/*",
+      "sidecar/event-loop-sentinel.worker.mjs",
+      "sidecar/git-ext-bridge.mjs",
+      "sidecar/harness/**/*",
+      "sidecar/internal-docs/**/*",
+      "sidecar/local-embedder-worker.script.mjs",
+      "sidecar/local-reranker-worker.script.mjs",
+      "sidecar/mcp-proxy.mjs",
+      "sidecar/node_modules/**/*",
+      "sidecar/opusscript_native_wasm.wasm",
+      "sidecar/orchestrator/**/*",
+      "sidecar/pui-companion.wasm",
+      "sidecar/pui-install.json",
+      "sidecar/scripts/**/*",
+      "sidecar/serve.mjs",
+      "sidecar/sidecar-preload.js",
+      "sidecar/spa/**/*",
+      "sidecar/sql/**/*"
+    ],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/lib/systemd/user/papercusp-server.service": "systemd/papercusp-server.service"
+        }
+      }
+    }
+  }
+}

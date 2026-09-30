@@ -1,0 +1,188 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    :root{
+      --bg:#07101d;--bg-1:#0b1220;--bg-2:rgba(255,255,255,0.045);--bg-3:rgba(255,255,255,0.075);
+      --bg-raised:#112235;--fg:#e7f7ff;--fg-dim:#b9d4e8;--fg-mute:#7f9bb4;
+      --border-muted:rgba(125,211,252,0.08);--border:rgba(125,211,252,0.15);--border-strong:rgba(125,211,252,0.32);
+      --accent:#38bdf8;--accent-soft:#bae6fd;--good:#34d399;--warn:#fbbf24;--bad:#fb7185;
+      --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    }
+    body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:12.5px;-webkit-font-smoothing:antialiased;}
+    a{color:#7dd3fc}a:hover{color:#bae6fd}
+    .ic{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+    .top{display:flex;align-items:center;gap:8px;padding:10px 14px}
+    .scope{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+    .scope span{padding:4px 11px;font-size:11px;color:var(--fg-mute);border-right:1px solid var(--border-muted)}
+    .scope span:last-child{border-right:0}
+    .scope span.on{background:rgba(56,189,248,0.14);color:var(--accent-soft)}
+    .search{display:flex;align-items:center;gap:6px;width:230px;padding:4px 9px;border-radius:8px;background:var(--bg-3);border:1px solid var(--border);color:var(--fg-mute);font-size:12px}
+    .sum{margin-left:auto;font-size:11px;color:var(--fg-mute);display:flex;gap:12px;font-variant-numeric:tabular-nums}
+    .sum b{color:var(--fg-dim);font-weight:600}
+    .lane{margin:0 14px 10px;border:1px solid var(--border);border-left-width:3px;border-radius:10px;background:var(--bg-1);overflow:hidden}
+    .lane.needs{border-left-color:color-mix(in srgb,var(--bad) 70%,transparent)}
+    .lane.live{border-left-color:color-mix(in srgb,var(--good) 55%,transparent)}
+    .lh{display:grid;grid-template-columns:minmax(0,1fr) 130px 96px 96px 30px;align-items:center;column-gap:12px;padding:9px 12px 7px}
+    .lt{display:flex;align-items:center;gap:8px;min-width:0}
+    .lt b{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .bucket{padding:0 5px;border-radius:999px;font-size:8.5px;font-weight:650;text-transform:uppercase;color:var(--fg-mute);border:1px solid var(--border);flex:0 0 auto}
+    .bucket.run{color:#bae6fd;border-color:rgba(56,189,248,0.4)}
+    .bucket.goal{color:#c4b5fd;border-color:rgba(139,92,246,0.4)}
+    .slug{font-family:var(--mono);font-size:9.5px;color:var(--fg-mute);flex:0 0 auto}
+    .prog{display:flex;align-items:center;gap:8px}
+    .prog-track{flex:1;height:5px;border-radius:999px;background:color-mix(in srgb,var(--fg-mute) 14%,transparent);overflow:hidden}
+    .prog-fill{display:block;height:100%;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,transparent)}
+    .prog-n{font-size:10.5px;color:var(--fg-mute);font-variant-numeric:tabular-nums}
+    .t{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--fg-dim);font-variant-numeric:tabular-nums}
+    .t .ic{color:var(--fg-mute)}
+    .t.hot{color:var(--fg)}.t.hot .ic{color:var(--good)}
+    .chev{color:var(--fg-mute);display:flex;justify-content:flex-end}
+    .lbody{display:flex;flex-direction:column;gap:6px;padding:0 12px 10px}
+    .srow{display:flex;align-items:center;gap:10px;padding:6px 9px;border:1px solid var(--border-muted);border-radius:8px;background:var(--bg)}
+    .sav{width:20px;height:20px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:8.5px;font-weight:700;font-family:var(--mono);color:#051827;flex:0 0 auto}
+    .sid{font-family:var(--mono);font-size:11px;color:var(--fg-dim);flex:0 0 auto}
+    .state{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:650;flex:0 0 auto}
+    .state.live{color:#bbf7d0}.state.parked{color:var(--fg-mute)}
+    .dotg{width:5px;height:5px;border-radius:999px;background:var(--good)}
+    .dotp{width:5px;height:5px;border-radius:999px;background:var(--fg-mute)}
+    .sintent{font-size:11px;color:var(--fg-mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+    .slast{font-size:10px;color:var(--fg-mute);font-variant-numeric:tabular-nums;flex:0 0 auto}
+    .go{font-size:10.5px;color:var(--accent-soft);font-weight:600;flex:0 0 auto}
+    .ask{display:flex;align-items:center;gap:10px;padding:6px 9px;border:1px solid rgba(251,191,36,0.4);border-radius:8px;background:rgba(251,191,36,0.06)}
+    .ask .q{font-size:11px;color:#fde68a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+    .btn{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:8px;border:1px solid rgba(251,191,36,0.5);background:rgba(251,191,36,0.10);color:#fde68a;font-size:10.5px;font-weight:600;flex:0 0 auto}
+    .fold{margin:0 14px 8px;display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-2);font-size:11px;font-weight:650;color:var(--fg-mute)}
+    .fold .n{font-variant-numeric:tabular-nums;color:var(--fg-dim)}
+    .fold .hint{margin-left:auto;font-weight:400;font-size:10px}
+    .foot{margin-top:auto;display:flex;align-items:center;gap:14px;padding:8px 14px;font-size:10.5px;color:var(--fg-mute);border-top:1px solid var(--border-muted)}
+  </style>
+</helmet>
+<div style="display:flex;flex-direction:column;width:1440px;height:858px;overflow:hidden">
+  <div class="top">
+    <div class="scope"><span class="on">Everything</span><span>Goals</span><span>Plans</span><span>Work items</span><span>Sessions</span></div>
+    <span class="search">Filter…</span>
+    <span class="sum"><b>3</b> need you · <b>12</b> agents live · <b>14</b> plans in motion</span>
+  </div>
+
+  <!-- Lane 1: needs-you plan with everything inline -->
+  <div class="lane needs">
+    <div class="lh">
+      <span class="lt"><span class="bucket run">plan</span><b>EI-100 security posture closure</b><span class="slug">ei-100-security-posture-closure</span></span>
+      <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:33%"></span></span><span class="prog-n">3/9</span></span>
+      <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>2m</span>
+      <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>41s</span>
+      <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span>
+    </div>
+    <div class="lbody">
+      <div class="ask">
+        <span class="q">D-001 needs you: reuse the landed route-tier auth for remote listeners?</span>
+        <span class="btn">Answer</span>
+      </div>
+      <div class="srow">
+        <span class="sav" style="background:#7dd3fc">76</span><span class="sid">su-76a83</span>
+        <span class="state live"><span class="dotg"></span>live</span>
+        <span class="sintent">Recording D-001 — route-tier + remote-listener auth</span>
+        <span class="slast">tool 41s</span><span class="go">Open →</span>
+      </div>
+      <div class="srow">
+        <span class="sav" style="background:#a78bfa">6e</span><span class="sid">su-6e294</span>
+        <span class="state live"><span class="dotg"></span>live</span>
+        <span class="sintent">P-045 verification sweep</span>
+        <span class="slast">tool 3m</span><span class="go">Open →</span>
+      </div>
+      <div class="srow">
+        <span class="sav" style="background:#fbbf24">82</span><span class="sid">su-82be7</span>
+        <span class="state parked"><span class="dotp"></span>parked</span>
+        <span class="sintent">Holds WI-40971 open — owner-directed pause</span>
+        <span class="slast">1h</span><span class="go">Open →</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lane 2: goal frames its plan -->
+  <div class="lane live">
+    <div class="lh">
+      <span class="lt"><span class="bucket goal">goal</span><b>Ship the P2P git public release</b><span class="slug">goal · 2 subdirectives</span></span>
+      <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:70%"></span></span><span class="prog-n">21/30</span></span>
+      <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>12m</span>
+      <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>2m</span>
+      <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span>
+    </div>
+    <div class="lbody">
+      <div class="srow">
+        <span class="sav" style="background:#34d399">7f</span><span class="sid">su-7f4eb</span>
+        <span class="state live"><span class="dotg"></span>live</span>
+        <span class="sintent">Git lane reconcile — public-release verification evidence</span>
+        <span class="slast">tool 2m</span><span class="go">Open →</span>
+      </div>
+      <div class="srow">
+        <span class="sav" style="background:#fda4af">50</span><span class="sid">su-50a5a</span>
+        <span class="state live"><span class="dotg"></span>live</span>
+        <span class="sintent">Critical-bug wave closure sweep</span>
+        <span class="slast">tool 8m</span><span class="go">Open →</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lane 3: quiet working plan, collapsed body -->
+  <div class="lane live">
+    <div class="lh">
+      <span class="lt"><span class="bucket run">plan</span><b>Agent launch unification</b><span class="slug">agent-launch-unification</span></span>
+      <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:98%"></span></span><span class="prog-n">44/45</span></span>
+      <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>3m</span>
+      <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>3m</span>
+      <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></span>
+    </div>
+  </div>
+
+  <!-- Lane 4: blocked plan, reason inline -->
+  <div class="lane">
+    <div class="lh">
+      <span class="lt"><span class="bucket run">plan</span><b>Focused GUI server split</b><span class="slug">focused-gui-server-split</span><span style="font-size:10.5px;color:#fecaca">· blocked: D-035 proofs incomplete</span></span>
+      <span class="prog"><span class="prog-track"><span class="prog-fill" style="width:63%"></span></span><span class="prog-n">7/11</span></span>
+      <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>2d</span>
+      <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>6h</span>
+      <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></span>
+    </div>
+  </div>
+
+  <!-- Solo sessions group -->
+  <div class="lane">
+    <div class="lh">
+      <span class="lt"><span class="bucket">solo</span><b>Sessions on no plan</b><span class="slug">3 sessions</span></span>
+      <span></span><span></span><span></span>
+      <span class="chev"><svg class="ic" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span>
+    </div>
+    <div class="lbody">
+      <div class="srow">
+        <span class="sav" style="background:#f9a8d4">f4</span><span class="sid">su-f4df4</span>
+        <span class="state live"><span class="dotg"></span>live</span>
+        <span class="sintent">WI-40086 claim-hold reconcile</span>
+        <span class="slast">tool 12m</span><span class="go">Open →</span>
+      </div>
+      <div class="srow">
+        <span class="sav" style="background:#7dd3fc">c9</span><span class="sid">su-c949d</span>
+        <span class="state live"><span class="dotg"></span>live</span>
+        <span class="sintent">Federation sidecar gate triage</span>
+        <span class="slast">tool 5m</span><span class="go">Open →</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="fold">Not in motion — Ready<span class="n">87</span> · Done<span class="n">244</span><span class="hint">▸ expand</span></div>
+
+  <div class="foot">
+    <span>One board: goals, plans, items and their sessions in the same lane — no tab-hopping to answer "what's happening?"</span>
+    <span style="margin-left:auto;display:inline-flex;align-items:center;gap:5px"><span class="dotg"></span>live via SSE</span>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

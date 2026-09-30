@@ -1,0 +1,101 @@
+{
+  "$doc": "The worked checks-config for a two-plane desktop app (a purchasing-ops domain) — papercusp-app answered `target: desktop` + `agents: pots`. The current agentic plane uses an app-owned plan template, canonical work-item promotion/DAG, and one stable app-agent blueprint; the historical app-root aliases still resolve to this composition but do not define its execution. Schema: @papercusp/template-kit TemplateChecksConfig. A materialized app copies the portable check files verbatim and writes ITS OWN config shaped like this one (app.root='.' means 'place beside the app repo root'; run via a `template-checks` npm script at the app root). boot.mode is 'attach' because the app-home operator.json is a per-user singleton — use 'spawn' with a command only on a machine where the app is NOT live. Pinned by template-kit's checks-config tests.",
+  "app": { "name": "purchase-ops", "root": "." },
+  "confinement": {
+    "blueprints": ["blueprints/purchase-agent/blueprint.yaml"],
+    "dangerousCapabilities": [
+      "cart:*",
+      "checkout:*",
+      "card-vault:*",
+      "vault:*",
+      "payment_methods:*",
+      "approvals:write",
+      "approvals:*",
+      "purchases:write"
+    ],
+    "dangerousTools": ["cart:*", "checkout:*", "card-vault:*", "vault:*", "payment_methods:*", "approvals:*", "purchases:write"]
+  },
+  "seam": {
+    "workItemKind": "purchase-research",
+    "contractModule": "packages/contracts/src/index.ts",
+    "parseInputExport": "parsePurchaseResearchInput",
+    "parseOutputExport": "parseCandidateSet",
+    "joinKey": "itemId",
+    "agentBlueprint": "blueprints/purchase-agent/blueprint.yaml",
+    "operation": {
+      "id": "research-purchase",
+      "version": "1",
+      "planTemplate": {
+        "ref": "purchase-research",
+        "revision": "7",
+        "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "validInput": {
+      "itemId": 42,
+      "item": "Cash Drawer",
+      "qty": 2,
+      "notes": "16 inch, under-counter mount",
+      "constraints": { "maxUnitPriceCents": 15000, "attributes": ["16 inch"] }
+    },
+    "validOutput": {
+      "itemId": 42,
+      "candidates": [
+        {
+          "vendor": "posguys.com",
+          "url": "https://posguys.com/cash-drawer-16",
+          "title": "16\" Cash Drawer",
+          "priceCents": 12999,
+          "currency": "USD",
+          "matchConfidence": 0.9,
+          "rationale": "exact 16-inch variant, under the 150.00 ceiling",
+          "sources": ["https://posguys.com/cash-drawer-16"]
+        }
+      ],
+      "ts": "2026-07-04T00:00:00.000Z"
+    },
+    "invalidOutput": { "itemId": 42, "candidates": [] },
+    "roundTripCommand": ["npx", "vitest", "run", "src/lib/research-seam.test.ts", "src/lib/hive-bootstrap.test.ts"],
+    "roundTripCwd": "apps/desktop"
+  },
+  "components": {
+    "$doc": "The composition's npm-visible component pins for `target: desktop` + `agents: pots`. PATTERN components map to app-local packages (embedded-postgres-server -> @purchase-ops/embedded-postgres-server; typed-contracts -> @purchase-ops/contracts); papergrid is a META-package so the app depends on the SUB-package it uses (@papercusp/grid-core); lexicon is DROPPED per the ui template's ui-surfaces decision point (see DECISIONS.md).",
+    "packages": [
+      "@purchase-ops/embedded-postgres-server",
+      "@papercusp/embedded-pg-discovery",
+      "@purchase-ops/contracts",
+      "@papercusp/ui-primitives",
+      "@papercusp/grid-core",
+      "@papercusp/dock-workbench",
+      "@papercusp/pot-app-seam"
+    ],
+    "manifests": ["apps/desktop/package.json", "packages/db/package.json"]
+  },
+  "boot": {
+    "mode": "attach",
+    "discoveryFile": "~/.purchase-ops/operator.json",
+    "healthPath": "/api/health"
+  },
+  "nativeDesktop": {
+    "cargoManifest": "apps/desktop/src-tauri/Cargo.toml",
+    "cargoLock": "apps/desktop/src-tauri/Cargo.lock",
+    "tauriConfig": "apps/desktop/src-tauri/tauri.conf.json",
+    "icons": [
+      "apps/desktop/src-tauri/icons/32x32.png",
+      "apps/desktop/src-tauri/icons/128x128.png",
+      "apps/desktop/src-tauri/icons/128x128@2x.png",
+      "apps/desktop/src-tauri/icons/icon.png",
+      "apps/desktop/src-tauri/icons/icon.icns",
+      "apps/desktop/src-tauri/icons/icon.ico"
+    ]
+  },
+  "gym": {
+    "blueprint": "blueprints/purchase-agent/blueprint.yaml",
+    "requiredSignals": [
+      "no-checkout-reach",
+      "candidate-has-evidence",
+      "price-ceiling-honored",
+      "schema-clean-output"
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "primitive": {
+    "color": {
+      "ink": "#172033",
+      "paper": "#F6F3EC",
+      "accent": "#4966D4"
+    },
+    "space": {
+      "sm": 8,
+      "md": 16,
+      "lg": 24
+    }
+  },
+  "component": {
+    "button": {
+      "radius": 10,
+      "horizontalPadding": 16
+    }
+  },
+  "semantic": {
+    "contentPrimary": "{primitive.color.ink}",
+    "surfacePrimary": "{primitive.color.paper}",
+    "actionPrimary": "{primitive.color.accent}"
+  }
+}

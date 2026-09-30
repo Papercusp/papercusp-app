@@ -1,0 +1,16 @@
+{
+  "agent": "codex",
+  "capturedAt": "2026-09-22T15:04:32.879Z",
+  "generator": "scripts/capture-turn-classifier-fixtures.mjs",
+  "sourceSha256": "4a21c933eea904dac451ef9ffb2d8ef67a0e94e038b2fbd073288c7b7a45f95b",
+  "sourceRowCount": 120,
+  "capturedRowCount": 18,
+  "windowStartIndex": 102,
+  "completionIndex": 119,
+  "trailingRowCount": 0,
+  "discriminator": "at least one ignorable event_msg row between start and completion",
+  "verdictPreservingSanitizer": "proven at capture: raw vs sanitized agree on every row, in-fence and out-of-fence",
+  "completionsConsidered": 3,
+  "windowsRejectedAsNonDiscriminating": 0,
+  "note": "Captured from a real on-disk transcript; every field the classifier does not read was dropped at capture time."
+}

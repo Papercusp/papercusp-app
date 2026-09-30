@@ -1,0 +1,12 @@
+next-env.d.ts
+storybook-static/
+lostpixel-current/
+lostpixel-diff/
+
+# Playwright test artifacts (screenshots, videos, error contexts on failed runs)
+test-results/
+playwright-report/
+
+# Vitest junit reporter output — a stray in-tree junit.xml gets swept in by git-sync
+# and its embedded test names red-pin the envelope-grammar recurrence guard (2026-08-24)
+junit.xml

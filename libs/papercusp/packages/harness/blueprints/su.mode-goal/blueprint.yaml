@@ -1,0 +1,54 @@
+id: su.mode-goal
+extends: base
+version: 0.1.2
+description: "Built-in GOAL mode identity component; host policy remains in the mode registry."
+slots:
+  - slot: goal
+contributions:
+  - id: goal-definition
+    purpose: prompt
+    source: fixed
+    refresh: source-change
+    inputKind: prompt-file
+    ref: "mode:su.mode-goal:goal"
+  - id: current-mode-state
+    purpose: operational
+    source: provider
+    refresh: turn
+    inputKind: setting
+    ref: mode
+    producerRef: modes/store:agent_modes
+    availability: optional
+  - id: goal-kickoff
+    purpose: prompt
+    source: provider
+    refresh: launch
+    inputKind: prompt-file
+    ref: provider:goal-kickoff
+    producerRef: agent-tools/goals/start:buildGoalKickoffBrief
+    availability: optional
+  - id: goal-portfolio
+    purpose: prompt
+    source: provider
+    refresh: launch
+    inputKind: prompt-file
+    ref: provider:goal-portfolio
+    producerRef: goal-launch-settings:renderGoalPortfolioBrief
+    availability: optional
+  - id: goal-obligations
+    purpose: prompt
+    source: provider
+    refresh: turn
+    inputKind: prompt-file
+    ref: provider:goal-obligations
+    producerRef: agent-obligation-reader:projectAgentTurnStartObligationBrief
+    availability: optional
+mode:
+  id: goal
+  policyRef: goal
+  title: "GOAL — own an outcome, not a queue"
+  oneLiner: "own a goal end-to-end: create the pots/plans/fleets that reach it, outsource every build, reallocate on evidence, kill on written criteria"
+  definitionContributionId: goal-definition
+  implies: [auto, ideate]
+  requiresSubject: true
+  launchable: false

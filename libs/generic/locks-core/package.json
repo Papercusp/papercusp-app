@@ -1,0 +1,20 @@
+{
+  "name": "@papercusp/locks-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic, pure concurrency + causality primitives for distributed coordination. Four zero-I/O, zero-domain-coupling modules: Hybrid Logical Clocks (Kulkarni 2014 — 8-byte causal timestamps that stay monotone across NTP steps, the software substitute for TrueTime); state-based CRDTs (PN-Counter, add-wins OR-Set, per-field HLC LWW-Register, version vectors / dotted version vectors, and a Thomas-Write-Rule merge decision that routes genuine concurrency to a resolver instead of clobbering); the Gray-1976 multi-granularity intention-lock matrix (IS/IX/S/SIX/X compatibility, ancestor lock-set derivation, conflict detection); and authority-hardening — fencing + anti-flap for a lowest-id leader election (monotonic fencing token a la Kleppmann, no-preemption hysteresis + re-grant cooldown a la Consul/Chubby, an RCU grace window on handover). The consumer injects persistence/transport (a PG lock store, a federation outbox) and maps its own domain onto these algorithms — the lib names no host.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./authority-hardening": "./src/authority-hardening.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

@@ -1,0 +1,93 @@
+# papercusp-web-host — aspect: the web app chassis (P-029; extracted per the
+# origin-webapp audit — agent-insights/restart-webapp-audit-papercusp-webapp-
+# template). The web twin of papercusp-tauri-desktop-shell. Machine twin:
+# @papercusp/template-kit src/reference-templates.ts
+# PAPERCUSP_WEB_HOST_TEMPLATE — the kit's suite pins this file to it.
+id: papercusp-web-host
+version: "0.1.0"
+scope: aspect
+category: shell
+summary: >-
+  The web app chassis — the web twin of papercusp-tauri-desktop-shell, extracted from
+  the first papercusp webapp: a Next.js app-router host
+  built with output:'standalone' (outputFileTracingRoot at the monorepo root
+  + transpilePackages for every workspace lib — the classic monorepo miss),
+  started as node server.js with static/public assets staged in,
+  operator.json discovery written on boot, an auth seam (middleware.ts gate
+  stub + a minimal basic-auth reverse proxy — placeholders to REPLACE before
+  real exposure), a Dockerfile builder on the workspace-manifest COPY layer,
+  and a serial-PG vitest rig. Config/skeleton, not a lib — Tier A
+  throughout: compose and modify freely.
+components:
+  - id: next-standalone-host
+    version: "0.0.1"
+contracts: []
+decisionPoints:
+  # Declared HERE, not on an app root: tenancy is a web-chassis concern, so it
+  # appears exactly when this chassis is in the closure (composition tags every
+  # decision point with the template that owns it — no conditionals needed).
+  - id: tenancy
+    prompt: >-
+      Single-user local install (papercusp-style, embedded PG per install)
+      or multi-user server deployment (one PG, real auth, sessions)? The web
+      chassis serves both, but auth-strategy, data-layer connection
+      resolution, and the hosting target all fork on this answer — decide it
+      FIRST.
+  - id: hosting-target
+    prompt: >-
+      Where does the app run — a local per-user install (papercusp-style), a
+      container (the Dockerfile builder pattern), or behind a reverse proxy
+      on a server? Drives PORT/HOSTNAME wiring, the update story, and whether
+      the basic-auth proxy is even relevant.
+  - id: auth-strategy
+    prompt: >-
+      What replaces the auth placeholders before exposure? The template ships
+      a middleware.ts gate STUB and a basic-auth reverse proxy for
+      pre-release protection — shipping either as the real auth is the
+      classic miss; pick the app's real authn/z at composition time.
+  - id: render-strategy
+    prompt: >-
+      Which routes are SSR/server-components vs client-only? The standalone
+      output serves both; decide per surface — data-heavy operator-style
+      panes usually go client + live sync, content/docs surfaces go server.
+  - id: observability
+    prompt: >-
+      Does the app wire instrumentation.ts (OTEL) and browser RUM, or ship
+      without? FREE tier — a deployed multi-user webapp without traces debugs
+      blind; a local single-user install can skip it.
+composesWith:
+  - papercusp-data-layer
+  - papercusp-ui
+  - papercusp-data-sync
+  - papercusp-search
+  - papercusp-app
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+  - agent-insights/restart-webapp-audit-papercusp-webapp-template
+checks:
+  - id: boot-e2e
+    run: checks/boot-e2e.test.ts
+    summary: >-
+      composed web app builds, host starts, discovery file written, health
+      returns 200
+musts:
+  - id: standalone-output
+    rule: "output standalone + outputFileTracingRoot + complete transpilePackages — all three before first deploy"
+    enforcedBy: prose-only
+  - id: auth-before-exposure
+    rule: "Both auth placeholders replaced before any non-local exposure — the auth-strategy decision point is not optional"
+    enforcedBy: prose-only
+  - id: discovery-lifecycle
+    rule: "The discovery file is written on boot and removed on shutdown"
+    enforcedBy: boot-e2e
+  - id: wire-boot-check
+    rule: "checks/boot-e2e.test.ts is wired in the composed app TEMPLATE_CHECKS_CONFIG boot section, spawn mode in CI"
+    enforcedBy: prose-only
+  - id: next-manual-sig-handle
+    rule: "NEXT_MANUAL_SIG_HANDLE=1 whenever the app registers its own shutdown hook (WI-2880) — else Next truncates async cleanup"
+    enforcedBy: boot-e2e
+  - id: native-deps-copy
+    rule: "A post-build native-deps copy step for every spawn-based dependency (WI-2875) — the standalone tracer will not carry them"
+    enforcedBy: prose-only

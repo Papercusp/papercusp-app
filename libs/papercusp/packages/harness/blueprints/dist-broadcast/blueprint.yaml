@@ -1,0 +1,48 @@
+# dist-broadcast — flat-DISTRIBUTED coordination topology (benchmark-coordination-topologies).
+#
+# N peer worker agents, NO central Queen/decider. Each agent SELF-CLAIMS the next ready work-item
+# from the shared backlog (FIFO arrival order), solves it end-to-end, declares-intent so peers see
+# what it's on, and BROADCASTS progress/findings/blockers to a shared topic peers subscribe to — so
+# peers can correct each other + avoid duplicating discovery. This is the fully-distributed pole of
+# the central-vs-distributed study (vs the central-Queen `hive`). A coordination-topology arm for the
+# fairness benchmark; runs over any backlog via the shared makePoolBacklogDriver.
+id: dist-broadcast
+extends: base
+version: 0.1.0
+description: >-
+  Flat-distributed coordination: N peer workers self-claim from a shared queue (no Queen) and
+  broadcast findings to peers. The fully-distributed pole of the central-vs-distributed study.
+
+workItem:
+  kind: feature
+  idPrefix: W
+
+# Fleet saturation: N workers drain the backlog in waves of <= the global maxSimultaneousAgents cap
+# (set per-run for iso-budget fairness — same saturation discipline as the hive arm).
+dispatch:
+  concurrency: 4
+
+spine:
+  # NO central decider — peers pull the next ready work-item themselves (FIFO arrival order).
+  claimModel: self-claim-fifo
+  maxTurns: 200
+
+dependencies:
+  tools: []
+  packs: []
+  plugins: []
+  blueprints: []
+
+# The distributed coordination protocol.
+coordination:
+  broadcast: topic     # publish findings/blockers to a peer topic for self-correction
+  review: none         # no peer-review gate (that's the dist-peer-review arm)
+  sharedState: both    # coordinate via shared work-item state AND direct messages
+  team: per-backlog    # one shared queue for the whole team (no per-repo/per-task grouping)
+
+roles:
+  - id: worker
+    description: >-
+      A peer worker: self-claims the next ready task, declares-intent (so peers see the claim),
+      solves it end-to-end, and broadcasts findings/blockers to the shared topic so peers can
+      correct or avoid duplication. No central orchestrator.

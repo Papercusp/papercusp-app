@@ -1,0 +1,30 @@
+{
+  "_doc-black": {
+    "$description": "Black theme — a semantic-layer override set. Emitted by the css-semantic-black Style Dictionary platform into apps/operator/app/_semantic.black.css under the [data-theme=\"black\"] selector. THEME CONTRACT: every key here MUST be a base semantic token (it overrides the :root value from desktop.semantic.tokens.json); never a brand primitive (color.*) or a raw literal var. Only tokens that DIFFER from frost are listed — everything else (the bg-2/3/4 white-alpha tiers, --frost, status hues, --card-shadow) inherits :root, which is theme-neutral on black. Mirrors THEME_TOKENS in apps/operator/lib/theme.ts."
+  },
+  "black": {
+    "bg-deepest":    { "$value": "#000000", "$type": "color", "$description": "Deep surface tiers collapse to pure black on the black page" },
+    "bg-deeper":     { "$value": "#000000", "$type": "color" },
+    "bg-deep":       { "$value": "#000000", "$type": "color" },
+    "bg":            { "$value": "#000000", "$type": "color", "$description": "Pure black page background" },
+    "bg-1":          { "$value": "#0A0A0A", "$type": "color", "$description": "Near-black base surface (tier 1)" },
+    "bg-popover":    { "$value": "#121212", "$type": "color", "$description": "Solid elevated surface for popovers/menus" },
+    "bg-raised":     { "$value": "#181818", "$type": "color", "$description": "Solid raised panel — subtle grey elevation above the black page (frost: bespoke navy)" },
+    "bg-raised-high":{ "$value": "#202020", "$type": "color", "$description": "Solid raised emphasis/hover panel — one step lighter than --bg-raised" },
+    "fg":            { "$value": "#F5F5F5", "$type": "color", "$description": "Near-white primary text" },
+    "fg-dim":        { "$value": "#B8B8B8", "$type": "color", "$description": "Dimmed text" },
+    "fg-mute":       { "$value": "#808080", "$type": "color", "$description": "Muted text" },
+    "border":        { "$value": "rgba(255, 255, 255, 0.14)", "$type": "color", "$description": "Neutral border (replaces the sky-tinted frost border)" },
+    "border-strong": { "$value": "rgba(255, 255, 255, 0.30)", "$type": "color", "$description": "Neutral strong border" },
+    "accent":        { "$value": "#E6E6E6", "$type": "color", "$description": "Light-grey accent so interactive chrome stays visible on black" },
+    "accent-rgb":    { "$value": "230, 230, 230", "$type": "color", "$description": "RGB triplet of --accent for rgba() alpha composition — every theme that overrides accent must override this too, or the frost sky triplet leaks through :root" },
+    "accent-strong": { "$value": "#FFFFFF", "$type": "color", "$description": "White strong accent" },
+    "accent-strong-rgb": { "$value": "255, 255, 255", "$type": "color", "$description": "RGB triplet of --accent-strong for rgba() alpha composition (same leak rule as accent-rgb)" },
+    "accent-cool":   { "$value": "#B0B0B0", "$type": "color", "$description": "Cool grey accent" },
+    "accent-soft":   { "$value": "#D8D8D8", "$type": "color", "$description": "Light grey — glows/highlights go monochrome on black (frost: sky-200)" },
+    "accent-soft-rgb": { "$value": "216, 216, 216", "$type": "color", "$description": "RGB triplet of --accent-soft for rgba() alpha composition (same leak rule as accent-rgb)" },
+    "accent-deep":   { "$value": "#707070", "$type": "color", "$description": "Mid grey — deeper accent tint on black (frost: sky-500)" },
+    "accent-deeper": { "$value": "#4A4A4A", "$type": "color", "$description": "Dark grey — deepest accent tint on black (frost: sky-700)" },
+    "accent-ink":    { "$value": "#000000", "$type": "color", "$description": "Black text drawn on top of an accent fill" }
+  }
+}

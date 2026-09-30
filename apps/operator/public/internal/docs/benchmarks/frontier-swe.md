@@ -1,0 +1,88 @@
+# FrontierSWE — ultra-long-horizon implementation / perf-eng / ML-research
+URL: /internal/docs/benchmarks/frontier-swe
+
+How Papercusp integrates the FrontierSWE benchmark (Proximal Labs) — an M2 in-container, continuous-score, ultra-long-horizon suite graded by each task's own scorer, reported as mean@5 / best@5 + AVG-RANK / dominance across a coordination-topology arm pool.
+
+import { Aside } from '@astrojs/starlight/components';
+
+**FrontierSWE** ([Proximal Labs](https://github.com/Proximal-Labs/frontier-swe);
+[leaderboard](https://www.frontierswe.com)) is an *ultra-long-horizon* coding-agent
+benchmark — **17 tasks** = **7 implementation / 7 performance-engineering / 3 ML-research**,
+with **4–20 h agent budgets per trial**. No model fully solves the
+implementation tasks, so it is scored on a **continuous \[0,1]** scale over **5 trials**
+per (model, harness) and reported as **mean\@5 / best\@5**; the leaderboard ranks models
+by **AVG RANK** (mean position, lower = better) + **dominance** (win rate vs a random
+opponent on a task). Plan: `benchmark-suite-frontier-swe-2026-06-18`.
+
+FrontierSWE is **M2 in-container + own-scorer** (the METR-HCAST shape), NOT the SWE-bench
+diff-batch (M1) shape. The agent works *inside* the task's Docker container over hours;
+each task ships its OWN verifier (`tests/test.sh` → `compute_reward.py` →
+`/logs/verifier/reward.txt`). We **do not author a verifier** — every arm hits the
+byte-identical task scorer (the fairness invariant).
+
+## How the integration is shaped
+
+| Concern      | Where                                                                                                                                      | Notes                                                                                                                                                                                                                                          |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Suite vocab  | `external-bench/types.ts` (`BenchmarkFamily`), `bench-metrics/schema.ts` (`BenchSuite`), `gym/report-set-firewall.ts` (`REPORT_ON_SUITES`) | `'frontier-swe'` in all 3 lock-step places — a published, gym-fenced suite.                                                                                                                                                                    |
+| Grader       | `external-bench/grader/frontier-swe.ts`                                                                                                    | `OfficialGrader`, modality **`in-container`**. Runs the task's own `test.sh` against the arm's container, reads `reward.txt` (bare scalar) / `reward.json` (fallback) → `GradeResult.score ∈ [0,1]`; `resolved = (score === 1)` is degenerate. |
+| Live binding | `external-bench/grader/frontier-swe-live.ts`                                                                                               | `resolveFrontierSweConfigFromEnv` + `buildLiveFrontierSweGrader` + `preflightFrontierSwe` + `describeFrontierSweRun`. Drives `docker exec` shell-free.                                                                                         |
+| Task sets    | `external-bench/task-sets.ts`                                                                                                              | `frontier-swe` (full 17) · `frontier-swe-pilot` (1/bucket → **3 tasks**) · `frontier-swe-cpu` (GPU-free) · `frontier-swe-custom`. Corpus at `~/.papercusp/bench-results/frontier-swe/tasks.jsonl`.                                             |
+| Aggregation  | `@papercusp/bench-metrics` `frontier-rank.ts`                                                                                              | `meanAtK` / `bestAtK` (unbiased), `avgRank`, `dominance`, `frontierRankReport`. New — `pass-k` is binary, `pareto` is cost/accuracy.                                                                                                           |
+| Arms         | the shared coordination-topology runtime (su-37e53a76)                                                                                     | FrontierSWE supplies only its task-set + clone/grade; it does NOT roll its own arms (D-007).                                                                                                                                                   |
+
+## Scoring & the headline
+
+Each task's verifier emits a continuous reward in `[0,1]`. Per task we report **mean\@5**
+(expected mean of a random 5-subset = the trial mean) and **best\@5** (the unbiased
+expected max of a random 5-subset; `best@1 = mean`, `best@n = max`). Across tasks the
+suite headline is the **coordination-topology comparison**: per-arm **mean\@5 / best\@5**,
+**AVG RANK**, and **dominance**, optionally per bucket (implementation / performance /
+research).
+
+The public AVG RANK / dominance are relative to a fixed competitor pool (the `job.yaml`
+models: claude-opus-4-6, gpt-5.4, gemini-3.1-pro, qwen, kimi, glm-5). By default we report
+the **central-Mug vs distributed-peer vs ensemble vs single-agent** comparison on the
+same tasks + same scorers under **iso-budget** — where FrontierSWE's real headroom (no
+model fully solves the implementation tasks) makes a topology lift measurable. Reproducing
+the absolute public rank requires running that competitor pool (an optional, owner-gated step).
+
+## Fairness (binding)
+
+Every FrontierSWE number passes the **C1–C10 pre-claim audit** in
+[Benchmark Fairness Criteria](/benchmarks/fairness-criteria) (use
+`buildFairnessAudit` from `@papercusp/bench-metrics`). FrontierSWE-specific points:
+
+* **C1 same denominator** — an empty / no-progress workspace scores **0** (it COUNTS); a
+  verifier that *fails to run* (image/OOM/timeout) is a `graderError`, excluded
+  *symmetrically* across arms and disclosed — never a vanished row.
+* **C3 iso-budget** — cap all arms to the same per-task budget; **wall-clock is a
+  first-class cap dimension** here (tasks run hours), alongside calls + `$`.
+* **C8** — the native 5-trial protocol satisfies ≥2 seeds; report per bucket.
+* **C9** — validate against a published number using a task's `solution/solve.sh` gold
+  control (or a reference model) before any cross-arm claim.
+
+## Hard gates (read before launching)
+
+* **GPUs** — 5 of 17 tasks need datacenter GPUs (B200: `granite-mamba2-inference-optimization`,
+  `inference-system-optimization`; H100: `modular-stack-wan21`, `optimizer-design`,
+  `pcqm4mv2-autoresearch`). Not runnable on a CPU host — use `frontier-swe-cpu` (12 tasks)
+  there, or run the GPU tasks on a cloud GPU. Note `pcqm4mv2-autoresearch` needs **both** an
+  H100 **and** internet, so it is excluded from `frontier-swe-cpu` *and* needs network.
+* **Wall-clock + disk** — 4–20 h agent + up to 24 h verifier per trial; per-task images are
+  GB-scale (`ghcr.io/proximal-labs/...`), memory up to 128 GB, storage up to 150 GB. Grade
+  on a **dedicated volume**, prune between tasks.
+* **External APIs** — only two tasks reach the network: `frogsgame-rl` needs `TINKER_API_KEY` +
+  internet (and is the only external-API task runnable on a CPU host — `gpus=0`, 8 h agent budget);
+  `pcqm4mv2-autoresearch` allows internet but also requires an H100.
+* **Reliability (D-009)** — long big-repo trials are the worst case for the slow-but-alive
+  heartbeat-reclaim gap; the liveness-conditioned reclaim fix (F-FIX-038 / EI-1293) shipped,
+  but infra non-completions are still counted-as-`false` + disclosed symmetrically (C6).
+* **License (D-005)** — the repo ships **no LICENSE**: research/eval use only, no
+  redistribution of derived data without owner sign-off.
+
+## Running it
+
+The full run is **owner-gated** (compute / `$` / wall-clock). Build + smoke first; see the
+operational runbook (`external-bench/grader/FRONTIER-SWE-PILOT.md`) for the exact ingest,
+preflight, gold/empty controls, env vars, and the per-task GPU/timeout envelope.

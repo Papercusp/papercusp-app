@@ -1,0 +1,7 @@
+<svg width="192" height="48" viewBox="0 0 192 48" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Papercusp Internal">
+  <path d="M24 4 42 14v20L24 44 6 34V14z" fill="#10120E" stroke="#FFD166" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M14 20 19 12l5 8 5-8 5 8-4 14H18z" fill="#F6B72F" stroke="#FFD166" stroke-width="1.4" stroke-linejoin="round"/>
+  <path d="M18 29h12M20 24h8M24 16v21" stroke="#FFF2C2" stroke-width="1.7" stroke-linecap="round"/>
+  <text x="54" y="29" fill="currentColor" font-family="Avenir Next, Segoe UI, sans-serif" font-size="18" font-weight="740" letter-spacing="-.4">Papercusp</text>
+  <text x="56" y="42" fill="#FFD166" font-family="SFMono-Regular, Consolas, monospace" font-size="8" font-weight="700" letter-spacing="1.6">INTERNAL</text>
+</svg>

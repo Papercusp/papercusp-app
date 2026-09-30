@@ -1,0 +1,115 @@
+# The `deliberate` blueprint — coordination-ops-as-blueprint-primitives-2026-06-04 (P-003 / D-006).
+#
+# The UNCERTAINTY LADDER as a program: ask the owner → if unresolved, run a vote
+# → if the vote is split, escalate a curated summary. It composes the coord ops
+# (`coord:ask`, `coord:vote`, `coord:escalate`) — the vote step recurses into the
+# `vote` blueprint program (D-008, depth-capped). The escalate-only-when-needed
+# flow: the cheapest sufficient rung wins, and the human is bothered only with a
+# genuinely-unresolvable, pre-deliberated decision.
+#
+# Directly invocable as `coord:deliberate` (D-009) or event-fired (D-007).
+# User-forkable (extends: deliberate) — declare a different ladder (ask-team, two
+# vote rounds, escalate-to-me) without code.
+id: deliberate
+extends: base
+version: 0.1.0
+description: >-
+  Resolve a decision via the uncertainty ladder: ask the owner, then a diverse
+  vote if unanswered, then a curated escalation if the vote is split.
+
+workItem:
+  kind: decision
+  idPrefix: DLIB
+
+# Program-mode spine: a ladder of coord ops with conditional steps + a gate.
+spine:
+  steps:
+    # Rung 1 — ask the owner (bounded wait). The cheapest resolution.
+    # EI-18685642611479940: WI-5951 changed this to `op: coord:ask-owner`,
+    # believing coord:ask lacked the `body`/`timeout_s` args and the
+    # `answered`/`answer` result shape this step needs. That premise no longer
+    # holds (and per the coord-ops registry — coord-ops-as-blueprint-primitives
+    # D-001 — never should have: `coord:ask-owner` is only the AGENT-FACING MCP
+    # TOOL name (agent-tools.ts), a *different* registration surface from the
+    # internal coord-op registry a blueprint's `op:` field resolves against;
+    # `registerCoordOp` never registered anything named `coord:ask-owner`, so
+    # every "deliberate" run 404'd on "unknown op coord:ask-owner"). The
+    # registered op is `coord:ask` (compose.ts) — its args (question/body/
+    # timeout_s/poll_ms/topics) and result ({ answered, answer, conversation_id
+    # }) already match this step's `args:` and `asked.answered`/`asked.answer`
+    # bindings exactly; `dependencies.tools` below was never changed off
+    # `coord:ask` either. Recurrence guard: blueprints-e2e.test.ts +
+    # registry-validation.test.ts both pin every op a blueprint names against
+    # the LIVE coord-ops registry.
+    - id: ask
+      op: coord:ask
+      args:
+        question: "{{ payload.question }}"
+        body: "Options: {{ payload.options }}"
+        timeout_s: "{{ payload.ask_timeout_s }}"
+      bind: asked
+    # Rung 2 — only if the owner didn't answer: run the diverse-lens vote. This
+    #   step invokes the `vote` program (recursion, depth-capped — D-008).
+    - id: vote
+      op: coord:vote
+      # MatchMap (@papercusp/rules) — owner did not answer (adopt-event-rules-engines D-002).
+      when: { "asked.answered": { truthy: false } }
+      args:
+        question: "{{ payload.question }}"
+        options: "{{ payload.options }}"
+        lenses: "{{ payload.lenses }}"
+        quorum: "{{ payload.quorum }}"
+        timeout_s: "{{ payload.timeout_s }}"
+      bind: voted
+  # The ladder gate, in priority order.
+  gate:
+    # Owner answered → use their answer.
+    - when: { "asked.answered": { truthy: true } }
+      op: resolve
+      args:
+        decision: "{{ asked.answer }}"
+        summary: "Owner answered '{{ payload.question }}' → {{ asked.answer }}"
+    # Owner silent but the vote resolved decisively → use the vote.
+    - when: { "voted.resolved": { truthy: true } }
+      op: resolve
+      args:
+        decision: "{{ voted.decision }}"
+        summary: "Vote resolved '{{ payload.question }}' → {{ voted.decision }}"
+    # Rung 3 — neither resolved → escalate a curated summary to the human.
+    - else: true
+      op: coord:escalate
+      args:
+        severity: question
+        summary: "Deliberation unresolved on: {{ payload.question }}"
+        body: "The owner did not answer in time and the vote was split. Options: {{ payload.options }}."
+
+# deliberate composes ops; the voters/advocate are the `vote` blueprint's roles,
+# spawned by the recursed vote program — so deliberate declares no roles of its own.
+roles: []
+
+knobs:
+  ask_timeout_s: 120
+  quorum: 3
+  max_voters: 5
+  timeout_s: 300
+  budget: 60000
+  lenses: [correctness, risk, simplicity]
+
+recursion:
+  maxDepth: 2
+
+triggers:
+  event: coordination-op:deliberate
+
+# Dependencies (official-blueprints-cupboard-publish D-002): deliberate is a
+# program-mode blueprint with no roles of its own — its ladder invokes the
+# coord ops below, each of which is also a real catalog tool, so the deps
+# travel with the listing and the import-time validator confirms the host has
+# the coordination surface. (The recursed `vote` program's roles declare their
+# own deps on the vote blueprint.)
+dependencies:
+  tools:
+    - coord:ask
+    - coord:escalate
+    - coord:vote
+  plugins: []

@@ -1,0 +1,32 @@
+#!/bin/sh
+# psu — the Papercusp superuser launcher, shipped inside the PUI release unit
+# (pui-first-party-public-release D-031). It runs the bundled lib/psu/psu.mjs on
+# the release's own private Node (lib/node/node), so no system Node, npm or
+# checkout is needed. PAPERCUSP_SIDECAR_BIN puts that Node first on PATH for
+# everything psu launches (the same contract as the desktop app's sidecar).
+set -eu
+
+self=$0
+# Follow the launcher link (~/.local/bin/psu → …/current/bin/psu) to this unit.
+while [ -L "$self" ]; do
+  command -v readlink >/dev/null 2>&1 || {
+    echo "psu: cannot resolve the link $self without readlink; run $(dirname "$self")/psu from the PUI release directory instead" >&2
+    exit 1
+  }
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd -P)
+node="$root/lib/node/node"
+entry="$root/lib/psu/psu.mjs"
+if [ ! -x "$node" ] || [ ! -f "$entry" ]; then
+  echo "psu: this PUI release is incomplete: $root is missing lib/node/node or lib/psu/psu.mjs." >&2
+  echo "psu: repair: reinstall PUI (pui self update, or run install.sh from a fresh download)." >&2
+  exit 1
+fi
+PAPERCUSP_SIDECAR_BIN="$root/lib/node"
+export PAPERCUSP_SIDECAR_BIN
+exec "$node" "$entry" "$@"

@@ -1,0 +1,61 @@
+# The `pot-eval` blueprint — pot-run-evaluation-2026-06-13 (HE-07, P-050).
+#
+# The monthly Pot-RUN evaluation pulse, as a deterministic blueprint (the SIBLING of the
+# `iq-battery` blueprint — D-006/D-011): per cadence, decide (owner-budget gate → code-SHA
+# identity → generation dedupe) and run + score ONE budget-capped generation of the seeded
+# scenario corpus. Whole throwaway Pots are driven to completion and graded on outcome
+# quality / efficiency / speed by the HE-06 un-gameable gate, persisted to hive_eval_scores
+# (its OWN tables — never the apiary beekeeper trend). The Learning tab's Benchmark trend
+# reads them: the acceptance yardstick for whether mug-execution / wave-dispatch / autonomy
+# made the Pot better over generations (D-007).
+#
+# The cup spawn stays INTERNAL to the `pot-eval:gen` op (like iq-battery, Option A): the
+# throwaway Pot boots its own Mug + cups over the scenario's work-item DAG — NOT a
+# spawn-roles step. NOT a flag/governor loop — the gate is the owner-set budgetUsd (absent ⇒
+# refuse; the gym's unattended-spend precedent). The live whole-Pot runner is owner-gated
+# P-051 (D-011); the op's default refuses until it is bound.
+id: pot-eval
+extends: base
+version: 0.1.0
+description: >-
+  Monthly Pot-run evaluation: when the code SHA changed, run one owner-budget-capped SCORED
+  generation of the seeded scenario corpus (whole-Pot runs graded on outcome quality /
+  efficiency / speed by the un-gameable gate) — the acceptance yardstick for whether
+  mug-execution / wave-dispatch / autonomy made the Pot better.
+
+workItem:
+  kind: hive-eval-run
+  idPrefix: HEV
+
+# Program-mode spine: one step, NO gate ⇒ deterministic pipeline (the op's internal cadence
+# gate decides refuse/skip/run). `payload.*` are the routine's cadence knobs.
+spine:
+  steps:
+    - id: gen
+      op: pot-eval:gen
+      args:
+        budgetUsd: "{{ payload.budgetUsd }}"
+        repeats: "{{ payload.repeats }}"
+        beeCap: "{{ payload.beeCap }}"
+        dryRun: "{{ payload.dryRun }}"
+      bind: gen
+
+knobs:
+  harnessKind: learning
+  # The benchmark derives the generation identity from git (the code SHA) + boots throwaway
+  # Pots over a seeded repo, so it needs a repo.
+  requiresRepo: true
+
+# Scheduled trigger: monthly, 1st @ 06:50 — :50 is OFFSET from the deploy rhythm
+# (release-trigger :00/:15/:30/:45, hourly green-checkpoint ~:30), the gym (:10/:40), and the
+# iq-battery (:20), since a battery is a long-running in-host job a deploy-restart would kill.
+# The routine fires `system:blueprint-run { blueprintId: pot-eval, payload: { budgetUsd } }`;
+# the handler detects program-mode and runs the step inline. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 50 6 1 * *"
+      action: system:blueprint-run
+
+dependencies:
+  tools: []
+  plugins: []

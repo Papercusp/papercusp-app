@@ -1,0 +1,229 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    :root{
+      --bg:#07101d;--bg-1:#0b1220;--bg-2:rgba(255,255,255,0.045);--bg-3:rgba(255,255,255,0.075);
+      --bg-raised:#112235;--bg-raised-high:#143049;--fg:#e7f7ff;--fg-dim:#b9d4e8;--fg-mute:#7f9bb4;
+      --border-muted:rgba(125,211,252,0.08);--border:rgba(125,211,252,0.15);--border-strong:rgba(125,211,252,0.32);
+      --accent:#38bdf8;--accent-strong:#7dd3fc;--accent-soft:#bae6fd;
+      --good:#34d399;--warn:#fbbf24;--bad:#fb7185;
+      --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    }
+    body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:12.5px;-webkit-font-smoothing:antialiased;}
+    a{color:var(--accent-strong)}a:hover{color:var(--accent-soft)}
+    .ic{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+    .appbar{display:flex;align-items:center;gap:18px;height:38px;padding:0 16px;border-bottom:1px solid var(--border-muted);background:var(--bg-1)}
+    .brand{font-family:var(--mono);font-size:12px;color:var(--fg-dim);display:flex;align-items:center;gap:7px}
+    .brand-dot{width:8px;height:8px;border-radius:999px;background:var(--accent)}
+    .tabs{display:flex;align-items:center;gap:2px;height:100%}
+    .tab{padding:0 11px;height:100%;display:flex;align-items:center;font-size:12px;color:var(--fg-mute);border-bottom:2px solid transparent}
+    .tab.on{color:var(--fg);border-bottom-color:var(--accent)}
+    .body{display:grid;grid-template-columns:360px minmax(0,1fr);flex:1;min-height:0}
+    .rail{border-right:1px solid var(--border-muted);display:flex;flex-direction:column;gap:6px;padding:10px;min-height:0;background:var(--bg-1)}
+    .search{display:flex;align-items:center;gap:6px;padding:4px 9px;border-radius:8px;background:var(--bg-3);border:1px solid var(--border);color:var(--fg-mute);font-size:12px}
+    .row{position:relative;overflow:hidden;display:flex;flex-direction:column;gap:3px;padding:7px 9px 8px;border-radius:8px;border:1px solid var(--border);border-left-width:3px;background:transparent}
+    .row.needs{border-left-color:color-mix(in srgb,var(--bad) 70%,transparent)}
+    .row.live{border-left-color:color-mix(in srgb,var(--good) 55%,transparent)}
+    .row.sel{background:var(--bg-3);border-color:var(--border-strong)}
+    .rhead{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--fg-mute)}
+    .bucket{padding:0 5px;border-radius:999px;font-size:8.5px;font-weight:650;text-transform:uppercase;color:var(--fg-mute);border:1px solid var(--border)}
+    .bucket.run{color:#bae6fd;border-color:rgba(56,189,248,0.4)}
+    .bucket.ready{color:#93c5fd;border-color:rgba(96,165,250,0.4)}
+    .bucket.draft{color:#c4b5fd;border-color:rgba(139,92,246,0.4)}
+    .sp{flex:1}
+    .t{display:inline-flex;align-items:center;gap:4px;font-variant-numeric:tabular-nums;font-size:10px;color:var(--fg-mute)}
+    .t.hot{color:var(--fg-dim)}.t.hot .ic{color:var(--good)}
+    .rtitle{font-size:12px;font-weight:550;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .rstat{font-size:10px;color:var(--fg-mute)}
+    .track{position:absolute;left:0;right:0;bottom:0;height:2px;background:color-mix(in srgb,var(--fg-mute) 14%,transparent)}
+    .fill{display:block;height:100%;background:color-mix(in srgb,var(--accent) 70%,transparent)}
+    .detail{display:flex;flex-direction:column;min-height:0;padding:16px 20px;gap:14px;overflow:hidden}
+    .dhead{display:flex;flex-direction:column;gap:6px}
+    .dtitle{display:flex;align-items:center;gap:10px}
+    .dtitle h1{margin:0;font-size:17px;font-weight:650}
+    .dslug{font-family:var(--mono);font-size:10.5px;color:var(--fg-mute)}
+    .dmeta{display:flex;align-items:center;gap:16px;font-size:11.5px;color:var(--fg-dim)}
+    .dmeta .t{font-size:11.5px}
+    .btn{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:8px;border:1px solid rgba(56,189,248,0.45);background:rgba(56,189,248,0.10);color:var(--accent-soft);font-size:11px;font-weight:600;white-space:nowrap}
+    .btn.ghost{border-color:var(--border);background:transparent;color:var(--fg-dim)}
+    .wtrack{height:6px;border-radius:999px;background:color-mix(in srgb,var(--fg-mute) 14%,transparent);overflow:hidden}
+    .wfill{display:block;height:100%;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,transparent)}
+    .sec{display:flex;flex-direction:column;gap:8px}
+    .sec-h{font-size:9.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-mute);display:flex;align-items:center;gap:8px}
+    .sess-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .scard{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:var(--bg-raised)}
+    .srow1{display:flex;align-items:center;gap:8px}
+    .sav{width:22px;height:22px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;font-family:var(--mono);color:#051827}
+    .sid{font-family:var(--mono);font-size:12px;color:var(--fg)}
+    .backend{font-size:9.5px;font-weight:650;padding:1px 6px;border-radius:999px;border:1px solid var(--border);color:var(--fg-mute)}
+    .state{margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:650}
+    .state.live{color:#bbf7d0}.state.parked{color:var(--fg-mute)}
+    .dotg{width:5px;height:5px;border-radius:999px;background:var(--good)}
+    .dot-p{width:5px;height:5px;border-radius:999px;background:var(--fg-mute)}
+    .sintent{font-size:11px;color:var(--fg-mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .srow3{display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--fg-mute)}
+    .feed{display:flex;flex-direction:column}
+    .fitem{display:grid;grid-template-columns:20px minmax(0,1fr) 90px 70px;align-items:center;column-gap:10px;padding:6px 0;border-bottom:1px solid var(--border-muted);font-size:11.5px}
+    .fitem:last-child{border-bottom:0}
+    .fic{display:flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:6px;background:var(--bg-3);color:var(--fg-mute)}
+    .fic.work{color:var(--good)}.fic.edit{color:var(--accent-strong)}.fic.dec{color:var(--bad)}
+    .ftext{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg-dim)}
+    .fwho{font-family:var(--mono);font-size:10px;color:var(--fg-mute);text-align:right}
+    .fago{font-size:10px;color:var(--fg-mute);font-variant-numeric:tabular-nums;text-align:right}
+  </style>
+</helmet>
+<div style="display:flex;flex-direction:column;width:1440px;height:878px;overflow:hidden">
+  <div class="appbar">
+    <span class="brand"><span class="brand-dot"></span>papercusp</span>
+    <div class="tabs">
+      <span class="tab">Overview</span><span class="tab">Work</span><span class="tab">HUD</span>
+      <span class="tab on">Plans</span><span class="tab">Git</span><span class="tab">More ▾</span>
+    </div>
+  </div>
+  <div class="body">
+    <!-- Left rail: the plan list (PlansPane rows, denser, with dual times) -->
+    <div class="rail">
+      <span class="search"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>Search plans…</span>
+
+      <div class="row needs sel">
+        <span class="rhead"><span class="bucket run">plan</span><span>papercusp</span><span class="sp"></span>
+          <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>2m</span>
+          <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>41s</span>
+        </span>
+        <span class="rtitle">EI-100 security posture closure</span>
+        <span class="rstat">1 decision needs you · 4 agents working</span>
+        <span class="track"><span class="fill" style="width:33%"></span></span>
+      </div>
+
+      <div class="row live">
+        <span class="rhead"><span class="bucket run">plan</span><span>papercusp</span><span class="sp"></span>
+          <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>12m</span>
+          <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>2m</span>
+        </span>
+        <span class="rtitle">P2P git public release</span>
+        <span class="rstat">3 agents working now</span>
+        <span class="track"><span class="fill" style="width:70%"></span></span>
+      </div>
+
+      <div class="row live">
+        <span class="rhead"><span class="bucket run">plan</span><span>papercusp</span><span class="sp"></span>
+          <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>3m</span>
+          <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>3m</span>
+        </span>
+        <span class="rtitle">Agent launch unification</span>
+        <span class="rstat">1 agent working now</span>
+        <span class="track"><span class="fill" style="width:98%"></span></span>
+      </div>
+
+      <div class="row">
+        <span class="rhead"><span class="bucket ready">ready</span><span>papercusp</span><span class="sp"></span>
+          <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>9h</span>
+          <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>9h</span>
+        </span>
+        <span class="rtitle">Event system drift to derived</span>
+        <span class="rstat">2 decisions need you</span>
+        <span class="track"><span class="fill" style="width:13%"></span></span>
+      </div>
+
+      <div class="row">
+        <span class="rhead"><span class="bucket draft">draft</span><span>papercusp</span><span class="sp"></span>
+          <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>3d</span>
+          <span class="t" style="opacity:.5"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>—</span>
+        </span>
+        <span class="rtitle">System health tab</span>
+        <span class="rstat">0 of 8 items done</span>
+        <span class="track"><span class="fill" style="width:0%"></span></span>
+      </div>
+
+      <div style="text-align:center;font-size:10px;color:var(--fg-mute);padding-top:2px">461 more…</div>
+    </div>
+
+    <!-- Right: live detail for the selected plan -->
+    <div class="detail">
+      <div class="dhead">
+        <div class="dtitle">
+          <span class="bucket run" style="font-size:9px">plan</span>
+          <h1>EI-100 security posture closure</h1>
+          <span class="dslug">papercusp · ei-100-security-posture-closure-2026-08-23</span>
+          <span class="sp" style="flex:1"></span>
+          <span class="btn ghost">Open full plan</span>
+          <span class="btn"><svg class="ic" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Launch agent</span>
+        </div>
+        <div class="dmeta">
+          <span class="t"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>edited 2m ago</span>
+          <span class="t hot"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg>worked 41s ago</span>
+          <span>3 of 9 items done</span>
+          <span style="color:#fecaca">1 decision needs you</span>
+        </div>
+        <div class="wtrack"><span class="wfill" style="width:33%"></span></div>
+      </div>
+
+      <div class="sec">
+        <div class="sec-h">Working now · 4 agents</div>
+        <div class="sess-grid">
+          <div class="scard">
+            <div class="srow1"><span class="sav" style="background:#7dd3fc">76</span><span class="sid">su-76a83</span><span class="backend">claude</span><span class="state live"><span class="dotg"></span>live</span></div>
+            <span class="sintent">Recording D-001 — reuse route-tier + remote-listener auth</span>
+            <div class="srow3"><span>last tool call 41s ago</span><span class="sp" style="flex:1"></span><span class="btn">Open session</span></div>
+          </div>
+          <div class="scard">
+            <div class="srow1"><span class="sav" style="background:#a78bfa">6e</span><span class="sid">su-6e294</span><span class="backend">claude</span><span class="state live"><span class="dotg"></span>live</span></div>
+            <span class="sintent">P-045 verification sweep</span>
+            <div class="srow3"><span>last tool call 3m ago</span><span class="sp" style="flex:1"></span><span class="btn">Open session</span></div>
+          </div>
+          <div class="scard">
+            <div class="srow1"><span class="sav" style="background:#f9a8d4">f4</span><span class="sid">su-f4df4</span><span class="backend">claude</span><span class="state live"><span class="dotg"></span>live</span></div>
+            <span class="sintent">WI-40086 claim-hold reconcile</span>
+            <div class="srow3"><span>last tool call 12m ago</span><span class="sp" style="flex:1"></span><span class="btn">Open session</span></div>
+          </div>
+          <div class="scard">
+            <div class="srow1"><span class="sav" style="background:#fbbf24">82</span><span class="sid">su-82be7</span><span class="backend">codex</span><span class="state parked"><span class="dot-p"></span>parked</span></div>
+            <span class="sintent">Holds WI-40971 open — owner-directed pause</span>
+            <div class="srow3"><span>idle 1h</span><span class="sp" style="flex:1"></span><span class="btn">Open session</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sec">
+        <div class="sec-h">Recent activity<span style="font-weight:400;text-transform:none;letter-spacing:0">edits + work, newest first</span></div>
+        <div class="feed">
+          <div class="fitem">
+            <span class="fic work"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg></span>
+            <span class="ftext">WI-40729 checkpoint — serializer verified against live gate run</span>
+            <span class="fwho">su-76a83</span><span class="fago">41s</span>
+          </div>
+          <div class="fitem">
+            <span class="fic dec"><svg class="ic" viewBox="0 0 24 24"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span>
+            <span class="ftext">Decision D-001 added — reuse the landed route-tier auth, no parallel system</span>
+            <span class="fwho">su-76a83</span><span class="fago">2m</span>
+          </div>
+          <div class="fitem">
+            <span class="fic work"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg></span>
+            <span class="ftext">P-045 flipped to done — unification lane verified</span>
+            <span class="fwho">su-6e294</span><span class="fago">3m</span>
+          </div>
+          <div class="fitem">
+            <span class="fic edit"><svg class="ic" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg></span>
+            <span class="ftext">## Now updated — scope narrowed to the two open lanes</span>
+            <span class="fwho">su-f4df4</span><span class="fago">1h</span>
+          </div>
+          <div class="fitem">
+            <span class="fic work"><svg class="ic" viewBox="0 0 24 24"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/></svg></span>
+            <span class="ftext">WI-40971 held open — owner-directed pause recorded</span>
+            <span class="fwho">su-82be7</span><span class="fago">1h</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

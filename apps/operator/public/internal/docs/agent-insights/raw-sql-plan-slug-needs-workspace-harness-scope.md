@@ -1,0 +1,80 @@
+# A raw SQL read of harness_plans by plan_slug alone can silently return the WRONG row
+URL: /internal/docs/agent-insights/raw-sql-plan-slug-needs-workspace-harness-scope
+
+harness_shared.harness_plans is keyed (workspace_id, harness_slug, plan_slug) — plan_slug alone is not unique. A dev:pg_query filtered only on plan_slug can pick up a stale/duplicate-slug row from a different workspace or harness and look exactly like a diverged/stale plan store, when the authoritative plans:get read is fine. Always scope raw plan reads by workspace_id + harness_slug, same as plans:get does.
+
+## The trap
+
+`harness_shared.harness_plans` is a **multi-tenant** table — its primary key is
+`(workspace_id, harness_slug, plan_slug)` (migration 122). `plan_slug` by
+itself is **not unique**: the same slug can exist as a distinct row under a
+different `harness_slug` or `workspace_id` (a duplicate/leftover/differently-scoped
+plan with the same human-chosen name).
+
+A raw `dev:pg_query` like:
+
+```sql
+-- sql-snippet-justified: the under-scoped query this page exists to warn about.
+SELECT content, version, updated_at FROM harness_shared.harness_plans
+WHERE plan_slug = 'some-plan-slug'
+```
+
+with no `workspace_id`/`harness_slug` filter can return an arbitrary row that
+matches the slug — possibly a stale, abandoned, or wrong-scope one — while the
+**authoritative** read for your actual working scope is current and correct.
+
+This bit an agent investigating EI-6348 (plan store/file divergence): the raw
+read showed old content with no expected markers, looking exactly like proof
+of a stale/diverged store — but `plans:get { slug, harness, mode:'meta' }` for
+the *same slug* showed the live, current version. The raw read had picked up a
+different row. Acting on the raw read would have meant "fixing" the divergence
+by overwriting 26+ versions of real progress with stale content (EI-7304).
+
+## The fix — scope raw plan reads exactly like `plans:get` does
+
+`getPlanRow` (`packages/operator-core/lib/agent-tools/plans/source.ts`) always
+resolves `{ workspaceId, harnessSlug }` via `resolvePlanScope` FIRST, then
+queries:
+
+```sql
+-- sql-snippet-justified: quotes getPlanRow's OWN query to show how the tool scopes —
+-- the encapsulation being documented, not a query to hand-write.
+SELECT workspace_id, harness_slug, plan_slug, content, content_hash, version, ...
+  FROM harness_shared.harness_plans
+ WHERE workspace_id = $workspaceId AND harness_slug = $harnessSlug
+   AND plan_slug = $slug
+```
+
+Do the same for any raw SQL cross-check: resolve the workspace + harness slug
+for your scope first (`papercusp:list_workspaces` / `harness:list`), then
+include **both** `workspace_id` and `harness_slug` in the `WHERE` clause — never
+`plan_slug` alone. If you only have the plan slug and want to double check
+against a raw read, prefer adding `AND workspace_id = <ws> AND harness_slug =
+'<harness>'` over trusting a bare slug match.
+
+## When you must sanity-check `plans:get` against raw SQL
+
+If you genuinely need a second opinion on what `plans:get` returned (e.g.
+suspected caching/staleness in the tool layer itself), the safe raw query is
+the exact same three-column `WHERE`, not a slug-only shortcut:
+
+```sql
+-- sql-snippet-justified: the sanctioned second-opinion read when the TOOL layer itself
+-- is the suspect (caching/staleness) — deliberately not answerable by that same tool.
+SELECT plan_slug, version, content_hash, updated_at, workspace_id, harness_slug
+  FROM harness_shared.harness_plans
+ WHERE workspace_id = '<ws>' AND harness_slug = '<harness>' AND plan_slug = '<slug>';
+```
+
+If that returns more than one row, or zero rows, THAT is the real anomaly worth
+investigating — not a slug-only read that happened to hit a different tenant's row.
+
+## General rule
+
+Any `harness_shared.*` table whose primary/unique key includes `workspace_id`
+and/or `harness_slug` (plans, features/issues consolidated, snapshots, agent
+runs, …) needs the SAME discipline: a raw cross-check query must reproduce the
+full scope key the canonical tool uses, not just the human-readable slug/id
+column. `dev:pg_query` doesn't do this scoping for you — you must include it
+explicitly, or you can silently be looking at a different tenant's row while
+believing you're looking at yours.

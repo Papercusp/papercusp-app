@@ -1,0 +1,80 @@
+# The `external-bench` blueprint — impartial-benchmark-suite-2026-06-15 (P-019 / BRIEF 2).
+#
+# THE TREATMENT under test (the full Papercusp arm) for the impartial benchmark suite:
+# the COMPLETE coding spine (a per-feature director driving scoper → architect → worker →
+# validator → reviewer → documenter → curator) + the coordination substrate + the
+# features-import decomposition planner — run autonomously to DONE over ONE cloned public
+# benchmark task, under an iso-budget cap, and graded by the benchmark's OWN external
+# harness. We neither author the tasks nor grade the results (D-005).
+#
+# THE MATCHED PAIR — this is the spine-ON half of the clean causal isolation:
+#   `external-bench` (this) ── `extends: coding` ──→ the FULL multi-agent spine   (arm 'papercusp')
+#   `coding-solo`     (P-006) ── `extends: single-agent` ──→ ONE worker, spine OFF (arm 'baseline-a-ablation')
+# Both arms are spun by the SAME `instantiateBenchHarness` port (this brief, ./run-loop.ts)
+# over the SAME cloned repo @ base_commit, capped at the SAME iso-budget (BRIEF 7 / P-011),
+# and graded by the SAME official grader (BRIEF 3 / P-005). They differ ONLY in
+# `blueprintId` — so any accuracy/cost delta between them is attributable to COORDINATION
+# ITSELF, not to compute / tools / plumbing (D-004 fairness; D-002 causal-isolation headline).
+#
+# WHY `extends: coding` (not a fork): the treatment IS the shipped coding system, byte for
+# byte (D-004 — the coordination tools + the multi-agent spine + the blueprint layer are
+# the independent variable, not a confounder to strip). Extending `coding` inherits the
+# decider-edges spine, the `features-import` planner (plan→features, waves, blocked_by
+# parallelism — decomposition machinery, itself part of "orchestration ON"), the full
+# role personas, the worker base tool surface, and the `git-diff` gym seam BRIEF 3's
+# `extractDiff` reads. A DISTINCT blueprint id (vs reusing `coding`) is what makes the
+# run-result row's `blueprintId: 'external-bench'` an unambiguous, pre-registerable
+# (P-010) provenance for "the full-spine benchmark arm" — the spine-ON pole of the
+# coding-solo pairing.
+#
+# `harnessKind` stays `coding` (inherited): the "identical infra" fairness control — the
+# benchmark arms must share the SAME harness infra class as each other (coding-solo also
+# pins `harnessKind: coding`). The Evaluation surface (D-007, P-020) keys on the run-result
+# rows (suite × arm × seed), NOT on harnessKind, so it needs no eval-specific kind here.
+#
+# Autonomy: the coding spine reaches DONE with NO human gate (coding declares no blocking
+# `gates.approvals`; the reviewer rides the finalize recipe, not a human approval) — so an
+# unattended benchmark run terminates at DONE / ESCALATE / the iso-budget cap, never on a
+# human. "No human gate for any arm" is the fairness protocol's automation control.
+id: external-bench
+extends: coding-factory
+version: 0.1.0
+description: >-
+  The full Papercusp arm of the impartial benchmark suite: the complete coding spine +
+  coordination substrate run autonomously to DONE over one cloned public benchmark task,
+  under an iso-budget cap, graded by the benchmark's OWN external harness. The spine-ON
+  pole of the `coding-solo` causal-isolation pairing (arm 'papercusp'); we neither author
+  nor grade. Spun by the `instantiateBenchHarness` port (./run-loop.ts).
+
+# kind/idPrefix inherited from `coding` (feature / F): a benchmark task = one `feature`
+# work_item whose brief is the task's problem_statement.
+
+# spine / roles / planner / gates / gym / knobs / dependencies are ALL inherited from
+# `coding` unchanged — the treatment is the shipped coding system byte for byte (D-004).
+# external-bench is `coding` under a distinct, pre-registerable blueprint id; deliberately
+# overrides NOTHING, so a fairness auditor can confirm "the benchmark arm == the product"
+# by diffing this file against `coding`.
+
+# RETIRED (WI-5646). Declared EXPLICITLY here rather than left to inherit `coding-factory`'s
+# block, because the two retirements have DIFFERENT causes and different revival conditions:
+# coding-factory is "preserved-but-dormant, nothing instantiates it" and could be revived by
+# restoring the director dispatch. This blueprint is retired because its PREMISE no longer
+# exists. Its whole design contract (impartial-benchmark-suite-2026-06-15, D-004) is "the
+# treatment IS the shipped coding system, byte for byte" — which is why it deliberately
+# overrides nothing. The per-feature spine it mirrored (director→scoper→architect→worker→
+# validator→reviewer→documenter→curator) was retired 2026-06-24 and the `coding` id was
+# reassigned to the kind:pot Mug/cup placement architecture, a different coordination model.
+# So this blueprint can no longer measure "the product" by diffing against `coding`; reviving
+# coding-factory would NOT make it valid again, and without its own block it would silently
+# un-retire along with its parent.
+#
+# A benchmark for the pot/Mug architecture is NEW DESIGN, not a repair of this one — do not
+# resurrect this id for it; register a new blueprint against a stated question.
+retired:
+  at: "2026-07-26"
+  reason: >-
+    Retired by owner decision (2026-07-26, WI-5646): the per-feature coding spine this
+    arm was defined as a byte-for-byte mirror of was retired 2026-06-24, so its design
+    premise ("the treatment IS the shipped coding system") is unrecoverable — it would now
+    benchmark a system that no longer exists. Do not wire new work to it. Benchmarking the
+    pot/Mug architecture is a new design against a new question, not a revival of this id.

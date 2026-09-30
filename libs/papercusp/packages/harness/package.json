@@ -1,0 +1,30 @@
+{
+  "name": "@papercusp/harness",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Autonomous-harness substrate: prompts, bin scripts, identity files, templates. The iteration driver is the TS orchestrator (@papercusp/orchestrator); the legacy run.sh was retired. Imported by consumers via @papercusp/harness/paths to locate the install root without hardcoding ~/autonomous-harness.",
+  "main": "paths.ts",
+  "types": "paths.ts",
+  "exports": {
+    ".": {
+      "types": "./paths.ts",
+      "import": "./paths.ts",
+      "default": "./paths.ts"
+    },
+    "./paths": {
+      "types": "./paths.ts",
+      "import": "./paths.ts",
+      "default": "./paths.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit --incremental false -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

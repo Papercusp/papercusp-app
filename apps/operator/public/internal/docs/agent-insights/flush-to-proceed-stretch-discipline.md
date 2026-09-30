@@ -1,0 +1,82 @@
+# Flush-to-proceed stretch discipline
+URL: /internal/docs/agent-insights/flush-to-proceed-stretch-discipline
+
+The su engine-loop discipline: gate work-sequencing on the state-flush invariant, not a turn-ending reflex — flush invariant, continuation gate (60%), presence-adaptive cadence, and the mechanical backstops that make the judgment layer safe.
+
+The rule that governs how an su session sequences **units of work** across a turn. It replaces the retired reflex — *"do one work-item per stretch, end the turn, get re-woken"* — with gating on a **state invariant** instead of a turn-lifetime behavior.
+
+## The reframe (why turn-ending was the wrong rule)
+
+"End your turn after one item" is a *turn-lifetime enforcement* of a *state-durability invariant*. That is the same bug class as an internal app's LLM-budget defect (a `≤100/day` cap enforced by a counter living in a per-cycle closure — enforcement lifetime ≠ invariant scope, so the cap never actually bound). The load-bearing invariant here is:
+
+> **Never hold unexternalized state longer than one unit of work.**
+
+Enforce *that* — checkpoint freshness at unit boundaries — and turn-ending becomes **one strategy among several** (chosen by the continuation gate), not the rule itself. The out-of-distribution failures of the behavioral proxy disappear because the proxy is gone: **presence-blindness** (settling per unit even while the owner is actively driving), the **boundary tax** (re-paying orient + inbox + facts on every single item), and **fragmentation** (splitting coupled work to fit a turn). *(Plan decision D-001.)*
+
+## The three rules
+
+### 1. Flush invariant
+
+Never transition to a new unit/phase while holding unexternalized state from the last. Before you move on, the finished unit is **flushed**:
+
+* in-flight state → a checkpoint (`work_items:checkpoint` / `loop:checkpoint`),
+* standing conclusions → `facts:assert`,
+* status → flipped (`plans:set-status` / `work_items:set_state`).
+
+The enforcement point is the **unit boundary, not turn-end**. This is *un-forgettable under pressure* because it is backstopped mechanically (see below), not left to persona trust.
+
+### 2. Continuation gate
+
+After settling a unit, continue in the **same turn** iff **all** hold:
+
+* context headroom (below the **60%** ceiling),
+* no pending owner input,
+* no inbox interrupt above threshold,
+* the next unit is already scoped.
+
+Otherwise **settle the turn**. On an armed loop this is a one-call read, not a guess: `loop:checkpoint` returns a `continuation` verdict (context-headroom leg + unread-inbox-since-last-settle leg), and it **fails safe toward settle** whenever a leg is unevaluable. Don't rationalize "just one more" under momentum — read the verdict.
+
+### 3. Presence-adaptive cadence
+
+Key the cadence off the **mechanical** owner-present bit — `coord:orient`'s `ownerPresent` (a fresh, non-revoked human auth session in `power_user_sessions`), not message-provenance guessing.
+
+* Owner **present** ⇒ run units back-to-back **and** stay conversational, so a redirect is seen within a unit.
+* Owner **absent** ⇒ settle per unit, so each wake stays a fresh injection point (orient + inbox + facts re-read).
+* A **standing owner directive** ("run start to finish") licenses back-to-back running even while absent.
+
+### Two supporting rules
+
+* **Verification stays hard-gated.** A unit settles only **live-verified** or **explicitly deferred-with-reason**, never silently. `work_items:complete` emits a `verificationWarning` when a completion carries neither `tests` nor `deferred` — treat that as a red unit, not a passed one.
+* **Size units by coherence, not by what fits a turn.** A unit is what you can finish *and verify* together. Keep coupled work in one unit and **checkpoint mid-unit** rather than splitting it across a boundary that would strand half-done state.
+
+## Thresholds (as shipped)
+
+| Constant                   | Value      | Where                    | Meaning                                                                      |
+| -------------------------- | ---------- | ------------------------ | ---------------------------------------------------------------------------- |
+| `CONTINUATION_CEILING_PCT` | **60**     | `continuation-gate.ts`   | Above this context %, settle rather than continue.                           |
+| `FLUSH_GATE_PCT`           | **75**     | `inbox-flush-gate.ts`    | At/above this %, `coord:inbox` names any held claim with a stale checkpoint. |
+| `FLUSH_STALE_MS`           | **10 min** | `inbox-flush-gate.ts`    | A checkpoint older than this (or absent) is "stale".                         |
+| `COMPACTION_HINT_PCT`      | **85**     | `inbox-context-usage.ts` | Pre-existing compaction affordance.                                          |
+| `OWNER_PRESENCE_FRESH_MS`  | **20 min** | `power-user-sessions.ts` | Auth-session recency that counts as "owner present".                         |
+
+The ordering is deliberate: **60 \< 75 \< 85** — you are nudged to *settle* (60) well before you are nudged to *flush* (75), which is itself below the *compaction* hint (85). By the time compaction is near, a disciplined session has already flushed.
+
+## What landed (mechanical enforcement — Phase 2)
+
+The judgment layer (rules 2–3) is only safe to grant because two mechanical backstops bound its failure mode: the flush gate makes it impossible to run hot without flushing, and the stale-checkpoint surface makes unflushed work visibly risky. **Ship order matters: the backstops (P-002/P-003) land before the persona grants back-to-back continuation (P-007).** *(D-002.)*
+
+| Item                               | Shipped                                                                                                                                                                                                                                         | Decision                                                                                                                                                                                                |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **P-002** flush-freshness gate     | `contextUsagePct` (shared %) + `inbox-flush-gate.ts` (`classifyStaleClaims` / `renderFlushGateLine`) + `listActiveClaimFreshnessForOwner` (joins `work_item_claims` → `carry_notes` checkpoints), wired into `coord:inbox` behind the 75% gate. | **D-004**: injection-strength v1; the hard mutating-tool PreToolUse block is a deferred v2 (needs a deadlock-exemption design).                                                                         |
+| **P-003** stale-checkpoint surface | The compaction-compliance watchdog names an over-limit session's stale-checkpoint claims in its warning + an `unflushedClaims` result field.                                                                                                    | **D-008**: **surface, not seize** — force-reclaiming a live peer's claim on a staleness heuristic races the holder (same harm class as EI-24). Auto-reclaim deliberately not built.                     |
+| **P-004** `ownerPresent` bit       | `readOwnerPresence` over `power_user_sessions` (fresh non-revoked human auth session), folded into `coord:orient`'s result via the IO-free `composeOrient`.                                                                                     | **D-007**: the wake-payload leg is delivered via **wake-time orient**, not a fire-engine edit (presence is live only at fire time; a prompt-baked bit would be stale).                                  |
+| **P-005** loop continuation        | `loop:arm { continuation: 'settle' \| 'gated' }` (persisted like `carry`); a `GATED_LOOP_WAKE_ADDENDUM`; the pure `continuation-gate.ts` returned by `loop:checkpoint`.                                                                         | **D-006**: policy + gate-read + prompt shipped; runtime **interval-auto-stretch is deferred** (keeps the loop fire lane untouched).                                                                     |
+| **P-006** completion lint          | A **soft** `verificationWarning` on `work_items:complete` when a completion has neither `tests` nor `deferred`.                                                                                                                                 | **D-005**: soft, not hard-reject — EI-24 ("a finished completion is normalised, never lost") is the load-bearing invariant of that file; a hard reject would be the one place that drops finished work. |
+
+Every scoping deviation from the plan's literal text is recorded as a decision (D-004…D-008) so the *why* survives — each honours an existing codebase invariant rather than overriding it.
+
+## Where the rules live, and how they're measured
+
+* **Persona (P-007 / D-003).** Durable rules live in a **re-injected surface**, never in conversation (which decays at the next compaction). The three rules ship as a `## Stretch discipline — flush to proceed` section in **both** su base playbooks (`papercusp-su-engineer.tools.md`, `papercusp-su-power.tools.md`) — the playbook is a system-prompt surface, so it re-injects across compaction by construction. **D-009:** these persona edits reach **new** su launches from the integration/staging prompt tree *without* a code deploy (the `promptsDir()` prompt-decouple); only the Phase-2 **code** rides the next papercusp deploy.
+* **Measurement (P-008).** The `stretch-discipline` rubric (`rubrics:propose`, status *proposed*) grades one scorecard **per session**: `checkpoint-freshness-at-compaction`, `wake-overhead-per-completed-unit`, `owner-redirect-latency`, `units-completed-per-session`. Graded via turn-end `improvements:capture { rubricRef: 'stretch-discipline' }`; Scout's digest trends it. A rule without measurement drifts back to a reflex.
+* **Rollout (P-009).** Pilot behind the loop-continuation policy on one session (the su-ac403 engine loop); compare the rubric trend + wake overhead before/after over ≥3 days, then flip the fleet default and ratify the rubric. Rollback = disarm the policy; the old always-settle behavior remains the fallback. *(Gated on the `papercusp-loops` flag.)*

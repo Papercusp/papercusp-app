@@ -1,0 +1,6 @@
+id: papercusp
+title: Papercusp product knowledge
+description: Tier-1 PRODUCT knowledge learned by running Papercusp on itself — tool semantics, table shapes, size caps, and the reading traps that return a confident answer instead of an error. Distinct from `coding` (generic engineering wisdom carried as discovery rules, and the global default for hives with nothing to do with Papercusp) and from `fleet-lessons` (cross-hive lessons adopted from the recurrence-escalation candidate loop). Every learning is editable and deletable per hive.
+version: 0.1.0
+author: Papercusp
+okf_version: "0.2"

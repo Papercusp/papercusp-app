@@ -1,0 +1,128 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 / pair tests.router-files (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T13:34:00Z",
+  "totalAtoms": 1558,
+  "totalSessions": 67,
+  "sample": [
+    {
+      "sid": "su-29a4071e-0980-4838-89c4-e1793c366a6b",
+      "ts": "2026-07-26T09:10:42.694Z",
+      "atom": "npm run test:file --    apps/operator/app/_lints/design-primitives.test.ts    packages/operator-core/lib/harness/git-sync/code-plane-federation.test.ts    packages/operator-core/lib/scheduler/claim-spec-match.test.ts    apps/operator/scripts/hooks/cc/__tests__/bash-resource-gate.test.ts 2>&1"
+    },
+    {
+      "sid": "su-38101f27-bf18-4044-9ca1-bd66bcf0b411",
+      "ts": "2026-07-26T07:01:51.930Z",
+      "atom": "npm run test:file --    packages/operator-core/lib/work-items-release-request.integration.test.ts    packages/operator-core/lib/agent-tools/work_items/request_release.test.ts    packages/operator-core/lib/agent-tools/work_items/decline_release_request.test.ts    packages/operator-core/lib/agent-tools/work_items/release.test.ts    packages/operator-core/lib/dbos/in-process-periodic.test.ts    packages/operator-core/lib/dbos/release-request-sweep.test.ts    2>&1"
+    },
+    {
+      "sid": "su-7845f434-583f-4801-86ba-d06f350d1071",
+      "ts": "2026-07-26T06:42:05.790Z",
+      "atom": "npm run test:file -- apps/operator/app/_components/OperatorChatSidebar.component.test.tsx apps/operator/app/_components/chat/curator-card-drill-in.test.ts 2>&1"
+    },
+    {
+      "sid": "su-794899a8-2470-4901-9f0b-4cb285ed3046",
+      "ts": "2026-07-20T06:05:42.186Z",
+      "atom": "npm run test:file -- apps/operator/app/_lints/css-tokens.test.ts apps/operator/app/_lints/design-primitives.test.ts packages/operator-core/lib/llm-testing/llm-client.test.ts packages/operator-core/lib/sync-resolver/index.test.ts 2>&1"
+    },
+    {
+      "sid": "su-7845f434-583f-4801-86ba-d06f350d1071",
+      "ts": "2026-07-26T04:24:16.313Z",
+      "atom": "npm run test:file -- apps/operator/lib/chat-actions/PostureActions.test.ts apps/operator/lib/chat-actions/registry.test.ts 2>&1"
+    },
+    {
+      "sid": "su-7905fadc-2ba3-4492-897d-99d351a64a68",
+      "ts": "2026-07-26T07:27:32.548Z",
+      "atom": "npm run test:file -- apps/operator/scripts/hooks/cc/__tests__/bash-resource-gate.test.ts 2>&1"
+    },
+    {
+      "sid": "su-ea8d3491-fd1c-441b-bef7-ffb820450f53",
+      "ts": "2026-07-26T09:42:02.817Z",
+      "atom": "npm run test:file -- libs/papercusp/libs/db/src/connection-jsonb-serializers.test.ts libs/papercusp/libs/db/src/connection-date-serializers.test.ts 2>&1"
+    },
+    {
+      "sid": "su-9d726f46-c7bc-4986-8700-62340b58689d",
+      "ts": "2026-07-26T08:27:34.920Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/adv-agent-detail.test.ts packages/operator-core/lib/adv-agent-detail-lock-domain.test.ts 2>&1"
+    },
+    {
+      "sid": "su-88c3bf51-e38b-47a4-b357-4c547d0e65be",
+      "ts": "2026-07-26T00:15:32.181Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/agent-tools/coordination/tools/orient-open-questions.test.ts packages/operator-core/lib/agent-tools/coordination/tools/orient.test.ts packages/operator-core/lib/agent-tools/coordination/tools/conversations-list.test.ts 2>&1"
+    },
+    {
+      "sid": "su-73565638-a17a-4be4-adfd-86a6750ac1c1",
+      "ts": "2026-07-26T07:35:00.730Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/agent-tools/fleet/assignments-workspace-scope.test.ts packages/operator-core/lib/agent-tools/fleet/assignments-default-args-parity.test.ts packages/operator-core/lib/agent-tools/fleet/assignments.test.ts packages/operator-core/lib/agent-tools/fleet/assignments-fleet-scope.test.ts packages/operator-core/lib/agent-tools/fleet/assignments-harness-scope.test.ts 2>&1"
+    },
+    {
+      "sid": "su-39274e17-029f-409c-b058-970c9cc5bfdc",
+      "ts": "2026-07-26T05:19:18.710Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/agent-tools/plans/read-dispatch.test.ts packages/operator-core/lib/agent-tools/plans/ui-read-projection.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e7df908e-b996-4da8-967c-0d655e68c8c8",
+      "ts": "2026-07-20T03:22:41.144Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/agent-tools/work_items/complete.test.ts 2>&1"
+    },
+    {
+      "sid": "su-6eab8a26-2a45-4253-a708-671fd3182607",
+      "ts": "2026-07-26T09:56:43.799Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/bash-substitution/equivalence.test.ts 2>&1"
+    },
+    {
+      "sid": "su-7905fadc-2ba3-4492-897d-99d351a64a68",
+      "ts": "2026-07-26T16:00:18.859Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/dbos/no-raw-setinterval-guard.test.ts 2>&1"
+    },
+    {
+      "sid": "su-9d726f46-c7bc-4986-8700-62340b58689d",
+      "ts": "2026-07-26T04:12:54.504Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/events/await/engine.test.ts packages/operator-core/lib/agent-tools/coordination/messages.test.ts 2>&1"
+    },
+    {
+      "sid": "su-9d726f46-c7bc-4986-8700-62340b58689d",
+      "ts": "2026-07-26T03:59:59.082Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/harness/git-sync/pipeline-events.integration.test.ts -- --run 2>&1"
+    },
+    {
+      "sid": "su-39274e17-029f-409c-b058-970c9cc5bfdc",
+      "ts": "2026-07-26T14:51:29.771Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/harness/routines/unguarded-halt-rescue-action.test.ts 2>&1"
+    },
+    {
+      "sid": "su-cd450e2a-a441-442a-afe6-f112522cbde8",
+      "ts": "2026-07-20T06:18:13.329Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/llm-testing/__tests__/operator-target-disconnect-after-card.test.ts packages/operator-core/lib/llm-testing/__tests__/operator-target-text-card-watch.test.ts 2>&1"
+    },
+    {
+      "sid": "su-9d726f46-c7bc-4986-8700-62340b58689d",
+      "ts": "2026-07-26T04:35:06.948Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/plan-item-coverage.integration.test.ts 2>&1"
+    },
+    {
+      "sid": "su-10aa1083-b92f-46c9-b340-ccf4455f801d",
+      "ts": "2026-07-17T09:29:16.943Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/role-codex-home.test.ts 2>&1"
+    },
+    {
+      "sid": "su-63f9b336-5b17-461a-b12e-a8421de9a09b",
+      "ts": "2026-07-26T01:43:59.110Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/scout/scout-cycle-action.test.ts packages/operator-core/lib/scout/run.test.ts packages/operator-core/lib/learning-governor/scout-ceiling.test.ts packages/operator-core/lib/learning-governor/core.test.ts 2>&1"
+    },
+    {
+      "sid": "su-00cb5bbb-979b-4d78-81d8-a1debf876551",
+      "ts": "2026-07-25T21:13:06.018Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/sync/hyperbee/__tests__/replication-liveness.test.ts 2>&1"
+    },
+    {
+      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
+      "ts": "2026-07-26T13:18:06.627Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/sync/hyperbee/rekey-send-side-wiring.integration.test.ts 2>&1"
+    },
+    {
+      "sid": "su-29a4071e-0980-4838-89c4-e1793c366a6b",
+      "ts": "2026-07-26T01:40:28.013Z",
+      "atom": "npm run test:file -- packages/operator-core/lib/system-health/compute.test.ts packages/operator-core/lib/system-health/thresholds.test.ts packages/operator-core/lib/system-health/liveness-alarm.test.ts 2>&1"
+    }
+  ]
+}

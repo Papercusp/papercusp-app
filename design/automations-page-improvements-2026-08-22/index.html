@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Papercusp Automations — improvement concepts</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --canvas: #050d17;
+      --chrome: #08131f;
+      --surface: #0b1724;
+      --surface-2: #0f1e2e;
+      --surface-3: #122538;
+      --line: #21364a;
+      --line-soft: #17293a;
+      --text: #eff8ff;
+      --text-2: #c9dbe8;
+      --muted: #88a0b6;
+      --quiet: #5f7990;
+      --cyan: #38bdf8;
+      --cyan-soft: rgba(56, 189, 248, .11);
+      --green: #34d399;
+      --green-soft: rgba(52, 211, 153, .10);
+      --amber: #fbbf24;
+      --amber-soft: rgba(251, 191, 36, .10);
+      --purple: #a78bfa;
+      --purple-soft: rgba(167, 139, 250, .11);
+      --rose: #fb7185;
+      --rose-soft: rgba(251, 113, 133, .10);
+      --shadow: 0 24px 80px rgba(0, 0, 0, .38);
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--canvas); }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 78% -8%, rgba(56, 189, 248, .08), transparent 31rem),
+        radial-gradient(circle at 4% 24%, rgba(167, 139, 250, .055), transparent 29rem),
+        var(--canvas);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    button, input { font: inherit; }
+    button { color: inherit; }
+    .page { width: min(1780px, calc(100vw - 32px)); margin: 0 auto; padding: 32px 0 56px; }
+    .study-head { display: grid; grid-template-columns: minmax(0, 1fr) 470px; gap: 34px; align-items: end; }
+    .eyebrow { color: var(--cyan); font-size: 10px; font-weight: 850; letter-spacing: .15em; text-transform: uppercase; }
+    h1 { max-width: 900px; margin: 9px 0 8px; font-size: clamp(34px, 4vw, 54px); line-height: 1; letter-spacing: -.045em; }
+    .lede { max-width: 950px; margin: 0; color: #abc0d1; font-size: 16px; }
+    .status-card { padding: 17px 18px; border: 1px solid rgba(52, 211, 153, .32); border-radius: 14px; background: var(--green-soft); box-shadow: var(--shadow); }
+    .status-card strong { display: flex; align-items: center; gap: 8px; color: var(--green); font-size: 13px; }
+    .status-card strong i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px rgba(52, 211, 153, .7); }
+    .status-card p { margin: 7px 0 0; color: #b9ced5; font-size: 11px; }
+
+    .concept-bar { display: flex; align-items: center; gap: 8px; margin: 28px 0 12px; padding: 8px; border: 1px solid var(--line); border-radius: 13px; background: rgba(8, 19, 31, .88); box-shadow: var(--shadow); }
+    .concept-bar > span { padding: 0 8px; color: var(--quiet); font-size: 9px; font-weight: 850; letter-spacing: .12em; text-transform: uppercase; }
+    .concept-button { display: flex; align-items: center; gap: 9px; min-height: 38px; padding: 0 13px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--muted); cursor: pointer; }
+    .concept-button > span { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
+    .concept-button b { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: #142538; color: #8eabc1; font-size: 9px; }
+    .concept-button strong { font-size: 10px; }
+    .concept-button small { margin-top: 2px; color: var(--quiet); font-size: 8px; }
+    .concept-button.active { border-color: rgba(56, 189, 248, .28); background: var(--cyan-soft); color: #def5ff; }
+    .concept-button.active b { background: rgba(56, 189, 248, .18); color: var(--cyan); }
+    .recommended { margin-left: auto; padding: 5px 8px; border: 1px solid rgba(52, 211, 153, .26); border-radius: 999px; color: var(--green); background: var(--green-soft); font-size: 8px; font-weight: 800; }
+
+    .concept { display: none; }
+    .concept.active { display: block; }
+    .concept-intro { display: grid; grid-template-columns: minmax(0, 1fr) 480px; gap: 22px; margin: 0 2px 12px; }
+    .concept-intro h2 { margin: 0; font-size: 18px; }
+    .concept-intro p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .principles { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; align-content: start; }
+    .principles span { padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; color: #9eb5c7; background: var(--surface); font-size: 8px; }
+
+    .app-frame { overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--chrome); box-shadow: var(--shadow); }
+    .windowbar { display: flex; align-items: center; justify-content: space-between; height: 35px; padding: 0 13px; border-bottom: 1px solid var(--line-soft); color: var(--quiet); font-size: 8px; }
+    .windowbar b { color: #9db5c8; font-weight: 650; }
+    .windowdots { display: flex; gap: 5px; }
+    .windowdots i { width: 6px; height: 6px; border-radius: 50%; background: #32495d; }
+    .shell { display: grid; grid-template-columns: 160px minmax(0, 1fr); min-height: 850px; }
+    .rail { padding: 16px 10px; border-right: 1px solid var(--line-soft); background: #07121d; }
+    .brand { display: flex; align-items: center; gap: 8px; margin: 0 7px 20px; color: #d9e9f4; font-weight: 780; }
+    .brand-mark { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid rgba(56, 189, 248, .28); border-radius: 7px; color: var(--cyan); background: var(--cyan-soft); font-size: 10px; }
+    .rail-label { margin: 16px 8px 6px; color: #536e84; font-size: 7px; font-weight: 850; letter-spacing: .12em; text-transform: uppercase; }
+    .nav { display: grid; gap: 3px; }
+    .nav span { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 9px; border: 1px solid transparent; border-radius: 7px; color: #718ba0; font-size: 9px; }
+    .nav span i { width: 13px; color: #5d7890; font-style: normal; text-align: center; }
+    .nav span.active { border-color: rgba(56, 189, 248, .22); background: var(--cyan-soft); color: #d7effa; font-weight: 750; }
+    .nav span.active i { color: var(--cyan); }
+    .nav em { margin-left: auto; color: #607b91; font-size: 7px; font-style: normal; }
+    .rail-status { margin: 25px 7px 0; padding: 9px; border: 1px solid var(--line-soft); border-radius: 8px; color: var(--muted); font-size: 7px; }
+    .rail-status b { display: block; margin-bottom: 3px; color: var(--green); font-size: 8px; }
+    .app-main { min-width: 0; background: #091421; }
+    .app-topbar { display: flex; align-items: center; justify-content: space-between; height: 47px; padding: 0 20px; border-bottom: 1px solid var(--line-soft); }
+    .crumb { color: var(--quiet); font-size: 8px; }
+    .crumb b { color: #b8cedd; }
+    .top-actions { display: flex; align-items: center; gap: 7px; }
+    .env-pill { padding: 4px 7px; border: 1px solid rgba(52, 211, 153, .24); border-radius: 6px; color: var(--green); background: var(--green-soft); font-size: 7px; font-weight: 800; }
+    .avatar { display: grid; place-items: center; width: 25px; height: 25px; border-radius: 7px; color: var(--cyan); background: #173047; font-size: 8px; font-weight: 850; }
+    .content { padding: 20px 22px 28px; }
+    .pagehead { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+    .pagehead h3 { margin: 0; font-size: 24px; letter-spacing: -.025em; }
+    .pagehead p { max-width: 760px; margin: 4px 0 0; color: var(--muted); font-size: 10px; }
+    .page-actions { display: flex; gap: 7px; }
+    .button { display: inline-flex; align-items: center; justify-content: center; min-height: 31px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); color: #b9ccda; font-size: 9px; font-weight: 700; cursor: pointer; }
+    .button.primary { border-color: rgba(56, 189, 248, .45); background: var(--cyan); color: #06121b; font-weight: 850; }
+    .button.warn { border-color: rgba(251, 191, 36, .30); color: var(--amber); background: var(--amber-soft); }
+    .button.ghost { background: transparent; }
+    .button.small { min-height: 25px; padding-inline: 8px; font-size: 7px; }
+    .view-tabs { display: flex; align-items: center; gap: 3px; margin-top: 15px; padding: 4px; border: 1px solid var(--line-soft); border-radius: 9px; background: #0a1724; }
+    .view-tabs span { padding: 6px 10px; border-radius: 6px; color: var(--muted); font-size: 8px; font-weight: 750; }
+    .view-tabs span.active { color: #dff6ff; background: var(--cyan-soft); }
+    .view-tabs b { margin-left: 4px; color: var(--quiet); font-size: 7px; }
+    .view-tabs small { margin-left: auto; padding-right: 7px; color: var(--quiet); font-size: 7px; }
+    .notice { display: flex; align-items: center; gap: 9px; margin-top: 10px; padding: 9px 10px; border: 1px solid rgba(56, 189, 248, .24); border-radius: 8px; color: #a7c5d8; background: var(--cyan-soft); font-size: 8px; }
+    .notice b { color: var(--cyan); }
+    .panel { min-width: 0; overflow: hidden; border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--surface); }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; min-height: 38px; padding: 0 11px; border-bottom: 1px solid var(--line-soft); }
+    .panel-head strong { font-size: 9px; }
+    .panel-head span { color: var(--quiet); font-size: 7px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 9px rgba(52, 211, 153, .5); }
+    .status-dot.warn { background: var(--amber); box-shadow: 0 0 9px rgba(251, 191, 36, .45); }
+    .status-dot.blue { background: var(--cyan); box-shadow: 0 0 9px rgba(56, 189, 248, .45); }
+    .status-dot.muted { background: #60798e; box-shadow: none; }
+    .tag { display: inline-flex; align-items: center; padding: 2px 5px; border: 1px solid var(--line); border-radius: 5px; color: #86a1b6; font-size: 6px; font-weight: 800; text-transform: uppercase; }
+    .tag.cyan { border-color: rgba(56, 189, 248, .28); color: var(--cyan); background: var(--cyan-soft); }
+    .tag.amber { border-color: rgba(251, 191, 36, .28); color: var(--amber); background: var(--amber-soft); }
+    .tag.green { border-color: rgba(52, 211, 153, .28); color: var(--green); background: var(--green-soft); }
+    .tag.purple { border-color: rgba(167, 139, 250, .28); color: #c2b5fb; background: var(--purple-soft); }
+
+    /* Concept A — triage */
+    .triage-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(315px, .62fr); gap: 10px; margin-top: 10px; }
+    .triage-main { display: grid; gap: 10px; min-width: 0; }
+    .today-strip { display: grid; grid-template-columns: 1.1fr repeat(3, .72fr); gap: 8px; margin-top: 10px; }
+    .today-card { min-height: 70px; padding: 11px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface); }
+    .today-card.attention { border-color: rgba(251, 191, 36, .30); background: var(--amber-soft); }
+    .today-card label { display: block; color: var(--quiet); font-size: 7px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+    .today-card strong { display: block; margin-top: 6px; font-size: 17px; }
+    .today-card.attention strong { color: var(--amber); }
+    .today-card small { display: block; margin-top: 5px; color: var(--muted); font-size: 7px; }
+    .attention-list { display: grid; }
+    .attention-row { display: grid; grid-template-columns: 7px minmax(0, 1fr) 115px auto; gap: 10px; align-items: center; min-height: 59px; padding: 9px 11px; border-bottom: 1px solid var(--line-soft); }
+    .attention-row:last-child { border-bottom: 0; }
+    .attention-row h4 { margin: 0; font-size: 9px; }
+    .attention-row p { margin: 3px 0 0; color: var(--muted); font-size: 7px; }
+    .attention-row .why { color: var(--amber); font-size: 7px; text-align: right; }
+    .attention-row .why.green { color: var(--green); }
+    .section-body { padding: 10px; }
+    .run-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+    .run-card { padding: 10px; border: 1px solid var(--line-soft); border-radius: 8px; background: #0a1623; }
+    .run-card header { display: flex; align-items: center; justify-content: space-between; }
+    .run-card h4 { margin: 0; font-size: 9px; }
+    .run-card p { margin: 5px 0 9px; color: var(--muted); font-size: 7px; }
+    .progress { height: 4px; overflow: hidden; border-radius: 99px; background: #1a2d3f; }
+    .progress i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--cyan), #67e8f9); }
+    .run-card footer { display: flex; justify-content: space-between; margin-top: 6px; color: var(--quiet); font-size: 6px; }
+    .timeline { display: grid; padding: 6px 11px 10px; }
+    .timeline-row { display: grid; grid-template-columns: 56px 13px minmax(0, 1fr) auto; gap: 8px; align-items: center; min-height: 38px; }
+    .timeline-row time { color: #9bb2c3; font-size: 7px; }
+    .timeline-row i { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); }
+    .timeline-row i::after { content: ""; position: absolute; top: 8px; left: 3px; width: 1px; height: 30px; background: var(--line); }
+    .timeline-row:last-child i::after { display: none; }
+    .timeline-row b { font-size: 8px; }
+    .timeline-row span { color: var(--muted); font-size: 7px; }
+    .triage-side { display: grid; align-content: start; gap: 10px; }
+    .side-stat-list { padding: 5px 11px 10px; }
+    .side-stat { display: flex; align-items: center; justify-content: space-between; min-height: 39px; border-bottom: 1px solid var(--line-soft); }
+    .side-stat:last-child { border-bottom: 0; }
+    .side-stat span { color: var(--muted); font-size: 7px; }
+    .side-stat b { font-size: 9px; }
+    .source-health { display: grid; gap: 6px; padding: 10px; }
+    .source-health > div { display: grid; grid-template-columns: 24px 1fr auto; gap: 8px; align-items: center; padding: 8px; border: 1px solid var(--line-soft); border-radius: 7px; background: #0a1623; }
+    .source-icon { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 6px; color: var(--cyan); background: var(--cyan-soft); font-size: 8px; font-weight: 850; }
+    .source-health b, .source-health small { display: block; }
+    .source-health b { font-size: 8px; }
+    .source-health small { margin-top: 2px; color: var(--quiet); font-size: 6px; }
+    .source-health em { color: var(--green); font-size: 7px; font-style: normal; font-weight: 800; }
+    .source-health em.warn { color: var(--amber); }
+
+    /* Concept B — catalog */
+    .catalog-toolbar { display: grid; grid-template-columns: minmax(300px, 1fr) auto auto; gap: 8px; margin-top: 10px; padding: 8px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface); }
+    .search-box { display: flex; align-items: center; min-height: 31px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--quiet); background: #08131f; font-size: 8px; }
+    .saved-views { display: flex; gap: 4px; }
+    .saved-views button { padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 7px; cursor: pointer; }
+    .saved-views button.active { color: #dff6ff; background: var(--cyan-soft); }
+    .catalog-layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 10px; margin-top: 10px; }
+    .table { min-width: 820px; }
+    .table-head, .table-row { display: grid; grid-template-columns: minmax(200px, 1.45fr) 96px 170px 105px 110px 78px 22px; gap: 9px; align-items: center; }
+    .table-head { min-height: 34px; padding: 0 11px; border-bottom: 1px solid var(--line-soft); color: var(--quiet); font-size: 6px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+    .table-row { min-height: 48px; padding: 7px 11px; border-bottom: 1px solid var(--line-soft); cursor: pointer; }
+    .table-row:last-child { border-bottom: 0; }
+    .table-row:hover { background: rgba(56, 189, 248, .035); }
+    .table-row.selected { box-shadow: inset 2px 0 var(--cyan); background: var(--cyan-soft); }
+    .table-name { min-width: 0; }
+    .table-name > span { display: flex; align-items: center; gap: 6px; }
+    .table-name b { overflow: hidden; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+    .table-name small { display: block; overflow: hidden; margin: 3px 0 0 13px; color: var(--quiet); font-size: 6px; text-overflow: ellipsis; white-space: nowrap; }
+    .trigger-stack { display: flex; flex-wrap: wrap; gap: 3px; }
+    .trigger-stack i { padding: 2px 4px; border: 1px solid rgba(56, 189, 248, .23); border-radius: 999px; color: #8fbbd2; font-size: 5px; font-style: normal; }
+    .cell { color: #a9bfce; font-size: 7px; }
+    .cell small { display: block; margin-top: 2px; color: var(--quiet); font-size: 6px; }
+    .cell.money { color: #c6b8ff; }
+    .chev { color: var(--quiet); text-align: right; }
+    .pagination { display: flex; align-items: center; justify-content: space-between; min-height: 36px; padding: 0 11px; border-top: 1px solid var(--line-soft); color: var(--quiet); font-size: 7px; }
+    .pagination span:last-child { display: flex; gap: 4px; }
+    .pagination b { display: grid; place-items: center; width: 19px; height: 19px; border: 1px solid var(--line); border-radius: 5px; color: #9db4c5; font-size: 7px; }
+    .inspector { align-self: start; }
+    .inspector-body { padding: 12px; }
+    .inspector-kicker { color: var(--cyan); font-size: 7px; font-weight: 850; text-transform: uppercase; }
+    .inspector h4 { margin: 5px 0 3px; font-size: 15px; }
+    .inspector p { margin: 0; color: var(--muted); font-size: 7px; }
+    .state-pills { display: flex; flex-wrap: wrap; gap: 4px; margin: 9px 0; }
+    .state-pills span { padding: 3px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 6px; }
+    .state-pills .good { border-color: rgba(52, 211, 153, .3); color: var(--green); background: var(--green-soft); }
+    .state-pills .attention { border-color: rgba(251, 191, 36, .3); color: var(--amber); background: var(--amber-soft); }
+    .inspector-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .inspector-grid > div { padding: 8px; border: 1px solid var(--line-soft); border-radius: 7px; background: #08141f; }
+    .inspector-grid span { display: block; color: var(--quiet); font-size: 6px; text-transform: uppercase; }
+    .inspector-grid b { display: block; margin-top: 4px; font-size: 8px; }
+    .mini-title { display: flex; justify-content: space-between; margin: 12px 0 6px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+    .mini-title b { font-size: 8px; }
+    .mini-title span { color: var(--quiet); font-size: 6px; }
+    .trigger-line { display: grid; grid-template-columns: 48px 1fr auto; gap: 7px; align-items: center; margin-top: 5px; padding: 7px; border: 1px solid var(--line-soft); border-radius: 7px; background: #08141f; }
+    .trigger-line > span { color: var(--cyan); font-size: 6px; font-weight: 850; text-transform: uppercase; }
+    .trigger-line b, .trigger-line small { display: block; }
+    .trigger-line b { font-size: 7px; }
+    .trigger-line small { margin-top: 2px; color: var(--quiet); font-size: 6px; }
+    .trigger-line em { color: var(--green); font-size: 6px; font-style: normal; }
+    .inspector-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 10px; }
+
+    /* Concept C — flows */
+    .flow-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; padding: 8px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface); }
+    .flow-filters { display: flex; gap: 4px; }
+    .flow-filters span { padding: 5px 8px; border-radius: 6px; color: var(--muted); font-size: 7px; }
+    .flow-filters span.active { color: #dff6ff; background: var(--cyan-soft); }
+    .flow-toolbar small { color: var(--quiet); font-size: 7px; }
+    .flow-layout { display: grid; grid-template-columns: minmax(0, 1fr) 335px; gap: 10px; margin-top: 10px; }
+    .flow-canvas { position: relative; min-height: 600px; overflow: hidden; padding: 14px; }
+    .flow-canvas::before { content: ""; position: absolute; inset: 0; opacity: .25; background-image: linear-gradient(var(--line-soft) 1px, transparent 1px), linear-gradient(90deg, var(--line-soft) 1px, transparent 1px); background-size: 28px 28px; pointer-events: none; }
+    .column-labels { position: relative; z-index: 2; display: grid; grid-template-columns: 1fr 1.2fr 1fr; gap: 84px; margin: 0 7px 10px; color: var(--quiet); font-size: 6px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
+    .flows { position: relative; z-index: 2; display: grid; gap: 10px; }
+    .flow-row { position: relative; display: grid; grid-template-columns: minmax(145px, 1fr) minmax(190px, 1.2fr) minmax(145px, 1fr); gap: 84px; align-items: center; min-height: 102px; padding: 8px; border: 1px solid transparent; border-radius: 10px; }
+    .flow-row.active { border-color: rgba(56, 189, 248, .22); background: rgba(56, 189, 248, .035); }
+    .flow-line { position: absolute; z-index: -1; left: 21%; right: 21%; top: 50%; height: 2px; background: linear-gradient(90deg, rgba(56, 189, 248, .35), rgba(56, 189, 248, .72), rgba(52, 211, 153, .48)); }
+    .flow-line::before, .flow-line::after { content: ""; position: absolute; top: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); }
+    .flow-line::before { left: 0; }
+    .flow-line::after { right: 0; background: var(--green); }
+    .flow-node { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #0d1c2a; box-shadow: 0 10px 28px rgba(0, 0, 0, .20); cursor: pointer; }
+    .flow-node:hover, .flow-node.selected { border-color: rgba(56, 189, 248, .45); box-shadow: 0 0 0 2px rgba(56, 189, 248, .08), 0 10px 28px rgba(0, 0, 0, .22); }
+    .flow-node header { display: flex; align-items: center; gap: 6px; }
+    .flow-node header i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+    .flow-node header i.warn { background: var(--amber); }
+    .flow-node b { overflow: hidden; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+    .flow-node p { overflow: hidden; margin: 5px 0 0; color: var(--muted); font-size: 6px; text-overflow: ellipsis; white-space: nowrap; }
+    .flow-node footer { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+    .flow-node footer span { color: var(--quiet); font-size: 6px; }
+    .flow-node.source { border-color: rgba(56, 189, 248, .24); background: rgba(56, 189, 248, .06); }
+    .flow-node.plan { border-color: rgba(167, 139, 250, .24); background: rgba(167, 139, 250, .06); }
+    .flow-node.outcome { border-color: rgba(52, 211, 153, .24); background: rgba(52, 211, 153, .05); }
+    .flow-inspector .inspector-body > header { display: flex; align-items: center; justify-content: space-between; }
+    .flow-inspector h4 { margin: 8px 0 4px; font-size: 16px; }
+    .flow-inspector p { margin: 0; color: var(--muted); font-size: 7px; }
+    .flow-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-top: 11px; }
+    .flow-summary > div { padding: 8px; border: 1px solid var(--line-soft); border-radius: 7px; background: #08141f; }
+    .flow-summary span { display: block; color: var(--quiet); font-size: 5px; text-transform: uppercase; }
+    .flow-summary b { display: block; margin-top: 4px; font-size: 8px; }
+    .flow-event { display: grid; grid-template-columns: 7px 1fr auto; gap: 7px; align-items: start; min-height: 37px; margin-top: 5px; }
+    .flow-event i { width: 6px; height: 6px; margin-top: 3px; border-radius: 50%; background: var(--green); }
+    .flow-event b, .flow-event small { display: block; }
+    .flow-event b { font-size: 7px; }
+    .flow-event small { margin-top: 2px; color: var(--quiet); font-size: 6px; }
+    .flow-event time { color: var(--quiet); font-size: 6px; }
+
+    .review { margin-top: 22px; }
+    .review h2 { margin: 0 0 5px; font-size: 22px; }
+    .review > p { max-width: 980px; margin: 0; color: var(--muted); }
+    .recommendation { display: grid; grid-template-columns: 1.2fr repeat(3, 1fr); gap: 9px; margin-top: 12px; }
+    .recommendation article { padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+    .recommendation article:first-child { border-color: rgba(52, 211, 153, .30); background: var(--green-soft); }
+    .recommendation article span { color: var(--quiet); font-size: 7px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
+    .recommendation article strong { display: block; margin-top: 5px; font-size: 10px; }
+    .recommendation article p { margin: 5px 0 0; color: var(--muted); font-size: 8px; }
+    .score-table { margin-top: 10px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+    .score-row { display: grid; grid-template-columns: 1.3fr repeat(3, 1fr); min-height: 39px; border-bottom: 1px solid var(--line-soft); }
+    .score-row:last-child { border-bottom: 0; }
+    .score-row > span { display: flex; align-items: center; padding: 0 11px; color: var(--muted); font-size: 8px; }
+    .score-row > span + span { border-left: 1px solid var(--line-soft); }
+    .score-row.head > span { color: #bcd0df; font-size: 7px; font-weight: 850; text-transform: uppercase; }
+    .score { color: var(--green) !important; font-weight: 800; }
+    .footnote { margin-top: 16px; color: var(--quiet); font-size: 8px; text-align: center; }
+
+    @media (max-width: 1250px) {
+      .study-head, .concept-intro { grid-template-columns: 1fr; }
+      .principles { justify-content: flex-start; }
+      .recommended { display: none; }
+      .shell { grid-template-columns: 125px minmax(0, 1fr); }
+      .triage-grid, .catalog-layout, .flow-layout { grid-template-columns: 1fr; }
+      .triage-side { grid-template-columns: 1fr 1fr; }
+      .catalog-layout .inspector, .flow-inspector { min-height: 360px; }
+      .recommendation { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 820px) {
+      .page { width: min(100% - 18px, 1780px); padding-top: 18px; }
+      .concept-bar { overflow-x: auto; }
+      .concept-button small, .concept-bar > span { display: none; }
+      .shell { display: block; }
+      .rail { display: none; }
+      .content { padding: 14px; }
+      .pagehead { flex-direction: column; }
+      .today-strip { grid-template-columns: 1fr 1fr; }
+      .run-cards, .triage-side { grid-template-columns: 1fr; }
+      .attention-row { grid-template-columns: 7px 1fr auto; }
+      .attention-row .why { display: none; }
+      .catalog-toolbar { grid-template-columns: 1fr; }
+      .table-wrap { overflow-x: auto; }
+      .flow-row { grid-template-columns: 1fr; gap: 8px; }
+      .flow-line, .column-labels { display: none; }
+      .recommendation { grid-template-columns: 1fr; }
+      .score-table { overflow-x: auto; }
+      .score-row { min-width: 620px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="study-head">
+      <div>
+        <div class="eyebrow">Papercusp design study · Automations</div>
+        <h1>Make the first screen answer “what needs me?”</h1>
+        <p class="lede">Three compatible directions for improving the live Automations page. They preserve the production data model and controls, but change the hierarchy so 1,985 catalog entries do not overwhelm the work that matters now.</p>
+      </div>
+      <aside class="status-card">
+        <strong><i></i> Current page is implemented and live</strong>
+        <p>This file explores the next design pass. All values shown below are illustrative interface data; the layouts are the proposal.</p>
+      </aside>
+    </header>
+
+    <nav class="concept-bar" aria-label="Mockup concepts">
+      <span>Switch concept</span>
+      <button class="concept-button active" data-concept-button="triage"><b>A</b><span><strong>Triage command center</strong><small>Recommended default</small></span></button>
+      <button class="concept-button" data-concept-button="catalog"><b>B</b><span><strong>Catalog workbench</strong><small>Scale to thousands</small></span></button>
+      <button class="concept-button" data-concept-button="flow"><b>C</b><span><strong>Trigger flow</strong><small>Explain what starts what</small></span></button>
+      <span class="recommended">Recommended system: A landing · B catalog · C plan detail</span>
+    </nav>
+
+    <section class="concept active" data-concept="triage">
+      <div class="concept-intro">
+        <div><h2>A · Triage command center</h2><p>Open on human decisions and live work. The full catalog becomes a secondary view instead of the first 1,985-row wall.</p></div>
+        <div class="principles"><span>7 actionable ≠ 52 raw attention</span><span>Running grouped by outcome</span><span>Intentional pauses stay quiet</span><span>Next run is a timeline</span></div>
+      </div>
+      <div class="app-frame">
+        <div class="windowbar"><div class="windowdots"><i></i><i></i><i></i></div><b>Papercusp · production workspace</b><span>Concept A · illustrative interface data</span></div>
+        <div class="shell">
+          <aside class="rail">
+            <div class="brand"><span class="brand-mark">P</span><span>Papercusp</span></div>
+            <div class="rail-label">Workspace</div>
+            <div class="nav"><span><i>⌂</i>Overview</span><span><i>◎</i>HUD</span><span class="active"><i>⌁</i>Automations <em>1,985</em></span><span><i>◆</i>Work</span><span><i>◌</i>Learning</span></div>
+            <div class="rail-label">Live attention</div>
+            <div class="nav"><span><i>◉</i>Running agents <em>18</em></span><span><i>!</i>Health <em>3</em></span></div>
+            <div class="rail-status"><b>● Systems reachable</b>4 trigger sources connected</div>
+          </aside>
+          <div class="app-main">
+            <div class="app-topbar"><span class="crumb">Workspace / <b>Automations</b></span><div class="top-actions"><span class="env-pill">LIVE · PROD</span><span class="avatar">AV</span></div></div>
+            <div class="content">
+              <header class="pagehead"><div><h3>Automations</h3><p>Background work, organized by what needs attention now—not by implementation type.</p></div><div class="page-actions"><button class="button">↻ Refresh</button><button class="button primary">＋ New automation</button></div></header>
+              <div class="view-tabs"><span class="active">Command center <b>7</b></span><span>Catalog <b>1,985</b></span><span>Activity</span><span>Sources <b>4</b></span><small>Schedule ≠ run ≠ permission</small></div>
+              <div class="notice"><b>✓</b><span><b>System pauses are explained, not alarmed.</b> 45 intentionally paused jobs are excluded from “Needs you.”</span></div>
+              <div class="today-strip">
+                <div class="today-card attention"><label>Needs you</label><strong>7 decisions</strong><small>3 credentials · 2 inputs · 2 failed runs</small></div>
+                <div class="today-card"><label>Running now</label><strong>18</strong><small>6 plans · 12 system jobs</small></div>
+                <div class="today-card"><label>Next scheduled</label><strong>2m</strong><small>Customer reply triage</small></div>
+                <div class="today-card"><label>Spend · 7 days</label><strong>$1,304</strong><small>$184 linked to plan runs</small></div>
+              </div>
+              <div class="triage-grid">
+                <div class="triage-main">
+                  <section class="panel">
+                    <div class="panel-head"><strong>Needs your decision</strong><span>reasoned, deduplicated, highest leverage first</span></div>
+                    <div class="attention-list">
+                      <div class="attention-row"><i class="status-dot warn"></i><div><h4>Customer reply triage</h4><p>Gmail trigger cannot refresh; last successful event 42m ago.</p></div><span class="why">Credential expired</span><button class="button small">Reconnect</button></div>
+                      <div class="attention-row"><i class="status-dot warn"></i><div><h4>Friday executive digest</h4><p>Two required plan inputs have no defaults.</p></div><span class="why">Blocked before run</span><button class="button small">Add inputs</button></div>
+                      <div class="attention-row"><i class="status-dot warn"></i><div><h4>Release notes publisher</h4><p>Last run failed after 18s; retry is safe and idempotent.</p></div><span class="why">Failed last run</span><button class="button small">Review run</button></div>
+                      <div class="attention-row"><i class="status-dot muted"></i><div><h4>Green checkpoint</h4><p>Paused by an active release policy; serializer owns the next transition.</p></div><span class="why green">Expected state</span><button class="button small ghost">View policy</button></div>
+                    </div>
+                  </section>
+                  <section class="panel">
+                    <div class="panel-head"><strong>Running now</strong><span>grouped by user-visible outcome</span></div>
+                    <div class="section-body run-cards">
+                      <article class="run-card"><header><h4>Support inbox triage</h4><span class="tag cyan">Plan run</span></header><p>Reading 24 new messages and drafting suggested replies.</p><div class="progress"><i style="width:68%"></i></div><footer><span>68% · 1m 12s</span><span>$0.42</span></footer></article>
+                      <article class="run-card"><header><h4>Repository health sweep</h4><span class="tag purple">AI routine</span></header><p>Checking release blockers across 18 active workspaces.</p><div class="progress"><i style="width:43%"></i></div><footer><span>43% · 38s</span><span>spend possible</span></footer></article>
+                      <article class="run-card"><header><h4>Outbox delivery</h4><span class="tag">System task</span></header><p>Draining 312 federated changes; no human action needed.</p><div class="progress"><i style="width:81%"></i></div><footer><span>81% · 8s</span><span>deterministic</span></footer></article>
+                    </div>
+                  </section>
+                  <section class="panel">
+                    <div class="panel-head"><strong>Next up</strong><span>scheduled starts in the next 90 minutes</span></div>
+                    <div class="timeline">
+                      <div class="timeline-row"><time>in 2m</time><i></i><span><b>Customer reply triage</b> · Gmail + schedule</span><span class="tag cyan">Plan</span></div>
+                      <div class="timeline-row"><time>in 14m</time><i></i><span><b>Workspace memory digest</b> · every 30m</span><span class="tag purple">AI routine</span></div>
+                      <div class="timeline-row"><time>in 1h</time><i></i><span><b>Dependency freshness scan</b> · hourly</span><span class="tag">System task</span></div>
+                    </div>
+                  </section>
+                </div>
+                <aside class="triage-side">
+                  <section class="panel"><div class="panel-head"><strong>Control summary</strong><span>not raw inventory</span></div><div class="side-stat-list"><div class="side-stat"><span>Triggered plans</span><b>28</b></div><div class="side-stat"><span>Armed automatic triggers</span><b>41</b></div><div class="side-stat"><span>Manual-only plans</span><b>9</b></div><div class="side-stat"><span>Intentional pauses</span><b>45</b></div><div class="side-stat"><span>Unowned system jobs</span><b>0</b></div></div></section>
+                  <section class="panel"><div class="panel-head"><strong>Trigger source health</strong><span>connections + bindings</span></div><div class="source-health"><div><span class="source-icon">S</span><span><b>Schedule</b><small>19 armed plans</small></span><em>Healthy</em></div><div><span class="source-icon">G</span><span><b>Gmail</b><small>2 of 3 bindings armed</small></span><em class="warn">1 action</em></div><div><span class="source-icon">#</span><span><b>Slack</b><small>8 bindings armed</small></span><em>Healthy</em></div><div><span class="source-icon">M</span><span><b>Manual</b><small>28 runnable plans</small></span><em>Ready</em></div></div></section>
+                  <section class="panel"><div class="panel-head"><strong>Spend guardrail</strong><span>run-linked where provable</span></div><div class="section-body"><div style="display:flex;justify-content:space-between;font-size:8px"><span style="color:var(--muted)">Plan-run spend</span><b style="color:#c8bbff">$184 / $500</b></div><div class="progress" style="margin-top:8px"><i style="width:37%;background:linear-gradient(90deg,var(--purple),var(--cyan))"></i></div><p style="margin:8px 0 0;color:var(--quiet);font-size:7px">Routine spend remains permission-only unless a run can be attributed.</p></div></section>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="concept" data-concept="catalog">
+      <div class="concept-intro">
+        <div><h2>B · Catalog workbench</h2><p>Make thousands of entries scannable: compact rows, saved views, explicit columns, virtualized pagination, and an inspector that follows selection.</p></div>
+        <div class="principles"><span>48px rows, not 86px</span><span>Saved views</span><span>Columns with stable meaning</span><span>Inspector follows selection</span></div>
+      </div>
+      <div class="app-frame">
+        <div class="windowbar"><div class="windowdots"><i></i><i></i><i></i></div><b>Papercusp · production workspace</b><span>Concept B · illustrative interface data</span></div>
+        <div class="shell">
+          <aside class="rail"><div class="brand"><span class="brand-mark">P</span><span>Papercusp</span></div><div class="rail-label">Workspace</div><div class="nav"><span><i>⌂</i>Overview</span><span><i>◎</i>HUD</span><span class="active"><i>⌁</i>Automations <em>1,985</em></span><span><i>◆</i>Work</span><span><i>◌</i>Learning</span></div><div class="rail-label">Live attention</div><div class="nav"><span><i>◉</i>Running agents <em>18</em></span><span><i>!</i>Health <em>3</em></span></div></aside>
+          <div class="app-main">
+            <div class="app-topbar"><span class="crumb">Workspace / Automations / <b>Catalog</b></span><div class="top-actions"><span class="env-pill">LIVE · PROD</span><span class="avatar">AV</span></div></div>
+            <div class="content">
+              <header class="pagehead"><div><h3>Automation catalog</h3><p>Every background capability, with filters that preserve meaning at 1,985 rows.</p></div><div class="page-actions"><button class="button">⇩ Export</button><button class="button primary">＋ New automation</button></div></header>
+              <div class="catalog-toolbar"><div class="search-box">⌕&nbsp;&nbsp; Search name, trigger, owner, or plan…</div><div class="saved-views"><button class="active">Needs you · 7</button><button>Triggered · 28</button><button>AI · 73</button><button>System · 1,884</button><button>Paused · 45</button></div><button class="button">Columns ▾</button></div>
+              <div class="catalog-layout">
+                <section class="panel table-wrap">
+                  <div class="table">
+                    <div class="table-head"><span>Automation</span><span>Kind</span><span>Triggers</span><span>Health</span><span>Last / next</span><span>Spend</span><span></span></div>
+                    <div class="table-row selected" data-catalog-row data-name="Customer reply triage" data-kind="Triggered plan" data-description="Filters inbound Gmail and prepares a response draft for review." data-health="Needs input" data-last="12m ago" data-cost="$14.20 · 36 runs"><span class="table-name"><span><i class="status-dot warn"></i><b>Customer reply triage</b></span><small>support-ops · reply-to-email</small></span><span><span class="tag cyan">Triggered</span></span><span class="trigger-stack"><i>Schedule</i><i>Gmail</i><i>Manual</i></span><span class="cell" style="color:var(--amber)">Needs input<small>2 required</small></span><span class="cell">12m ago<small>next in 2m</small></span><span class="cell money">$14.20<small>36 runs</small></span><span class="chev">›</span></div>
+                    <div class="table-row" data-catalog-row data-name="Release notes publisher" data-kind="Triggered plan" data-description="Builds release notes, requests review, and publishes after approval." data-health="Failed last run" data-last="38m ago" data-cost="$8.41 · 12 runs"><span class="table-name"><span><i class="status-dot warn"></i><b>Release notes publisher</b></span><small>papercusp · release-notes</small></span><span><span class="tag cyan">Triggered</span></span><span class="trigger-stack"><i>Schedule</i><i>Slack</i><i>Manual</i></span><span class="cell" style="color:var(--amber)">Failed<small>safe retry</small></span><span class="cell">38m ago<small>Fri 4:00p</small></span><span class="cell money">$8.41<small>12 runs</small></span><span class="chev">›</span></div>
+                    <div class="table-row" data-catalog-row data-name="Workspace memory digest" data-kind="AI routine" data-description="Synthesizes recent workspace observations into a compact digest." data-health="Healthy" data-last="7m ago" data-cost="Spend possible"><span class="table-name"><span><i class="status-dot blue"></i><b>Workspace memory digest</b></span><small>system · memory-digest</small></span><span><span class="tag purple">AI routine</span></span><span class="trigger-stack"><i>Every 30m</i></span><span class="cell" style="color:var(--green)">Healthy<small>running now</small></span><span class="cell">7m ago<small>next in 23m</small></span><span class="cell money">Possible<small>not attributed</small></span><span class="chev">›</span></div>
+                    <div class="table-row" data-catalog-row data-name="Green checkpoint" data-kind="System task" data-description="Certifies a stable candidate and advances the release pin when green." data-health="Policy paused" data-last="2h ago" data-cost="$0 deterministic"><span class="table-name"><span><i class="status-dot muted"></i><b>Green checkpoint</b></span><small>release · green-checkpoint</small></span><span><span class="tag">System task</span></span><span class="trigger-stack"><i>Schedule</i><i>Manual</i></span><span class="cell">Policy paused<small>owner active</small></span><span class="cell">2h ago<small>qualified only</small></span><span class="cell money">$0<small>deterministic</small></span><span class="chev">›</span></div>
+                    <div class="table-row" data-catalog-row data-name="Federation outbox drain" data-kind="System task" data-description="Delivers queued substrate changes to connected workspace peers." data-health="Healthy" data-last="just now" data-cost="$0 deterministic"><span class="table-name"><span><i class="status-dot blue"></i><b>Federation outbox drain</b></span><small>substrate · outbox-drain</small></span><span><span class="tag">System task</span></span><span class="trigger-stack"><i>Every 15s</i></span><span class="cell" style="color:var(--green)">Healthy<small>312 queued</small></span><span class="cell">just now<small>next in 11s</small></span><span class="cell money">$0<small>deterministic</small></span><span class="chev">›</span></div>
+                    <div class="table-row" data-catalog-row data-name="Friday executive digest" data-kind="Triggered plan" data-description="Summarizes completed work, risks, spend, and next decisions." data-health="Ready" data-last="6d ago" data-cost="$22.73 · 7 runs"><span class="table-name"><span><i class="status-dot"></i><b>Friday executive digest</b></span><small>leadership · weekly-digest</small></span><span><span class="tag cyan">Triggered</span></span><span class="trigger-stack"><i>Schedule</i><i>Slack</i><i>Manual</i></span><span class="cell" style="color:var(--green)">Ready<small>all inputs set</small></span><span class="cell">6d ago<small>Fri 5:00p</small></span><span class="cell money">$22.73<small>7 runs</small></span><span class="chev">›</span></div>
+                    <div class="table-row" data-catalog-row data-name="Dependency freshness scan" data-kind="System task" data-description="Checks lockfiles and package registries for stale dependencies." data-health="Healthy" data-last="14m ago" data-cost="$0 deterministic"><span class="table-name"><span><i class="status-dot"></i><b>Dependency freshness scan</b></span><small>system · dependency-freshness</small></span><span><span class="tag">System task</span></span><span class="trigger-stack"><i>Hourly</i></span><span class="cell" style="color:var(--green)">Healthy<small>0 findings</small></span><span class="cell">14m ago<small>next in 46m</small></span><span class="cell money">$0<small>deterministic</small></span><span class="chev">›</span></div>
+                    <div class="pagination"><span>Showing 1–7 of 1,985 · virtualized</span><span><b>‹</b><b>1</b><b>2</b><b>›</b></span></div>
+                  </div>
+                </section>
+                <aside class="panel inspector">
+                  <div class="panel-head"><strong>Inspector</strong><span>selection persists in URL</span></div>
+                  <div class="inspector-body">
+                    <div class="inspector-kicker" id="inspector-kind">Triggered plan</div><h4 id="inspector-name">Customer reply triage</h4><p id="inspector-description">Filters inbound Gmail and prepares a response draft for review.</p>
+                    <div class="state-pills"><span class="good">Enabled</span><span>Not running</span><span class="attention" id="inspector-health">Needs input</span></div>
+                    <div class="inspector-grid"><div><span>Last activity</span><b id="inspector-last">12m ago</b></div><div><span>Run-linked cost</span><b id="inspector-cost">$14.20 · 36 runs</b></div><div><span>Owner</span><b>support-ops</b></div><div><span>Inputs</span><b>2 required</b></div></div>
+                    <div class="mini-title"><b>Triggers</b><span>installed and armed separate</span></div>
+                    <div class="trigger-line"><span>Gmail</span><div><b>Filtered inbound email</b><small>from:customers · label:support</small></div><em>Armed</em></div>
+                    <div class="trigger-line"><span>Schedule</span><div><b>Every weekday</b><small>09:00 America/New_York</small></div><em>Armed</em></div>
+                    <div class="trigger-line"><span>Manual</span><div><b>Run with inputs</b><small>2 inputs need values</small></div><em style="color:var(--amber)">Blocked</em></div>
+                    <div class="mini-title"><b>Controls</b><span>danger separated from routine action</span></div>
+                    <div class="inspector-actions"><button class="button primary">▶ Run now</button><button class="button">Edit schedule</button><button class="button">View activity</button><button class="button warn">Pause triggers</button></div>
+                  </div>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="concept" data-concept="flow">
+      <div class="concept-intro">
+        <div><h2>C · Trigger flow</h2><p>For triggered plans, show the causal chain directly: source → plan → outcome. This makes “what starts this?” and “what happens next?” visually answerable.</p></div>
+        <div class="principles"><span>Causal chain over inventory</span><span>Source health in context</span><span>One plan identity</span><span>History attached to outcome</span></div>
+      </div>
+      <div class="app-frame">
+        <div class="windowbar"><div class="windowdots"><i></i><i></i><i></i></div><b>Papercusp · production workspace</b><span>Concept C · illustrative interface data</span></div>
+        <div class="shell">
+          <aside class="rail"><div class="brand"><span class="brand-mark">P</span><span>Papercusp</span></div><div class="rail-label">Workspace</div><div class="nav"><span><i>⌂</i>Overview</span><span><i>◎</i>HUD</span><span class="active"><i>⌁</i>Automations <em>1,985</em></span><span><i>◆</i>Work</span><span><i>◌</i>Learning</span></div><div class="rail-label">Live attention</div><div class="nav"><span><i>◉</i>Running agents <em>18</em></span><span><i>!</i>Health <em>3</em></span></div></aside>
+          <div class="app-main">
+            <div class="app-topbar"><span class="crumb">Workspace / Automations / <b>Triggered plans</b></span><div class="top-actions"><span class="env-pill">LIVE · PROD</span><span class="avatar">AV</span></div></div>
+            <div class="content">
+              <header class="pagehead"><div><h3>Trigger flows</h3><p>See which source starts each plan and the outcome it produces.</p></div><div class="page-actions"><button class="button">Fit canvas</button><button class="button primary">＋ New triggered plan</button></div></header>
+              <div class="flow-toolbar"><div class="flow-filters"><span class="active">All flows · 28</span><span>Needs attention · 3</span><span>Gmail · 3</span><span>Slack · 8</span><span>Scheduled · 19</span></div><small>Click any node to inspect the whole flow</small></div>
+              <div class="flow-layout">
+                <section class="panel flow-canvas">
+                  <div class="column-labels"><span>Trigger source</span><span>Plan</span><span>Outcome</span></div>
+                  <div class="flows">
+                    <div class="flow-row active" data-flow-row="reply"><i class="flow-line"></i><article class="flow-node source selected" data-flow-node="reply"><header><i class="warn"></i><b>Gmail · support inbox</b></header><p>Filtered inbound email</p><footer><span>2 of 3 bindings armed</span><span class="tag amber">Reconnect</span></footer></article><article class="flow-node plan selected" data-flow-node="reply"><header><i></i><b>Customer reply triage</b></header><p>Classify, research, draft response</p><footer><span>support-ops</span><span class="tag purple">2 inputs</span></footer></article><article class="flow-node outcome selected" data-flow-node="reply"><header><i></i><b>Gmail draft</b></header><p>Human review before send</p><footer><span>36 runs · 94% success</span><span class="tag green">Safe</span></footer></article></div>
+                    <div class="flow-row" data-flow-row="release"><i class="flow-line"></i><article class="flow-node source" data-flow-node="release"><header><i></i><b>Slack · #release</b></header><p>/publish command + schedule</p><footer><span>binding healthy</span><span class="tag green">Armed</span></footer></article><article class="flow-node plan" data-flow-node="release"><header><i class="warn"></i><b>Release notes publisher</b></header><p>Collect changes, draft, request review</p><footer><span>papercusp</span><span class="tag amber">Last failed</span></footer></article><article class="flow-node outcome" data-flow-node="release"><header><i></i><b>Release post</b></header><p>Docs + Slack announcement</p><footer><span>12 runs · 83% success</span><span class="tag">Approval</span></footer></article></div>
+                    <div class="flow-row" data-flow-row="digest"><i class="flow-line"></i><article class="flow-node source" data-flow-node="digest"><header><i></i><b>Schedule · Fridays</b></header><p>17:00 America/New_York</p><footer><span>next in 3d</span><span class="tag green">Armed</span></footer></article><article class="flow-node plan" data-flow-node="digest"><header><i></i><b>Executive digest</b></header><p>Work, risk, spend, next decisions</p><footer><span>leadership</span><span class="tag purple">AI plan</span></footer></article><article class="flow-node outcome" data-flow-node="digest"><header><i></i><b>Slack digest</b></header><p>Drafted in #leadership</p><footer><span>7 runs · 100% success</span><span class="tag green">Healthy</span></footer></article></div>
+                    <div class="flow-row" data-flow-row="incident"><i class="flow-line"></i><article class="flow-node source" data-flow-node="incident"><header><i></i><b>Webhook · monitoring</b></header><p>Critical service alert</p><footer><span>signature verified</span><span class="tag green">Armed</span></footer></article><article class="flow-node plan" data-flow-node="incident"><header><i></i><b>Incident briefing</b></header><p>Correlate logs and active changes</p><footer><span>operations</span><span class="tag purple">AI plan</span></footer></article><article class="flow-node outcome" data-flow-node="incident"><header><i></i><b>Response room</b></header><p>Slack thread + live incident plan</p><footer><span>4 runs · 100% success</span><span class="tag green">Healthy</span></footer></article></div>
+                  </div>
+                </section>
+                <aside class="panel inspector flow-inspector">
+                  <div class="panel-head"><strong>Flow inspector</strong><span>one identity across source, plan, outcome</span></div>
+                  <div class="inspector-body"><header><span class="tag cyan" id="flow-kind">Triggered plan</span><button class="button small">Open catalog row</button></header><h4 id="flow-name">Customer reply triage</h4><p id="flow-description">Filtered support email becomes a reviewable Gmail draft. Automatic send is not enabled.</p><div class="state-pills"><span class="good">Plan enabled</span><span class="attention" id="flow-state">Gmail reconnect</span></div><div class="flow-summary"><div><span>Last run</span><b id="flow-last">12m ago</b></div><div><span>Success</span><b id="flow-success">94%</b></div><div><span>Cost</span><b id="flow-cost">$14.20</b></div></div><div class="mini-title"><b>Causal path</b><span>installed and armed are distinct</span></div><div class="trigger-line"><span>Source</span><div><b id="flow-source">Gmail · support inbox</b><small id="flow-source-detail">Reconnect one expired credential</small></div><em id="flow-source-state" style="color:var(--amber)">Action</em></div><div class="trigger-line"><span>Plan</span><div><b id="flow-plan">reply-to-email</b><small>2 required inputs · review required</small></div><em>Ready</em></div><div class="trigger-line"><span>Outcome</span><div><b id="flow-outcome">Gmail draft</b><small>No automatic send permission</small></div><em>Safe</em></div><div class="mini-title"><b>Recent events</b><span>linked to this flow</span></div><div class="flow-event"><i></i><span><b>Draft created</b><small>Message #1842 · $0.42</small></span><time>12m</time></div><div class="flow-event"><i></i><span><b>Gmail event matched</b><small>support label + customer sender</small></span><time>14m</time></div><div class="flow-event"><i style="background:var(--amber)"></i><span><b>Credential degraded</b><small>one of three bindings needs refresh</small></span><time>42m</time></div><div class="inspector-actions"><button class="button primary">▶ Run manually</button><button class="button">Edit flow</button><button class="button">View activity</button><button class="button warn">Pause triggers</button></div></div>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="review">
+      <div class="eyebrow">Recommendation</div>
+      <h2>Use all three as one coherent hierarchy.</h2>
+      <p>The concepts solve different questions. Command center should be the default landing view, Catalog should handle exhaustive search and control, and Trigger flow should become the detail view for event-driven plans.</p>
+      <div class="recommendation"><article><span>Recommended system</span><strong>A landing → B inventory → C causal detail</strong><p>This prevents one layout from trying to be an alert queue, a 1,985-row database, and an event-flow explainer at the same time.</p></article><article><span>Concept A</span><strong>Best for daily operation</strong><p>Fastest route to action, clearest signal-to-noise improvement.</p></article><article><span>Concept B</span><strong>Best for administration</strong><p>Compact, scalable, queryable, and much easier to compare.</p></article><article><span>Concept C</span><strong>Best for understanding</strong><p>Makes triggers, plans, permissions, and outcomes legible together.</p></article></div>
+      <div class="score-table"><div class="score-row head"><span>Design criterion</span><span>A · Triage</span><span>B · Catalog</span><span>C · Flow</span></div><div class="score-row"><span>Answers “what needs me?”</span><span class="score">Excellent</span><span>Good</span><span>Good</span></div><div class="score-row"><span>Scales to 1,985 entries</span><span>Good via secondary view</span><span class="score">Excellent</span><span>Focused subset</span></div><div class="score-row"><span>Explains source → outcome</span><span>Summary only</span><span>Inspector only</span><span class="score">Excellent</span></div><div class="score-row"><span>Implementation risk</span><span class="score">Low–medium</span><span>Medium</span><span>Medium–high</span></div></div>
+      <div class="footnote">Static interactive design study · no production controls are wired · built against the live Automations information model and Papercusp semantic visual language</div>
+    </section>
+  </main>
+
+  <script>
+    const conceptButtons = [...document.querySelectorAll('[data-concept-button]')];
+    const concepts = [...document.querySelectorAll('[data-concept]')];
+    function showConcept(name, shouldScroll = true) {
+      conceptButtons.forEach((button) => button.classList.toggle('active', button.dataset.conceptButton === name));
+      concepts.forEach((concept) => concept.classList.toggle('active', concept.dataset.concept === name));
+      if (location.hash !== `#${name}`) history.replaceState(null, '', `#${name}`);
+      if (shouldScroll) window.scrollTo({ top: document.querySelector('.concept-bar').offsetTop - 8, behavior: 'smooth' });
+    }
+    conceptButtons.forEach((button) => button.addEventListener('click', () => showConcept(button.dataset.conceptButton)));
+    const initial = location.hash.slice(1);
+    if (['triage', 'catalog', 'flow'].includes(initial)) showConcept(initial, false);
+    window.addEventListener('hashchange', () => {
+      const next = location.hash.slice(1);
+      if (['triage', 'catalog', 'flow'].includes(next)) showConcept(next, false);
+    });
+
+    const catalogRows = [...document.querySelectorAll('[data-catalog-row]')];
+    catalogRows.forEach((row) => row.addEventListener('click', () => {
+      catalogRows.forEach((candidate) => candidate.classList.remove('selected'));
+      row.classList.add('selected');
+      document.querySelector('#inspector-kind').textContent = row.dataset.kind;
+      document.querySelector('#inspector-name').textContent = row.dataset.name;
+      document.querySelector('#inspector-description').textContent = row.dataset.description;
+      document.querySelector('#inspector-health').textContent = row.dataset.health;
+      document.querySelector('#inspector-last').textContent = row.dataset.last;
+      document.querySelector('#inspector-cost').textContent = row.dataset.cost;
+    }));
+
+    const flowData = {
+      reply: { name: 'Customer reply triage', description: 'Filtered support email becomes a reviewable Gmail draft. Automatic send is not enabled.', state: 'Gmail reconnect', last: '12m ago', success: '94%', cost: '$14.20', source: 'Gmail · support inbox', sourceDetail: 'Reconnect one expired credential', sourceState: 'Action', plan: 'reply-to-email', outcome: 'Gmail draft' },
+      release: { name: 'Release notes publisher', description: 'A Slack command or schedule produces reviewable release notes and an approved announcement.', state: 'Last run failed', last: '38m ago', success: '83%', cost: '$8.41', source: 'Slack · #release', sourceDetail: 'Command binding healthy', sourceState: 'Armed', plan: 'release-notes', outcome: 'Docs + Slack post' },
+      digest: { name: 'Friday executive digest', description: 'A weekly schedule composes a leadership digest from completed work, risk, and spend.', state: 'Healthy', last: '6d ago', success: '100%', cost: '$22.73', source: 'Schedule · Fridays', sourceDetail: 'Next run in 3 days', sourceState: 'Armed', plan: 'weekly-digest', outcome: 'Slack digest' },
+      incident: { name: 'Incident briefing', description: 'A signed monitoring webhook opens a response room with correlated logs and active changes.', state: 'Healthy', last: '18d ago', success: '100%', cost: '$6.02', source: 'Webhook · monitoring', sourceDetail: 'Signature verified', sourceState: 'Armed', plan: 'incident-briefing', outcome: 'Response room' },
+    };
+    document.querySelectorAll('[data-flow-node]').forEach((node) => node.addEventListener('click', () => {
+      const id = node.dataset.flowNode;
+      const data = flowData[id];
+      document.querySelectorAll('[data-flow-row]').forEach((row) => row.classList.toggle('active', row.dataset.flowRow === id));
+      document.querySelectorAll('[data-flow-node]').forEach((candidate) => candidate.classList.toggle('selected', candidate.dataset.flowNode === id));
+      document.querySelector('#flow-name').textContent = data.name;
+      document.querySelector('#flow-description').textContent = data.description;
+      document.querySelector('#flow-state').textContent = data.state;
+      document.querySelector('#flow-last').textContent = data.last;
+      document.querySelector('#flow-success').textContent = data.success;
+      document.querySelector('#flow-cost').textContent = data.cost;
+      document.querySelector('#flow-source').textContent = data.source;
+      document.querySelector('#flow-source-detail').textContent = data.sourceDetail;
+      document.querySelector('#flow-source-state').textContent = data.sourceState;
+      document.querySelector('#flow-source-state').style.color = data.sourceState === 'Action' ? 'var(--amber)' : 'var(--green)';
+      document.querySelector('#flow-plan').textContent = data.plan;
+      document.querySelector('#flow-outcome').textContent = data.outcome;
+    }));
+  </script>
+</body>
+</html>

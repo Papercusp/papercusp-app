@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-mobile-base",
+  "id": "papercusp-mobile-base",
+  "title": "Papercusp Official: Mobile Base",
+  "description": "Aspect template: the shared Rust/UniFFI, design-token, configuration, source-hygiene, and portable-verification contract used by both official Android and iPhone app roots.",
+  "category": "shell",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

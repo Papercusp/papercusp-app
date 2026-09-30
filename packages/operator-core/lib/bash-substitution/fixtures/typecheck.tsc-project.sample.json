@@ -1,0 +1,128 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 / pair typecheck.tsc-project (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T13:34:00Z",
+  "totalAtoms": 121,
+  "totalSessions": 32,
+  "sample": [
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T01:06:11.160Z",
+      "atom": "npx tsc --noEmit -p apps/desktop 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T03:52:16.348Z",
+      "atom": "npx tsc --noEmit -p apps/desktop/tsconfig.json 2>&1"
+    },
+    {
+      "sid": "su-4ca244e4-540e-4acc-bb67-9335192fc85f",
+      "ts": "2026-07-25T19:47:55.377Z",
+      "atom": "npx tsc --noEmit -p apps/operator-vite/tsconfig.json 2>&1"
+    },
+    {
+      "sid": "su-63f9b336-5b17-461a-b12e-a8421de9a09b",
+      "ts": "2026-07-26T02:21:48.395Z",
+      "atom": "npx tsc --noEmit -p apps/operator/tsconfig.json 2>&1"
+    },
+    {
+      "sid": "su-ea8d3491-fd1c-441b-bef7-ffb820450f53",
+      "ts": "2026-07-26T09:42:18.622Z",
+      "atom": "npx tsc --noEmit -p libs/papercusp/libs/db/tsconfig.json 2>&1"
+    },
+    {
+      "sid": "su-73565638-a17a-4be4-adfd-86a6750ac1c1",
+      "ts": "2026-07-26T04:56:21.291Z",
+      "atom": "npx tsc --noEmit -p libs/papercusp/plugins/gitnexus-bridge 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T03:51:32.237Z",
+      "atom": "npx tsc --noEmit -p packages/db/tsconfig.json 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T01:50:27.280Z",
+      "atom": "npx tsc --noEmit -p packages/engine 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T01:37:41.789Z",
+      "atom": "npx tsc --noEmit -p packages/ingestion 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T01:02:54.099Z",
+      "atom": "npx tsc --noEmit -p packages/integration 2>&1"
+    },
+    {
+      "sid": "su-e7df908e-b996-4da8-967c-0d655e68c8c8",
+      "ts": "2026-07-20T10:37:18.384Z",
+      "atom": "npx tsc --noEmit -p packages/operator-core 2>&1"
+    },
+    {
+      "sid": "su-7905fadc-2ba3-4492-897d-99d351a64a68",
+      "ts": "2026-07-26T03:41:51.072Z",
+      "atom": "npx tsc --noEmit -p packages/operator-core/tsconfig.json 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T03:10:21.625Z",
+      "atom": "npx tsc -p apps/desktop --noEmit 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T04:23:31.990Z",
+      "atom": "npx tsc -p apps/desktop/tsconfig.json --noEmit"
+    },
+    {
+      "sid": "su-21cd5f76-1476-4ee0-b596-30bc43b98bc9",
+      "ts": "2026-07-21T02:27:50.652Z",
+      "atom": "npx tsc -p apps/operator --noEmit 2>&1"
+    },
+    {
+      "sid": "su-4ca244e4-540e-4acc-bb67-9335192fc85f",
+      "ts": "2026-07-25T20:10:26.927Z",
+      "atom": "npx tsc -p apps/operator-vite/tsconfig.json --noEmit 2>&1"
+    },
+    {
+      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
+      "ts": "2026-07-26T16:35:10.468Z",
+      "atom": "npx tsc -p libs/flags/tsconfig.json --noEmit 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T03:09:40.765Z",
+      "atom": "npx tsc -p packages/db --noEmit 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T03:10:11.424Z",
+      "atom": "npx tsc -p packages/engine --noEmit 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T04:28:27.210Z",
+      "atom": "npx tsc -p packages/engine/tsconfig.json --noEmit"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T04:23:31.990Z",
+      "atom": "npx tsc -p packages/oms/tsconfig.json --noEmit"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T04:21:49.480Z",
+      "atom": "npx tsc -p packages/oms/tsconfig.json --noEmit 2>&1"
+    },
+    {
+      "sid": "su-7845f434-583f-4801-86ba-d06f350d1071",
+      "ts": "2026-07-26T08:03:22.348Z",
+      "atom": "npx tsc -p packages/operator-core/tsconfig.json --noEmit 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T03:10:11.424Z",
+      "atom": "npx tsc -p packages/treasury --noEmit 2>&1"
+    }
+  ]
+}

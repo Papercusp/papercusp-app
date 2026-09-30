@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Per testing-spec §1.12: mutation-testing health check on this crypto-adjacent library. NOT in PR CI. Run via `npm run mutate` from this package directory; surfaces a Stryker HTML report at reports/mutation/mutation.html plus a machine-readable JSON report at reports/mutation/mutation.json. Threshold of 80% mutation score is a target, not a gate. Below 80% triggers a tracking issue.",
+  "_runtime_comment": "MEASURED 2026-09-03 (WI-2142121, first run ever in this repo): 401 mutants, 54 initial tests, concurrency 4, on a 128-core box at loadavg ~102 -> 1 minute 25 seconds wall clock, score 76.31. This file previously asserted '~10-30 min' and used that to justify a quarterly-only cadence; that estimate was an order of magnitude high and had never been checked against a run. Re-measure before citing a runtime here.",
+  "packageManager": "npm",
+  "reporters": ["html", "json", "clear-text", "progress"],
+  "reporters_comment": "'json' emits the mutation-testing-elements JSON report — the machine-readable form any downstream consumer (e.g. mutation spec-evidence binding) should parse, rather than scraping clear-text stdout.",
+  "testRunner": "vitest",
+  "testRunner_comment": "Vitest's stryker plugin: runs the existing vitest config per mutant. No extra setup needed.",
+  "vitest": {
+    "configFile": "vitest.config.ts"
+  },
+  "mutate": [
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "!src/**/*.property.test.ts",
+    "!src/**/*.bench.ts"
+  ],
+  "thresholds": {
+    "high": 90,
+    "low": 70,
+    "break": 0
+  },
+  "thresholds_comment": "break:0 means Stryker never fails its run on score alone — surface, don't gate. low:70 turns the report yellow; high:90 turns it green.",
+  "coverageAnalysis": "perTest",
+  "concurrency": 4,
+  "timeoutMS": 30000,
+  "checkers": [],
+  "incremental": true,
+  "incrementalFile": "reports/stryker-incremental.json",
+  "incremental_comment": "Stores mutant/test state in incrementalFile — PINNED above to Stryker's own default path so this comment states a fact the config sets, rather than describing behaviour and drifting from it. Subsequent runs only re-mutate changed files. NOTE: incremental state is NOT in .stryker-tmp; that directory is the per-run sandbox COPY of your source and is deleted on completion (cleanTempDir defaults true), which is why an earlier version of this comment pointed readers at a path that never exists after a run. 'changed files' here means changed relative to this stored state — NOT a git ref, so the repo's origin/main-behind-staging skew cannot affect the scope."
+}

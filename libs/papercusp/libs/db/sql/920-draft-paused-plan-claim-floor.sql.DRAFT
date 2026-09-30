@@ -1,0 +1,113 @@
+-- 920-draft-paused-plan-claim-floor.sql — EI-21268387863408600
+--
+-- Align the SQL claim-floor SSOT with reservedPlanLaneExclusionSql. The old
+-- floor #11 reserved operationally started/paused plans and ordinary lifecycle
+-- active plans, but it let ordinary draft/paused plan lanes leak into generic
+-- self-select. It also treated a per-run instance's lifecycle-active row as
+-- reserved even when no execution agent could ever claim it.
+--
+-- This is a wrapper rather than a copied function body: v17 preserves every
+-- prior floor and replaces only the combined reserved-plan-lane decision. The
+-- live plan-item lease leg remains part of the replacement, while the stale
+-- v16 active-instance reservation is removed. The public signature stays stable
+-- for older releases that may call it during the migration transaction.
+
+DROP VIEW IF EXISTS harness_shared.work_items_claimable;
+
+-- FORWARD-COMPAT: deployed code calls the stable public signature. Rename the
+-- current implementation and recreate that signature in the same transaction.
+DO $function_guard920$
+BEGIN
+  IF to_regprocedure(
+       'harness_shared.work_item_claim_floors_v17(text,text,text,text,text,text,text,jsonb,text)'
+     ) IS NULL THEN
+    IF to_regprocedure(
+         'harness_shared.work_item_claim_floors(text,text,text,text,text,text,text,jsonb,text)'
+       ) IS NULL THEN
+      RAISE EXCEPTION '920: public work_item_claim_floors function is missing';
+    END IF;
+    ALTER FUNCTION harness_shared.work_item_claim_floors(
+      text, text, text, text, text, text, text, jsonb, text
+    ) RENAME TO work_item_claim_floors_v17;
+  END IF;
+END
+$function_guard920$;
+
+CREATE OR REPLACE FUNCTION harness_shared.work_item_claim_floors(
+  p_workspace_id            text,
+  p_status                  text,
+  p_taken_by                text,
+  p_origin                  text,
+  p_title                   text,
+  p_terminal_owner          text,
+  p_terminal_completion_ref text,
+  p_payload                 jsonb,
+  p_feature_id              text
+) RETURNS text[]
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT array_remove(
+    array_append(
+      -- v16 combined the plan-state and live-lease checks under one label.
+      -- Remove only that label, then rebuild both legs with the corrected
+      -- ordinary-plan lifecycle predicate below.
+      array_remove(
+        harness_shared.work_item_claim_floors_v17(
+          p_workspace_id,
+          p_status,
+          p_taken_by,
+          p_origin,
+          p_title,
+          p_terminal_owner,
+          p_terminal_completion_ref,
+          p_payload,
+          p_feature_id
+        ),
+        'reserved-plan-lane'::text
+      ),
+      CASE WHEN COALESCE(p_payload, '{}'::jsonb) ? 'plan_item' AND (
+             EXISTS (
+               SELECT 1
+                 FROM harness_shared.harness_plans hp
+                WHERE hp.workspace_id = p_workspace_id
+                  AND hp.plan_slug = p_payload->'plan_item'->>'plan_slug'
+                  AND (
+                    hp.op_status IN ('started', 'paused')
+                    OR (hp.status IN ('draft', 'paused', 'active') AND hp.template_slug IS NULL)
+                  )
+             )
+             OR EXISTS (
+               SELECT 1
+                 FROM harness_shared.plan_item_claims pic
+                WHERE pic.workspace_id = p_workspace_id
+                  AND pic.plan_slug = p_payload->'plan_item'->>'plan_slug'
+                  AND pic.item_id = p_payload->'plan_item'->>'item_id'
+                  AND pic.expires_ts > now()
+             )
+           ) THEN 'reserved-plan-lane'::text
+      END
+    ),
+    NULL::text
+  )
+$$;
+
+COMMENT ON FUNCTION harness_shared.work_item_claim_floors(
+  text, text, text, text, text, text, text, jsonb, text
+) IS
+  'P-001/P-002 claim-floor SSOT. Mirrors claimNextIssueWorkItem unconditional floors; per-claim rig/swarm/redundancy/cooldown and own-node origin context remain outside the generic view. EI-21268387863408600 updates the reserved-plan-lane floor: operational started/paused or ordinary lifecycle draft/paused/active plans are reserved, ready and done controls remain free, live leases remain reserved, and per-run instance lifecycle rows do not reserve unless their operation is started/paused.';
+
+CREATE VIEW harness_shared.work_items_claimable AS
+  SELECT wi.*
+    FROM harness_shared.work_items wi
+   WHERE wi.item_kind IN ('bug', 'change', 'task')
+     AND wi.status = 'open'
+     AND COALESCE(wi.payload, '{}'::jsonb) ->> 'lane' IS DISTINCT FROM 'observation'
+     AND COALESCE(wi.payload, '{}'::jsonb) ->> 'needsOwnerAction' IS DISTINCT FROM 'true'
+     AND cardinality(harness_shared.work_item_claim_floors(
+           wi.workspace_id, wi.status, wi.taken_by, wi.origin, wi.title,
+           wi.terminal_owner, wi.terminal_completion_ref, wi.payload, wi.feature_id
+         )) = 0;
+
+COMMENT ON VIEW harness_shared.work_items_claimable IS
+  'P-001/P-002 issue-family rows passing every unconditional claim floor. The generic view intentionally omits caller-context rig/swarm/redundancy/cooldown and own-node origin floors. EI-21268387863408600 keeps the SQL reserved-plan-lane floor aligned with the TypeScript claim path, including the ordinary draft/paused lifecycle states and per-run instance exemption.';

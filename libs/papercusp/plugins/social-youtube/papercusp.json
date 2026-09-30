@@ -1,0 +1,252 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/social-youtube",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "YouTube platform trigger pack: Watches a channel for uploads, and its videos for comments and replies. Records each event and publishes nothing.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": {
+    "mode": "exact"
+  },
+  "capabilities": [],
+  "oauth": [
+    {
+      "provider": "google",
+      "scopes": [
+        "https://www.googleapis.com/auth/youtube.readonly",
+        "https://www.googleapis.com/auth/youtube.force-ssl"
+      ],
+      "fieldName": "googleWorkspace"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "googleWorkspace"
+    ],
+    "properties": {
+      "channelId": {
+        "type": "string",
+        "title": "YouTube channel id",
+        "shareable": true,
+        "description": "The channel to watch, e.g. `UC…`. Public, so it travels with a share."
+      },
+      "googleWorkspace": {
+        "type": "string",
+        "title": "Google connection",
+        "secret": true,
+        "shareable": false,
+        "snapshotPolicy": "strip",
+        "description": "OAuth credential for the YouTube Data API, on the same Google connection as the Gmail and Calendar lanes — a scope addition, never a second credential path.",
+        "oauth": {
+          "provider": "google",
+          "scopes": [
+            "https://www.googleapis.com/auth/youtube.readonly",
+            "https://www.googleapis.com/auth/youtube.force-ssl"
+          ]
+        }
+      }
+    }
+  },
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "escalationGuidance": {
+          "type": "string",
+          "title": "What needs a human",
+          "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said.",
+          "maxLength": 1000
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 3,
+      "windowSeconds": 300
+    },
+    "targets": [
+      {
+        "id": "record-youtube-event",
+        "kind": "plan",
+        "path": "plan.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "trigger"
+          ],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": [
+                "key",
+                "source",
+                "event",
+                "sourceId",
+                "externalId",
+                "dedupeKey",
+                "payload"
+              ],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "pattern": "^ext:youtube:(upload|comment|reply)$"
+                },
+                "source": {
+                  "type": "string",
+                  "const": "youtube"
+                },
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "upload",
+                    "comment",
+                    "reply"
+                  ]
+                },
+                "sourceId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "externalId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dedupeKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "payload": {
+                  "type": "object",
+                  "datatype": "social-post",
+                  "additionalProperties": true,
+                  "required": [
+                    "id",
+                    "text"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "author": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "replyToId": {
+                      "type": "string"
+                    },
+                    "occurredAt": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "escalationGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "Anything hostile, legal, financial, or that would commit the owner to something they have not said."
+            }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "youtube-upload",
+        "source": {
+          "kind": "external",
+          "sourceKind": "youtube",
+          "oauthField": "googleWorkspace"
+        },
+        "target": "record-youtube-event",
+        "eventPattern": "ext:youtube:upload",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      },
+      {
+        "id": "youtube-comment",
+        "source": {
+          "kind": "external",
+          "sourceKind": "youtube",
+          "oauthField": "googleWorkspace"
+        },
+        "target": "record-youtube-event",
+        "eventPattern": "ext:youtube:comment",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      },
+      {
+        "id": "youtube-reply",
+        "source": {
+          "kind": "external",
+          "sourceKind": "youtube",
+          "oauthField": "googleWorkspace"
+        },
+        "target": "record-youtube-event",
+        "eventPattern": "ext:youtube:reply",
+        "filter": {
+          "all": [
+            {
+              "id": {
+                "exists": true
+              }
+            },
+            {
+              "text": {
+                "exists": true
+              }
+            }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      }
+    ],
+    "edges": []
+  },
+  "icon": "Youtube"
+}

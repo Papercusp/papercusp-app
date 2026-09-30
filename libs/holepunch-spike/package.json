@@ -1,0 +1,24 @@
+{
+  "name": "@papercup/holepunch-spike",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Phase 0 spike for papercusp-dogfood-v5: verify Holepunch P2P primitives bundle + work on the target runtime. Throwaway package — delete if spike fails and fall back to git-as-sync per the named fallback.",
+  "type": "module",
+  "scripts": {
+    "smoke:install": "node smoke/01-install-check.mjs",
+    "smoke:swarm": "node smoke/02-swarm-loopback.mjs",
+    "smoke:autobase": "node smoke/03-autobase-converge.mjs",
+    "smoke:hyperbee": "node smoke/04-hyperbee-kv.mjs",
+    "smoke:all": "npm run smoke:install && npm run smoke:swarm && npm run smoke:autobase && npm run smoke:hyperbee"
+  },
+  "dependencies": {
+    "hyperswarm": "^4.11.7",
+    "hyperdht": "^6.20.0",
+    "hypercore": "^11.5.0",
+    "hyperbee": "^2.20.0",
+    "autobase": "^7.10.0",
+    "corestore": "^7.4.0",
+    "hyperdrive": "^12.0.0",
+    "b4a": "^1.6.7"
+  }
+}

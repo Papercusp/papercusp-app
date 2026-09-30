@@ -1,0 +1,17 @@
+event: heartbeat
+data: {"tsMs":1778789826577}
+
+event: heartbeat
+data: {"tsMs":1778789845771}
+
+event: heartbeat
+data: {"tsMs":1778789861552}
+
+event: delta
+data: {"text":"<say>Checking harness-prod-de"}
+
+event: delta
+data: {"text":"ploy now — one sec.</say>"}
+
+event: done
+data: {"costUsd":0}

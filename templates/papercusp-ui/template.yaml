@@ -1,0 +1,89 @@
+# papercusp-ui — 'Papercusp Official: UI Kit' (scope: aspect, category: ui;
+# owner directive 2026-07-04 / P-020). Integrates the UI generic-library
+# family into a composed app: headless React primitives, the data-grid stack,
+# the dockview workbench shell, and brand-lexicon terminology resolution.
+# Machine twin: @papercusp/template-kit src/reference-templates.ts
+# PAPERCUSP_UI_TEMPLATE — the kit's suite pins this file to it.
+id: papercusp-ui
+version: "0.1.0"
+scope: aspect
+category: ui
+summary: >-
+  The UI kit for a papercusp-composed app: @papercusp/ui-primitives (headless
+  ANSI/terminal, markdown, JSON-tree, and virtualized-list primitives —
+  brand-value-free, consumer-styled), the papergrid data-grid stack
+  (grid-core sort/selection/virtualization + bloom-grid server-rendered
+  rows), @papercusp/dock-workbench (host-agnostic dockview panel workbench
+  with pluggable layout persistence), and @papercusp/lexicon (canonical term
+  keys → brand-pack display labels, so rebranding is a pack swap). Compose
+  into any app whose deterministic plane needs an operator-style SPA.
+components:
+  - { id: ui-primitives, version: 0.0.1 }
+  - { id: papergrid, version: 0.1.0 }
+  - { id: dock-workbench, version: 0.0.1 }
+  - { id: lexicon, version: 0.1.0 }
+contracts: []
+decisionPoints:
+  - id: ui-surfaces
+    prompt: >-
+      Which surfaces does the app's deterministic plane need — data grids,
+      terminal/agent-output panes, markdown/docs views, JSON inspectors, a
+      multi-panel workbench? Take only the components those surfaces use;
+      drop the rest from the composition.
+  - id: grid-usage
+    prompt: >-
+      papergrid is a META-PACKAGE — apps depend on the grid SUB-PACKAGES
+      directly (@papercusp/grid-core, @papercusp/bloom-grid, @papercusp/grid).
+      Which grids does the app need, and do any need server-rendered rows
+      (bloom-grid) vs pure client virtualization (grid-core)?
+  - id: workbench-layout
+    prompt: >-
+      What is the panel layout — which panels register in the dock-workbench
+      registry, what is the default logical layout, and where does layout
+      persistence live (the app's data layer vs localStorage)?
+  - id: branding-lexicon
+    prompt: >-
+      How are user-facing nouns kept rebrandable? @papercusp/lexicon's
+      TermKey is a CLOSED papercusp-internal vocabulary (fleet, harness,
+      operator, ...) resolved through the active brand pack — route THOSE
+      terms through it (wire the configure*() host seam to the app's pack
+      selection) wherever your chrome surfaces them. The app's OWN domain
+      nouns are NOT lexicon terms: keep them in one app-local terms module
+      so a rebrand is still one edit — never hardcode a display label a
+      rebrand would have to grep for.
+composesWith:
+  - papercusp-tauri-desktop-shell
+  - papercusp-data-sync
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+checks:
+  - id: components-integrated
+    run: checks/components-integrated.test.ts
+    summary: >-
+      every pinned component package is a declared dependency of the composed
+      app (config section: components)
+  - id: theme-tokens
+    run: checks/theme-tokens.test.ts
+    summary: >-
+      the app consumes the generated shared theme tokens.css (3-state
+      light/dark/system model, D-011) and its app CSS carries no raw hex —
+      every color routes through the semantic vars (config section:
+      themeTokens)
+musts:
+  - id: headless-primitives
+    rule: "Primitives stay headless and are styled from the app design system — never forked to hardcode brand values"
+    enforcedBy: prose-only
+  - id: theme-via-tokens
+    rule: "App CSS draws every color from the shared token package's semantic vars (tokens/tokens.base.json → generated tokens.css) — no raw hex; per-app accents/extras are a thin override layer on top, and dark mode arrives from the tokens, never from per-app hex"
+    enforcedBy: theme-tokens
+  - id: grid-subpackages
+    rule: "Depend on the grid sub-packages directly — @papercusp/papergrid is the catalog handle, not the import"
+    enforcedBy: prose-only
+  - id: lexicon-scope
+    rule: "papercusp-internal TermKeys route through the lexicon; the app own domain nouns live in one app-local terms module (WI-2873) — never hardcode a label a rebrand would grep for"
+    enforcedBy: prose-only
+  - id: deps-declared
+    rule: "Every kept component (and the primitives peer deps) is a real package dependency — not wired on paper"
+    enforcedBy: components-integrated

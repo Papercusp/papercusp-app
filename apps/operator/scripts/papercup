@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# papercup — operator console CLI shim.
+#
+# Tiny dispatcher to keep v1 scope honest: today only `papercup status`
+# does anything. Other subcommands print a "use claude/codex/omp via
+# .mcp.json" hint pointing at the real way to talk to the operator.
+#
+# Resolves the script dir robustly (symlinks, $PWD changes) so it works
+# whether shipped in sidecar/bin/ or invoked from a dev checkout.
+
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+cmd="${1:-status}"
+case "$cmd" in
+  status)
+    exec node "$SCRIPT_DIR/papercup-status.mjs"
+    ;;
+  help|--help|-h)
+    cat <<'EOF'
+papercup — operator console CLI
+
+  papercup status   Show a one-screen briefing (workspace, harness, pending work)
+
+For everything else, run claude / codex / omp in this terminal — they
+auto-discover the operator's MCP server via .mcp.json in this directory
+and get the full 145+ tool catalog (harness state, tasks, features,
+goals, messages, search, hindsight, spawn primitives, …).
+
+See /docs/endpoint-system/tool-catalog for the full surface.
+EOF
+    ;;
+  *)
+    echo "papercup: unknown subcommand '$cmd'. Try 'papercup help'." >&2
+    exit 2
+    ;;
+esac

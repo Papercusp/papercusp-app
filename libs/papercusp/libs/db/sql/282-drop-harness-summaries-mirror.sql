@@ -1,0 +1,24 @@
+-- Migration 282 — drop the harness_summaries mirror table.
+-- Part of fs-watcher-retirement-2026-05-10 step 2.
+--
+-- harness_shared.harness_summaries mirrored the top-level
+-- `.papercusp/summary.md` ("dated run summaries") via the fs-watcher
+-- (upsertSummary/deleteSummary in harness-fs-watcher.ts). This was a DEAD
+-- legacy path on both ends:
+--   • PRODUCER: nothing writes the top-level `.papercusp/summary.md` anymore
+--     (the only surviving row, sheets/staging, was last written 2026-05-09).
+--     The curator now writes `.papercusp/memory/summary.md` instead, which is
+--     PG-canonical in harness_shared.harness_text_artifacts (Migration 035).
+--   • CONSUMER: nothing reads this table. The sync query `summary.byHarness`
+--     had no UI subscriber, and the live summary REST view
+--     (GET /api/harness/:slug/summary, text-views.ts) reads
+--     harness_text_artifacts, not harness_summaries.
+--
+-- The fs-watcher mirror leg + the `summary.byHarness` sync resolver + the
+-- table-to-query-names mapping are removed, and the table is dropped from the
+-- git-export registry (GIT_DOCS / PROSE_TABLES / GIT_KEY_COLS) — its stale
+-- git-export capture trigger is auto-cleaned by detachStaleGitCaptureTriggers
+-- on the next boot. Dropping this table loses no source-of-truth data (the
+-- live curated summary lives in harness_text_artifacts). Idempotent.
+
+DROP TABLE IF EXISTS harness_shared.harness_summaries CASCADE;

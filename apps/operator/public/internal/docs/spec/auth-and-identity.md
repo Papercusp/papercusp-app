@@ -1,0 +1,122 @@
+# Auth & identity
+URL: /internal/docs/spec/auth-and-identity
+
+Per-harness shared-secret tokens. Identity is bearer-derived, not body-supplied. Threat model and recovery procedures.
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every `/api/admin/execute-action` request is authenticated against a per-harness shared-secret token. **Harness identity is derived from the token binding, not from caller-supplied body fields.** This is what makes `parent_slug` and `from_slug` cryptographically sealed.
+
+This page is about the **bearer-authenticated admin/write plane**. Several voice
+surfaces are intentionally **not** in that plane; see
+[Voice surfaces that do not use per-harness bearers](#voice-surfaces-that-do-not-use-per-harness-bearers).
+
+## Token issuance
+
+Generated at scaffold time:
+
+* 256-bit random, base64url-encoded (no padding)
+* Written to **two places**, all together:
+
+  1. `<harnessDir>/.papercusp/config.json:harness_token` (mode 0600)
+  2. `harness_shared.token_index` (token → `harness_slug`, with `kind`/`workspace_id`, O(1) lookup) — the **authoritative** store
+
+  *(Implemented in `doScaffoldHarness` in `packages/operator-core/lib/execute-action.ts` — the `scaffold_harness` op that `dispatchAction` routes to. The `INSERT INTO harness_shared.token_index … kind = 'harness'` runs there, after the token is written to `config.json`. The earlier per-harness `harness_<slug>.config_token` row was retired — `token_index` is now the single source of truth for token→harness lookups.)*
+
+Both scaffold and rotation derive the token the same way — `base64url(randomBytes(32))`, i.e. 256-bit random with `=` padding stripped — so the no-padding/256-bit property holds across both issuance and rotation.
+
+Generated once per harness. **Rotation is implemented** via `POST /api/admin/rotate-token` (`packages/operator-core/lib/endpoint-route/routes/admin/rotate-token.ts`), which mints a fresh token, mirrors it to PG + `config.json`, and invalidates the old one.
+
+## Auth header
+
+```
+Authorization: Bearer <harness_token>
+```
+
+Every executeAction request needs this. Missing or unrecognized → `401 invalid_or_missing_token`.
+
+## Identity derivation
+
+There is no middleware. The auth and identity-validation steps run inline in the route handler (`routes/admin/execute-action.ts`), as two plain functions exported from `execute-action.ts`:
+
+1. `deriveCallerFromBearer(req.headers.get('authorization'))` looks up `harness_shared.token_index WHERE token = <bearer>` → `derivedCallingHarness`.
+2. `validateIdentityFields(derivedSlug, body)` then enforces:
+   * **`callingHarness` in body must equal `derivedCallingHarness`** or be omitted; mismatch → `403 identity_mismatch`.
+   * **`from` in `send_message` body**: same rule, 403 on mismatch.
+   * **`parent_slug` in `scaffold_harness` body**: server-controlled. Presence in body → `400 parent_slug_not_caller_controlled`.
+
+After this, the handler trusts `derivedCallingHarness` as the caller's identity. Any body-supplied identity field is dropped or rejected.
+
+### System principals
+
+The bearer lookup has no `kind` filter, so the caller is not always a harness. A **system principal** — a slug prefixed `system:` (e.g. `system:operator`) — resolves through the same `token_index` lookup and is bearer-derived identically. System callers are handled specially in the dispatch path: they have no per-harness schema, so they bypass the per-harness `executed_actions` idempotency cache (`getCachedAction`) and the per-caller send-message rate limit (`checkSendMessageRate`). Identity is still bearer-derived for them.
+
+This per-harness bearer check sits *behind* an outer transport-trust gate: both `/admin/execute-action` and `/admin/rotate-token` are registered with `auth: { trust: ['verified', 'trusted'] }`, so the request must already be on a verified/trusted transport before `deriveCallerFromBearer` ever runs.
+
+## Substrate invariants
+
+These hold by construction. If they fail, the substrate is broken:
+
+1. The bearer token is the **single source of truth** for caller identity.
+2. `from_slug` on every `messages` row equals the bearer-derived identity at the time of insert.
+3. `parent_slug` on every `harness_shared.projects` row equals the bearer-derived identity of the calling harness at scaffold time.
+4. No body-supplied identity field ever overrides the derived value.
+5. A harness can read any other harness's state (operator-local reads, no auth) but can only **write** to its own schema (`mark_message_status`) or insert into other harnesses' inboxes (`send_message`, with from-spoofing prevented by #2).
+
+The dispatcher (`dispatchAction`) now routes nine ops, not the original four — beyond `send_message` / `mark_message_status` / `spinup_project` / `scaffold_harness` it also handles `create_feature`, `add_directive_summary`, `pause_project`, `resume_project`, and `mark_campaign_published`. The identity-binding invariants above apply to **every** `caller_slug`-stamped write, not just `messages` (`from_slug`) and `projects` (`parent_slug`). In particular:
+
+* `create_feature` rejects cross-harness writes: caller must own the target harness — `callerSlug !== harness_slug` → `403 forbidden`.
+* `add_directive_summary` stamps `caller_slug` on the inserted row from the bearer-derived identity (not from any body field).
+
+## Voice surfaces that do not use per-harness bearers
+
+The local voice stack has several routes and sockets that are **not harness
+writes** and therefore do not use `Authorization: Bearer <harness_token>`.
+
+They use transport-local trust instead:
+
+| Surface                             | Trust model                                                 | Why                                                                                   |
+| ----------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `POST /api/operator/papercup-input` | `auth: 'loopback'` + allowed-origin check                   | Types into the local Papercup pane; local app-user surface, not a harness admin write |
+| `GET /api/desktop/voice-config`     | `auth: 'public'`                                            | Returns loopback runtime config (chosen WS port + framing constants), not owner data  |
+| `/api/desktop/voice` WebSocket      | loopback-only remote-address check in `desktop-voice-ws.ts` | Dumb byte-pipe from the Tauri webview into the local voice socket                     |
+| `/api/device/voice` WebSocket       | device JWT (`verifyDeviceToken`)                            | Device-session auth, not harness identity                                             |
+
+The important boundary: **per-harness bearer identity seals cross-harness admin
+writes; local voice surfaces are transport- or device-authenticated runtime
+surfaces.** Do not try to model them as `execute-action` callers, and do not
+assume the bearer invariants on this page apply to them.
+
+## Threat model
+
+This is **not a network-attacker model** — the operator is local-only by default. The threats it does protect against:
+
+* **Malicious local processes**: another app on the machine reaching `:3055` faces two gates. First the route's `auth: { trust: ['verified', 'trusted'] }` requires a verified/trusted transport; then, even past that, without a valid bearer every `executeAction` call is rejected, and without a *bound* bearer every cross-harness write is rejected as identity\_mismatch.
+* **Buggy harness emitting wrong slug**: the substrate refuses to write `from_slug = "papercup-org"` if the bearer isn't bound to `papercup-org`. The harness can't accidentally claim someone else's identity.
+* **Future plugin holding the operator API**: same identity-binding rule. A plugin spawning on behalf of a harness must use that harness's token; cannot impersonate.
+
+What it does **NOT** protect against:
+
+* A harness whose `.papercusp/config.json` is read-leaked to another process — the token is then full-permission for that harness. Mode 0600 mitigates; OS-level isolation would be the v2 hardening.
+* A compromised operator process — the operator has the source of truth; if it's malicious, all bets are off.
+
+## Compromised harness recovery (manual)
+
+If a harness's token is leaked, the lightest fix is to **rotate** it:
+`POST /api/admin/rotate-token` (authenticated with the harness's *current*
+token) mints a fresh token and invalidates the old one. For a fuller wipe:
+
+1. Stop the harness's loop (operator UI → cancel).
+2. Delete the project's PG schema: `DROP SCHEMA harness_<slug> CASCADE`.
+3. Delete the registry row: `curl -X DELETE /api/harness/projects/<slug>`.
+4. Delete the on-disk directory.
+5. Re-install or re-spawn the harness. A fresh token is generated.
+
+If the parent is the compromised harness, all child harnesses spawned during the compromise window may have hostile content. Audit `harness_<parent>.executed_actions` for recent `scaffold_harness` calls.
+
+## Out of scope (v2)
+
+* Revocation API beyond rotation (token rotation itself shipped — `POST /api/admin/rotate-token`)
+* Cross-machine identity (cryptographic signatures, not just shared secrets)
+* Per-action capability tokens (more granular than per-harness)
+* Audit log monitoring / anomaly detection on the executor

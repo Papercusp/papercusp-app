@@ -1,0 +1,63 @@
+# Fleet cup killed by the DBOS invoke timeout (was 600s/10 min; default now 45 min)
+URL: /internal/docs/agent-insights/fleet-cup-600s-invoke-timeout
+
+A cup:spawn'd cup that fails with exit 143 (SIGTERM), an EMPTY error_message, and a duration landing exactly on PAPERCUSP_DBOS_INVOKE_TIMEOUT_MS was killed by the DBOS invoke timeout (invokeTimeoutMs(), orchestrator-runner.ts). The default was 600_000ms (10 min) when first hit — three cups died that way on 2026-06-11 mid-edit, one leaving the shared tree red — and has since been raised to 2_700_000ms (45 min). Don't re-dispatch a task that outruns the timeout into the same guillotine — do it inline or raise the env.
+
+:::caution\[The `cup` this debugs is a retired role — the timeout it hits is not]
+`cup:spawn` **refuses** as of 2026-08-09 (the Mug · Kettle · Cup tier is
+[retired](/internal/docs/agent-insights/mug-kettle-cup-tier-is-retired)), so you will not
+spawn a cup to reproduce this. Kept because the failure SHAPE is a property of the shared
+DBOS invoke path, not of the cup role: **exit 143 (SIGTERM) + an EMPTY `error_message` +
+a duration landing exactly on `PAPERCUSP_DBOS_INVOKE_TIMEOUT_MS`** still identifies a
+timeout kill for any DBOS-invoked agent. Read "cup" below as "the invoked child".
+:::
+
+## Symptom
+
+A `cup:spawn`'d agent shows `failed` in the nursery
+(`harness_shared.spawned_agents`) with:
+
+* `exit_code` **143** (SIGTERM)
+* `error_message` **empty** — nothing distinguishes it from a crash
+* `finished_at - started_at` = **exactly the invoke timeout** (the tell — measure it; default
+  now **2,700 s / 45 min**, was **600 s / 10 min** when the cups below died)
+* `output_tail` cut off mid-sentence, mid-work
+* no respawn, even with `restart_strategy = one_for_one`
+
+Three cups died this way on 2026-06-11 (20:06, 20:19, 22:34). The 22:34 one was
+mid-way through pot-network-surface P-014: its half-landed edits left the
+shared tree with a tsc +1 over baseline and a 20/21-failing integration suite
+that other agents then tripped over for hours.
+
+## Root cause
+
+The DBOS invoke path wraps every spawned run in a hard timeout:
+
+```ts
+// packages/operator-core/lib/dbos/orchestrator-runner.ts:96-97
+export const invokeTimeoutMs = (): number =>
+  Number(process.env.PAPERCUSP_DBOS_INVOKE_TIMEOUT_MS ?? 2_700_000);
+```
+
+2 700 000 ms = 45 minutes — raised from the original 600 000 ms / 10 min (the three cups
+below died at the old 10-minute default, which "was insufficient" per the code comment). A
+coding cup with a long brief can still exceed it.
+`operator-spawn.ts` supports a per-spawn `timeoutMs` override (threaded to the
+DBOS step), but **`cup:spawn` does not expose it** — so a dispatcher cannot
+grant a longer window. Filed as **EI-361** (with the empty-`error_message` and
+dead `one_for_one` legs).
+
+## What to do
+
+* **Diagnose**: `SELECT status, exit_code, finished_at - started_at FROM
+  harness_shared.spawned_agents WHERE spawn_id = '…'` — `143` + a duration landing on the
+  invoke timeout (default `00:45:00`, or whatever `PAPERCUSP_DBOS_INVOKE_TIMEOUT_MS` is set
+  to) ⇒ timeout kill, not a crash. Check `output_tail` for where it died.
+* **Don't blind-retry**: a retry of a brief that outruns the timeout dies the same death and
+  may leave MORE half-landed edits. Either do the work inline (an interactive session has no
+  invoke timeout), split the brief into chunks each well under the timeout, or raise
+  `PAPERCUSP_DBOS_INVOKE_TIMEOUT_MS` on the spawning host until EI-361 lands a per-spawn
+  override.
+* **Always sweep for partial work** after such a kill: the cup's edits are in
+  the shared tree (git-sync swept them) — `git log` the kill window and check
+  `lint:tsc` / the touched suites before assuming "nothing landed".

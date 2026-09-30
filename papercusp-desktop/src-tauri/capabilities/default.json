@@ -1,0 +1,77 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default permissions for the Papercusp desktop shell. NOTE: core:window:default carries only the READ half of the fullscreen pair (allow-is-fullscreen); allow-set-fullscreen is listed explicitly below because the chat popup's full-screen control drives the WINDOW rather than the document — the DOM Fullscreen API needs transient activation, and every way it can fail degrades that control into full-window (owner-reported 2026-08-02). Removing this permission does not error; it silently restores that bug.",
+  "windows": ["main", "pc-perf-recorder-*", "ws-*", "docs-search-palette"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-create",
+    "core:window:allow-close",
+    "core:window:allow-set-fullscreen",
+    "core:webview:default",
+    "core:webview:allow-create-webview-window",
+    "core:webview:allow-webview-close",
+    "core:event:default",
+    "shell:allow-open",
+    "dialog:default",
+    "fs:default",
+    "os:default",
+    "updater:default",
+    "process:default",
+    "notification:default",
+
+    "allow-workspaces-list",
+    "allow-workspaces-create",
+    "allow-workspaces-rename",
+    "allow-workspaces-delete",
+    "allow-workspaces-switch",
+    "allow-workspaces-open-window",
+
+    "allow-show-attention-notification",
+    "allow-app-version",
+    "allow-check-for-update",
+    "allow-install-update",
+    "allow-revert-to",
+
+    "allow-pty-spawn",
+    "allow-pty-write",
+    "allow-pty-resize",
+    "allow-pty-kill",
+    "allow-pty-history",
+    "allow-pty-is-alive",
+
+    "allow-wsl-status",
+    "allow-wsl-install",
+    "allow-wsl-relaunch-elevated",
+    "allow-wsl-import",
+    "allow-wsl-bootstrap",
+    "allow-wsl-finalize-ready",
+    "allow-wsl-uninstall",
+
+    "allow-console-launch",
+    "allow-list-windows-by-title",
+    "allow-focus-window-by-title",
+    "allow-external-console-run",
+    "allow-window-title-for",
+
+    "allow-native-terminal-status",
+    "allow-native-terminal-toggle",
+    "allow-native-terminal-set-enabled",
+    "allow-terminal-get-layout",
+    "allow-terminal-set-layout",
+
+    "allow-endpoint-invoke",
+    "allow-endpoint-cancel",
+    "allow-endpoint-ipc-status",
+
+    "allow-list-envs",
+    "allow-open-docs-search-palette",
+    "allow-open-route-in-app",
+
+    "allow---dev-bridge-result"
+  ]
+}

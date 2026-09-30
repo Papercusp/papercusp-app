@@ -1,0 +1,36 @@
+# Spawns silently fell to `omp -p` after a settings save — empty config used to delete the host's AGENT_CMD env
+URL: /internal/docs/agent-insights/settings-save-clobbered-agent-env
+
+A /settings/agent save with empty cmd/models deleted the .env.local-provided AGENT_CMD/AGENT_MODELS from the live operator process until restart (EI-337, fixed). Symptom signature + the boot-env-restore rule.
+
+**Symptom signature (what it looked like):** fleet spawns finish in \~4s with
+exit 0, completely **empty** `out_body`/`err_body`/`jsonl_body` in
+`harness_run_output`, no `session_id` on the nursery row, no
+`claude-cfg-spawn-*` dir, no transcript. It looks exactly like a bug in
+whatever spawn feature you just built (per-spawn model tiers, in our case).
+
+**Actual root cause (2026-06-11):** any `POST /api/agent-config` (saving the
+/settings/agent page) ran `applyToProcessEnv`, which treated an empty config
+value as "unset the env var" — deleting the **host's own** `.env.local`-provided
+`AGENT_CMD`/`AGENT_MODELS` from the live operator process. Every spawn after
+the save resolved the CLI default `omp -p`, and an omp run with an
+unresolvable model exits 0 with empty output. The host healed only on the
+next service restart, so the breakage window was invisible unless you knew a
+settings save had happened.
+
+**Fixed (EI-337):** `applyToProcessEnv` captures the boot-time values at
+module load and *restores* them when a config field is empty (empty = "no
+user override → host default"); the `env.sh` mirror likewise stopped emitting
+`unset` lines. Regression-pinned in
+`packages/operator-core/lib/agent-config-env.test.ts`.
+
+**Rules of thumb:**
+
+* Empty-output rc=0 spawns right after any agent-config write → check
+  `GET /api/agent-config` → `envOverrides` against what `.env.local` sets,
+  before debugging your feature.
+* When mirroring stored config into `process.env`, never `delete` on empty —
+  snapshot the boot env once and restore it. A settings page's "no value" is
+  an *absence of override*, not an instruction to strip the host's config.
+* This matters double on auto-save settings pages (the /settings/agent page
+  is per-field auto-save now): the mirror runs on every debounced save.

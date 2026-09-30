@@ -1,0 +1,29 @@
+id: su.mode-test
+extends: base
+version: 0.1.0
+description: "Built-in TEST mode identity component; host policy remains in the mode registry."
+slots:
+  - slot: test
+contributions:
+  - id: test-definition
+    purpose: prompt
+    source: fixed
+    refresh: source-change
+    inputKind: prompt-file
+    ref: "mode:su.mode-test:test"
+  - id: current-mode-state
+    purpose: operational
+    source: provider
+    refresh: turn
+    inputKind: setting
+    ref: mode
+    producerRef: modes/store:agent_modes
+mode:
+  id: test
+  policyRef: test
+  title: "TEST — a verdict on the work, not progress on it"
+  oneLiner: "test someone else’s work independently, report defects instead of silently fixing them, and leave committed tests behind"
+  definitionContributionId: test-definition
+  implies: []
+  requiresSubject: false
+  launchable: true

@@ -1,0 +1,166 @@
+{
+  "schema": 1,
+  "target": "public",
+  "purpose": "public source release — public-safe cut (plan open-source-release-2026-09-29)",
+  "year": 2026,
+  "source": {
+    "repo": "Papercusp/papercup",
+    "ref": "af68b44255af32245d5298c51aaaaabc23d2a0e8",
+    "commit": "af68b44255af32245d5298c51aaaaabc23d2a0e8"
+  },
+  "submodules": [
+    {
+      "path": "libs/agent-chat",
+      "sha": "2e2de7639c654d7e26b7a0733cc3790bad015205"
+    },
+    {
+      "path": "libs/generic/cache",
+      "sha": "4c32764ecf742eead930c346f3a4f73f630c6e41"
+    },
+    {
+      "path": "libs/generic/card-stack",
+      "sha": "7c0dec78a9fa0d6553bf6908bb06a9e81f153496"
+    },
+    {
+      "path": "libs/generic/chat-protocol",
+      "sha": "4b17dcaec785f86747ffc0b3ce593de78322c4ad"
+    },
+    {
+      "path": "libs/generic/control-mutation",
+      "sha": "ae8d65376c178d3f89b56bc4918af7f1736c83c0"
+    },
+    {
+      "path": "libs/generic/debounce-coalesce",
+      "sha": "7f5be7375cc9420b3f446724542a70d1b382c953"
+    },
+    {
+      "path": "libs/generic/desktop-ipc",
+      "sha": "bdee3b752a4be2dba93439a03d3825b395b2e48f"
+    },
+    {
+      "path": "libs/generic/dock-workbench",
+      "sha": "b2cc3751bdd90ac4c24995271b8e6d97d71ab1f5"
+    },
+    {
+      "path": "libs/generic/embedded-pg-discovery",
+      "sha": "1dc55adb817f6e5ab75fb64f3703d1773972a8c5"
+    },
+    {
+      "path": "libs/generic/failure-detector",
+      "sha": "3edf6df7f3e4bcd2a0abaac863bd1e8a57410cb2"
+    },
+    {
+      "path": "libs/generic/git-graph",
+      "sha": "a19025b74001cb510258c8de9cb20faa605f6616"
+    },
+    {
+      "path": "libs/generic/ipc-endpoint-server",
+      "sha": "8c9d16efec9a6da86556ec9ebb122ade4d84fd43"
+    },
+    {
+      "path": "libs/generic/ipc-framing",
+      "sha": "82a623665508fbf907fdf5c6fc8cb3b980f6ea85"
+    },
+    {
+      "path": "libs/generic/memory",
+      "sha": "168b7f3d215c8dc8704cbb09b61749cb335faeb4"
+    },
+    {
+      "path": "libs/generic/model-pricing",
+      "sha": "a854eb0cc88ca64e0cc68130fe97217f701ada06"
+    },
+    {
+      "path": "libs/generic/papergrid",
+      "sha": "b5a9d8c264ef9476eb1184d274f00cc161c36601"
+    },
+    {
+      "path": "libs/generic/plan-parser",
+      "sha": "2492e7011c5b693324233a6c0130607694749a4c"
+    },
+    {
+      "path": "libs/generic/rate-limit",
+      "sha": "aabd6edd33e5f1dbf0c437d3a21f0cbf79881852"
+    },
+    {
+      "path": "libs/generic/rerank",
+      "sha": "670332d5a41ca83a3fff013dffc646ae2bc89e94"
+    },
+    {
+      "path": "libs/generic/resumable-download",
+      "sha": "e3c6c87e5a89803d91f5254d742702a3500c8fac"
+    },
+    {
+      "path": "libs/generic/rrf",
+      "sha": "c0a44046b76f169ea7b5bec267b8db5cfb776f26"
+    },
+    {
+      "path": "libs/generic/rules",
+      "sha": "d1bd7540fac6e09e1d9ec9a2cc74e2b4a13b7310"
+    },
+    {
+      "path": "libs/generic/search",
+      "sha": "741cf2f9b32212c6bab920ac2f7501411b3c8d42"
+    },
+    {
+      "path": "libs/generic/search-core",
+      "sha": "3edb2d87f18ffb797a5430a1b3704bde1af89e14"
+    },
+    {
+      "path": "libs/generic/sse",
+      "sha": "2a1ca663b9acd87f09c4139037a95a45c56db16c"
+    },
+    {
+      "path": "libs/generic/sync",
+      "sha": "9a48c472929b44c095f031e9aa24ce86616f2b57"
+    },
+    {
+      "path": "libs/generic/tauri-release-kit",
+      "sha": "de8b89d6ee245baa9caf600b4998e21d67c593b3"
+    },
+    {
+      "path": "libs/generic/token-kit",
+      "sha": "02eea9fd505ef8271d49b122ca7c115fe5af7501"
+    },
+    {
+      "path": "libs/generic/tooldef",
+      "sha": "fa1338a10fdc3a4a566d397cee565899899a9011"
+    },
+    {
+      "path": "libs/generic/tooldef-http",
+      "sha": "859806f8b7a88b69970e615f6373301d788200e8"
+    },
+    {
+      "path": "libs/generic/ui-primitives",
+      "sha": "826a55ea0394ac43774338689bbe238cbd10106d"
+    },
+    {
+      "path": "libs/papercusp",
+      "sha": "896ebc5a4dce88a095b5dca6365cdb468c5a379a"
+    },
+    {
+      "path": "libs/papercusp-db",
+      "sha": "d4d3da8a9a42453ad179e1e3d56bc697ab9867ce"
+    },
+    {
+      "path": "libs/papercusp-shared",
+      "sha": "f6622fd6df1e01ed020e7be5bc6cf902410bbac1"
+    },
+    {
+      "path": "libs/test-config",
+      "sha": "207ec8484f9747af1563d27fe08e3b9a217c3956"
+    },
+    {
+      "path": "libs/testing-shell",
+      "sha": "54009dddd7fae504eb35115ef85938476dbd2951"
+    },
+    {
+      "path": "papercusp-desktop",
+      "sha": "e080779f9bc3a3a4e304b2706e3ee84eccbff73b"
+    }
+  ],
+  "notShipped": [
+    "libs/generic/prospect-contract"
+  ],
+  "fileCount": 16141,
+  "generatedBy": "scripts/source-preview.mjs"
+}

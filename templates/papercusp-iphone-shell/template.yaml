@@ -1,0 +1,80 @@
+# papercusp-iphone-shell — 'Papercusp Official: iPhone Shell' (scope:
+# aspect, category: shell; official-mobile-app-templates-2026-08-20 P-012).
+# Machine twin: @papercusp/template-kit src/reference-templates.ts
+# PAPERCUSP_IPHONE_SHELL_TEMPLATE — the kit suite pins this file to it.
+id: papercusp-iphone-shell
+version: "0.1.0"
+scope: aspect
+category: shell
+summary: >-
+  The iPhone chassis for official Papercusp mobile apps: a thin SwiftUI
+  application generated from XcodeGen source, a dedicated generated-binding
+  module over one device-and-simulator XCFramework, local or named-remote Mac
+  execution, non-zero XCTest/XCUITest acceptance, explicit privacy and
+  entitlement policy, and archive/export/signing preflight with no upload.
+  Product screens, domain flows, endpoints, brand, and optional service
+  dependencies stay in the consuming app.
+components: []
+contracts: []
+decisionPoints:
+  - id: iphone-identity
+    prompt: >-
+      What bundle ID, module, scheme, product/display name, version/build
+      source, and generated project name are used?
+  - id: iphone-os-floor
+    prompt: >-
+      Does the app keep the default deployment target or raise it for a
+      selected capability?
+  - id: iphone-capabilities
+    prompt: >-
+      Which optional entitlements, privacy declarations, URL schemes,
+      associated domains, background modes, and Swift packages are enabled?
+  - id: iphone-test-host
+    prompt: >-
+      Are Xcode checks executed locally on macOS or delegated to a named Mac
+      host from Linux?
+  - id: iphone-release
+    prompt: >-
+      Which external team/signing inputs, archive/export mode, release
+      channel, and validation actions are used?
+composesWith:
+  - papercusp-mobile-base
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+checks:
+  - id: iphone-shell-contract
+    run: checks/iphone-shell-contract.test.ts
+    summary: >-
+      the parameterized SwiftUI/XcodeGen source pins identity, the dedicated
+      generated Swift module, exact Rust slices, XCFramework inputs, host
+      strategy, privacy declarations, external signing names, and no-upload
+      release preflight without product assumptions
+  - id: iphone-shell-assertions
+    run: checks/iphone-shell-commands.test.ts
+    summary: >-
+      every MOB-IOS host leg runs directly, writes an atomic machine evidence
+      record, and proves deterministic project generation, XCFramework and
+      module compilation, host health, non-zero XCTest/XCUITest execution,
+      privacy/capability agreement, archive/export preflight, and
+      signing-absence rejection
+musts:
+  - id: xcodegen-source-chassis
+    rule: "One thin SwiftUI app pins iOS 17.0 or higher and Swift 5.9, keeps ios/project.yml as the XcodeGen source of truth, and treats the generated .xcodeproj as ignored build output"
+    enforcedBy: iphone-shell-contract
+  - id: exact-xcframework-slices
+    rule: "Fresh Rust builds produce aarch64-apple-ios plus aarch64-apple-ios-sim and x86_64-apple-ios, lipo the simulator library, and create one XCFramework with generated headers and modulemap"
+    enforcedBy: iphone-shell-contract
+  - id: dedicated-generated-module
+    rule: "Generated Swift and the FFI XCFramework compile behind their own framework target; the app and tests import that module instead of compiling generated bindings ad hoc"
+    enforcedBy: iphone-shell-contract
+  - id: host-and-test-evidence
+    rule: "Local-mac or named remote-host preflight proves Xcode, SDK, simulator, XcodeGen, and SwiftFormat health; XCTest and XCUITest execute a non-zero count, while incapable hosts report host-constrained"
+    enforcedBy: iphone-shell-assertions
+  - id: privacy-and-no-upload-release
+    rule: "Privacy manifest, usage descriptions, background modes, selected entitlements, and capability answers agree; archive/export/signing preflight uses external input names and performs no upload"
+    enforcedBy: iphone-shell-assertions
+  - id: product-capabilities-stay-owned
+    rule: "Optional capabilities, Swift packages, product screens, routes, data, endpoints, brand, assets, and domain behavior appear only when selected by the consuming product"
+    enforcedBy: prose-only

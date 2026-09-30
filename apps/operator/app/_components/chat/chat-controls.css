@@ -1,0 +1,2383 @@
+/**
+ * chat-controls — the session popup's control VOCABULARY
+ * (session-chat-popup-direction-d-2026-08-02 P-003, deck change #1).
+ *
+ * The owner's complaint was not that the controls looked bad; it was that
+ * "the difference between whats a label, whats a button, and whats a mode etc,
+ * is confusing". So this file fixes the GRAMMAR before any layout moves: every
+ * element in the popup is one of five kinds, and each kind gets a form you can
+ * identify WITHOUT reading the label — shape, border, corner radius and case all
+ * carry the distinction, so it survives a greyscale screenshot and a colour-blind
+ * operator.
+ *
+ *   State          a fact, read-only, changes on its own   full-round pill, no border, tinted fill
+ *   Mode           a state you can change                  pill with a filled cap + caret
+ *   Action         happens the instant you click           rectangle, 4px radius, 1px border
+ *   Action→picker  opens a chooser first                   same rectangle + a trailing "…"
+ *   Alert          a state that is ALSO a link to detail   warn-tinted pill + a trailing "›"
+ *   Field          part of a form, nothing fires yet       recessed well + a caption above
+ *
+ * Two rules fall out of that table and do most of the work:
+ *   ① ROUNDED = the system is telling you something.
+ *     RECTANGULAR = you are telling the system something.
+ *   ② A trailing "…" means a chooser opens; no ellipsis means it fires now.
+ *     (`Focus window` acts; `Grade session…` asks first — that one character
+ *     removes the "I clicked Grade and nothing happened" class of confusion.)
+ *
+ * ── Two repo rails this file is deliberately shaped around ──
+ *
+ * 1. NO `letter-spacing` ANYWHERE. The deck's specimens used .06–.13em tracking
+ *    on the uppercase micro-labels, but `lint:design-primitives` ENFORCES
+ *    letter-spacing: 0 across app UI (it is `expectNoUnexpected`, not warn-only),
+ *    and a nonzero value here would red the fleet's gate. Weight + size + case
+ *    carry the label/■control distinction instead, which is what AgentOrders.css
+ *    already does.
+ *
+ * 2. NO `display:flex` ON A `<button>` SELECTOR. WebKitGTK — the Tauri desktop
+ *    webview, i.e. the ONLY shipping target — ignores flex/grid set on the
+ *    <button> element itself and falls back to block, stacking the icon on top of
+ *    the label (EI-18135716653974462 / WI-5581; owner-screenshotted when the HUD
+ *    board shipped it "verified" in chromium). Every button-backed shape below is
+ *    therefore `display: block` with an inner `__inner`/`__cap`-bearing span doing
+ *    the layout. The fleet-wide lint is only warn-level, but this is a real
+ *    rendering bug in the real target, not a style preference.
+ *
+ * Colour comes from the operator's semantic token scale (app/_semantic.css) —
+ * no literal hexes, no brand primitives.
+ */
+
+/* ═══ the band that holds them ═══════════════════════════════════════════════ */
+
+.pc-ctl-band {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 11px;
+  min-width: 0;
+}
+
+/** Pushes everything after it to the far edge — used to separate the controls
+ *  that act on THIS session from the one that does not (the fleet launcher). */
+.pc-ctl-band__spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pc-ctl-band__sep {
+  flex: none;
+  width: 1px;
+  height: 17px;
+  margin: 0 3px;
+  background: var(--border);
+}
+
+/** A group caption ("FLEET", "SESSION"). Uppercase + weight, never tracking. */
+.pc-ctl-band__label {
+  flex: none;
+  font-size: 9px;
+  font-weight: 660;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+/* The status band sits ABOVE the transcript (facts); the do band BELOW it
+   (verbs). That spatial rule is Direction C's, and it is why nothing in the
+   do band is inert and nothing in the status band is clickable-to-change. */
+/* The zone RULE (not the hairline `--border`) is what makes a band read as its
+   own region rather than as more chrome: Status is bounded below, and each band
+   below the transcript is bounded above, so every boundary in the popup is drawn
+   by the same line at the same weight. */
+.pc-ctl-band--status {
+  background: color-mix(in oklab, transparent, black 16%);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--pc-zone-rule);
+}
+
+.pc-ctl-band--do {
+  background: var(--bg-2);
+  border-top: 1px solid var(--pc-zone-rule);
+  /* [owner 2026-08-02] compaction: the do band carries four mode pills AND
+     four action buttons, which at the popup's usual width wrapped to two
+     lines. A tighter gap + the action padding below buy back ~70px. It still
+     WRAPS rather than overflows if the popup is narrower or an action's label
+     grows — degrading to two lines is correct here; clipping a button is not.
+
+     ⚠ MEASURED CORRECTION 2026-08-03 (P-009): this used to claim the ~70px was
+     "enough to land all eight on one line at the width the owner actually
+     runs". It is not, and the claim was never measured. At the popup's REAL
+     centre-column width of 748px — window >= ~1361px, so the modal reaches its
+     designed min(1320px) — a LIVE session renders four action buttons
+     (Resume / Fork / Focus window / Grade session…) beside the four pills and
+     the band wraps to two lines. It fits on one line only when the session is
+     NOT live and renders two actions. So this gap is still worth keeping, but
+     it does not deliver one line, and the remaining gap to the owner's "1 or 2
+     lines" ask cannot be closed by tightening spacing — it needs fewer
+     controls, which is the owner-gated question in D-004. See D-005: a claim
+     about this band's line count is meaningless without BOTH the width and the
+     session's liveness. */
+  gap: 5px;
+  padding: 6px 11px;
+}
+
+/** The status band shares its row with the chat popup's two floating toolbar
+ *  clusters (WI-7110). They are absolutely positioned because they must live
+ *  INSIDE the conversation region that maximize paints (D-002), which means they
+ *  overlay this band rather than displacing it — so the band declares the two
+ *  gutters they sit in and keeps its chips clear of both.
+ *
+ *  Measured against the rendered controls, not guessed: left = `left: 8` + the
+ *  Orders button (7px padding + label + 4px gap + a 14px chevron + 7px padding);
+ *  right = `right: 8` + two icon buttons, the Activity button and their gaps.
+ *  Both carry slack so a font-size bump narrows the clearance instead of
+ *  reintroducing the overlap. `flex-wrap` on the base band means an unusually
+ *  long claim chip drops to a second line inside the padding rather than sliding
+ *  under a button. */
+.pc-ctl-band--with-toolbars {
+  padding-left: 92px;
+  padding-right: 156px;
+}
+
+/* Identity and window actions share real layout space. Long names wrap
+   without slipping under controls or reserving empty toolbar gutters. */
+.pc-chat-heading {
+  display: flex;
+  align-items: flex-start;
+  flex: none;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+}
+.pc-chat-heading > .pc-ctl-band--status {
+  flex: 1;
+  min-width: 0;
+  border-bottom: 0;
+}
+.pc-chat-window-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 8px;
+}
+
+/* A closed panel keeps its place at the edge while its data stays unmounted. */
+.pc-panel-dock {
+  flex: 0 0 36px;
+  width: 36px;
+  min-height: 0;
+  background: var(--bg-popover);
+}
+.pc-panel-surface .pc-zone-title {
+  padding: 0;
+}
+.pc-panel-toggle.pc-panel-toggle--panel,
+.pc-panel-toggle.pc-panel-toggle--edge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-transform: none;
+  cursor: pointer;
+}
+.pc-panel-toggle--panel {
+  min-height: 36px;
+  padding: 8px 10px;
+}
+.pc-panel-toggle--panel .pc-panel-toggle__label {
+  flex: 1;
+  text-align: left;
+}
+.pc-panel-toggle--edge {
+  flex-direction: column;
+  justify-content: flex-start;
+  min-height: 112px;
+  height: 100%;
+  padding: 12px 4px;
+}
+.pc-panel-toggle--edge .pc-panel-toggle__label {
+  writing-mode: vertical-rl;
+}
+.pc-panel-toggle--edge svg {
+  order: -1;
+  flex: none;
+}
+.pc-panel-toggle.pc-panel-toggle--panel:hover,
+.pc-panel-toggle.pc-panel-toggle--edge:hover {
+  background: var(--bg-raised);
+  color: var(--accent);
+}
+.pc-panel-toggle.pc-panel-toggle--panel:focus-visible,
+.pc-panel-toggle.pc-panel-toggle--edge:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+@media (max-width: 600px) {
+  .pc-panel-dock {
+    flex-basis: 32px;
+    width: 32px;
+  }
+}
+
+/** Actions sharing a `group` cluster together inside the band (ChatActionBar).
+ *  A <div>, not a <button>, so flex is safe here. */
+.chat-action-bar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ═══ ZONES — the Framed look ════════════════════════════════════════════════
+ *
+ * [owner 2026-08-02] approved artifact 6379bb65 ("Session popup — Framed,
+ * every zone"): all SIX regions of the popup are named, ruled zones rather than
+ * three framed ones floating among unlabelled chrome —
+ *
+ *   Status (this band) · Orders (left rail) · Conversation ·
+ *   Controls (do band) · Fleet (strip) · Activity (right rail)
+ *
+ * ── The one decision worth knowing ──
+ * A vertical zone (a rail) is tall and narrow, so a full-width title bar across
+ * its top costs nothing you care about. The three horizontal zones are the
+ * opposite shape, and giving each its own title ROW would add three rows to a
+ * popup we just compacted from five rows to two — undoing one owner ask to
+ * satisfy another. So a horizontal zone is named by a small filled cap that sits
+ * INSIDE the band's existing row, at its leading edge, in the same
+ * accent-on-ink as the rails' titles. Same vocabulary, zero added height.
+ *
+ * Colour [owner 2026-08-02 verbatim: "the light blue and yellow header bars
+ * are good but they are too bright. Make them less bright."]. That ask exposed a
+ * real defect, so read this before changing these values back:
+ *
+ *   The bars USED to be a bright accent fill (58% --accent-strong) carrying
+ *   --accent-ink, and the comment here claimed "4.6:1 for the cap's own text".
+ *   That number was wrong. Recomputed properly (oklab color-mix -> WCAG, the
+ *   implementation self-tested against white/black = 21.00 and #767676/#fff =
+ *   4.54), the real ratio was 4.05:1 — BELOW the 4.5:1 AA floor. Nothing caught
+ *   it because the contrast lint SKIPS any pair whose background is a
+ *   color-mix() (contrast.test.ts:214, `not statically resolvable`), and this
+ *   fill is exactly that. Filed as EI-19386265666375541.
+ *
+ * So "less bright" could not be a smaller mix percentage: darkening a fill that
+ * carries DARK ink drives contrast further down (52% -> 3.46:1, 40% -> 2.51:1).
+ * The pairing had to INVERT — a dark surface carrying LIGHT text, which is both
+ * calmer and far more legible. Measured for the values below:
+ *
+ *   fill  #30526c  (35% accent)  — 44% less luminous than the raw accent
+ *   text  #c1eafe on that fill    6.46:1  (was 4.05:1) — clears AA with margin
+ *   amber #574f3a / #fdd37d       5.72:1  — 49% less luminous
+ *
+ * Why 35% and not lower: these caps also have to stay VISIBLE as bars. The
+ * section caps sit on a card that is itself a 3.5% white veil over the ground
+ * (#152030), and below ~25% the plate stops separating from it — at 22% it
+ * measures 1.35:1, i.e. the bar the owner explicitly called GOOD would
+ * dissolve. 35% keeps that separation at ~2.0:1.
+ *
+ * (The text is DERIVED from the theme accent, not pinned to a sky-blue
+ * primitive — under `frost` it resolves to the value measured above, and under
+ * the `black`/`honeycomb` themes it follows their palette instead of importing
+ * a blue those themes never use. See --pc-zone-label below.)
+ *
+ * The 1px zone STROKE stays brighter than the fill on purpose: D-001 of
+ * `session-popup-compaction-and-contrast-2026-08-02` measured that on this
+ * ground section separation has to come from the stroke, because fill lightness
+ * tops out around 1.6:1. Hence TWO tokens below where there used to be one —
+ * the boundary and the label plate want opposite treatments, and a single token
+ * could only ever satisfy one of them.
+ */
+.pc-ctl-band,
+.pc-fleet-launch-row,
+.pc-zone {
+  /* Defined on the zone ROOTS rather than :root — the three bands and the two
+     rails are the only things that draw zones, and a popup-local vocabulary
+     should not leak into every surface in the app. Every element that either
+     DRAWS a zone rule or CONTAINS a zone cap has to be in this list: the fleet
+     strip is not a `.pc-ctl-band`, so leaving it out would resolve its cap's
+     fill to nothing — an invalid var() computes to unset, i.e. an invisible
+     cap, not a loud failure. */
+  /* The 1px BOUNDARY between zones. Stays the brighter of the two: it is a
+     hairline, so it needs luminance to read at all, and D-001 established that
+     section separation on this ground has to come from the stroke. Lowered
+     58% -> 48% so it calms with the rest without dissolving into the ground. */
+  --pc-zone-rule: color-mix(in oklab, var(--accent-strong) 48%, var(--bg-popover));
+
+  /* The LABEL PLATE behind a zone's name. A broad filled area rather than a
+     hairline, so the same luminance that makes the stroke legible makes this
+     shout — which is what the owner was reacting to.
+
+     35%, matching the SECTION caps in AgentOrders.css / SessionsRosterView.css
+     (see the measured curve there). One strength for every filled cap in the
+     popup on purpose: the zone caps and the section caps are visible in the
+     same glance, and two different "calmed" strengths read as one of them
+     being a mistake. Held at 35% rather than lower because the section caps
+     sit on a card ground where anything below ~25% stops separating — and a
+     zone cap that is calmer than the section caps inside it inverts the
+     hierarchy. */
+  --pc-zone-fill: color-mix(in oklab, var(--accent-strong) 35%, var(--bg-popover));
+
+  /* Text ON that plate. NOT --accent-ink: that token means "dark ink for a
+     BRIGHT accent fill", and this plate is deliberately no longer bright — dark
+     ink on it measured 4.05:1 (sub-AA), which is the defect described above.
+     The light label on the new plate is 8.66:1.
+
+     DERIVED from the accent rather than pinned to `--sky-200`: the operator
+     ships four themes, and a hardcoded sky-blue is off-palette in two of them
+     (`black` sets --accent-strong #ffffff and is deliberately monochrome;
+     `honeycomb` sets it to honey #d6a64a). Mixing the theme's own strong accent
+     50% toward white lands on ~#bee9fd under `frost` — i.e. sky-200 to within a
+     couple of levels, so the measurement above still holds — while following
+     the other themes instead of fighting them. */
+  --pc-zone-label: color-mix(in oklab, var(--accent-strong), white 50%);
+
+  /* The amber/attention variant of the plate. Mixing amber toward this navy
+     ground desaturates it into olive, so the amber identity is carried by the
+     TEXT and the stroke rather than by the plate's own hue. */
+  --pc-zone-fill-warn: color-mix(in oklab, var(--warn) 35%, var(--bg-popover));
+  /* Lifted toward white rather than left as raw `--warn`: on the 35% amber
+     plate --warn itself measures 4.87:1 — over the AA line but with almost no
+     margin, and these caps are 9px uppercase. At white 30% it is 5.72:1.
+     NOT --amber-200: that token does NOT exist in _brand-primitives.css (only
+     --amber-400 does), and an undefined var() computes to unset — an INVISIBLE
+     label rather than a loud failure, the exact trap this file warns about a
+     few lines up. */
+  --pc-zone-label-warn: color-mix(in oklab, var(--warn), white 30%);
+}
+
+/** The two vertical zones' own boundary. In CSS rather than in the rails'
+ *  inline style objects on purpose: `--pc-zone-rule` is a popup-local token, and
+ *  the css-tokens lint only resolves a component-local token INSIDE the file
+ *  that defines it — a `var(--pc-zone-rule)` in the .tsx would read as an
+ *  undefined token and red the lint. Same rule in both the side-by-side and the
+ *  narrow-overlay layouts, so it belongs on the shared class either way. */
+.pc-zone--orders {
+  border-right: 1px solid var(--pc-zone-rule);
+}
+.pc-zone--activity {
+  border-left: 1px solid var(--pc-zone-rule);
+}
+/** The goal popup's BRIEF zone (P-022) — a left zone, so it takes the same
+ *  edge rule as Orders. Declared here beside its siblings rather than in
+ *  hud.css because `--pc-zone-rule` is defined by `.pc-zone` in THIS file, and
+ *  a rule that reaches for the token from another stylesheet is one import
+ *  ordering change away from resolving to nothing. */
+.pc-zone--brief {
+  border-right: 1px solid var(--pc-zone-rule);
+}
+
+/** A HORIZONTAL zone's name: an inline cap sharing the band's own row. */
+.pc-zone-cap {
+  flex: none;
+  align-self: center;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--pc-zone-fill);
+  color: var(--pc-zone-label);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+/** A VERTICAL zone's name: a full-width bar at the top of the column. Sticky,
+ *  because the rail scrolls and the zone it belongs to should not scroll away —
+ *  the same reason a section cap below it is sticky inside its own card. */
+.pc-zone-title {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  margin: 0;
+  padding: 3px 8px;
+  background: var(--pc-zone-fill);
+  color: var(--pc-zone-label);
+  /* The plate is now close in luminance to the rail it sits on, so it needs an
+     explicit lower edge to still read as a bar rather than as tinted rail. */
+  border-bottom: 1px solid var(--pc-zone-rule);
+  /* 9px -> 10.5px, matching the section caps under it (P-008: the rails' text
+     is hard to read). Lifted HERE but deliberately NOT across the rest of this
+     file: the bottom control band lives in chat-controls.css too, and the
+     owner's readability complaint was about the left and right RAILS, while
+     ask #1 asked that same bottom band be squeezed onto 1-2 lines. Enlarging
+     the band's type would undo that. */
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+/** The gloss ("— what they were told"). Sentence case and lighter, so the zone
+ *  NAME is what a scanning eye lands on. */
+.pc-zone-title__sub {
+  font-weight: 600;
+  text-transform: none;
+  opacity: 0.74;
+}
+/** Sits on the filled bar, so it takes the bar's ink rather than the rail's. */
+.pc-zone-title__close {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1;
+  /* Follows the plate, not --accent-ink: the plate is now DARK, so dark ink
+     would render this close affordance invisible on it. */
+  color: var(--pc-zone-label);
+  opacity: 0.7;
+}
+.pc-zone-title__close:hover {
+  opacity: 1;
+}
+.pc-zone-title__close:focus-visible {
+  outline: 2px solid var(--pc-zone-label);
+  outline-offset: 1px;
+}
+
+/* ═══ collapsible rail sections ══════════════════════════════════════════════
+ *
+ * [owner 2026-08-02] "make sure the sections that get big have a good way to
+ * collapse and expand them" — and the original complaint this popup started
+ * from: "the coord section and others take up huge vertical space if its a long
+ * list, thats bad".
+ *
+ * TWO mechanisms, because they solve two different halves:
+ *   ① the cap is a toggle — click it and the body folds away, count still
+ *     visible, so a section you never read costs one row forever;
+ *   ② a section that is open still cannot grow without bound — its body scrolls
+ *     inside its own card (see the rails' own stylesheets), with the cap pinned.
+ * ② is what fixes the complaint for a reader who never clicks anything.
+ *
+ * `display: block` on the button, layout in the inner span: WebKitGTK (the Tauri
+ * webview, i.e. the only shipping target) ignores flex on a <button> element and
+ * falls back to block, stacking children — see this file's header note 2.
+ */
+.pc-sec-head__btn {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.pc-sec-head__inner {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+}
+/** The chevron is the affordance: it must say "this folds" before you hover.
+ *  It ROTATES rather than swapping glyphs, so the control reads as one object
+ *  moving instead of two states blinking. */
+.pc-sec-head__chev {
+  flex: none;
+  display: inline-block;
+  width: 8px;
+  font-size: 8px;
+  line-height: 1;
+  transition: transform 120ms ease;
+  transform: rotate(90deg);
+}
+[data-collapsed='true'] > .pc-sec-head .pc-sec-head__chev,
+[data-collapsed='true'] > * > .pc-sec-head .pc-sec-head__chev {
+  transform: rotate(0deg);
+}
+.pc-sec-head__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-sec-head__btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ═══ rail clusters + the quiet-empty line ═══════════════════════════════════
+ *
+ * Treatment C3's two structural moves, shared by BOTH rails so the popup's two
+ * edges speak one vocabulary (plan session-popup-compaction-and-contrast
+ * -2026-08-02 P-005; the shape is from the C3 whole-popup artifact,
+ * apps/operator/docs/session-popup-c3-wholepopup-2026-08-02.html).
+ *
+ * ① CLUSTER LABEL. Six framed cards down a narrow column read as six peers;
+ *    they are not. Two unfilled labels group them by the question they answer
+ *    ("what they were told" vs "what they're carrying"), which costs one dim
+ *    row and is the cheapest hierarchy available here — it adds no fill, no
+ *    stroke and no accent, i.e. nothing that competes with the caps.
+ *
+ * ② QUIET-EMPTY. A settled section becomes ONE dim line instead of a bordered
+ *    card with a blank in it. This is why it matters more than it sounds: this
+ *    rail deliberately names every signal it could show, including the ones
+ *    usually empty ("an empty section that NAMES what it would hold is how a
+ *    reader learns the signal exists"). Rendered as cards, that principle
+ *    spends ~34px of a ~200px-wide rail per NOTHING — and six of them out-shout
+ *    the one card that has content, because a border is a border whether or not
+ *    anything is inside it. The quiet line keeps the name and the "none" wording
+ *    (so the principle survives intact) and drops only the frame.
+ *
+ * The frame is what encodes "there is something here", so a section that is
+ * UNAVAILABLE or wants the reader keeps its card — see RailQuiet's contract in
+ * rail-sections.tsx, which is where that guard actually lives. */
+.pc-rail-cluster {
+  flex: none;
+  margin: 7px 10px 1px;
+  padding: 0;
+  font-size: 9.5px;
+  font-weight: 700;
+  /* NO letter-spacing — `lint:design-primitives` enforces 0 across app UI and a
+     nonzero value here reds the fleet gate. Tracking is the reflex reach for a
+     small uppercase label; weight + case + the muted ink already carry it. */
+  text-transform: uppercase;
+  /* Deliberately the rail's QUIETEST ink: this label groups the caps, so it
+     must not compete with them. The rails set the actual value — each lifts its
+     own muted tier (P-008) and a shared literal here would fight that. */
+  color: inherit;
+  opacity: 0.72;
+}
+.pc-rail-quiet {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: none;
+  margin: 0;
+  /* Aligns with the cards' text column, not their border box: the quiet line is
+     a peer of the cards' CONTENT, and indenting it to the frame would make the
+     rail look ragged exactly where it is trying to look calm. */
+  padding: 1px 10px;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+/** A dot, not a dash or a bullet glyph: it is the one mark that survives at
+ *  4px, carries no directional meaning, and cannot be mistaken for a control. */
+.pc-rail-quiet::before {
+  content: '';
+  flex: none;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.55;
+  transform: translateY(-1px);
+}
+/** The section's NAME — the part that must still read as a label, so a reader
+ *  learns the signal exists even when it is empty. */
+.pc-rail-quiet__label {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+/** What "none" means HERE — italic, because it is a state, not a value. The
+ *  wording is per-section on purpose ("none open" vs "none in scope" vs "no
+ *  note written" are three different facts). */
+.pc-rail-quiet__none {
+  min-width: 0;
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+
+/* ═══ ⓪ Name — the popup's TITLE, and the band's one editable fact ══════════ */
+/* hud-session-display-names-2026-08-31 P-008 / D-002. Everything else in this
+   band is read-only because it changes on its own; the name is the exception,
+   and it earns the seat by being what the band is ABOUT — the session's
+   identity, which a header names. Set at the band's leading edge and a step
+   above its neighbours in size/weight, so the row reads "WHAT this is, then how
+   it is doing". Deliberately unlike a button until hovered: at rest it is the
+   title, not a control. */
+.pc-ctl-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40ch;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+button.pc-ctl-name:not(:disabled) {
+  cursor: text;
+}
+
+button.pc-ctl-name:not(:disabled):hover,
+button.pc-ctl-name:not(:disabled):focus-visible {
+  border-color: var(--border);
+  background: color-mix(in oklab, transparent, white 6%);
+}
+
+/* An unnamed session shows only the invitation to name it — never its resolved
+   fallback headline, which is the intent/handle this band deliberately does not
+   repeat (see SessionNameField). So it is set as the quietest thing in the row:
+   an offer, not a title. */
+.pc-ctl-name[data-named='false'] {
+  font-weight: 500;
+  font-size: 10.5px;
+  color: var(--fg-mute);
+  font-style: italic;
+}
+
+.pc-ctl-name--editing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  max-width: none;
+  overflow: visible;
+}
+
+.pc-ctl-name__input {
+  min-width: 0;
+  width: 28ch;
+  padding: 3px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.pc-ctl-name__error {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--bad, #f87171);
+  white-space: nowrap;
+}
+
+/* ═══ ① State — a fact. Read-only. Changes on its own. ═══════════════════════ */
+
+.pc-ctl-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 4px 9px 4px 7px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in oklab, transparent, white 6%);
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  /* [owner 2026-08-02, screenshotted] A state chip whose text is FREE-FORM
+     (the ⏳ await chip renders `openAwait.note`, an agent-authored sentence)
+     grew to the full width of its string and ran off the right edge of the
+     popup, shoving the chips after it onto a second row. `white-space: nowrap`
+     above is correct — a fact chip must not wrap mid-phrase — but with no
+     ceiling it means "never wrap AND never stop".
+     This is the ceiling. It is on the BASE class, not on the await chip,
+     because every chip here is one unvalidated string away from the same
+     defect: the claim chip renders a work-item id, the badges render
+     `b.label`, and none of those lengths is bounded by anything. */
+  max-width: 340px;
+  min-width: 0;
+}
+
+/** The clipping surface for a chip's variable-length text.
+ *  Needed as its own element: `text-overflow: ellipsis` acts on a block
+ *  container's own inline content, so putting it on the inline-FLEX chip above
+ *  would do nothing at all — the text would clip with no ellipsis and no hint
+ *  that anything was cut. `min-width: 0` is what actually lets this shrink
+ *  inside the flex row. */
+.pc-ctl-state__clip {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/** A state chip that is actually a <button> (P-006/D-018: the "N waiting on you"
+ *  count jumps to the section it counts). It keeps the chip's exact shape — a
+ *  control that announced itself by CHANGING SHAPE would break the band's
+ *  alignment — and earns its affordance from the cursor plus a real focus ring.
+ *  `font: inherit` is not cosmetic: a <button> otherwise takes the UA's font
+ *  stack and size, so the chip would render visibly different from the <span>
+ *  siblings sitting beside it in the same row. */
+.pc-ctl-state--action {
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.pc-ctl-state--action:hover {
+  background: color-mix(in oklab, transparent, var(--warn) 22%);
+}
+/* focus-VISIBLE, not focus: a mouse click on a chip should not leave a ring
+   behind, but a keyboard user must never lose their place. */
+.pc-ctl-state--action:focus-visible {
+  outline: 2px solid var(--warn);
+  outline-offset: 2px;
+}
+
+.pc-ctl-state__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--good);
+}
+
+/* Tone is a VERDICT, not decoration — so it also shifts the text colour, and the
+   dot keeps its own shape, so the reading survives greyscale. */
+.pc-ctl-state--good {
+  background: color-mix(in oklab, transparent, var(--good) 13%);
+  color: color-mix(in oklab, var(--good), white 34%);
+}
+.pc-ctl-state--warn {
+  background: color-mix(in oklab, transparent, var(--warn) 13%);
+  color: color-mix(in oklab, var(--warn), white 34%);
+}
+.pc-ctl-state--bad {
+  background: color-mix(in oklab, transparent, var(--bad) 14%);
+  color: color-mix(in oklab, var(--bad), white 34%);
+}
+.pc-ctl-state--warn .pc-ctl-state__dot { background: var(--warn); }
+.pc-ctl-state--bad .pc-ctl-state__dot { background: var(--bad); }
+
+/** A SUBORDINATE clause inside a state chip — the provenance of the number
+ *  beside it, not a second fact (popup-agent-state-coverage-2026-08-18 P-008:
+ *  "ctx 47% · measured 3m ago").
+ *
+ *  It is deliberately quieter than its host chip rather than a chip of its own.
+ *  A reading's age qualifies that reading and is meaningless apart from it, so
+ *  splitting it into a sibling chip would put it in the band's flat left-to-right
+ *  scan as if it were independent — and would spend a whole chip slot saying
+ *  something nobody reads first. Dimmer, attached, and legible on the second
+ *  look is exactly the weight it should carry. */
+.pc-ctl-state__muted {
+  opacity: 0.62;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ═══ ② Mode — a state you can change. A switch that is currently on. ════════ */
+
+/* The <button> itself is display:block (see the WebKitGTK note above); the inner
+   span is the flex row. `overflow:hidden` + the pill radius are what make the
+   filled cap read as one object with its value rather than two adjacent chips —
+   which is the whole point of the shape: a mode and the control that sets it are
+   ONE thing. That is what kills the AUTO/Autonomy and GRADE/Grade duplicate
+   pairs the owner was complaining about. */
+.pc-ctl-mode {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  min-height: 0;
+  background: color-mix(in oklab, transparent, var(--accent) 14%);
+  color: var(--accent-soft);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pc-ctl-mode__inner {
+  display: flex;
+  align-items: stretch;
+  border-radius: inherit;
+  overflow: hidden;
+}
+
+.pc-ctl-mode__cap {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.pc-ctl-mode__value {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 7px;
+}
+
+/* Off is not merely "dimmer" — the cap loses its fill entirely, so on/off is a
+   difference in FORM (filled vs hollow), legible without colour. */
+.pc-ctl-mode--off {
+  background: color-mix(in oklab, transparent, white 6%);
+  color: var(--fg-mute);
+}
+/* --fg-dim, not --fg-mute: the cap is a LABEL on a raised fill, and the muted
+   pair cleared only 92% of the WCAG AA ratio (caught by lint:contrast). The
+   off-state still reads as off through FORM — the cap loses its accent fill —
+   so nothing is lost by keeping the text itself legible. */
+.pc-ctl-mode--off .pc-ctl-mode__cap {
+  background: var(--bg-raised-high);
+  color: var(--fg-dim);
+}
+
+.pc-ctl-mode:hover {
+  background: color-mix(in oklab, transparent, var(--accent) 22%);
+}
+.pc-ctl-mode--off:hover {
+  background: color-mix(in oklab, transparent, white 11%);
+}
+
+/* The pill is now the TRIGGER of a design-system Select (P-002), which means
+   it is still a <button> and still bound by the WebKitGTK note above — the
+   `__inner` span keeps doing the layout. Radix stamps these two attributes on
+   an open trigger; both get the hover fill so the pill visibly stays "held"
+   while its menu is up, which is what tells you WHICH pill the floating menu
+   belongs to. */
+.pc-ctl-mode[data-state='open'] {
+  background: color-mix(in oklab, transparent, var(--accent) 22%);
+}
+.pc-ctl-mode--off[data-state='open'] {
+  background: color-mix(in oklab, transparent, white 11%);
+}
+.pc-ctl-mode[disabled] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* A mode option in that menu: label over its one-line explanation. The hint is
+   the descriptor's `hint`, which the old card rendered as a second line under
+   the label — keeping it means the dropdown lost the card's chrome without
+   losing any of its INFORMATION. */
+.pc-ctl-mode-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  max-width: 320px;
+}
+
+.pc-ctl-mode-opt__label {
+  font-weight: 600;
+}
+
+.pc-ctl-mode-opt__hint {
+  color: var(--fg-mute);
+  font-size: 10.5px;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+/* ═══ ③/④ Action, and Action → picker ═══════════════════════════════════════ */
+
+.pc-ctl-act {
+  display: block;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  /* Declared explicitly because globals.css's zero-specificity
+     `:where(button, .pc-btn) { min-height: 26px }` baseline otherwise wins over
+     the intended padded height and produces an off-by-a-few-px "egg"
+     (EI-18690913356156250). Stating it is what keeps that baseline out; the
+     value moved 26 → 24 with the 2026-08-02 compaction, which is exactly why
+     it must stay declared — inheriting the baseline would silently undo it. */
+  min-height: 24px;
+  background: var(--bg-raised);
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.pc-ctl-act__inner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.pc-ctl-act:hover { background: var(--bg-raised-high); }
+.pc-ctl-act[disabled] { cursor: default; opacity: 0.55; }
+
+.pc-ctl-act__icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  color: var(--accent);
+}
+
+.pc-ctl-act--ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--fg-dim);
+}
+.pc-ctl-act--ghost:hover { background: color-mix(in oklab, transparent, white 6%); }
+
+.pc-ctl-act--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 640;
+}
+.pc-ctl-act--primary:hover { background: var(--accent-strong); }
+.pc-ctl-act--primary .pc-ctl-act__icon { color: var(--accent-ink); }
+
+/* ═══ ⑤ Alert — a state that is ALSO a link to its detail. ═══════════════════ */
+
+.pc-ctl-alert {
+  display: block;
+  padding: 4px 7px 4px 8px;
+  border: 0;
+  border-radius: 999px;
+  min-height: 0;
+  background: color-mix(in oklab, transparent, var(--warn) 14%);
+  color: color-mix(in oklab, var(--warn), white 34%);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pc-ctl-alert__inner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pc-ctl-alert:hover { background: color-mix(in oklab, transparent, var(--warn) 22%); }
+
+/** The trailing "›". Its job is to say "this opens something" — the one thing
+ *  that distinguishes an Alert from a State, since both are rounded. */
+.pc-ctl-alert__chevron { opacity: 0.65; }
+
+/* ═══ ⑥ Field — part of a form. Nothing happens until you submit. ═══════════ */
+
+/* The recessed well is the point: it is the only shape here that looks like
+   something is MISSING from it, which is what a form control should look like.
+   The caption above it is non-negotiable — the fleet row's seven controls
+   carried no visible captions at all (their names existed only in aria-label),
+   which is exactly why the owner's paste read "Plan the fleet works" and
+   "Account routing for every fleet member". */
+.pc-ctl-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pc-ctl-field__cap {
+  font-size: 9px;
+  font-weight: 620;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+/* ⚠ The selectors are CHILD combinators, and `.h-combobox__box` is listed
+ * explicitly. Both are corrections, not style (WI-7456) — the descendant form
+ * these used to have silently styled the WRONG ELEMENT on every Combobox-backed
+ * field, which is four of the fleet strip's six.
+ *
+ * A Combobox is not a bare <input>: it renders `.h-combobox` > `.h-combobox__box`
+ * (the bordered well the user sees) > `.h-combobox__input` (a transparent inner
+ * text field). `.pc-ctl-field input` matches that INNER input, so the well
+ * vocabulary was being painted onto the invisible element while the visible one
+ * kept only harness.css's generic combobox chrome. Two measured consequences:
+ *
+ *   · HEIGHT — §⑦'s "one control height" list had the same descendant bug, so
+ *     it set the inner input to 26px and left the box at 34px. Measured
+ *     2026-08-03: Name well 26px beside Plan/Model/Account/Windows wells at
+ *     34px. §⑦ claimed a heightSpread of 0.0; that verification was reading
+ *     the same wrong elements this selector was.
+ *   · TEXT INSET — the box already pads 8px, and this rule then added another
+ *     9px to the inner input, so a dropdown's text sat 19px into its well while
+ *     a plain input's sat 10px in. Two wells, aligned edges, misaligned text.
+ *
+ * So the well list names the element that DRAWS the well, and the child
+ * combinator keeps it from reaching inside a composite control ever again. */
+.pc-ctl-field__well,
+.pc-ctl-field > select,
+.pc-ctl-field > input,
+.pc-ctl-field .h-combobox__box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: color-mix(in oklab, transparent, black 28%);
+  box-shadow: inset 0 1px 2px color-mix(in oklab, transparent, black 35%);
+  color: var(--fg);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* The inner text field carries NO inset of its own — the well above owns the
+   padding, exactly as it does for a bare <input>. Without this the two are
+   additive and the dropdown's text hangs 9px right of its neighbour's. */
+.pc-ctl-field .h-combobox__input {
+  padding: 0;
+  font-size: 11.5px;
+}
+
+.pc-ctl-field__well--empty { color: var(--fg-mute); }
+
+.pc-ctl-field__chevron {
+  flex: none;
+  color: var(--fg-mute);
+  font-size: 9px;
+}
+
+/* ═══ the fleet launcher's captioned form (P-007) ═══════════════════════════ */
+
+/* THE CONTAINER. Owns `display` explicitly (WI-7110) — this is the rule whose
+   absence produced [owner 2026-08-02] "the display of the bottom panel is all
+   messed up". P-007 turned this component into three STACKED bands (caption /
+   field grid / submit) but styled only the inner two, leaving hud.css's
+   pre-P-007 `flex-direction: row` to lay the three bands out SIDE BY SIDE:
+   caption squeezed into a left column, the grid collapsed to one 148px column,
+   and the submit band's `border-top` stranded mid-panel as a floating rule.
+   hud.css's copy is deleted; a component's layout lives beside its form, in one
+   file, so the two halves can never disagree again.
+
+   `column` is load-bearing, not cosmetic: the field grid's `auto-fit` can only
+   spread into columns if the container hands it the FULL popup width, which a
+   row-direction parent never does. */
+.pc-fleet-launch-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  /* Fleet is the one band that does NOT act on this session — it launches new
+     ones — so it gets the same zone rule as every other boundary rather than the
+     hairline that made it read as a continuation of the controls above it. */
+  border-top: 1px solid var(--pc-zone-rule);
+  background: var(--bg-2);
+  /* Fixed chrome inside a flex-column modal: never let the transcript's growth
+     squeeze the launcher out of view — always visible is the whole ask
+     (WI-6505, owner ask 2026-07-27 (ii)). */
+  flex: none;
+}
+
+/* Two classes, so this reliably beats `.pc-new-session-launcher`'s own single-
+   class `display` on the same element rather than depending on stylesheet
+   order. The element keeps that class because the CONTROLS inside it are still
+   the new-session launcher's controls — only their arrangement changes.
+
+   [owner 2026-08-02] "make it more compact you should be able to fit all the
+   things on 1 or 2 lines." This was a GRID of six cells, each a caption
+   STACKED above its control, plus a caption band above and a submit band
+   below — four stacked bands, ~200px, five rendered lines for seven controls.
+
+   It is now ONE wrapping flex strip. Three things had to change together, and
+   dropping any one of them puts a line back:
+     · the per-field caption goes from ABOVE the control to BESIDE it
+       (`--inline` below), which is what actually removes a line per row;
+     · the "FLEET" caption joins the strip as its first item instead of
+       owning a band;
+     · the submit joins the strip and floats right on `margin-left:auto`
+       instead of owning a band with a border-top.
+
+   `flex-wrap` (not a fixed column count) is what keeps the owner's "1 or 2":
+   wide popup ⇒ one line, narrow ⇒ two, never a hard-coded break that is wrong
+   at both widths.
+
+   ⚠ MEASURED CORRECTION 2026-08-03 (WI-7456): the strip is no longer a wrapping
+   flex row. `flex-wrap` did keep it to "1 or 2 lines", but it is ALSO what made
+   the second line start under the FLEET cap and put its captions 49px out of
+   column with the first line's — the owner's THIRD alignment complaint, and the
+   reason the fix had to be structural rather than another round of spacing. The
+   line-count promise is now kept by the field grid's `auto-fit` (fewer columns
+   at a narrow width, never an overflow) instead; see §⑧. */
+.pc-fleet-launch-row .pc-fleet-launch-row__fields {
+  /* THREE columns: the shared label gutter | the field grid | the submit.
+     The gutter track is the SAME token the Controls band uses, which is what
+     makes the two bands one grid rather than two that merely happen to start
+     in the same place (§⑧). The submit is its own track so it can never
+     consume a field cell and push the strip onto a third line. */
+  display: grid;
+  grid-template-columns: var(--pc-ctl-gutter) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 7px 11px;
+  min-width: 0;
+}
+
+/* The strip's own leading caption. Shares .pc-ctl-band__label's type so the
+   form still reads as the "FLEET" group, but it is now a flex ITEM. */
+.pc-fleet-strip__label {
+  align-self: center;
+}
+
+/* Pushes the submit to the far edge of whatever line it lands on. */
+.pc-fleet-launch-row .pc-fleet-strip__submit {
+  margin-left: auto;
+  flex: none;
+}
+
+/* Each field fills its grid cell. `min-width: 0` is what lets a long plan name
+   ellipsize inside its well instead of widening the column it sits in — which,
+   in a grid, would drag the column below it out of alignment too.
+
+   The old `max-width: 210px` is GONE on purpose: capping a cell's content while
+   the cells themselves stay equal leaves a ragged right edge inside each column,
+   which is the same "nearly aligned" look this change exists to remove. */
+.pc-fleet-launch-row .pc-ctl-field {
+  min-width: 0;
+}
+
+/* A member count is at most two digits — sizing it to the shared input width
+   would leave a mostly-empty box next to the launch button. The cell stays a
+   full column (so MEMBERS still lines up under MODEL); only the input is short. */
+.pc-fleet-launch-row .pc-fleet-launch-row__count {
+  max-width: 52px;
+}
+
+/* ═══ ⑥b Field, INLINE — the same shape, laid on its side ═══════════════════ */
+
+/* The stacked caption is what the Field shape uses to say "this control has a
+   NAME" (P-007 — the owner was reading aria-labels as UI copy because nothing
+   else named these controls). Compaction must not undo that, so the caption is
+   not deleted, only MOVED: it sits before the well on the same line, still
+   uppercase, still muted, still the thing you read first. The long form that
+   used to be the visible caption ("Plan — the lane members work") survives as
+   the `title`, so the explanation is one hover away rather than one line down. */
+/* A GRID, not a flex row (WI-7456) — and this is the half of the alignment fix
+   that a band-level grid alone cannot deliver.
+ *
+ * As a flex row, each caption was `flex: none`, i.e. as wide as its own word.
+ * So the well after it started wherever that word happened to end: "Name" is
+ * 27px and "Account" is 49px, which put the two wells 18px out of column even
+ * when their fields were the same width. Measured across the strip the drift
+ * was 18.4 / 27.2 / 42.1px (WI-7456).
+ *
+ * One shared caption TRACK removes the coupling: every well now starts at
+ * `--pc-ctl-cap-w + gap` from its cell's leading edge, whatever the caption
+ * says. Captions and wells therefore form two columns each, not six. */
+.pc-ctl-field--inline {
+  display: grid;
+  grid-template-columns: var(--pc-ctl-cap-w) minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+
+.pc-ctl-field--inline > .pc-ctl-field__cap {
+  /* Nudged up from the stacked caption's 9px: beside a 11.5px control it has
+     to hold its own as a label rather than read as a superscript. */
+  font-size: 9.5px;
+  /* The track is fixed, so a caption that outgrows it must TRUNCATE rather
+     than widen its column — a silently-widened column is exactly the drift
+     this grid removes, and it would come back the first time a caption is
+     renamed or a theme ships a wider face. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The well takes the rest of the field, and clips rather than pushes. */
+.pc-ctl-field--inline > :not(.pc-ctl-field__cap) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ═══ ⑦ ONE control height for the whole bottom panel (P-009) ═══════════════
+ *
+ * [owner 2026-08-02] "the bottom panel buttons are all misaligned."
+ *
+ * MEASURED before anything changed, in a live Tauri webview at the popup's REAL
+ * width — window 1500 so the modal reaches its designed `min(1320px, 97vw)` and
+ * the centre column is 748px (D-002's measured figure). Stating the width is
+ * part of the measurement: at a 1280px window the modal is capped at 1224px and
+ * the same panel reports a different row count entirely.
+ *
+ *   centreSpread  0.0px on every row   <- `align-items: center` was never broken
+ *   heightSpread  6.0 / 0.0 / 4.2px    <- the controls are different SIZES
+ *   bottomSpread  3.0 / 0.0 / 2.1px
+ *
+ * That rules out the obvious suspect and names the real one. FOUR control
+ * heights coexisted in one panel — 18px mode pills, 24px action buttons, 29.8px
+ * fleet wells, 34px Launch. Centred items of unequal height scatter their BOTTOM
+ * edges, and a row of boxes is read on its bottoms, not its centres. So this is
+ * not a centring bug and not four per-element nudges; it is one missing shared
+ * metric.
+ *
+ * 26px because the design system already answers this: globals.css calls the
+ * `sm` button size "the 26px chrome" scale and `.pc-btn`'s own min-height is
+ * 26px. Aligning TO that beats inventing a value — the popup's controls now
+ * match chrome everywhere else in the app.
+ *
+ * This does NOT flatten the control vocabulary at the top of this file. Shape,
+ * radius, border and case still carry mode-vs-action-vs-field; height was never
+ * one of the distinguishing signals, it was merely uncontrolled.
+ *
+ * ⚠ Height goes on the BUTTON, layout stays on its `__inner` span — never
+ * `display:flex` on a <button> selector (rail 2 in this file's header:
+ * WebKitGTK, the only shipping target, ignores it and stacks the contents).
+ * Both button shapes here already have that inner span.
+ *
+ * VERIFIED by injecting exactly these declarations into the live webview and
+ * re-measuring: heightSpread and bottomSpread went to 0.0 on all three rows and
+ * the row count did not grow. */
+
+.pc-ctl-band,
+.pc-fleet-launch-row {
+  --pc-ctl-h: 26px;
+
+  /* ── §⑧'s two shared column metrics. They live beside --pc-ctl-h because
+     they are the same KIND of thing: one number, declared once, that several
+     otherwise-independent rules have to agree on. The panel's whole alignment
+     history is rules that agreed by coincidence and then stopped. ──
+
+     The LABEL GUTTER: the track holding a band's zone cap. Fixed rather than
+     `max-content` on purpose — `max-content` would size each band's gutter to
+     its OWN cap ("Controls" 62.9px vs "Fleet" 39.1px), so the two bands would
+     each be internally tidy and still disagree with each other by 24px, which
+     is the failure mode one step subtler than the one being fixed.
+     68px = the widest cap ("CONTROLS", measured 62.9px at 9px/700 uppercase
+     with its 6px padding) plus ~5px of slack for a wider theme face. */
+  --pc-ctl-gutter: 68px;
+
+  /* The FIELD CAPTION track inside an inline field. 54px = the widest caption
+     ("Members" 49.0px, "Account" 48.8px, "Windows" 47.0px at 9.5px) plus
+     slack. A caption that outgrows it truncates rather than shoving its own
+     well out of column — see .pc-ctl-field--inline. */
+  --pc-ctl-cap-w: 54px;
+}
+
+/* ⚠ Child combinators + `.h-combobox__box`, for the reason spelled out at §⑥'s
+   well rule: the descendant form applied this height to a Combobox's INVISIBLE
+   inner input and left its visible 34px well untouched, so the "one height"
+   this section is named for was never actually reaching four of the six fleet
+   controls. The `input`/`select` legs stay for the fields that really are bare
+   controls (Name, Members). */
+.chat-action-bar .pc-ctl-mode,
+.chat-action-bar .pc-ctl-act,
+.pc-fleet-launch-row .pc-ctl-field__well,
+.pc-fleet-launch-row .pc-ctl-field > select,
+.pc-fleet-launch-row .pc-ctl-field > input,
+.pc-fleet-launch-row .pc-ctl-field .h-combobox__box,
+.pc-fleet-launch-row .pc-fleet-strip__submit {
+  box-sizing: border-box;
+  height: var(--pc-ctl-h);
+  /* The height IS the metric now; vertical padding would only fight it.
+     Horizontal padding stays with each shape's own rule. */
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* The inner span does the centring, for the WebKitGTK reason above. */
+.chat-action-bar .pc-ctl-mode__inner,
+.chat-action-bar .pc-ctl-act__inner {
+  height: 100%;
+}
+
+/* The band's leading cap ("CONTROLS", "FLEET") takes the same height — the item
+ * asks for the caps to share the control line too, and measured as a direct
+ * child of the band it was 17px against 26px controls, leaving its plate 4.5px
+ * clear of the row's bottom edge.
+ *
+ * The HEIGHT is shared; the TYPE is not. This is a label, not a control, and
+ * this file's vocabulary leans on that distinction — so it keeps its 9px
+ * uppercase and simply centres inside a control-height box. Growing the text
+ * would turn it into something you try to click. It is a <span>, so `flex` is
+ * safe here: the WebKitGTK rail above is specifically about <button>. */
+.chat-action-bar .pc-zone-cap,
+.pc-fleet-launch-row .pc-zone-cap {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: var(--pc-ctl-h);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* The filled cap must still reach both edges of the pill it sits in. */
+.chat-action-bar .pc-ctl-mode__cap,
+.chat-action-bar .pc-ctl-mode__value {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* Launch is the one control here with no `__inner` span — it is the shared
+   design-system <Button> — so it cannot use the flex centring above. A
+   line-height equal to its content box centres the label whether the webview
+   honours `.pc-btn`'s inline-flex or falls back to block. */
+.pc-fleet-launch-row .pc-fleet-strip__submit {
+  line-height: calc(var(--pc-ctl-h) - 2px);
+}
+
+/* ═══ ⑧ ONE column grid for the whole bottom panel (WI-7456) ════════════════
+ *
+ * [owner 2026-08-03] "the alignement on the bottom panel is still all mest up."
+ *
+ * THIRD recurrence, which is the fact that decides the shape of this fix. §⑦
+ * above unified the control HEIGHTS after the owner's second complaint, and it
+ * was correct — but it left the HORIZONTAL axis governed by nothing at all, and
+ * that is what came back. So this is deliberately not another round of nudges:
+ * a nudge is a value that happens to look right in one screenshot, and three
+ * screenshots have now disproved that method here.
+ *
+ * ── What was actually wrong ──
+ * Both bands were WRAPPING FLEX STRIPS in which the zone cap was just another
+ * flex item. Two things follow from that, and both are structural:
+ *
+ *   ① A wrapped line restarts at the CONTAINER's padding, so line 2 began
+ *     underneath the cap — inside the label gutter — while line 1's first
+ *     control began after it. Nothing in flexbox can express "wrap, but not
+ *     into the first item's column".
+ *   ② Every item was sized by its own content, so the two lines' columns had no
+ *     reason to coincide and did not.
+ *
+ * MEASURED (WI-7456; headless Tauri at window 1280, modal 1040, band root 740):
+ *
+ *   FLEET row 1   Fleet@11 | Name@60.1 well@93.2 | Plan@280.1 well@320.2 | Model@500.1 well@548.1
+ *   FLEET row 2   Account@11 well@74.8 | Windows@231 well@293 | Members@451 well@506
+ *
+ *   gutter violation   49.1px   (row 2 starts at 11, row 1's first field at 60.1)
+ *   caption columns    49.1px out, all three
+ *   well columns       18.4 / 27.2 / 42.1px out
+ *
+ * The 49.1px is not a coincidence and is the tell that this is one bug, not
+ * three: it is exactly the cap plus its gap — i.e. the gutter that line 2 was
+ * free to occupy.
+ *
+ * ── The shape ──
+ * Each band becomes a GRID whose first track is the label gutter, and every
+ * control moves into a single wrapper occupying the second track:
+ *
+ *   CONTROLS   [ gutter ][ controls ................................ ]
+ *   FLEET      [ gutter ][ field grid ..................][ submit ]
+ *
+ * A wrapped line can no longer reach the gutter because it is a different
+ * track. The gutter is the same token in both bands, so the two zone caps and
+ * the two control regions line up with each other — that is what makes this ONE
+ * grid rather than two tidy bands that happen to start in the same place. And
+ * the fleet fields become a real grid, so NAME/PLAN/MODEL sit above
+ * ACCOUNT/WINDOWS/MEMBERS by construction rather than by content coincidence.
+ *
+ * Guard: chat-controls.vocabulary.test.ts asserts the gutter track and the
+ * shared caption track, so a future edit that reverts either to a flex strip
+ * reds here rather than in a fourth screenshot. */
+
+.chat-action-bar.pc-ctl-band--do {
+  display: grid;
+  grid-template-columns: var(--pc-ctl-gutter) minmax(0, 1fr);
+  align-items: center;
+  /* Row gap is dead weight in a two-track single-row grid, but it is stated so
+     that a future third band item cannot inherit the flex `gap: 5px` above and
+     silently pick a different rhythm from the fleet strip's 6px. */
+  gap: 6px 10px;
+}
+
+/* The cap FILLS its gutter track rather than shrink-wrapping its word. Two
+   equal-width plates reading CONTROLS / FLEET are what make the shared column
+   visible — a reader should be able to SEE the grid, not just measure it. */
+.chat-action-bar.pc-ctl-band--do > .pc-zone-cap,
+.pc-fleet-launch-row .pc-fleet-launch-row__fields > .pc-zone-cap {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+/* Track 2 of the Controls band: the controls themselves, still a wrapping strip
+   — wrapping was never the problem, wrapping INTO THE GUTTER was. */
+.pc-ctl-band__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+/* Track 2 of the Fleet strip: six fields in equal columns.
+   `auto-fit` + `minmax` is what keeps the owner's earlier "1 or 2 lines" ask
+   without a hard-coded column count — the grid drops to two columns, then one,
+   as the popup narrows, and never overflows. 160px is the width below which a
+   caption track plus a legible well stops fitting. */
+.pc-fleet-strip__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+/* ═══ FLEET rail — the fourth zone ══════════════════════════════════════════
+ *
+ * chat-popup-fleet-peers-rail-2026-08-09 P-004. The right-hand twin of
+ * `.pc-zone--orders`, one column further out: Orders | conversation | Activity |
+ * Fleet. Its boundary is drawn here rather than in the .tsx for the reason the
+ * two rails above already state — `--pc-zone-rule` is a popup-local token, and
+ * the css-tokens lint only resolves a component-local token inside the file that
+ * DEFINES it, so a `var(--pc-zone-rule)` in a .tsx reads as undefined and reds
+ * the lint.
+ */
+.pc-zone--peers {
+  border-left: 1px solid var(--pc-zone-rule);
+}
+
+/* The goal popup's WORK rail (plans + work items under a goal). Identical rule
+ * to `.pc-zone--peers`, and it existed as a borrow of that very class until
+ * P-021 — which put a REAL peers rail in the goal popup and so made the borrow
+ * an outright lie: two zones, both claiming to be the fleet rail, in one popup.
+ * Named separately rather than left to collide, because the next reader greps
+ * `pc-zone--peers` to find the fleet rail and must not land on the work rail.
+ * Declared here beside its siblings for the token-scoping reason above. */
+.pc-zone--work {
+  border-left: 1px solid var(--pc-zone-rule);
+}
+
+/* The goal popup's SESSIONS rail (P-024, who is working on this goal). A right
+ * zone like the three above, and now the INNERMOST of them — the owner placed
+ * it "to the left of the WORK pane" — so it owns the seam against the
+ * conversation while `--work` keeps owning the seam against it. Each right zone
+ * drawing only its OWN left edge is what keeps the count of rules equal to the
+ * count of gaps however many of them are open. Declared here beside its
+ * siblings for the token-scoping reason above. */
+.pc-zone--sessions {
+  border-left: 1px solid var(--pc-zone-rule);
+}
+
+.pc-peers {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+/* The fleet's identity: colour chip, slug, headcount. Its own row under the zone
+   title rather than crammed into it, because the slug is the one string here
+   that must never be truncated into ambiguity — two fleets on this box have
+   shared a 16-character prefix. */
+.pc-peers__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.pc-peers__swatch {
+  width: 3px;
+  height: 15px;
+  border-radius: 2px;
+  flex: none;
+  /* Runtime-set per fleet by the rail's inline style (the same
+     `--hud-fleet` the board's cards carry, so one fleet is one colour
+     everywhere). Falls back to the muted rule when a fleet has no colour. */
+  background: var(--hud-fleet, var(--fg-mute));
+}
+.pc-peers__slug {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-peers__count {
+  margin-left: auto;
+  font-size: 9.5px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Shown ONLY when something needs a human, so its absence is meaningful. Amber
+   text on a faint amber wash — the same treatment the popup's other warn
+   surfaces use, rather than a second alert vocabulary. */
+.pc-peers__warn {
+  flex: none;
+  padding: 4px 9px;
+  font-size: 9.5px;
+  color: var(--warn);
+  background: rgb(from var(--warn) r g b / 0.09);
+  border-bottom: 1px solid var(--border);
+}
+
+.pc-peers__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.pc-peers__group {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Sticky, for the same reason the rails' other section caps are: a 24-member
+   fleet scrolls, and the group a row belongs to must not scroll away from it. */
+.pc-peers__cap {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  font-size: 8.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  /* NO letter-spacing — see this file's header rule 1: `lint:design-primitives`
+     enforces 0 across app UI and it is expectNoUnexpected, not warn-only. The
+     uppercase caps above (.pc-zone-cap) carry none either. */
+  color: var(--pc-zone-label);
+  background: var(--pc-zone-fill);
+  border-bottom: 1px solid var(--pc-zone-rule);
+}
+.pc-peers__cap-n {
+  margin-left: auto;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+
+/* An EMPTY section's heading, dimmed (GoalSessionsRail). That rail deliberately
+ * keeps all five headings even when a section has nothing in it — the five
+ * types ARE the goal's coverage model, so "no drain fleet" is a FINDING, and a
+ * hidden section would render it as "no drain section exists" instead. The
+ * Work rail hides its empty sections; this one must not.
+ *
+ * The dimming is what makes that model scannable: with every heading at equal
+ * weight the reader has to read five counts to find the gap, which is exactly
+ * the work the rail is supposed to have already done. Dimmed, the populated
+ * sections come forward and a gap reads at a glance.
+ *
+ * Set as an attribute by the component, styled here, so the rule stays with the
+ * rest of the rail's vocabulary rather than becoming an inline style. */
+.pc-peers__cap[data-muted='true'] {
+  opacity: 0.55;
+}
+
+.pc-peers__empty {
+  padding: 7px 9px;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--fg-mute);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── a peer row ───────────────────────────────────────────────────────────
+   Rendered as a <button> when it navigates and a plain <li> when it does not,
+   so the two never look alike. Both share this block; only `--btn` adds the
+   affordances. */
+.pc-peer {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 9px 7px 8px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: inherit;
+  font: inherit;
+}
+.pc-peer--btn {
+  cursor: pointer;
+}
+.pc-peer--btn:hover {
+  background: var(--bg-raised);
+}
+.pc-peer--btn:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: -2px;
+}
+/* The agent already on screen. Marked in FORM (a fleet-coloured rail) as well as
+   by the word, and deliberately NOT a button — re-opening the reader onto
+   themselves is a no-op that reads as a broken row. */
+.pc-peer[data-current='true'] {
+  border-left-color: var(--hud-fleet, var(--accent-strong));
+  background: rgb(from var(--accent-strong) r g b / 0.09);
+}
+
+.pc-peer__r1 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.pc-peer__glyph {
+  font-size: 10px;
+  flex: none;
+}
+.pc-peer__handle {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-peer__kind {
+  font-size: 8.5px;
+  padding: 0 4px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  color: var(--fg-mute);
+  flex: none;
+}
+.pc-peer__here {
+  margin-left: auto;
+  font-size: 8.5px;
+  font-weight: 700;
+  /* NO letter-spacing — same rule as .pc-peers__cap above. */
+  text-transform: uppercase;
+  color: var(--hud-fleet, var(--accent-strong));
+  white-space: nowrap;
+}
+.pc-peer__ctx {
+  margin-left: auto;
+  font-size: 9.5px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+}
+.pc-peer__ctx[data-hot='true'] {
+  color: var(--warn);
+}
+
+/* ── Leader-brief alert glyphs (popup-agent-state-coverage-2026-08-18 P-003) ──
+ *
+ * Marks on a row that already existed — the rail's fixed height is unchanged,
+ * which is the whole point of drawing these as glyphs rather than rows (D-003).
+ * They take the row's free space, so `__here`/`__ctx` give up their auto margin
+ * when glyphs are present; otherwise the two autos would split the gap and the
+ * glyphs would float mid-row. */
+.pc-peer__alerts {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  flex: none;
+}
+.pc-peer__r1:has(.pc-peer__alerts) .pc-peer__here,
+.pc-peer__r1:has(.pc-peer__alerts) .pc-peer__ctx {
+  margin-left: 0;
+}
+.pc-peer__alert {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 3px;
+  min-width: 12px;
+  text-align: center;
+  border-radius: 3px;
+  flex: none;
+  color: var(--warn);
+  background: rgb(from var(--warn) r g b / 0.14);
+  border: 1px solid rgb(from var(--warn) r g b / 0.3);
+}
+/* `bad` = act now (dormant, verified-wait takeover). Deliberately louder than
+   the amber set: those are look-at-it, these are nothing-will-fix-itself. */
+.pc-peer__alert[data-sev='bad'] {
+  color: var(--bad);
+  background: rgb(from var(--bad) r g b / 0.16);
+  border-color: rgb(from var(--bad) r g b / 0.34);
+}
+
+/* ── The fleet-level alert block (P-004) ─────────────────────────────────────
+ *
+ * `flex: none` so it never steals height from the scrolling roster below it,
+ * and capped so a pathological fleet cannot reclaim the ~2,000px this rail's
+ * fixed height was introduced to prevent — it scrolls inside itself instead. */
+.pc-peers__alerts {
+  flex: none;
+  max-height: 30%;
+  overflow-y: auto;
+  padding: 5px 9px 6px;
+  border-bottom: 1px solid var(--border);
+  background: rgb(from var(--bad) r g b / 0.05);
+}
+.pc-peers__alerts-cap {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 3px;
+  font-size: 8.5px;
+  font-weight: 700;
+  /* NO letter-spacing — same rule as .pc-peers__cap above. */
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+.pc-peers__alert {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 1px 0;
+  font-size: 9.5px;
+  color: var(--warn);
+}
+.pc-peers__alert[data-sev='bad'] {
+  color: var(--bad);
+}
+.pc-peers__alert-mark {
+  flex: none;
+  font-size: 8px;
+}
+.pc-peers__alert-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-peers__alert-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 9px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+.pc-peer__r2 {
+  display: block;
+  margin-top: 2px;
+  padding-left: 13px;
+  font-size: 10px;
+  color: var(--fg-mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-peer__state {
+  color: var(--fg-dim);
+}
+
+/* ── P-024: the goal Sessions rail's two additions ──────────────────────────
+   Both live here rather than in hud.css because they extend THIS block's row —
+   the rail borrows `pc-peer` wholesale on the owner's instruction to mimic the
+   fleet pane, and a second stylesheet redefining half of a row is how the two
+   drift into looking almost alike. */
+
+/* A fleet MEMBER, indented under its lead. The indent is on the <li> WRAPPER,
+   never on `.pc-peer` itself: the row is a full-width button whose hover and
+   focus ring must keep spanning the rail, and padding it in would shrink the
+   hit target and leave the focus outline floating off the row's own edge. */
+.pc-peers__nest {
+  padding-left: 11px;
+  /* The elbow. A border rather than a glyph so it cannot be read aloud by a
+     screen reader as content — the nesting is already carried semantically by
+     the row order and the lead/member glyph. */
+  border-left: 1px solid var(--border);
+  margin-left: 8px;
+}
+
+/* The session's INTENT, trailing the state word on the second line. Inherits
+   `.pc-peer__r2`'s ellipsis, so a long intent truncates instead of wrapping the
+   row to two lines and breaking the rail's even rhythm. Dimmer than the state
+   word beside it: the state is the row's verdict, the intent is its detail. */
+.pc-peer__intent {
+  color: var(--fg-mute);
+}
+
+/* State is carried by the DOT's colour and by the word beside it, never colour
+   alone — the rail has to survive a greyscale screenshot pasted into an
+   escalation, and a colour-blind operator reading it at 2am.
+
+   The colours are the board's own (.hud__dot--*), verbatim: an agent that is
+   amber on the board behind the popup must not be green in the rail in front of
+   it. Keep these in step with hud.css if that mapping ever changes. */
+.pc-peer__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--fg-mute);
+}
+.pc-peer__dot[data-col='working'] {
+  background: var(--good);
+}
+.pc-peer__dot[data-col='needs-you'] {
+  background: var(--warn);
+  box-shadow: 0 0 0 2px rgb(from var(--warn) r g b / 0.18);
+}
+.pc-peer__dot[data-col='blocked'] {
+  background: var(--bad);
+  box-shadow: 0 0 0 2px rgb(from var(--bad) r g b / 0.15);
+}
+.pc-peer__dot[data-col='stalled'] {
+  background: var(--warn);
+}
+.pc-peer__dot[data-col='parked'] {
+  background: var(--border-strong);
+}
+.pc-peer__state[data-col='needs-you'],
+.pc-peer__state[data-col='stalled'] {
+  color: var(--warn);
+}
+.pc-peer__state[data-col='blocked'] {
+  color: var(--bad);
+}
+
+/* An ENDED session (GoalSessionsRail) keeps the board's own state word as
+ * HISTORY — it is evidence of what the agent was doing when it stopped — but it
+ * must never wear a LIVE colour. `column` is preserved verbatim by
+ * `goal-sessions.ts`, so a session that died mid-`working` would otherwise
+ * render the green `--good` dot on a rail whose heading asks who is *working on
+ * it*: a corpse reading as a live worker, which is the one thing this rail
+ * exists to answer correctly.
+ *
+ * Selector specificity is load-bearing: `[data-ended] .pc-peer__dot[data-col]`
+ * is (0,3,0) against the per-column rules' (0,2,0), so it wins for every column
+ * without having to enumerate them — a new column added above inherits the
+ * ended treatment automatically instead of silently reintroducing the bug.
+ *
+ * Colour is the SECONDARY cue only. The row also says the word "ended"
+ * (GoalSessionsRail renders it into the state line), because greying a dot is a
+ * colour-only signal and would be invisible to a colour-blind or high-contrast
+ * reader — the same reason SessionChatModal spells out "This session has ended"
+ * rather than tinting the composer. */
+[data-ended='true'] .pc-peer__dot[data-col] {
+  background: var(--fg-mute);
+  box-shadow: none;
+}
+[data-ended='true'] .pc-peer__state[data-col] {
+  color: var(--fg-mute);
+}
+[data-ended='true'] .pc-peer {
+  opacity: 0.72;
+}
+
+/* ═══ DECISIONS shelf ═══════════════════════════════════════════════════════
+ *
+ * The pending escalation cards that need a human answer, docked at the BOTTOM
+ * of the conversation region [owner 2026-08-09]. It used to sit above the
+ * transcript, where a 45%-tall block could eat half the popup before a single
+ * message was readable.
+ *
+ * The shelf is a ZONE (`.pc-zone .pc-chat-decisions`), so it inherits the same
+ * cap/rule vocabulary as Orders, Activity and Fleet — the class is required,
+ * not cosmetic: the zone vars are defined on the zone ROOTS, so a container
+ * holding a `.pc-zone-title` without it resolves the cap fill to `unset`, i.e.
+ * an invisible cap rather than a loud failure.
+ */
+.pc-chat-decisions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Capped + internally scrolled so several open decisions can never push the
+     composer off screen. Tighter than the 45% it used at the top: down here it
+     competes with the composer AND the action bar, not with the transcript
+     alone. */
+  max-height: 34%;
+  /* The boundary now faces the conversation it sits UNDER (was border-bottom
+     when this block lived above the transcript). */
+  border-top: 1px solid var(--pc-zone-rule);
+  /* Lifted off the transcript ground: this is a surface you ACT on, and the
+     single most common misread of the old placement was scrolling past it as
+     more conversation. */
+  background: var(--bg-raised);
+}
+
+/* Only the LIST scrolls — the title bar is its sibling, not its child, so the
+   zone cap stays put without needing the `position: sticky` the rails use. */
+.pc-chat-decisions__list {
+  min-height: 0;
+  overflow-y: auto;
+  /* A shelf pinned directly above the composer is easy to over-scroll; without
+     this the leftover delta scrolls the transcript behind it and the message
+     you were reading jumps. */
+  overscroll-behavior: contain;
+}
+
+/* ── ONE scroll, not three ───────────────────────────────────────────────────
+ *
+ * [owner 2026-08-09] "the additional scrollable text in that box is weird to
+ * navigate." Measured live before this fix: 3,280 characters (486px of text)
+ * inside a scroll port **24 pixels tall**, nested inside `__list`'s scroll.
+ *
+ * `OtherDetail` is shared with the Queue, the HUD and PreviewPanel, where it
+ * owns a tall pane — `height: 100%` + a `flex-shrink: 0` toolbar + an
+ * `overflow: auto` body is exactly right there. In a height-CAPPED shelf the
+ * same rules invert: the toolbar took 147px of the card's 146px and handed the
+ * text what was left. So the fix is not a bigger number, it is telling the card
+ * it is no longer the one that owns a viewport. Scoped to `.pc-chat-decisions`
+ * so the three hosts that DO give it a pane keep today's behavior.
+ */
+.pc-chat-decisions .pc-items__detail {
+  height: auto;
+}
+.pc-chat-decisions .pc-items__detail-body {
+  overflow: visible;
+  padding: 10px 12px;
+}
+.pc-chat-decisions .pc-items__detail-toolbar {
+  /* Nothing can starve it now that the card is intrinsic-height, and letting it
+     shrink would squeeze the action row this pass just made legible. */
+  flex-shrink: 1;
+}
+
+/* Each decision is a discrete card, not a run-on. With the single scroll above,
+   several open decisions stack — so they need a visible edge between them. */
+.pc-chat-decisions__card + .pc-chat-decisions__card {
+  border-top: 1px solid var(--pc-zone-rule);
+}
+
+/* CLAMP + expand-in-place. One scroll fixed the nesting, but a 3,000-character
+   escalation would still turn the shelf into a tunnel you scroll three screens
+   of to discover there is a second decision underneath. So the request text is
+   clamped to a preview and the reader opens the one they mean to act on.
+   The clamp lands on `.ask-choice-card` — the request — never on the body that
+   also hosts the Answer box and the Discuss thread; clipping a chat you just
+   opened would be a worse bug than the one being fixed. */
+.pc-chat-decisions__card:not(.is-expanded) .ask-choice-card {
+  max-height: 132px;
+  overflow: hidden;
+  /* Fades the cut instead of guillotining a line mid-x-height, so "there is
+     more here" is legible without reading the toggle first. */
+  -webkit-mask-image: linear-gradient(to bottom, #000 92px, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 92px, transparent 100%);
+}
+
+/* Rendered only when the text actually overflows (measured, not guessed) — a
+   toggle that expands nothing reads as broken. */
+.pc-chat-decisions__more {
+  all: unset;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  padding: 3px 12px 7px;
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.pc-chat-decisions__more:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+.pc-chat-decisions__more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* D-007 step 5 (WI-7323): "see where this was asked ↑" — scrolls the transcript
+   below to the turn the agent filed the ask in. Rendered only when that turn
+   could be DERIVED from the ask's timestamp, so its absence is the normal state
+   and must not leave a gap: no reserved height, no border of its own.
+
+   Deliberately quieter than `__more`: `__more` reveals the rest of THIS card and
+   is the card's own primary affordance, while this one navigates away from the
+   shelf. Same block, one weight down. */
+.pc-chat-decisions__asked-at {
+  all: unset;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  padding: 0 12px 5px;
+  color: var(--fg-mute);
+  font-size: 11px;
+  cursor: pointer;
+}
+.pc-chat-decisions__asked-at:hover {
+  color: var(--accent-strong);
+  text-decoration: underline;
+}
+.pc-chat-decisions__asked-at:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ── What the buttons DO ─────────────────────────────────────────────────────
+ * [owner 2026-08-09] "What do those buttons actually do its unclear."
+ * Sits under the cap, above the cards: the answer/Discuss split is a property
+ * of the whole shelf, so it is said once rather than under every decision. */
+.pc-chat-decisions__legend {
+  flex: none;
+  margin: 0;
+  padding: 5px 10px 6px;
+  border-bottom: 1px solid var(--pc-zone-rule);
+  color: var(--fg-mute);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.pc-chat-decisions__legend b {
+  color: var(--fg-dim);
+  font-weight: 700;
+}
+
+/* ── The action row: buttons, not more tags ──────────────────────────────────
+ *
+ * [owner 2026-08-09] "improve the design of the reolsve and discuss buttons
+ * highlighting them making them more distinguishable from th other pills and
+ * more like buttons."
+ *
+ * Measured, they were barely distinguishable and the owner is right: the chips
+ * beside them run 16-20px tall, 9.5-10.5px type, 4px/999px radii, translucent
+ * tint fills, several with a 1px hairline. The buttons were 28px, 12px type,
+ * 10px radius — and a translucent tint fill with a 1px hairline. Same visual
+ * language, one size up. Worse, `--nav` (Discuss) was fully TRANSPARENT, so the
+ * only action that opens a conversation read as weaker than a metadata tag.
+ *
+ * Three separations, because one is not enough when the vocabulary is shared:
+ *   1. POSITION — the action group takes its own full-width row under a rule,
+ *      instead of wrapping into the same line as the chips.
+ *   2. WEIGHT   — primary becomes an OPAQUE filled surface. A translucent tint
+ *      is the chips' entire idiom; opacity is the one axis they never use, so
+ *      it separates without inventing a new colour.
+ *   3. GEOMETRY — 30px tall, 8px radius: deliberately neither the 4px of a
+ *      `pc-kind` badge nor the 999px pill of a `pc-tier`.
+ *
+ * Scoped to `.pc-chat-decisions`. The Queue and the HUD render the same toolbar
+ * and would arguably benefit, but they did not ask and their layouts differ;
+ * promoting this is a deliberate follow-up, not a side effect. */
+.pc-chat-decisions .pc-items__detail-actions {
+  flex-basis: 100%;
+  margin-left: 0;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  gap: 8px;
+}
+
+/* The other half of "distinguishable from the other pills": stop drawing the
+   pills that say nothing HERE. Measured, the chip row cost 45px and pushed the
+   action row toward the fold of a 34%-capped shelf — and three of its five
+   chips were restating the cap directly above them:
+     `pc-tier`     "Decisions"   ← the zone cap already says DECISIONS
+     `pc-count`    "open"        ← everything in this shelf is open, by definition
+     `pc-category` "escalations" ← `pc-kind` beside it already says "escalation"
+   Those three are also the two ROUNDEST, most button-adjacent shapes in the row
+   (20px tall, 999px radius, 1px hairline), so removing them separates the real
+   buttons by subtraction as well as by weight.
+   What stays is what varies between cards and therefore informs: `pc-kind`
+   (escalation vs conversation — this shelf carries both), `pc-imp` (urgent),
+   and the harness pill. Scoped to the shelf: the Queue lists MIXED tiers,
+   categories and statuses in one pane, where every one of these earns its
+   place. */
+.pc-chat-decisions .pc-items__detail-toolbar > .pc-tier,
+.pc-chat-decisions .pc-items__detail-toolbar > .pc-count,
+.pc-chat-decisions .pc-items__detail-toolbar > .pc-category {
+  display: none;
+}
+
+.pc-chat-decisions .pc-items__action {
+  min-height: 30px;
+  padding: 6px 13px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 650;
+  /* The escalation options are whole sentences, so they must wrap and read
+     left-aligned rather than stretch one unreadable line across the shelf. */
+  white-space: normal;
+  text-align: left;
+  max-width: 100%;
+  line-height: 1.3;
+}
+
+/* PRIMARY = the answer. Opaque plate, high-contrast ink, and a lift — the one
+   thing in the toolbar that looks pressable. */
+.pc-chat-decisions .pc-items__action--primary {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+  color: var(--accent-ink);
+  box-shadow: 0 1px 0 var(--pc-zone-rule);
+}
+.pc-chat-decisions .pc-items__action--primary:hover {
+  background: color-mix(in oklab, var(--accent-strong) 84%, var(--fg));
+  border-color: color-mix(in oklab, var(--accent-strong) 84%, var(--fg));
+}
+.pc-chat-decisions .pc-items__action--primary:active {
+  /* Reads as pressed rather than merely re-tinted. */
+  transform: translateY(1px);
+  box-shadow: none;
+}
+
+/* SECONDARY = Discuss. An outlined button on a real surface: subordinate to the
+   answer, but unmistakably still a button — which the transparent ghost was
+   not. */
+.pc-chat-decisions .pc-items__action--nav {
+  border-color: var(--border);
+  background: var(--bg-popover);
+  color: var(--fg-dim);
+  font-weight: 600;
+}
+.pc-chat-decisions .pc-items__action--nav:hover {
+  border-color: var(--accent-strong);
+  background: var(--bg-2);
+  color: var(--fg);
+}
+.pc-chat-decisions .pc-items__action--nav:active {
+  transform: translateY(1px);
+}
+
+.pc-chat-decisions .pc-items__action--danger {
+  border-color: var(--bad);
+  background: color-mix(in oklab, var(--bad) 24%, var(--bg-popover));
+  color: var(--fg);
+}
+
+/* How many decisions are waiting. Right-aligned on the title bar, and the one
+   place in this popup that earns an alert fill: the count is the whole reason
+   the shelf is on screen at all. Takes the plate's ground as ink, the same way
+   `.pc-zone-title__close` follows the plate rather than `--accent-ink`. */
+.pc-chat-decisions__count {
+  margin-left: auto;
+  min-width: 15px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--warn);
+  color: var(--bg-popover);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+/* ═══ the TURN RAIL ══════════════════════════════════════════════════════════
+ *
+ * chat-popup-turn-rail-2026-08-31 P-002. The popup's turn index: the reader's
+ * own questions, one row each, clicking one scrolls the transcript to that
+ * turn's ANSWER (D-005).
+ *
+ * Two densities off one component (D-003). `rail` is the default — previews you
+ * can read without interacting. `spine` is what it becomes under width pressure:
+ * a tick gutter, question one hover away. The other three rails overlay when
+ * they run out of room; this one degrades, because a position indicator you must
+ * open to see where you are has stopped being one.
+ *
+ * Both button-backed shapes below are `display: block` with inner spans doing
+ * the layout — this file's header rule 2 (WebKitGTK ignores flex on a <button>
+ * and stacks the children). And no letter-spacing anywhere, per rule 1.
+ */
+
+.pc-turns {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+/* The rail sits on the popup's LEFT edge, so its rule is on the right — the
+   mirror of `.pc-zone--activity`. */
+.pc-zone--turns {
+  border-right: 1px solid var(--pc-zone-rule);
+}
+
+.pc-turns__count {
+  margin-left: auto;
+  font-size: 9.5px;
+  color: var(--pc-zone-label);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* At spine density the title bar has ~40px to work with, so the cap is the count
+   alone. The column still has an accessible name — it is on the <aside>. */
+.pc-turns__spine-cap {
+  width: 100%;
+  text-align: center;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--pc-zone-label);
+  font-variant-numeric: tabular-nums;
+}
+
+.pc-turns__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.pc-turns__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* A real answer, not a placeholder: a transcript can genuinely contain no
+   questions (an agent woken by a loop fire talks without being asked), and a
+   blank column would read as a load failure instead. */
+.pc-turns__empty {
+  margin: 0;
+  padding: 8px 9px;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--fg-mute);
+}
+
+/* ── a turn row ─────────────────────────────────────────────────────────── */
+
+.pc-turn {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 6px 9px;
+  border: 0;
+  border-bottom: 1px solid var(--border-muted);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 90ms ease;
+}
+.pc-turn:hover {
+  background: var(--bg-2);
+}
+.pc-turn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* WHERE YOU ARE, not what you picked — hence aria-current on the element. Marked
+   with a rail AND a fill, never colour alone, so it survives greyscale and a
+   colour-blind reader; the same reason the transcript's own focus-match mark is
+   built that way. */
+.pc-turn[data-live='true'] {
+  background: rgb(from var(--accent) r g b / 0.1);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.pc-turn__top {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.pc-turn__n {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+}
+.pc-turn[data-live='true'] .pc-turn__n {
+  color: var(--accent);
+}
+.pc-turn__time {
+  margin-left: auto;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9.5px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Two lines, then ellipsis. The full question rides in the tooltip and the
+   accessible name, so the clamp costs nothing but height. */
+.pc-turn__q {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+}
+.pc-turn[data-live='true'] .pc-turn__q {
+  color: var(--fg);
+}
+.pc-turn__q[data-empty='true'] {
+  font-style: italic;
+  color: var(--fg-mute);
+}
+
+.pc-turn__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+}
+/* The row's one state word, and it is derived (D-006): this turn has no answer
+   in the transcript. Amber, matching every other "not finished" surface in the
+   popup rather than inventing a second vocabulary. */
+.pc-turn__pending {
+  color: var(--warn);
+}
+
+/* ── a spine tick ───────────────────────────────────────────────────────── */
+
+.pc-turns--spine .pc-turns__list {
+  padding: 6px 0;
+  /* The gutter is too narrow to host a scrollbar without eating the ticks. */
+  scrollbar-width: none;
+}
+.pc-turns--spine .pc-turns__list::-webkit-scrollbar {
+  display: none;
+}
+
+.pc-turn-tick {
+  display: block;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.pc-turn-tick:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Height is set inline, from the turn's share of the transcript — the tick is a
+   minimap of the scroll being navigated, so what makes a turn tall is how much
+   of it there is to scroll past. */
+.pc-turn-tick__bar {
+  display: block;
+  width: 18px;
+  margin: 0 auto;
+  border-radius: 2px;
+  background: rgb(from var(--accent-strong) r g b / 0.28);
+  transition: background 90ms ease;
+}
+.pc-turn-tick:hover .pc-turn-tick__bar {
+  background: var(--accent-strong);
+}
+.pc-turn-tick[data-live='true'] .pc-turn-tick__bar {
+  background: var(--accent);
+}
+.pc-turn-tick__n {
+  display: block;
+  margin-top: 1px;
+  text-align: center;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 8.5px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+}
+.pc-turn-tick[data-live='true'] .pc-turn-tick__n {
+  color: var(--accent);
+}
+
+/* ═══ shared focus treatment ════════════════════════════════════════════════ */
+
+.pc-ctl-mode:focus-visible,
+.pc-ctl-act:focus-visible,
+.pc-ctl-alert:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

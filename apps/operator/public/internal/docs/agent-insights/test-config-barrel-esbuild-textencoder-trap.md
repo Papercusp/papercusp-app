@@ -1,0 +1,61 @@
+# "@papercusp/test-config" barrel import crashes esbuild with a misleading TextEncoder error
+URL: /internal/docs/agent-insights/test-config-barrel-esbuild-textencoder-trap
+
+Why a Vite/jsdom component test importing anything from the @papercusp/test-config main barrel fails with a nonsense "TextEncoder invariant" error, and the subpath-export fix pattern.
+
+## Symptom
+
+A Vite/jsdom component test (`vitest run --config apps/operator-vite/vitest.config.ts`,
+jsdom environment) that imports **anything** — even one symbol — from
+`@papercusp/test-config` (the package's main barrel, `libs/test-config/src/index.ts`)
+fails immediately with:
+
+```
+Error: Invariant violation: "new TextEncoder().encode("") instanceof Uint8Array" is incorrectly false
+  ...at Object.<anonymous> node_modules/esbuild/lib/main.js:201:9
+```
+
+This **looks like** a broken Node/jsdom global-realm issue. It is not — a bare Node
+REPL confirms `TextEncoder` is fine:
+
+```bash
+node -e "console.log(new TextEncoder().encode('') instanceof Uint8Array)"  # → true
+```
+
+## Root cause
+
+The main barrel (`libs/test-config/src/index.ts`) statically re-exports the WHOLE
+heavy node-only test-infra module graph: `testcontainers`, `@testcontainers/postgresql`,
+`msw`, `@nestjs/testing`, `drizzle-orm`, etc. Importing **any single export** from the
+barrel drags that entire graph into esbuild's transform for a jsdom/browser test
+target — and esbuild chokes outright on the weight/shape of that graph (not fully
+root-caused further; suspected culprits are testcontainers' native/WASM bits, or just
+resource pressure transforming that much code under esbuild's jsdom target). The
+failure surfaces as an unrelated-looking internal esbuild crash, not a clear
+"you imported too much" error.
+
+Confirmed via A/B (EI-8888): identical file/content, differing only in importing the
+barrel (`@papercusp/test-config`) vs. a dedicated subpath
+(`@papercusp/test-config/nuqs-mock`) — barrel import crashed 5/5 files; subpath import
+passed 107/107 tests.
+
+## The fix pattern — subpath exports, never the main barrel
+
+`libs/test-config` already carries two precedents for this: `./nest` (keeps
+`@nestjs/*` out of non-Nest consumers) and `./nuqs-mock`. **Any new lightweight /
+browser-safe export belongs behind its own `package.json` `exports` subpath — never
+added to the main barrel's re-export list.** `libs/test-config/src/index.ts` carries
+an inline warning at the top of the file (and again near the nuqs-mock note) — read it
+before adding a new export there.
+
+If you hit the TextEncoder crash: check whether the failing test imports
+`@papercusp/test-config` (the bare barrel) instead of a specific subpath — that's very
+likely the actual cause, however unrelated the error message looks.
+
+## Still open
+
+The underlying esbuild-crashes-on-heavy-graph mechanism itself is not further
+root-caused (option (b) in EI-8888) — this doc + the inline warning are the mitigation
+(option (a)), not a fix to esbuild's behavior. A `vitest.config.ts` importing the
+barrel (a Node-context config file, not a jsdom test target) is fine and unaffected —
+only jsdom/browser-target test FILES importing the barrel trip this.

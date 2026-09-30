@@ -1,0 +1,4 @@
+node_modules/
+install.log
+spike-state/
+*.log

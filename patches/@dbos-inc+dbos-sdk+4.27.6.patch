@@ -1,0 +1,17 @@
+diff --git a/node_modules/@dbos-inc/dbos-sdk/dist/src/debugpoint.js b/node_modules/@dbos-inc/dbos-sdk/dist/src/debugpoint.js
+index 9ad1c4d..1d2c7ee 100644
+--- a/node_modules/@dbos-inc/dbos-sdk/dist/src/debugpoint.js
++++ b/node_modules/@dbos-inc/dbos-sdk/dist/src/debugpoint.js
+@@ -29,8 +29,11 @@ exports.DebugAction = DebugAction;
+ exports.pointTriggers = new Map();
+ exports.pointLocations = new Map();
+ async function debugTriggerPoint(name) {
+-    const cpi = getCallSiteInfo();
++    // papercusp patch (WI-10002541): capture the call site only the FIRST time a
++    // point is hit. It is only stored when absent, and a `new Error()` stack
++    // capture + split + regex on every call ran in the queue-poll and step loops.
+     if (!exports.pointLocations.has(name)) {
++        const cpi = getCallSiteInfo();
+         exports.pointLocations.set(name, { name, ...cpi, hitCount: 0 });
+     }
+     if (exports.pointTriggers.has(name)) {

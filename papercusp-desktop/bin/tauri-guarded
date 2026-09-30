@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# tauri-guarded — the ONE chokepoint every `tauri dev` in this repo goes through.
+#
+# WHY THIS EXISTS (EI-19369470572700441, hardening WI-7101)
+# WI-7101 put the target-dir claim in `bin/lib/claim-target-dir.sh` and sourced it
+# from `bin/desktop-dev-nohmr` (the `npm run dev` path). That protects exactly ONE
+# caller, and leaves the protection as a convention every FUTURE launcher has to
+# remember. It was then forgotten three times:
+#
+#   scripts/verify-tauri-headless.sh   the DOCUMENTED agent UI-verification path
+#   package.json  dev:hmr              bare `tauri dev`
+#   bin/desktop-preview-prod           `npm run tauri -- dev`
+#
+# The first is the expensive one: root CLAUDE.md tells agents to verify UI by
+# booting a headless instance, and that path launched an UNPROTECTED concurrent
+# build against the shared ~/.cargo-target. So the documented safe practice was
+# itself the corruption path — the same shape as the original WI-7101 incident,
+# where the agent that took down the owner's live desktop was following the
+# documented advice.
+#
+# Rather than add a fourth "remember to source it", the claim moves HERE: the
+# `tauri` npm script. Every launcher already runs `npm run tauri -- dev`, so they
+# are all covered without touching any of them, and a launcher added tomorrow is
+# covered by construction. That is the difference between a convention and a
+# chokepoint.
+#
+# Target-dir claiming is scoped to the `dev` subcommand deliberately. Finite
+# `build` and `bundle` commands keep their existing isolation, but any invocation
+# capable of emitting a Debian package is routed through build-deb-repacked.sh.
+# That makes the generic `npm run tauri -- build|bundle` surface obey the same
+# xz + sidecar-deduplication invariant as the named npm build scripts.
+
+set -euo pipefail
+
+__here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# FAIL FAST AND SAY WHY (WI-39358)
+#
+# Every path below ends in a bare `tauri` — the two `exec tauri` sites here, and
+# bin/build-deb-repacked.sh:65 for the Debian-producing commands. When @tauri-apps/cli is
+# not installed, bash reports that as
+#
+#     bin/tauri-guarded: line 100: exec: tauri: not found
+#
+# which names neither the cause nor the fix, and reads like a broken toolchain. It is not:
+# papercusp-desktop is a git submodule with its OWN package-lock.json and is NOT an npm
+# workspace of the monorepo root, so a root `npm install` does not install it. A fresh
+# clone or a restored tree therefore leaves this empty, and the repair is one command.
+#
+# Measured 2026-08-15: exactly this cost the owner a debugging session after the tree was
+# re-cloned following WI-39347 and only the ROOT install was re-run. The check runs BEFORE
+# the target-dir claim and the sidecar read lock, so a missing CLI cannot leave a claimed
+# slot or a held lock behind on the way out.
+if ! command -v tauri >/dev/null 2>&1; then
+  cat >&2 <<EOF
+✗ tauri CLI not found — @tauri-apps/cli is not installed for papercusp-desktop.
+
+  This is NOT a broken toolchain. papercusp-desktop is a git submodule with its own
+  package-lock.json, and it is not an npm workspace of the monorepo root — so a root
+  \`npm install\` does not install it. A fresh clone or a restored tree leaves it empty.
+
+  Fix (from the monorepo root):
+      npm run install:safe -- --repo-root papercusp-desktop
+
+  \`npm run doctor\` asserts this too ("submodule installs complete").
+EOF
+  exit 127
+fi
+
+# A sidecar rebuild publishes with an exclusive flock on this same lock. Keep a
+# shared read lock for every Tauri command that asks Cargo/build.rs to inspect
+# bundle resources, and inherit the descriptor through the `exec tauri` below.
+# Without this second half of the reader/writer protocol, a Tauri rig can walk
+# `src-tauri/sidecar/db-sql` in the narrow rename gap and turn a concurrent
+# publish into a false "resource ... does not exist" panic (EI-20227496970063146).
+__pc_sidecar_lock="${PAPERCUSP_SIDECAR_LOCK:-$__here/../src-tauri/sidecar.lock}"
+__pc_sidecar_lockdir="${PAPERCUSP_SIDECAR_LOCKDIR:-$__here/../src-tauri/sidecar.lockdir}"
+__pc_sidecar_lock_held=0
+
+__pc_release_sidecar_read_lock() {
+  local reason="${1:-}"
+
+  if [[ "$__pc_sidecar_lock_held" != 1 ]]; then
+    return 0
+  fi
+
+  # The wrapper, not the long-lived Tauri child, owns fd 9. Closing it here
+  # makes a waiting sidecar publish immediately eligible without interrupting
+  # the already-started dev server. The writer sends SIGUSR1 only after its
+  # startup grace period, once the resource-read window should be complete.
+  exec 9>&-
+  __pc_sidecar_lock_held=0
+  if [[ "$reason" == "sigusr1" ]]; then
+    echo "→ yielded $__pc_sidecar_lock to a waiting sidecar publish (SIGUSR1)" >&2
+  fi
+}
+
+__pc_hold_sidecar_read_lock() {
+  mkdir -p "$(dirname "$__pc_sidecar_lock")"
+  if command -v flock >/dev/null 2>&1; then
+    # fd 9 matches the sidecar builder's lock convention. The descriptor is
+    # intentionally inherited by the Tauri CLI and its Cargo child.
+    exec 9>>"$__pc_sidecar_lock"
+    if ! flock -sn 9; then
+      echo "→ build-desktop-sidecar.sh holds $__pc_sidecar_lock exclusively — waiting before reading sidecar/" >&2
+      flock -s 9
+    fi
+    __pc_sidecar_lock_held=1
+    return 0
+  fi
+
+  # macOS has no flock(1); mirror cargo-build-safe.sh's best-effort fallback.
+  # A mkdir mutex cannot provide shared-reader semantics, but it does keep a
+  # Tauri read out of an active writer's publish window.
+  while [[ -d "$__pc_sidecar_lockdir" ]]; do
+    local holder
+    holder="$(cat "$__pc_sidecar_lockdir/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+      break
+    fi
+    echo "→ build-desktop-sidecar.sh holds $__pc_sidecar_lockdir — waiting before reading sidecar/" >&2
+    sleep 2
+  done
+}
+
+__pc_run_dev_with_yieldable_reader() {
+  local child_pid status
+
+  # Keep the reader lock in THIS short-lived supervisor. The child must not
+  # inherit fd 9: an inherited flock would survive this shell closing its own
+  # descriptor and recreate the daemon-lifetime deadlock.
+  trap '__pc_release_sidecar_read_lock sigusr1' USR1
+  trap 'if [[ -n "${child_pid:-}" ]]; then kill -TERM "$child_pid" 2>/dev/null || true; fi; __pc_release_sidecar_read_lock; exit 143' INT TERM HUP
+
+  (
+    exec 9>&-
+    exec tauri "$@"
+  ) &
+  child_pid=$!
+  echo "→ tauri dev startup is protected by $__pc_sidecar_lock (pid $$); a waiting sidecar publish may request SIGUSR1 to yield it" >&2
+
+  # `wait` is written as an if-condition so set -e does not bypass the
+  # cleanup/trap path when the Tauri child exits non-zero.
+  while :; do
+    if wait "$child_pid"; then
+      status=0
+      break
+    else
+      # Capture wait's non-zero status inside the condition. Reading `$?` after
+      # the `if` compound command would observe the condition's completed
+      # status (0), swallowing a plain Tauri failure.
+      status=$?
+    fi
+    # Bash reports 128+SIGUSR1 when the wait is interrupted to run the
+    # cooperative-yield trap. Resume waiting while the Tauri child remains
+    # alive; only return once the child itself has exited.
+    if kill -0 "$child_pid" 2>/dev/null; then
+      continue
+    fi
+    break
+  done
+  __pc_release_sidecar_read_lock
+  trap - USR1 INT TERM HUP
+  return "$status"
+}
+
+# Find the subcommand: the first argument that is not a flag (and not the value
+# of one we care about). `tauri` takes its subcommand first in every documented
+# form used in this repo, so a plain scan is enough — and being wrong here is
+# fail-safe in one direction only: a missed `dev` claims nothing (status quo),
+# never a wrong target dir.
+__tauri_args=("$@")
+__subcommand=""
+__subcommand_index=-1
+for __index in "${!__tauri_args[@]}"; do
+  __arg="${__tauri_args[$__index]}"
+  case "$__arg" in
+    -*) continue ;;
+    *)
+      __subcommand="$__arg"
+      __subcommand_index="$__index"
+      break
+      ;;
+  esac
+done
+
+__pc_bundle_value_includes_deb() {
+  local value part
+  value="$1"
+  IFS=',' read -r -a __pc_bundle_parts <<<"$value"
+  for part in "${__pc_bundle_parts[@]}"; do
+    if [[ "$part" == "deb" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Decide from argv, not from a spelling-specific grep. Tauri accepts both short
+# and long bundle flags, with space- or comma-separated values. No filter means
+# the base config can emit deb; an explicit list is producer-capable only when
+# one of its exact values is `deb`. `build --no-bundle` is the one unfiltered
+# build form that cannot emit a package and must remain a direct invocation.
+__pc_repack_deb=0
+__pc_bundle_filter_seen=0
+__pc_bundle_filter_includes_deb=0
+__pc_collect_bundle_values=0
+__pc_no_bundle=0
+if [[ "$__subcommand" == "build" || "$__subcommand" == "bundle" ]]; then
+  for ((__index = __subcommand_index + 1; __index < ${#__tauri_args[@]}; __index++)); do
+    __arg="${__tauri_args[$__index]}"
+
+    if [[ "$__pc_collect_bundle_values" == 1 ]]; then
+      if [[ "$__arg" == -* ]]; then
+        __pc_collect_bundle_values=0
+      else
+        if __pc_bundle_value_includes_deb "$__arg"; then
+          __pc_bundle_filter_includes_deb=1
+        fi
+        continue
+      fi
+    fi
+
+    case "$__arg" in
+      --) break ;;
+      --no-bundle) __pc_no_bundle=1 ;;
+      -b|--bundles)
+        __pc_bundle_filter_seen=1
+        __pc_collect_bundle_values=1
+        ;;
+      -b=*|--bundles=*)
+        __pc_bundle_filter_seen=1
+        if __pc_bundle_value_includes_deb "${__arg#*=}"; then
+          __pc_bundle_filter_includes_deb=1
+        fi
+        ;;
+      -b?*)
+        # clap also accepts the compact short-option form (`-bdeb` and
+        # `-brpm,deb`). Treating it as an unrelated flag makes an explicit
+        # non-Debian filter look unfiltered and wrongly enters the repacker.
+        __pc_bundle_filter_seen=1
+        if __pc_bundle_value_includes_deb "${__arg#-b}"; then
+          __pc_bundle_filter_includes_deb=1
+        fi
+        ;;
+    esac
+  done
+
+  if [[ "$__pc_no_bundle" == 0 ]] && {
+    [[ "$__pc_bundle_filter_seen" == 0 ]] ||
+      [[ "$__pc_bundle_filter_includes_deb" == 1 ]]
+  }; then
+    __pc_repack_deb=1
+  fi
+fi
+
+if [[ "$__subcommand" == "dev" ]]; then
+  # Sourced, not executed: it exports CARGO_TARGET_DIR and holds a lock fd on the
+  # claimed slot. A POSIX lock lives on the open file DESCRIPTION, so it survives
+  # the `exec` below and is released when the tauri process dies — which is
+  # exactly the lifetime we want the slot held for.
+  #
+  # Already claimed upstream (bin/desktop-dev-nohmr sources it too, then execs
+  # `npm run tauri -- dev`)? Then CARGO_TARGET_DIR is already exported and the
+  # helper honours it and returns without taking a second lock. Double-sourcing
+  # is idempotent by design, so belt-and-braces callers cost nothing.
+  . "$__here/lib/claim-target-dir.sh"
+fi
+
+# `dev` is the documented rig path; `build`/`bundle` also have Cargo/build.rs
+# resource reads and must observe the same publish lock when invoked directly.
+case "$__subcommand" in
+  dev|build|bundle) __pc_hold_sidecar_read_lock ;;
+esac
+
+# `tauri` here is node_modules/.bin/tauri (@tauri-apps/cli), NOT this script:
+# npm puts .bin on PATH for run-scripts, and this file is only ever reached via
+# the `tauri` npm SCRIPT. No recursion. `dev` gets a supervisor so the parent
+# can yield its startup-only reader lock. Debian-producing finite commands exec
+# the canonical repacking wrapper; explicit non-Debian filters remain direct.
+if [[ "$__subcommand" == "dev" ]] && [[ "$__pc_sidecar_lock_held" == 1 ]]; then
+  __pc_run_dev_with_yieldable_reader "$@"
+elif [[ "$__pc_repack_deb" == 1 ]]; then
+  __wrapper_args=("${__tauri_args[@]}")
+  unset '__wrapper_args[__subcommand_index]'
+  __wrapper_mode=("--tauri-subcommand=$__subcommand")
+  if [[ "$__pc_bundle_filter_seen" == 0 ]]; then
+    # Preserve the generic command's unfiltered semantics. The wrapper's own
+    # no-argument default is Debian-only for `npm run build`, so its internal
+    # escape hatch is required here to avoid silently dropping rpm/appimage.
+    __wrapper_mode+=(--all-bundles)
+  fi
+  exec "$__here/build-deb-repacked.sh" "${__wrapper_mode[@]}" "${__wrapper_args[@]}"
+else
+  exec tauri "$@"
+fi

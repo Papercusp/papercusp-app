@@ -1,0 +1,19 @@
+{
+  "name": "@papercusp/image-blankness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic zero-dependency detector for a BLANK image capture — a screenshot a tool wrote successfully, and exited 0 over, of a window that never painted (uniform fill, smooth gradient, fully transparent). Decodes non-interlaced PNG with node:zlib alone, then judges adjacent-pixel detail PER ROW so that content occupying only a narrow band of an otherwise empty frame still reads as rendered. Deliberately fail-open: anything undecodable, too small, or merely ambiguous is never reported 'blank', so a caller can act only on a confident negative.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  }
+}

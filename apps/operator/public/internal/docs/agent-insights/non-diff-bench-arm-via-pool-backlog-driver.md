@@ -1,0 +1,62 @@
+# Add a non-diff (in-container / interactive) bench suite as a fleet arm — makePoolBacklogDriver
+URL: /internal/docs/agent-insights/non-diff-bench-arm-via-pool-backlog-driver
+
+The shared pool-orchestration shell so a non-M1 suite (METR HCAST containers, tau2 interactive sims) runs through the same HiveBacklogDriver contract + fleet metrics as the SWE-bench diff arms, supplying ONLY a per-task work fn.
+
+The SWE-bench-Pro fleet arms (`su-independent-backlog.ts`, `pot-backlog-realqueen.ts`) and the non-diff
+suites (METR HCAST containers, tau2 interactive sims, TheAgentCompany) share ONE orchestration skeleton —
+a bounded concurrency pool + a live-occupancy `ConcurrencyTimeline` + the never-throw drain — and differ
+only in the per-task **work surface** (M1 = clone a host worktree → spine cup via :3170 → `git diff`; M2 =
+run an agent inside a Docker container / drive an agent↔sim conversation → score in place). Don't fork the
+orchestration per suite.
+
+## The shared shell
+
+`packages/operator-core/lib/external-bench/hive-backlog-utilities.ts`:
+
+* `makeConcurrencySampler(startedAtMs, now)` — the `ConcurrencyTimeline` accounting (enter/exit/sample/peak/finalize).
+* `runConcurrencyPool({ backlogLength, cap, now, deadlineMs, perTask, onEntered, onExited, onResult })` — the
+  bounded, never-throw worker pool (≤cap live, drains in waves, stops at the deadline).
+* **`makePoolBacklogDriver(deps): HiveBacklogDriver`** — the whole pool-topology driver shell. It owns the
+  sampler + pool + the canonical `HiveBacklogResult` projection. A suite supplies ONLY its `perTask`.
+
+## Adding a suite = one `perTask`
+
+```ts
+export function myBacklogDriver(ops, opts = {}): HiveBacklogDriver {
+  return makePoolBacklogDriver({
+    now: ops.now,
+    concurrencyCap: () => ops.concurrencyCap(),
+    perTask: async ({ task, index, arm, seed, budget }) => {
+      // arm (FleetArmId) selects the agent loop — {baseline-opus | pot | su}; identical pool → causal isolation.
+      // Run the agent on ONE task → ONE FleetTaskResult. NEVER THROW: on infra failure RETURN a result with
+      // attempt.stopReason='error'|'infra-failed' (downstream isScoredStopReason excludes it).
+      const r = await runOneMyTask(ops, { task, arm: myArmId(arm), seed, budget });
+      return toFleetTaskResult(r);            // carry suite-specific score on attempt.armMeta
+    },
+    collectCoordEvents: () => [],             // pot arm → placement events; pool/independent → []
+  });
+}
+```
+
+`metr-hcast-backlog.ts` is the live \~12-line example (perTask = pull container → driveArm → taskhelper
+`score()` → `toFleetTaskResult`). Its `metrHcastTaskResultsFromFleet(result)` round-trips the canonical
+output back to the suite-specific report (one run → both the standard fleet metrics AND the horizon fit) —
+carry the suite score on `attempt.armMeta` and read it back. Copy this shape for an interactive suite (tau2):
+the `perTask` body is the per-turn `TurnGenerator` (agent↔sim conversation → reward score).
+
+## Why the canonical contract matters
+
+The shell returns `HiveBacklogResult` (`FleetTaskResult[]` + `ConcurrencyTimeline` + `CoordEvent[]`), so the
+new suite flows straight through `runHiveBacklog()` → `toFleetRunSummary()` → `@papercusp/bench-metrics`
+`buildHiveReport` (throughput / value / autonomy) + MAST coordination — identical to every SWE-bench arm. The
+suite driver + its per-turn loop live in **external-bench**; keep `@papercusp/bench-metrics` domain-free
+(pass-k / horizon / fleet aggregation only).
+
+## The one honest gap (M1 vs M2)
+
+This shares the POOL topology. The REAL Mug-over-backlog (`pot-backlog-realqueen`) places cups onto host
+**worktree** member harnesses — a spine cup cannot literally operate inside a Docker container / a sim loop
+without generalizing the spine to a "container/interactive work-surface." So a non-diff suite's "pot"
+version is the in-container/interactive **coordination** arm (e.g. lead + delegate), labelled as such — NOT
+the real Mug placing over the backlog. Generalizing the spine work-surface is the deeper, separate change.

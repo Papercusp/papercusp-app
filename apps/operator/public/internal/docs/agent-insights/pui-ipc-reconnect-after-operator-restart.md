@@ -1,0 +1,91 @@
+# pui IPC client must reconnect after an operator restart
+URL: /internal/docs/agent-insights/pui-ipc-reconnect-after-operator-restart
+
+Symptom: a pui pane silently goes stale — the Fleet roster freezes and reactive features (New-plan → zellij pane, live invalidations) stop firing — with NO error popup. Root cause: the pui's IpcClient held ONE Unix-socket connection resolved once at startup; when the operator (:3070) redeploys it gets a new <pid>.sock, severing every long-lived loop (refetch/invalidation/coord-inbox) for good. Fix: IpcClient now re-resolves discovery and reconnects on a dead/failed connection.
+
+## Symptom
+
+A long-running `pui` pane (the desktop chat dock's `dock-driver`, or a bare
+`pui`/full-TUI) **silently stops reacting to the operator** — no error toast, no
+crash. The tells:
+
+* Clicking **New plan** (or any deferred `launchAgent({ deferSpawn: true })`)
+  records a pending workbench launch but **no zellij pane ever opens**. The row
+  sits in `/api/adv/roster` → `pending[]` for hours with `launched_at` NULL.
+* The Fleet roster / plans lists are stale (last-good snapshot, never updating).
+* Live coord-inbox notifications stop arriving in the pane.
+
+The give-away is **time**: the `pending` launch is *older than the 60 s
+safety-net refetch* (often hours). If the safety net were running, it would have
+caught it within a minute — so the client is dead, not merely un-pushed.
+
+## Root cause
+
+`apps/tui/src/ipc.rs` `IpcClient` held a **single** `UnixStream`, resolved once
+from `~/.papercusp/endpoint-ipc.json` at `connect_discovered()` time. The reader
+task `break`s on EOF and never reconnects.
+
+The operator (`:3070`) **restarts on every release redeploy** (green-checkpoint
+FF + release-trigger, ≤ \~1 h cadence). A new operator pid means a **new
+`<pid>.sock`** and a rewritten `endpoint-ipc.json`. Any pui process that started
+*before* that restart is now pointed at a dead socket — and because the three
+long-lived loops (`refetch_loop`, `invalidation_loop`, `coord_inbox_loop` in
+`apps/tui/src/main.rs`) each call `OperatorClient::from_discovery()` **once** at
+startup and reuse that client forever, they are severed permanently. Worse, the
+old `invoke()` had **no timeout**, so a call issued after the reader had exited
+could hang the whole refetch loop indefinitely.
+
+This is why "New plan didn't open a pane" presents as a *dead feature* rather
+than an error: the dock-driver simply never sees the new roster.
+
+Diagnose it by comparing process start times — if the operator (`:3070`) started
+*after* the pui pane, the pane's IPC client is stale:
+
+```
+ps -o pid,lstart,cmd -p <operator-pid> <pui-pid>
+```
+
+## Fix (the model to keep)
+
+`IpcClient` now owns a **replaceable** connection plus a **liveness flag**:
+
+* The reader, on EOF/error, sets `alive=false` *before* draining in-flight calls.
+* `invoke_stream` checks `alive` and **reconnects (re-reading discovery, so the
+  new operator's socket is picked up) before issuing**; a write that fails
+  mid-flight triggers one reconnect-and-retry.
+* `invoke` carries a 30 s timeout backstop so a call issued in the tiny
+  reader-already-exited window can't hang — it errors, and the next call
+  reconnects via the liveness flag.
+
+Because the fix is at the transport, **every** consumer (all three loops + the
+per-spawn `from_discovery()` callers) recovers automatically. Regression guard:
+`ipc::tests::reconnects_after_connection_drop`.
+
+### Complementary fix: a `roster` invalidation on the New-plan record
+
+Reconnect keeps the client *alive*; it doesn't make a new pending launch refetch
+*promptly*. Recording a deferred workbench launch
+(`POST /api/adv/sessions/launch-su` with `defer_spawn`) now also fires
+`notifySyncInvalidate('roster')` after the row commits. The pui's SSE loop
+(`main.rs`) signals a refetch on **any** `invalidate` frame, so the dock-driver
+refetches `/api/adv/roster` and panes the launch within a tick — instead of
+waiting for the general invalidation firehose or the 60 s safety-net. Best-effort
+(the row is already committed, so a notify hiccup can't fail the launch; the
+safety-net still backs it up). Guard:
+`launch-su.test.ts` ("defer\_spawn records a pending workbench launch…"). The live
+(non-deferred) spawn path stays quiet — the *active* roster tier is
+presence-primary and refreshes via its own `coord_presence` invalidation.
+
+## Gotchas for the next agent
+
+* **The pui is a separately-built Rust binary** (`~/.cargo/bin/pui`), not part of
+  the operator deploy. A code fix in `apps/tui` is not live until someone runs
+  `cd apps/tui && cargo install --path .` **and** the running panes are
+  restarted (close+reopen the docked terminal / restart the desktop). Check the
+  binary's mtime vs the running process's start time.
+* A stuck `pending` launch is drained the moment any healthy pui fetches the
+  roster — so a plain pui restart clears the backlog even without the fix; the
+  fix is what stops it recurring on the *next* redeploy.
+* The HTTP transport (`HttpClient`) was never affected — it reconnects per
+  request (the port in `endpoint-ipc.json` is stable across restarts). Only the
+  persistent-socket IPC path had this bug.

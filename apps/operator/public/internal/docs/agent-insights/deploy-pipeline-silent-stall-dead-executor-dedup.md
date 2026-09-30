@@ -1,0 +1,212 @@
+# Deploy pipeline silently stalled: the dead-executor dedup wedge (and the health-probe 406)
+URL: /internal/docs/agent-insights/deploy-pipeline-silent-stall-dead-executor-dedup
+
+main/:3070 frozen on old code for hours while green-checkpoint 'fires' but never advances — a routineFire stuck PENDING on a DEAD executor holds its dedup forever, and the stall-detector misses it (consecutiveReds stays 0). Plus the post-deploy 406 that auto-rolls-back every deploy. Two distinct layers; check both.
+
+If `origin/main` and the live `:3070` operator are stuck on hours-old code while
+staging is many commits ahead, the deploy pipeline has silently stalled. It has
+**two independent layers** — green-checkpoint (FF `main`) and release-trigger
+(deploy `main` → `:3070`). Check both; the symptoms look identical from the outside.
+
+## First: what is `:3070` actually serving?
+
+```bash
+cd papercupai-workspace/papercup-release && git log -1 --format='%h %ci'
+git cat-file -e HEAD:<a-file-you-expect-deployed> && echo present || echo ABSENT
+git -C ../papercup log origin/main -1   # is main even advancing?
+```
+
+If `papercup-release` (what `:3070` runs) is stale **and** `origin/main` is stale →
+layer 1 (green-checkpoint). If `origin/main` is current but `papercup-release` is
+stale → layer 2 (release-trigger/deploy).
+
+## Layer 1: the dead-executor dedup wedge (green-checkpoint never advances)
+
+**Symptom:** the `green-checkpoint` routine is `active` with a recent `last_fired_at`
+(looks alive), but `metadata->gate_health` shows `lastGreenAt` hours stale,
+`consecutiveReds: 0`, `stallAlerted: false`. No open `red-test` signals (staging
+isn't actually red). It *fires* but never produces a verdict.
+
+**Root cause:** a `routineFire` DBOS workflow is stuck `PENDING` on a **dead
+executor** (a transient repro/debug host that's gone), holding the routine's
+`deduplication_id`. The dedup unique index is **status-independent**:
+
+```sql
+-- uq_workflow_status_dedup_id
+CREATE UNIQUE INDEX ... ON dbos.workflow_status (queue_name, deduplication_id)
+  WHERE deduplication_id IS NOT NULL;
+```
+
+DBOS frees a dedup by **NULLing `deduplication_id` on dequeue** — a workflow that
+never dequeued (its executor died) never clears it, so every future `routineFire`
+for that routine collapses on the held dedup. `claimDueRoutine` keeps bumping
+`last_fired_at` (the routine *looks* alive) but the fire never runs. The
+`ROUTINE_FIRE_TIMEOUT_MS` release valve **cannot fire for a dead executor** — DBOS
+recovery is per-executor, and live hosts don't reap a dead host's PENDING workflows.
+
+**Diagnose:**
+
+```sql
+SELECT status, executor_id, deduplication_id,
+       to_timestamp(created_at/1000) AS created
+FROM dbos.workflow_status
+WHERE name='routineFire' AND status='PENDING'
+ORDER BY created_at;
+-- a PENDING row on an executor_id with no recent activity, holding a
+-- deduplication_id = routine:<id>, is the wedge. Confirm the executor is dead:
+SELECT max(to_timestamp(updated_at/1000)) FROM dbos.workflow_status
+WHERE executor_id='<that-executor>';
+```
+
+**Fix (clears the dedup so the next tick re-enqueues + runs):**
+
+```sql
+UPDATE dbos.workflow_status
+   SET deduplication_id = NULL, status = 'CANCELLED'
+ WHERE workflow_uuid = '<the stuck uuid>';
+-- then force it due (don't wait for the cron):
+UPDATE harness_shared.routines SET next_fire_at = now()
+ WHERE name='green-checkpoint' AND install_slug='papercup';
+```
+
+Setting `status` alone is **not** enough — the index keys on `deduplication_id`
+being non-NULL regardless of status; you must NULL it. Within \~30s the next
+`routinesTick` re-enqueues a fresh fire on a live executor.
+
+**The blind spot:** `trackGateStall` (release-actions.ts) increments
+`consecutiveReds` only on a red *verdict*. A running-but-collapsed routine never
+verdicts, so `consecutiveReds` stays 0 and `stallAlerted` never fires — the silent
+part. (Tracked: EI-455. Now detected externally — see the 2026-06-20 update below.)
+
+**UPDATE 2026-06-19 — the reaper is now implemented.** The manual fix below is
+automated by `packages/operator-core/lib/dbos/dbos-executor-reaper.ts`: it NULLs the
+held `deduplication_id` + sets `status='CANCELLED'` on every `PENDING`/`ENQUEUED`
+workflow belonging to an executor that has had no `dbos.workflow_status` activity in
+
+> 5 min (a dead executor), and purges its orphaned `workflow_queue` rows. It runs once
+> at boot **and** on a 2-min `setInterval` started from `dbos/bootstrap.ts` right after
+> `DBOS.launch()` — deliberately a process-level interval, **NOT** a DBOS scheduled
+> routine, because a scheduled reaper would queue on the very executor that wedges and
+> so couldn't fire when it's most needed. Kill-switch: `PAPERCUSP_DBOS_EXECUTOR_REAPER=0`.
+> Still open after this: an optional dedup-TTL safety valve (for a hung-but-live
+> executor) and a "no green verdict in N hours" alarm independent of the red counter.
+
+**UPDATE 2026-06-20 — the "no green in N hours" alarm is now implemented too.** The
+blind spot above (a routine that *never verdicts*, or never *fires*, never trips
+`consecutiveReds`) is now covered by
+`packages/operator-core/lib/release/green-stall-watchdog.ts` — a second process-level
+sweep (started in `dbos/bootstrap.ts` right after the reaper, same "NOT a DBOS routine"
+rationale) that alarms when an `active` green-checkpoint routine is **fire-stale**
+(`last_fired_at` > 3h ⇒ the scheduler isn't running it — the exact case the in-routine
+detector structurally cannot see) or **verdict-stale** (`lastGreenAt` > 12h, a deep
+backstop set past the in-routine 6h alarm so the two don't double-ping). It reuses the
+same `notifyAttention` (urgent) + durable `harness_escalations` surfaces under its own
+phase `green-checkpoint-watchdog` and dedup flag `watchdogAlerted`, with cross-process
+exactly-once and an idempotent recovery clear. Kill-switch:
+`PAPERCUSP_GREEN_STALL_WATCHDOG=0`. (Note: an earlier P-006 fix already made `error` /
+timeout count as a red, so a *crashing/hanging* suite is caught in-routine; the watchdog
+specifically closes the "routine not firing at all" axis.) Still open under EI-455: only
+the optional dedup-TTL safety valve (for a hung-but-live executor).
+
+**UPDATE 2026-07-03 — routine-engine stale suppresses symptom alarms (EI-2994).** When
+the root DBOS `routinesTick` engine is itself stale (no `routinesTick` fire in >6min),
+every scheduled routine — including green-checkpoint — will appear to stall downstream.
+To avoid a restart cascade from separate independent alarms on each stuck routine, the
+green-stall watchdog now reads `readRoutineEngineLiveness` (checks the max
+`created_at` of `routinesTick` in `dbos.workflow_status`) and, when the root engine is
+stale, suppresses the fire-stale and verdict-stale alarms — the infra-liveness alarm
+owns the single "background routine engine frozen" escalation and will auto-resolve it.
+If `routineEngine.unknown` (data unavailable), alarms proceed (fail-open). This moves
+the primary detection up the stack to where it belongs: an infra-liveness watchdog at
+the request path (invoked on every API call) will catch the root-cause freeze immediately
+(see `packages/operator-core/lib/release/routine-engine-liveness.ts`), while
+green-stall remains a secondary verification channel for the symptom layer.
+
+This applies to **any** routine, not just green-checkpoint — a `system:git-sync`,
+`release-trigger`, gym, etc. can wedge the same way (a gym cycle wedged 7.5h on a
+dead repro host, 2026-06-12).
+
+**UPDATE 2026-07-09 — the reaper's fast-orphan guard falsely reaped HEALTHY
+backlogged fires (WI-3519).** In this DBOS version `dbos.workflow_queue` holds
+**zero rows total** even for a never-dequeued `ENQUEUED` workflow — the
+`NOT EXISTS (... workflow_queue ...)` fast-orphan check the reaper used to gate
+on was therefore **vacuous** (always true), not an anomaly signal. Under
+queue-slot starvation (`routines-critical` concurrency=2, two slow-but-checkpointing
+fires under host CPU pressure) every OTHER waiting fire aged past the orphan
+window and got cancelled+requeued on **every** sweep — live evidence: `oddsmith`
+`reaped_count` hit 114, `quartermaster` hit 100, flapping the stall watchdog
+STALLED/RECOVERED across \~10 harnesses even though nothing was actually dead.
+Fix (`reapDeadExecutorWorkflows`, `dbos-executor-reaper.ts`): the fast-orphan
+branch now ALSO requires the **queue itself** to be dead — no sibling workflow
+on the same `queue_name` either actively `PENDING` with a recent `updated_at`,
+or recently drained to `SUCCESS`/`ERROR`, within the orphan window.
+(`CANCELLED` is deliberately excluded from that liveness check — the reaper's
+own cancels bump `updated_at` and would self-mask a genuinely wedged queue.) A
+healthy backlog behind live workers is now left alone; the 60-min no-output
+window, explicit deadlines, and the dead-executor branch still backstop true
+wedges. **So: before treating a reaper `reaped_count` spike as evidence of a
+dead executor, check whether the queue had OTHER fires actively progressing at
+the time — a busy-but-alive queue is not a wedge.**
+
+**Also as of 2026-07-05/06 — a missing release-tooling checkout no longer
+crash-loops the routine.** `release-actions.ts` now calls
+`releaseToolingStatus(root, script)` before invoking `green-checkpoint.ts` /
+`deploy-cli.ts`: if the resolved integration/release root is missing `tsx` or
+the target script (a checkout that hasn't materialized yet, or was wiped), the
+action logs a `skipped-no-tooling` pipeline event and returns cleanly instead
+of throwing — a symptom that used to look like "the routine fired but errored"
+now reads as an explicit, distinguishable skip reason in
+`harness_shared.pipeline_events`.
+
+**UPDATE 2026-07-10 — the reaper's own tick could overlap itself + misreport
+timing (EI-3673).** `startExecutorReaper`'s tick function used to fire
+`reapDeadExecutorWorkflows(...)` fire-and-forget (`void promise.then(...)`) and
+return `undefined` synchronously, instead of returning the promise chain. That
+broke two things the `managedSetInterval` tick wrapper relies on: (1)
+re-entrancy — its `rec.running` guard only holds while it is actually awaiting
+the fn's returned promise, so a slow reap pass (e.g. many queued queries right
+after a restart) could let a second tick start concurrently with the first
+instead of being skipped; (2) visibility — `schedule:inventory`'s
+`lastFireAt`/`fires` were stamped the instant `run()` returned, not when the
+reap actually finished, so recorded fire timing didn't reflect real completion.
+`run` now returns the promise chain so the wrapper genuinely awaits it, fixing
+both (`dbos-executor-reaper.ts`, `startExecutorReaper`).
+
+## Layer 2: the post-deploy 406 (main advances but :3070 stays stale)
+
+Once `main` advances, `release-trigger` runs the scripted deploy — which can fail
+its post-restart health probe and **auto-roll-back**, leaving `main` green but
+`:3070` on the old code:
+
+```sql
+SELECT to_char(created_at,'MM-DD HH24:MI') ts, status, detail
+FROM harness_shared.pipeline_events
+WHERE install_slug='papercup' AND kind='deploy' ORDER BY created_at DESC LIMIT 5;
+-- "failed: health probe failed after restart: MCP initialization failed: status 406"
+```
+
+**Root cause (EI-459):** the probe (`apps/operator/lib/release/health-probe.ts`,
+`probeMcpInitialize`) POSTed the MCP `initialize` **without** an `Accept` header.
+The MCP streamable-HTTP endpoint (`endpoint-route/.../agent-tools/catchall.ts`)
+requires `Accept: application/json, text/event-stream` and returns **406** without
+it. Verify live:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST :3170/api/mcp \
+  -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+# 406 ; add  -H 'accept: application/json, text/event-stream'  → 200 text/event-stream
+```
+
+Fix = the probe sends `Accept` (the probe runs from the **integration tree**, so the
+fix takes effect on the next deploy without itself needing to deploy). After a failed
+deploy, **P-013 back-off** (`shouldBackOff`, release-actions.ts) refuses to
+re-deploy the *same* `targetSha` for 60 min — a new green sha (or the window
+elapsing) clears it. General lesson: a spec-strict server surface + a non-spec
+internal client → sweep other internal MCP callers for the missing `Accept`.
+
+## The meta-lesson
+
+"The deploy isn't landing" is two questions: *is `main` advancing?* (green-checkpoint)
+and *is `main` reaching `:3070`?* (release-trigger/deploy). They fail independently and
+silently. Always verify what `:3070` **actually serves** (the `papercup-release` HEAD),
+not just that `main` went green.

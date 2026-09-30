@@ -1,0 +1,236 @@
+{
+  "name": "@papercupai/firecrawl-bridge",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "Managed Firecrawl access for heavy research workloads — PDFs, JS-rendered pages, structured extraction with JSON schemas, and site-wide crawls. Wraps the Firecrawl API (firecrawl.dev) so agents get more capability than fetch-plus's Jina Reader. Requires FIRECRAWL_API_KEY.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "icon": "Flame",
+  "capabilities": [
+    "tools:firecrawl:scrape",
+    "tools:firecrawl:extract",
+    "tools:firecrawl:crawl",
+    "tools:firecrawl:map",
+    "http:fetch:api.firecrawl.dev",
+    "secrets:read:FIRECRAWL_API_KEY"
+  ],
+  "tools": [
+    {
+      "name": "scrape",
+      "description": "Fetch one URL and return clean markdown. Like fetch-plus but uses Firecrawl's full extraction stack (PDFs, JS-rendered pages, screenshots optional). Requires FIRECRAWL_API_KEY. Use fetch-plus first; reach for this when fetch-plus fails or when you need a screenshot/structured extraction.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "formats": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "markdown",
+                "html",
+                "rawHtml",
+                "screenshot",
+                "links"
+              ]
+            },
+            "default": [
+              "markdown"
+            ]
+          },
+          "onlyMainContent": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "capabilities": [
+        "tools:firecrawl:scrape",
+        "http:fetch:api.firecrawl.dev",
+        "secrets:read:FIRECRAWL_API_KEY"
+      ],
+      "roles": [
+        "scoper",
+        "architect",
+        "operator",
+        "reviewer",
+        "debugger",
+        "worker"
+      ],
+      "rolesQuota": {
+        "worker": {
+          "perChunk": 2
+        },
+        "scoper": {
+          "perRun": 10
+        },
+        "architect": {
+          "perRun": 15
+        },
+        "reviewer": {
+          "perRun": 5
+        },
+        "debugger": {
+          "perRun": 10
+        }
+      },
+      "timeoutSec": 60,
+      "expose": {
+        "http": {
+          "path": "/api/plugins/firecrawl-bridge/scrape",
+          "methods": [
+            "POST"
+          ]
+        },
+        "mcp": {
+          "name": "firecrawl.scrape"
+        }
+      },
+      "guidance": {
+        "when": "Fetch one URL with the full Firecrawl extraction stack — better than fetch_plus for PDF or JS-heavy sites.",
+        "notWhen": "For SIMPLE markdown extraction, `fetch_plus.fetch_clean` is cheaper. For STRUCTURED extraction, use `firecrawl.extract`."
+      }
+    },
+    {
+      "name": "extract",
+      "description": "Extract structured JSON from a URL given a JSON schema describing the desired shape. Firecrawl uses an LLM under the hood to fill the schema. Use for 'give me an array of {name, price, url} from this product listing' workflows.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri"
+            }
+          },
+          "schema": {
+            "type": "object",
+            "description": "JSON Schema describing the desired output shape."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Optional natural-language hint to guide extraction."
+          }
+        },
+        "required": [
+          "urls",
+          "schema"
+        ]
+      },
+      "capabilities": [
+        "tools:firecrawl:extract",
+        "http:fetch:api.firecrawl.dev",
+        "secrets:read:FIRECRAWL_API_KEY"
+      ],
+      "roles": [
+        "scoper",
+        "architect",
+        "operator",
+        "reviewer"
+      ],
+      "rolesQuota": {
+        "scoper": {
+          "perRun": 5
+        },
+        "architect": {
+          "perRun": 10
+        }
+      },
+      "timeoutSec": 120,
+      "expose": {
+        "http": {
+          "path": "/api/plugins/firecrawl-bridge/extract",
+          "methods": [
+            "POST"
+          ]
+        },
+        "mcp": {
+          "name": "firecrawl.extract",
+          "largeOutput": true
+        }
+      },
+      "guidance": {
+        "when": "Pull structured JSON from a URL given a schema describing the desired shape. Use when you need typed data, not free-text markdown.",
+        "notWhen": "For free-text content, use `firecrawl.scrape` or `fetch_plus.fetch_clean`. extract costs more (LLM-driven)."
+      }
+    },
+    {
+      "name": "map",
+      "description": "Discover all URLs reachable from a starting URL — fast, no scraping. Use to plan a crawl or to enumerate a doc-site's pages before fetching specific ones.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "limit": {
+            "type": "number",
+            "default": 100,
+            "description": "Max URLs to return."
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "capabilities": [
+        "tools:firecrawl:map",
+        "http:fetch:api.firecrawl.dev",
+        "secrets:read:FIRECRAWL_API_KEY"
+      ],
+      "roles": [
+        "scoper",
+        "architect",
+        "operator"
+      ],
+      "rolesQuota": {
+        "scoper": {
+          "perRun": 5
+        },
+        "architect": {
+          "perRun": 5
+        }
+      },
+      "timeoutSec": 60,
+      "expose": {
+        "http": {
+          "path": "/api/plugins/firecrawl-bridge/map",
+          "methods": [
+            "POST"
+          ]
+        },
+        "mcp": {
+          "name": "firecrawl.map"
+        }
+      },
+      "guidance": {
+        "when": "Enumerate every URL reachable from a starting URL — fast crawl, no content extraction. Use to plan a crawl.",
+        "notWhen": "For getting CONTENT, follow up with `firecrawl.scrape` or `fetch_plus.fetch_clean` per URL.",
+        "chaining": "Pair with `firecrawl.scrape` to actually fetch the URLs map returns."
+      }
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiBase": {
+        "type": "string",
+        "default": "https://api.firecrawl.dev",
+        "description": "API base URL. Override for self-hosted Firecrawl instances."
+      },
+      "inlineThresholdChars": {
+        "type": "number",
+        "default": 50000,
+        "description": "Outputs smaller than this returned inline; larger ones written to .papercusp/scratch/."
+      }
+    }
+  }
+}

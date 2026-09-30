@@ -1,0 +1,58 @@
+# getOrgPg()'s prepare:false connection returns timestamptz as STRINGS (and rejects Date bind params)
+URL: /internal/docs/agent-insights/pooled-prepare-false-timestamptz-strings-2026-06-22
+
+Why a query that works in tests + dev:pg_query silently no-ops in the operator — the pooled prepare:false connection doesn't parse timestamptz to Date or accept Date params. Root cause of the fleet-wide engine-loop re-arm death (EI-2549).
+
+## TL;DR
+
+The operator's **pooled admin connection** (`getOrgPg().sql`, defined in
+`libs/papercusp/libs/db/src/connection.ts` with **`prepare: false`** + PgBouncer) does **not**
+behave like a default postgres-js connection for `timestamptz`:
+
+* **Reads:** a `timestamptz` column comes back as a **string** (`"2026-06-21 16:30:03.587133-04"`),
+  **not** a `Date`. So `row.some_ts.getTime()` throws `getTime is not a function`.
+* **Writes:** binding a **`Date`** object as a query parameter throws
+  `The "string" argument must be of type string … Received an instance of Date`.
+
+A direct, type-parsing connection (what testcontainer integration tests + `dev:pg_query` use)
+returns `Date`s and accepts `Date` params — so **code that touches `Date` methods/params passes
+every test and works in `dev:pg_query`, then silently fails only in the live operator.** That
+test-vs-live gap is the trap.
+
+## The incident (EI-2549)
+
+For \~16h, **every** engine loop (`loop:arm`) fleet-wide parked at `next_fire_at = infinity` and
+never re-armed — loops fired **once per arm, then died**. `reconcileLoopRoutines` (the re-arm)
+crashed on the **first row of every pass** with `row.last_fired_at.getTime is not a function`,
+which propagated out and was swallowed by `reconcileAndGovern`'s best-effort `try/catch` → **0
+re-arms, no surfaced error.** Fixing the read then exposed the **mirror** bug: the re-arm
+`UPDATE` bound a `Date` param and threw `Received an instance of Date`.
+
+Red herrings that cost hours: the jsonb `?` operator (works fine — `prepare:false`), a stale
+`dist` (operator-core runs from `src`), the DBOS tick being wedged (it ran 283× SUCCESS — the
+step just swallowed the throw). **The error was only visible in the `papercup-bg-host.service`
+journal** (the routines host), not `papercup-dev-api` — check the *right* unit.
+
+## The rule
+
+When you write code that runs on `getOrgPg()` (or any pooled `prepare:false` connection):
+
+* **Reads:** never call `Date` methods on a timestamptz column directly. Coerce:
+  `const ms = (v instanceof Date ? v : new Date(v)).getTime();` (handles Date **and** the PG
+  string). Or return epoch ms from SQL (`extract(epoch from ts)*1000`).
+* **Writes:** never bind a `Date` for a timestamptz param. Bind an **ISO string + explicit cast**:
+  `` sql`… LEAST(next_fire_at, ${d.toISOString()}::timestamptz)` ``.
+* **Tests:** a testcontainer/direct connection won't reproduce this. Add a unit test that drives
+  the function with **string-typed** rows (see
+  `packages/operator-core/lib/harness/routines/reconcile-loop-routines.test.ts`).
+* **Defense:** wrap per-item loops in `try/catch` so one bad row can't abort a whole sweep — a
+  single throwing row silently wedging the whole fleet is the failure class here.
+
+## Pointers
+
+* Fix: `packages/operator-core/lib/harness/routines/reconcile-loop-routines.ts` (`tsMs()` +
+  ISO-string UPDATE bind + per-row isolation).
+* Connection config: `libs/papercusp/libs/db/src/connection.ts` (`getOrgPg`, `prepare: false`).
+* The routines host is `papercup-bg-host.service` (runs from the shared `papercup` tree, caches
+  transpiles in `node_modules/.cache/jiti` — clear it if a code change isn't picked up after a
+  restart). `WI`/issue: EI-2549.

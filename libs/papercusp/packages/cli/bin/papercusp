@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Wrapper that runs the TypeScript CLI via tsx.
+# tsx is hoisted via the workspace install.
+set -euo pipefail
+# Resolve through any symlink (npm puts a symlink in node_modules/.bin) so
+# we always find the real source dir.
+SELF="$(readlink -f "$0")"
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
+SCRIPT="$HERE/../src/papercusp.ts"
+# Prefer the nearest repo-local tsx so a shared PATH cannot accidentally run
+# through a sibling checkout's loader (e.g. papercup-release during staging tests).
+DIR="$HERE"
+for _ in 1 2 3 4 5 6 7 8; do
+  if [ -x "$DIR/node_modules/.bin/tsx" ]; then
+    exec "$DIR/node_modules/.bin/tsx" "$SCRIPT" "$@"
+  fi
+  DIR="$(dirname "$DIR")"
+done
+# Fall back to PATH, then node strip mode, only when no local tsx exists.
+if command -v tsx >/dev/null 2>&1; then
+  exec tsx "$SCRIPT" "$@"
+fi
+exec node --experimental-strip-types --no-warnings "$SCRIPT" "$@"

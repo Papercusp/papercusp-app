@@ -1,0 +1,160 @@
+/* VideoGrid — holepunch-video-shared-harnesses-2026-06-05 P-006.
+   Brand-neutral, container-filling; the workbench pane sizes it. Uses CSS vars
+   with fallbacks so it inherits the operator theme where present. */
+
+.pc-video-grid {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 200px;
+  background: var(--pc-surface-1, #14151a);
+  color: var(--pc-text-1, #e8e8ea);
+  overflow: hidden;
+}
+
+.pc-video-grid__banner {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: var(--warn-bg, #3a2c10);
+  color: var(--warn, #f3d27a);
+  border-bottom: 1px solid var(--pc-border, #2a2c33);
+}
+
+.pc-video-grid__tiles {
+  flex: 1 1 auto;
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-content: start;
+  overflow: auto;
+}
+.pc-video-grid__tiles[data-empty='true'] {
+  place-content: center;
+}
+
+.pc-video-grid__empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: var(--pc-text-2, #9a9ba3);
+  font-size: 14px;
+  padding: 24px;
+}
+
+.pc-video-grid__tile {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--pc-surface-2, #1d1f26);
+  border: 2px solid transparent;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Active-speaker highlight ring (D-004). */
+.pc-video-grid__tile[data-speaking='true'] {
+  border-color: var(--pc-accent, #4f9dff);
+  box-shadow: 0 0 0 2px var(--pc-accent, #4f9dff) inset;
+}
+
+.pc-video-grid__tile-canvas,
+.pc-video-grid__self-canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: #000;
+}
+
+.pc-video-grid__tile-label,
+.pc-video-grid__self-label {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  padding: 1px 6px;
+  font-size: 11px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  pointer-events: none;
+}
+
+.pc-video-grid__avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--pc-accent-2, #3a4a66);
+}
+
+.pc-video-grid__overflow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  background: var(--pc-surface-2, #1d1f26);
+  color: var(--pc-text-2, #9a9ba3);
+  font-size: 14px;
+}
+
+/* Self-view PiP (bottom-right, above the control bar). */
+.pc-video-grid__self {
+  position: absolute;
+  right: 12px;
+  bottom: 56px;
+  width: 160px;
+  height: 90px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--pc-surface-2, #1d1f26);
+  border: 1px solid var(--pc-border, #2a2c33);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.pc-video-grid__controls {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  justify-content: center;
+  border-top: 1px solid var(--pc-border, #2a2c33);
+  background: var(--pc-surface-1, #14151a);
+}
+
+.pc-video-grid__btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  border-radius: 6px;
+  border: 1px solid var(--pc-border, #2a2c33);
+  background: var(--pc-surface-2, #1d1f26);
+  color: var(--pc-text-1, #e8e8ea);
+  cursor: pointer;
+}
+.pc-video-grid__btn:hover:not(:disabled) {
+  background: var(--pc-surface-3, #262932);
+}
+.pc-video-grid__btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.pc-video-grid__btn[data-active='true'] {
+  border-color: var(--pc-accent, #4f9dff);
+  color: var(--pc-accent, #4f9dff);
+}
+.pc-video-grid__btn--leave {
+  border-color: var(--bad, #d6584f);
+  color: var(--bad, #d6584f);
+}

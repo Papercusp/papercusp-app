@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-terminal-get-layout"
+description = "Enables the terminal_get_layout command without any pre-configured scope."
+commands.allow = ["terminal_get_layout"]
+
+[[permission]]
+identifier = "deny-terminal-get-layout"
+description = "Denies the terminal_get_layout command without any pre-configured scope."
+commands.deny = ["terminal_get_layout"]

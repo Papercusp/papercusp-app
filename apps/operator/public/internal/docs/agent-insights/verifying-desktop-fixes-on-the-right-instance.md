@@ -1,0 +1,114 @@
+# Verifying a desktop-operator fix on the RIGHT instance (don't fix the wrong window/build)
+URL: /internal/docs/agent-insights/verifying-desktop-fixes-on-the-right-instance
+
+Hard-won runbook: the dev box runs MANY papercusp-desktop instances across nested X displays, each env is a SEPARATE checkout serving a different port, and dev dists go stale for days behind a stuck watcher. How to find the exact window the user sees, deploy to the build it actually serves, and screenshot-verify before claiming 'fixed' — plus why a missing env bar can be an /api-routing symptom, not a missing component.
+
+# Verifying a desktop fix on the RIGHT instance
+
+A debugging session burned hours because the agent kept "fixing" and "verifying" the
+**wrong** thing. Each trap below was a separate wrong turn. If you are asked to verify a
+desktop-operator UI fix, read this first.
+
+## Trap 0 — "tests pass" / "the DOM has it" is NOT "fixed"
+
+Unit tests passing and `document.querySelector(...)` returning an element are **not**
+verification. The user looks at pixels. Claiming "fixed" from tests or a DOM probe — without
+seeing the user's actual window — is the #1 way to lose their trust. **Screenshot the
+window the user is on, or you have not verified.**
+
+## Trap 1 — the user's window is on DISPLAY `:0`; background instances are on nested displays
+
+The dev box runs **several `papercusp-desktop` processes at once**, on **different X
+displays**. The user's real window is the one whose process env is `DISPLAY=:0` (the
+physical monitor). Other instances run headless/nested on `:90`, `:92`, etc. — driving the
+first bridge token you find will happily verify a window **the user cannot see**.
+
+```sh
+# every desktop instance, with its display
+for pid in $(pgrep -f papercusp-desktop); do
+  echo "$pid $(tr '\0' '\n' </proc/$pid/environ 2>/dev/null | grep '^DISPLAY=')"
+done
+# bridge tokens → match the one whose pid is on :0, then probe IT
+for t in /tmp/tauri-dev-bridge-*.token; do bp=${t//[^0-9]/}; \
+  echo "$bp $(tr '\0' '\n' </proc/$bp/environ|grep ^DISPLAY=) \
+  $(tauri-agent-tools probe --pid $bp 2>/dev/null | grep URL:)"; done
+```
+
+Always pass `--pid <the :0 bridge pid>` to every `tauri-agent-tools` call. The probe's
+`URL:` line tells you which **port/env** that window is on.
+
+## Trap 2 — each env is a SEPARATE checkout serving a different port
+
+A fix only reaches the user if you deploy it to the checkout that serves **their** port:
+
+| Env button       | Port    | Checkout                                                                 |
+| ---------------- | ------- | ------------------------------------------------------------------------ |
+| dev              | `:3270` | `papercupai-workspace/papercusp` (`papercup` is a symlink → `papercusp`) |
+| staging          | `:3170` | `papercupai-workspace/papercusp-staging` (a git worktree of `papercusp`) |
+| prod / release   | `:3070` | `papercupai-workspace/papercup-release`                                  |
+| local (Vite HMR) | `:3055` | `papercusp` (bare Vite dev server; `/api` proxies to `:3070`)            |
+
+The persisted choice is `~/.papercusp/desktop-build-target.json`. **Deploying to `:3170`
+when the user is on `:3270` does nothing for them.** Confirm the port from the probe's
+`URL:` first, then rebuild *that* checkout's `apps/operator-vite/dist`.
+
+## Trap 3 — dev dists go STALE for days behind a stuck watcher
+
+`:3270`/`:3055` are kept fresh by a single `vite build --watch` (via
+`bin/vite-watch-singleton`, EI-306 global flock). That watcher can **silently stop
+rebuilding** (one had been stuck 6.5 days). Symptom: `dist/index.html` mtime is hours/days
+older than your source edit, and the served entry hash never changes.
+
+```sh
+stat -c '%y' apps/operator-vite/dist/index.html      # vs your edit time
+pgrep -af 'vite build --watch'                       # is it really running?
+```
+
+Fix: kill the stuck watcher tree and start a fresh `vite build --watch --mode development`
+(watch build keeps `emptyOutDir:false`, so it retains old chunks and can't strand an open
+webview). Then `tauri-agent-tools eval --pid <pid> "location.reload()"`.
+
+## Trap 4 — screenshot the user's window directly (title/`--title` lookups fail)
+
+The shell's `tauri-agent-tools screenshot --title` keys off `document.title` ("The Swarm"),
+which doesn't match any X11 window name (all the launcher terminals are titled "Papercusp
+dev (npm run dev)"). Capture by window id on the app's own display instead:
+
+```sh
+WIN=$(DISPLAY=:0 xdotool search --pid <bridge-pid> | while read w; do \
+  g=$(DISPLAY=:0 xdotool getwindowgeometry --shell $w); eval "$g"; \
+  [ "$(DISPLAY=:0 xdotool getwindowname $w)" = "Papercusp" ] && echo $w; done | head -1)
+DISPLAY=:0 import -window "$WIN" /tmp/userwin.png   # then VIEW it
+```
+
+(For a nested-display instance, read its `DISPLAY` from `/proc/<pid>/environ` and
+`DISPLAY=:NN import -window root out.png`.)
+
+## Trap 5 — a missing env bar can be an `/api`-ROUTING symptom, not a missing component
+
+`EnvSwitcherBar` self-hides when `GET /api/desktop/dev-operators` returns no data
+(`if (!data || envOps.length === 0) return null`). On `:3270` that endpoint **404s** even
+though `curl :3270/api/desktop/dev-operators` returns the env list — because the desktop
+webview's `/api` is routed over the **endpoint-IPC socket** (`~/.papercusp/endpoint-ipc.json`,
+pid→checkout) which can point at a backend lacking the desktop endpoints (e.g. `:3070`
+release). Probe from inside the webview to tell routing apart from a real bug:
+
+```js
+Promise.all(['/api/flags/bootstrap','/api/desktop/dev-operators','/api/operator/whoami']
+  .map(u => fetch(u).then(r=>r.status))).then(s=>console.log(s))   // e.g. [200, 404, 404]
+```
+
+A 200 on `flags/bootstrap` but 404 on the `desktop/*` + `operator/whoami` endpoints means
+`/api` is reaching a backend that simply doesn't serve those routes — a **routing** issue.
+The robust fix is to make the bar source its env list from the desktop/Tauri side (which
+authoritatively owns the env set in `env_switch.rs`), not a routed HTTP fetch, so the
+escape-hatch bar can never vanish exactly when routing is misconfigured.
+
+## The work-items "parent shows child" bug (the actual fix this session)
+
+Selecting a formal pot home (`harness_kind:'pot'`, e.g. `papercusp`) showed its first
+child's (`pot-canary`) work items. Root cause: `hiveMembers()` excludes a pot home from
+its own member list, so `dockSlug` fell through to `members[0]`. Fixed with
+`resolveDockSlug()` in `harness-axis.ts` (a registered selected pot shows ITS OWN content).
+`?harness` / `focusSlug` were red herrings — `focusSlug` is an output-only focused-panel
+tracker, not an input.

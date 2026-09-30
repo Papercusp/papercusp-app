@@ -1,0 +1,48 @@
+{
+  "$comment": [
+    "SHRINK-ONLY baseline for scripts/check-rust-advisories.mjs (plan",
+    "security-boundary-remediation-and-usability-2026-09-04, P-007 / WI-2144851).",
+    "",
+    "`accepted` is the flat list the analyzer reads: a shipped Rust vulnerability listed",
+    "here does not fail --strict. `entries` carries the REASON for each, which is the part",
+    "a reviewer needs and the derivation cannot supply.",
+    "",
+    "This list may only SHRINK. Fixing an advisory removes its entry (the gate reports a",
+    "still-listed-but-resolved entry as STALE). A NEW shipped vulnerability must be patched,",
+    "not appended — appending is how a gate becomes a parking lot. Re-seed only from",
+    "`node scripts/check-rust-advisories.mjs --list`, never from a hand grep.",
+    "",
+    "WHY THIS ONE IS SEEDED RATHER THAN PATCHED: it is pre-existing debt that",
+    "accrued while NOTHING scanned the Rust graph at all — the very gap this gate closes.",
+    "Seeding a measured-green baseline first is the same precedent the npm sibling set, and",
+    "it is what lets the guard be wired without red-pinning the fleet on debt it slept",
+    "through. Each reason below names the concrete next action, not a shrug.",
+    "",
+    "SHRUNK 2026-09-05 (WI-2144851): RUSTSEC-2026-0194 and RUSTSEC-2026-0195 (quick-xml, CVSS",
+    "7.5 each) were REMOVED because they are FIXED in this tree, not reclassified. Both instances",
+    "are gone: quick-xml 0.39.4 -> 0.41.0 via `cargo update -p plist` (plist 1.9.0 -> 1.10.0), and",
+    "quick-xml 0.37.5 dropped entirely by `cargo update -p tauri-plugin-notification` (2.3.3 ->",
+    "2.4.0, tauri-winrt-notification 0.7.2 -> 0.7.3, which no longer depends on quick-xml). Both",
+    "stayed inside the existing `tauri-plugin-notification = \"2\"` range, so neither was a forced or",
+    "feature-removing upgrade. Build-verified after each: `cargo check --all-targets` exit 0, zero",
+    "errors. The gate then reported both ids as STALE, which is what authorized removing them.",
+    "",
+    "Only advisories WITHOUT `database_specific.informational` appear here. The 17",
+    "unmaintained + 1 unsound notices over the same 611 crates are reported by the gate and",
+    "never gate, so they are deliberately absent from this file."
+  ],
+  "seededAt": "2026-09-05",
+  "seededFrom": "node scripts/check-rust-advisories.mjs --list against papercusp-desktop/src-tauri/Cargo.lock (615 crates, OSV.dev crates.io ecosystem) — 21 advisory clusters, 3 gating vulnerabilities, 18 informational",
+  "accepted": [
+    "RUSTSEC-2024-0429"
+  ],
+  "entries": {
+    "RUSTSEC-2024-0429": {
+      "crate": "glib@0.18.5",
+      "severity": "moderate",
+      "disposition": "pinned-for-abi",
+      "fixedIn": "0.20.0",
+      "reason": "Unsoundness in glib::VariantStrIter's Iterator/DoubleEndedIterator impls. Fixed in glib 0.20.0, but papercusp-desktop/src-tauri/Cargo.toml pins `glib = \"0.18\"` DELIBERATELY, with the stated reason that it must stay on the same 0.18 line tauri/wry already use so there is exactly one GTK in the process (D-009, the embedded native terminal view). Bumping to 0.20 splits the GTK/glib ABI in-process — precisely the forced feature-removing upgrade WI-2144851 excludes. Deferred until tauri/wry themselves move to the glib 0.20 line, at which point the pin is bumped WITH them, not ahead of them. NOTE: this cluster is OSV alias pair GHSA-wrw7-89jp-8q8g (classified a vulnerability, GHSA severity MODERATE) + RUSTSEC-2024-0429 (classified informational 'unsound'); the gate resolves the disagreement fail-closed to vulnerability, which is why it appears here at all."
+    }
+  }
+}

@@ -1,0 +1,80 @@
+# The `graduation` blueprint — deterministic-blueprints-migration-2026-06-13 (bucket A).
+#
+# The graduation tracker (count per-class clean auto-passes over the outcome rails
+# and file an OWNER REPORT when a class crosses the threshold) as a SCHEDULED
+# DETERMINISTIC blueprint, mirroring the negative-space pilot (P-110). A
+# program-mode spine whose single step fires a registered typed function
+# (`graduation:scan`) wrapping the shipped tracker logic — same flag, same
+# governor budget, same tick (behavior-neutral, D-004). No decision gate ⇒ a
+# DETERMINISTIC PIPELINE. The bespoke `system:graduation-scan` routine action
+# delegates to the SAME shared orchestration (`runGraduationScan`).
+#
+# It NEVER auto-widens autoKinds — it files a kind=change owner report behind the
+# protected-path patterns; the widening stays a reviewed policy.ts edit (P-046 /
+# D-008). Preserved exactly via the shared `runGraduationTick`.
+#
+# Dark stays dark: the op runs the SAME `papercusp-graduation-tracker` flag +
+# learning-governor preflight the routine did — the loop is triple-gated
+# (inactive seed + dark flag + unbudgeted governor) until the self-learning-frontier
+# P-001 arming gate closes.
+id: graduation
+extends: base
+version: 0.1.0
+description: >-
+  Deterministic learning loop: count per-class clean auto-passes over the outcome
+  rails and file an owner ratification report for any class that crosses the
+  graduation threshold (the graduation tracker) on a cadence. Pure SQL, no agent;
+  files an owner report — never auto-widens autoKinds.
+
+# A descriptive work-item kind (the deterministic pipeline does not create rows —
+# it files owner reports through the improvement rails directly); the schema
+# requires the field.
+workItem:
+  kind: mining-run
+  idPrefix: GRD
+
+# Program-mode spine (P-010): one deterministic step, NO gate ⇒ deterministic
+# pipeline. `payload.*` are the graduation thresholds / windows the routine's
+# payload_template carries (absent ⇒ the op's defaults). A whole-string
+# `{{ payload.x }}` that is unset interpolates to undefined → the op's optional
+# arg is omitted → its default applies.
+spine:
+  steps:
+    - id: scan
+      op: graduation:scan
+      args:
+        threshold: "{{ payload.threshold }}"
+        recurrenceWindowDays: "{{ payload.recurrenceWindowDays }}"
+        lookbackDays: "{{ payload.lookbackDays }}"
+        maxReportsPerTick: "{{ payload.maxReportsPerTick }}"
+        neverGraduateClassPatterns: "{{ payload.neverGraduateClassPatterns }}"
+        mineOnly: "{{ payload.mineOnly }}"
+      bind: scan
+
+knobs:
+  harnessKind: learning
+  # SQL-only evidence counting needs no repo.
+  requiresRepo: false
+
+# Scheduled trigger (D-004): the tracker cadence, byte-identical to the bespoke
+# `system:graduation-scan` routine (daily at 04:05, offset from the deploy rhythm).
+# The routine fires `system:blueprint-run` with `{ blueprintId: graduation }`;
+# the handler detects program-mode and runs the steps inline. SEEDED INACTIVE.
+#
+# singleton: true (deterministic-blueprints-migration D-018 step 2 / P-144 pilot) — this is a
+# workspace-GLOBAL learning loop, not a per-install harness. `materializeBlueprintTriggers`
+# upserts EXACTLY ONE routine per workspace under the reserved `@singleton` host-slug, seeded
+# INACTIVE/dark, stamped `payload_template.blueprintId: graduation` so the harness-less row
+# fires this program. Replaces the bespoke seed-graduation-routine.ts; the governor loop
+# `graduation-tracker` still self-registers at first armed contact (graduationGovernorGate).
+triggers:
+  schedule:
+    - cron: "0 5 4 * * *"
+      action: system:blueprint-run
+      singleton: true
+
+# No agent roles (pure-deterministic) and no agent-tool deps — the step calls a
+# registered function, not an agent.
+dependencies:
+  tools: []
+  plugins: []

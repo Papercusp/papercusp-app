@@ -1,0 +1,170 @@
+# Named resource locks with drain
+URL: /internal/docs/agent-spawning/named-resource-locks
+
+Shared/exclusive locks on registered named resources (the dev server, the DB schema) with a writer-priority drain, broadcasts, and a defineTool-level enforcement path — for coordinating destructive shared actions across the agent fleet.
+
+import { Aside } from '@astrojs/starlight/components';
+
+File locks (`locks:acquire`) guard *files* — exclusive-per-path. **Named
+resource locks** guard shared *resources* — the dev server, the DB schema —
+where many agents can *use* a resource at once but only one can *restart /
+mutate* it. They live in the same `papercusp_su` substrate, reuse the same
+`ch_coord_<domain>` NOTIFY channel and the `inWorkspaceTxn` advisory lock, and
+are a **separate table** (`agent_resource_locks`) so the file-lock hot path is
+untouched. Full design: plan `named-resource-locks-drain-2026-06-02`.
+
+## The model
+
+* **`shared`** — "I'm using it." Many holders coexist.
+* **`exclusive`** — "I need to restart/mutate it." Granted only once shared
+  holders drain to zero.
+
+A pending `exclusive` is **writer-priority**: new `shared` acquisitions are
+refused (`exclusive_pending`) while existing ones run to completion, then the
+exclusive is granted. A crashed holder's lease TTL-expires (heartbeat keeps a
+long hold alive); `max_drain_sec` caps the wait, after which the requester gets
+`drain_timeout` and decides force-proceed or escalate.
+
+**Bounds the tools enforce:** the lease TTL defaults to **1200s** (20 min) and
+caps at **3600s**.
+
+⚠ **`max_drain_sec` is ONE ARG NAME WITH TWO DIFFERENT CAPS — and the tool most
+callers reach for is the SMALLER one.** `locks:acquire_resource` caps
+`wait.max_drain_sec` at **45s** (`MAX_LOCK_WAIT_SEC` in
+`packages/operator-core/lib/agent-tools/locks/lock-config.ts`), and an over-cap
+value is **REJECTED** (`Too big expected <=45`), not clamped — unlike
+`locks:acquire`, whose `wait.max_sec` silently clamps to that same 45. The
+**300s** cap belongs only to the blessed wrappers `dev:restart` and `db:migrate`,
+which declare their own `MAX_DRAIN_SEC = 300` and drain for their own defaults —
+`dev:restart` 120s, `db:migrate` 60s — both bumpable up to that 300s cap.
+
+So a 120s drain copied from a `dev:restart` recipe into `locks:acquire_resource`
+fails every time. This doc previously stated the 300s figure as though it were
+the only cap, which is exactly how that happened (EI-21673430317554145).
+
+```text
+B,C hold SHARED ───────────────┐ (working)
+R: acquire EXCLUSIVE → DRAINING │  new SHARED refused; broadcast "release please" → B,C
+B,C release ───────────────────┘  shared == 0 → R granted EXCLUSIVE → acts → release → "back up"
+```
+
+## Registered names only
+
+A resource must be pre-registered in `agent_resource_registry` to be
+acquirable (`unknown_resource` otherwise) — free-form names silently fail to
+coordinate (`dev-server` vs `devserver` → no mutual exclusion). The registry
+is the one home for each lock's **rule text** and **enforcement level**
+(the `enforcement` column: `advisory` | `checked` | `enforced`).
+`locks:list` is the authoritative discovery surface (names, rules, live
+holders, draining flag). The **one exception** to "pre-registered only" is the
+per-harness `git-sync:<slug>` name: the `system:git-sync` action self-registers
+it (idempotent `INSERT … ON CONFLICT DO NOTHING`, inside the same workspace txn
+as the acquire) on first acquire, so an un-pre-registered harness slug can never
+silently no-op its sync forever. Names listed in `trigger_config.extra_lock_resources`
+are **never** auto-registered — an unknown extra name makes the tick skip with a
+logged warning. Currently registered:
+
+| Resource                                                      | Enforcement | What it guards                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `dev-server`                                                  | `enforced`  | The operator dev server (`:3070` Hono + `:3055` Vite). Promoted advisory → enforced once the raw-Bash gate made `systemctl restart papercup` matchable (P-016).                                                                                                    |
+| `db-schema`                                                   | `checked`   | The papercusp DB schema — migrations / destructive DDL.                                                                                                                                                                                                            |
+| `shop`                                                        | `enforced`  | The shop build + `:4321` preview (stale-server e2e false-positives + concurrent dist clobbers).                                                                                                                                                                    |
+| `desktop-sidecar`                                             | `enforced`  | The papercusp-desktop sidecar / embedded-pg bundle build (the recurring 0-byte-binary clobber).                                                                                                                                                                    |
+| `windows-vm-build:user@127.0.0.1:2223:papercup-build-release` | `enforced`  | The concrete Windows VM host + `VM_BUILD_DIR`. The producer acquires it before mutation, records purpose + ETA, heartbeats, declares a latched release event, and verifies release on every exit/signal.                                                           |
+| `libs-papercusp-submodule`                                    | `advisory`  | The `libs/papercusp` submodule commit + superproject pointer bump (+ push).                                                                                                                                                                                        |
+| `git-sync`                                                    | `advisory`  | The git-sync auto-commit/push routine. **Now per-harness:** each harness's `system:git-sync` tick holds `exclusive(git-sync:<slug>)`. The unsuffixed `git-sync` row is the legacy back-off name papercup still acquires via `trigger_config.extra_lock_resources`. |
+
+## The enforcement dial (per resource)
+
+| Level      | What enforces it                                                                                                                                                                                                   |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `advisory` | The rule (prompt) + the broadcast + `locks:list` visibility. Honor-system. The level for `libs-papercusp-submodule` + `git-sync` (no hookable "I'm using it" action).                                              |
+| `checked`  | A tool / `locks:check_command` actively refuses while an exclusive is in flight (`db-schema`).                                                                                                                     |
+| `enforced` | A handler/producer that cannot run without the lock (see below), or the `PreToolUse` Bash gate that hard-blocks a colliding raw command. `dev-server`, `shop`, `desktop-sidecar`, and the Windows VM build target. |
+
+## Tools
+
+* `locks:acquire_resource { resource, mode, wait?: { max_drain_sec } }` /
+  `locks:release_resource` / `locks:heartbeat_resource`
+* `locks:list` — registry + live holders + drain state.
+* `locks:check_command { command }` — does a raw shell command touch a resource
+  with an exclusive in flight? Returns `allow | warn | block`.
+
+**Role access (2026-06-25):** `locks:acquire_resource` previously used
+`agentRoles: [...SU_ROLES, 'cup']`. Changed to `agentRoles: [...AGENT_ROLES]`:
+every built-in role can now acquire named-resource locks (shared or exclusive).
+Non-SU roles that need to use a shared resource (e.g. a worker running a build
+that depends on the dev server being up) can now hold a shared lock and
+participate in the drain protocol without going through a superuser intermediary.
+
+**`locks:release_resource` response shape (2026-06-25):** The single-item
+release path was consolidated onto the bulk `runBulk` implementation — all
+releases (whether one lock or many) now return the same bulk envelope:
+`{ ok, results:[{ ok, lock_id?, resource?, released, released_modes, exclusive_resources }], errors, counts }`.
+If your code parsed the old flat single-release shape, update it to read `results[0]`.
+
+### Blessed wrappers
+
+`dev:restart` and `db:migrate` are the canonical paths for the two destructive
+actions. They run the whole drain protocol (acquire `exclusive` + drain →
+act → release → "back up") via `guardResource`. **Dry-run by default**;
+`confirm: true` acts, and the real exec is additionally env-gated
+(`PAPERCUSP_ALLOW_DEV_RESTART` / `PAPERCUSP_ALLOW_DB_MIGRATE`) so they're safe
+on a shared box.
+
+## Enforcement: `guardResource` / `withResourceLock`
+
+The `enforced` rung is a **handler HOF**, not a dispatcher interceptor:
+`guardResource(spec, run)` acquires the lock, runs `run()` *only if acquired*,
+and releases after — so a tool body cannot run without the lock.
+`withResourceLock(spec, handler)` wraps a role-gated handler. This keeps the
+borrowable, domain-free `tooldef` lib free of locks coupling (decision D-016).
+
+## Fencing: stale-lease abort (D-001)
+
+Holding the lock isn't enough if the holder *paused* — a zombie holder whose
+lease TTL-lapsed mid-hold can be re-granted to someone else while it sleeps.
+So an exclusive acquisition returns a monotonic **`fence_seq`**, and `run()`
+receives a `FenceToken`. Immediately before the irreversible step, `dev:restart`
+and `db:migrate` call `fence.assertCurrent()` — which re-verifies against PG that
+they *still* hold the effective exclusive at their fence — and **abort** with a
+`stale_fence_*` reason (no restart/apply) if their lease was superseded while
+held. Fencing is **exclusive-only**; a shared lock's `assertCurrent()` is a
+no-op (shared is efficiency-class, git-backstopped).
+
+`db:migrate` adds a second, independent guard: a resource-side **idempotency
+ledger** keyed on the migration filename (`migrate:<basename>`,
+`ON CONFLICT DO NOTHING`). A retried / zombie re-apply of the *same* file
+short-circuits as a checked `already_applied` no-op — recorded only on a
+successful apply (first-writer-wins) — even if fencing were somehow bypassed.
+
+`locks:check_command` + the registry `match_patterns` back a `PreToolUse`
+`Bash` hook that gates raw destructive commands (`systemctl restart …`,
+`psql -f …`) which bypass the wrapper tools. `install-standalone-mcp.sh` now
+installs `pretooluse-bash-resource-gate.sh` and merges it as its **own**
+`PreToolUse` entry (matcher `Bash`) into `~/.claude/settings.json` — so an
+in-flight `exclusive` hold on a registered resource *blocks* a colliding raw
+restart/migrate, not just warns. It is fail-open with a local keyword
+pre-filter, so the vast majority of commands never reach the operator. This is
+what let `dev-server` (and the build resources) be `enforced` rather than
+advisory.
+
+## Lifecycle notes
+
+* **Delivery is event-push**, never polling: drain completion wakes the
+  exclusive waiter via PG `NOTIFY` (the `resource_grant_cascade` channel + the
+  wait loop). "release please" (drain-start) and "back up" are now **plain coord
+  messages** sent via `sendMessage` to the coord inbox (the same surface the
+  mid-turn injection hook reads). There is no `fireNotifications` /
+  `resource:<name>` watcher fan-out — that path-glob surface was retired with
+  the rest of `coord:watch` (locks are control-plane: you *wait* on a lock, you
+  don't *follow* it). Note "back up" is **targeted, not a broadcast to all**:
+  `broadcastResourceBackUp` notifies only the owner ids who were refused while
+  the exclusive was held (the `waiters` list), and sends nothing when that list
+  is empty.
+* **Session-end** `locks:release { all_mine: true }` clears named-resource
+  locks **and** file locks (separate tables, one call) — TTL is the backstop
+  for a crashed session.
+* **Not a world mutex.** Dispatch/hook enforcement binds *agents going through
+  the operator*; a human at a terminal, paperclip, or the Tauri shell never hit
+  it, so for them only the advisory rule + the broadcast apply.

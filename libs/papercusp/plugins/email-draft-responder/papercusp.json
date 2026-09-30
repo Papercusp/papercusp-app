@@ -1,0 +1,135 @@
+{
+  "$schema": "https://papercuspai.com/schema/papercusp-plugin.schema.json",
+  "kind": "plugin",
+  "name": "@papercupai/email-draft-responder",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Starter trigger pack: an inbound Gmail message launches a plan that creates a draft reply and never sends it.",
+  "author": "Papercusp",
+  "publisher": "@papercupai",
+  "license": "MIT",
+  "versionPin": { "mode": "exact" },
+  "capabilities": [],
+  "oauth": [
+    {
+      "provider": "google",
+      "scopes": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose"
+      ],
+      "fieldName": "googleWorkspace"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["googleWorkspace"],
+    "properties": {
+      "googleWorkspace": {
+        "type": "string",
+        "title": "Google Workspace connection",
+        "secret": true,
+        "shareable": false,
+        "snapshotPolicy": "strip",
+        "oauth": {
+          "provider": "google",
+          "scopes": [
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.compose"
+          ]
+        },
+        "description": "OAuth credential for the Gmail source. It is never copied into a snapshot or shared with a forker."
+      }
+    }
+  },
+  "triggerPack": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "responseGuidance": {
+          "type": "string",
+          "title": "Reply guidance",
+          "default": "Concise, helpful, and faithful to the inbound message.",
+          "maxLength": 1000
+        }
+      }
+    },
+    "defaultStormPolicy": {
+      "maxRuns": 5,
+      "windowSeconds": 60
+    },
+    "targets": [
+      {
+        "id": "draft-reply",
+        "kind": "plan",
+        "path": "plan.md",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trigger"],
+          "properties": {
+            "trigger": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey", "payload"],
+              "properties": {
+                "key": { "const": "ext:gmail:message.received" },
+                "source": { "const": "gmail" },
+                "event": { "const": "message.received" },
+                "sourceId": { "type": "string", "minLength": 1 },
+                "externalId": { "type": "string", "minLength": 1 },
+                "dedupeKey": { "type": "string", "minLength": 1 },
+                "payload": {
+                  "type": "object",
+                  "datatype": "email-message",
+                  "additionalProperties": true,
+                  "required": ["id", "threadId", "from", "subject", "messageId", "direction"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "threadId": { "type": "string", "minLength": 1 },
+                    "from": { "type": "string", "minLength": 1 },
+                    "subject": { "type": "string", "minLength": 1 },
+                    "messageId": { "type": "string", "minLength": 1 },
+                    "direction": { "const": "inbound" }
+                  }
+                }
+              }
+            },
+            "responseGuidance": {
+              "type": "string",
+              "maxLength": 1000,
+              "default": "Concise, helpful, and faithful to the inbound message."
+            }
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "id": "inbound-email-to-draft",
+        "source": {
+          "kind": "external",
+          "sourceKind": "gmail",
+          "oauthField": "googleWorkspace"
+        },
+        "target": "draft-reply",
+        "eventPattern": "ext:gmail:message.received",
+        "filter": {
+          "all": [
+            { "direction": "inbound" },
+            { "threadId": { "exists": true } },
+            { "from": { "exists": true } },
+            { "subject": { "exists": true } },
+            { "messageId": { "exists": true } }
+          ]
+        },
+        "mapping": {
+          "mode": "payload-context"
+        }
+      }
+    ],
+    "edges": []
+  },
+  "icon": "Mail"
+}

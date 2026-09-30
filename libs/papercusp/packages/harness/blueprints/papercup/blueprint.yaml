@@ -1,0 +1,91 @@
+# The `papercup` launch blueprint — unify-launch-mechanics-2026-06-09 (P-008/P-009, D-004).
+#
+# A SINGLE-ROLE LAUNCH BLUEPRINT (D-007): the Mug's "place a fleet watcher"
+# primitive. Firing it is `fleet:spawn { role:'papercup', harness:<slug> }` (the
+# Mug-placed-role path) or fireLaunchBlueprint('papercup') with a parent — it
+# launches ONE watcher agent (the `papercup` role) through the SAME unified launch
+# primitive every other agent uses (spawnInvokeOnce → invoke.ts, which keys the
+# per-session config via the shared session-launch-dirs). The persona resolves
+# from the global prompts/papercup.md.
+#
+# The split (D-004): the Mug STEERS (schedule/place/prioritize); the papercup
+# WATCHES (fleet health / misbehaving agents / the coord substrate) and RAISES
+# ALARMS (coord:escalate/send) — it never acts. Read-mostly by construction: its
+# caps (BLUEPRINT_ROLE_CAPS.papercup) grant reads + coord:write only, and it is
+# carved OUT of fleet:spawn/gym (placement is the Mug's, not the watcher's).
+#
+# kind:'harness' (NOT a pot): a papercup is a placed agent, freely launchable by
+# the Mug; the privileged kind:'pot' is the Mug (pot blueprint) alone.
+#
+# Extends `single-agent`: inherits the run-to-done single-role spine (one decider +
+# DONE/ESCALATE/IDLE edges) + the governed + durable launch contract. Overrides
+# ONLY the decider role (`papercup`), the turn budget, and requiresRepo (a watcher
+# does not build against a repo — it sweeps the workspace).
+id: papercup
+extends: single-agent
+kind: harness
+version: 0.1.0
+description: >-
+  Launch one fleet WATCHER (the `papercup` role) — the read-mostly observer split
+  out of the overloaded operator (D-004). It sweeps fleet liveness, the coord
+  substrate, and harness health, and raises alarms via coord:escalate/send. It
+  never acts (no spawn/cancel/mutate) — the Mug steers, the papercup watches.
+
+# The watcher is given a watch directive, not a typed pipeline feature.
+workItem:
+  kind: task
+  idPrefix: SENTINEL
+
+# Spine edges + planner inherited from `single-agent`; override the decider role +
+# the papercup's turn budget only. The papercup runs one sweep to done/escalate,
+# registers a wake (coord:await-inbox / events:await), then sleeps.
+spine:
+  decider: papercup
+  maxTurns: 40
+
+roles:
+  - id: papercup
+    description: >-
+      The fleet watcher: sweep fleet:assignments/tree (stuck/orphaned spawns),
+      coord:presence/inbox/feed (substrate health), harness:health/escalation
+      (crash-loops), activity:recent (retry storms); judge noise vs alarm; raise a
+      genuine anomaly via coord:escalate/send (never act); register a wake and
+      sleep. Persona: prompts/papercup.md (global — no blueprint-scoped override).
+
+knobs:
+  harnessKind: sentinel
+  # A papercup WATCHES the workspace/fleet, it does not build against a project cwd
+  # — like the Mug (pot), it is repo-less. requiresRepo:false gates the cwd
+  # resolution to the home slug without demanding a registered repo.
+  requiresRepo: false
+
+# NO `triggers` here — like the cup, the papercup is PLACED by the Mug on demand
+# (fleet:spawn / fireLaunchBlueprint). The Mug's supervision loop decides WHEN a
+# watcher is warranted (e.g. when fleet load is high); she may also declare a
+# cadence/event wake for it via her own pot:declare-wake. The Mug's placement IS
+# its trigger — the watcher is steered, not self-firing.
+
+# Dependencies — the READ-MOSTLY watcher surface (caps-aligned, no execution):
+# fleet liveness, the coord substrate + alarm channel, harness health, activity,
+# and search to investigate. Deliberately NO fleet:spawn/drain/cancel, no
+# work_items:write, no harness:create — the papercup watches + alerts, the Mug acts.
+dependencies:
+  tools:
+    - agent_tools:list
+    - fleet:assignments
+    - fleet:tree
+    - coord:presence
+    - coord:inbox
+    - coord:feed
+    - coord:declare-intent
+    - coord:send
+    - coord:escalate
+    - coord:await-inbox
+    - harness:health
+    - harness:escalation
+    - harness:status
+    - activity:recent
+    - search:fulltext
+    - search:semantic
+    - work_items:list
+  plugins: []

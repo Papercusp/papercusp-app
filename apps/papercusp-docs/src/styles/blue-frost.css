@@ -1,0 +1,210 @@
+/* Papercusp public docs — blue-frost theme ported to Starlight 0.39.
+ *
+ * The original `blue-frost.css` lived at apps/papercusp-docs/app/ and
+ * targeted fumadocs DOM (#nd-page, .bg-fd-card, --color-fd-*).
+ * fumadocs is gone; this re-implements the cool blue glass aesthetic
+ * on Starlight's DOM and CSS-variable surface. Pixel-perfect parity
+ * isn't the goal — palette + body gradient + frosted sidebar + cyan
+ * accent + scrollbar are. Force-dark parity with the old
+ * `enableSystem:false, defaultTheme:'dark'` is achieved by mirroring
+ * the dark palette into the light-theme variables.
+ */
+
+:root,
+:root[data-theme='dark'],
+:root[data-theme='light'] {
+  color-scheme: dark;
+
+  /* Blue-frost palette — copied from the fumadocs original */
+  --docs-bg: #050b13;
+  --docs-bg-soft: #07101d;
+  --docs-text: #e7f7ff;
+  --docs-text-soft: #b9d4e8;
+  --docs-text-muted: #86a3bb;
+  --docs-accent: #38bdf8;
+  --docs-accent-soft: #7dd3fc;
+  --docs-border: rgba(125, 211, 252, 0.16);
+  --docs-border-strong: rgba(125, 211, 252, 0.34);
+
+  /* Starlight theme variable overrides (force dark in both variants) */
+  --sl-color-accent-low: rgba(56, 189, 248, 0.16);
+  --sl-color-accent: var(--docs-accent);
+  --sl-color-accent-high: var(--docs-accent-soft);
+  --sl-color-white: #f0fbff;
+  --sl-color-gray-1: #f0fbff;
+  --sl-color-gray-2: var(--docs-text);
+  --sl-color-gray-3: var(--docs-text-soft);
+  --sl-color-gray-4: var(--docs-text-muted);
+  --sl-color-gray-5: rgba(125, 211, 252, 0.20);
+  --sl-color-gray-6: var(--docs-bg-soft);
+  --sl-color-gray-7: #03101e;
+  --sl-color-black: var(--docs-bg);
+  --sl-color-bg: var(--docs-bg);
+  --sl-color-bg-nav: rgba(7, 16, 29, 0.92);
+  --sl-color-bg-sidebar: rgba(7, 16, 29, 0.88);
+  --sl-color-bg-inline-code: rgba(56, 189, 248, 0.10);
+  --sl-color-text: var(--docs-text);
+  --sl-color-text-accent: var(--docs-accent-soft);
+  --sl-color-hairline: var(--docs-border);
+  --sl-color-hairline-shade: var(--docs-border);
+  --sl-color-hairline-light: var(--docs-border);
+  --sl-color-backdrop-overlay: rgba(2, 8, 18, 0.68);
+}
+
+html {
+  background: var(--docs-bg);
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 50% -10%, rgba(56, 189, 248, 0.26), transparent 34rem),
+    radial-gradient(circle at 92% 8%, rgba(125, 211, 252, 0.14), transparent 24rem),
+    radial-gradient(circle at 12% 38%, rgba(14, 165, 233, 0.11), transparent 24rem),
+    linear-gradient(180deg, #0b1220 0%, #081523 44%, #050b13 100%);
+  background-attachment: fixed;
+  color: var(--docs-text);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    linear-gradient(120deg, rgba(255, 255, 255, 0.035), transparent 24%, rgba(125, 211, 252, 0.032) 52%, transparent 70%),
+    linear-gradient(rgba(125, 211, 252, 0.032) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(125, 211, 252, 0.022) 1px, transparent 1px);
+  background-size: auto, 64px 64px, 64px 64px;
+  mask-image: linear-gradient(to bottom, black, transparent 82%);
+}
+
+body > * {
+  position: relative;
+  z-index: 1;
+}
+
+::selection {
+  background: rgba(56, 189, 248, 0.35);
+  color: #f0fbff;
+}
+
+/* Markdown content */
+.sl-markdown-content {
+  color: var(--docs-text-soft);
+}
+
+.sl-markdown-content :where(h1, h2, h3, h4) {
+  color: #f0fbff;
+  letter-spacing: -0.035em;
+}
+
+.sl-markdown-content h1 {
+  letter-spacing: -0.045em;
+  text-shadow: 0 16px 44px rgba(0, 0, 0, 0.46), 0 0 34px rgba(56, 189, 248, 0.10);
+}
+
+.sl-markdown-content strong {
+  color: #f4fbff;
+}
+
+.sl-markdown-content a {
+  text-decoration-color: rgba(125, 211, 252, 0.45);
+  text-underline-offset: 3px;
+}
+
+.sl-markdown-content a:hover {
+  color: #d7f3ff;
+  text-decoration-color: #d7f3ff;
+}
+
+/* Sidebar — frosted glass panel */
+.sidebar-pane {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.14), transparent 18rem),
+    linear-gradient(180deg, rgba(7, 16, 29, 0.92), rgba(4, 10, 20, 0.94)) !important;
+  border-color: var(--docs-border) !important;
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+}
+
+.sidebar-content a[aria-current='page'] {
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.18), rgba(56, 189, 248, 0.09));
+  border: 1px solid rgba(125, 211, 252, 0.18);
+  color: #f0fbff;
+  border-radius: 8px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* Top header */
+header.header {
+  background: rgba(6, 13, 24, 0.86) !important;
+  border-color: var(--docs-border) !important;
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+}
+
+/* Right-rail TOC */
+.right-sidebar,
+starlight-toc {
+  color: var(--docs-text-muted);
+}
+
+/* Inline code + code blocks */
+.sl-markdown-content :not(pre) > code {
+  color: #d9f3ff;
+  background: rgba(56, 189, 248, 0.10);
+  border: 1px solid rgba(125, 211, 252, 0.16);
+  border-radius: 0.42rem;
+  padding: 0.12rem 0.34rem;
+}
+
+.sl-markdown-content pre,
+.expressive-code .frame {
+  background:
+    radial-gradient(circle at 20% 0%, rgba(56, 189, 248, 0.10), transparent 40%),
+    rgba(3, 8, 16, 0.94) !important;
+  border-color: rgba(125, 211, 252, 0.18) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 18px 50px rgba(0, 0, 0, 0.22) !important;
+}
+
+/* Focus + form input */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible {
+  outline: 2px solid rgba(125, 211, 252, 0.48);
+  outline-offset: 2px;
+}
+
+input,
+[cmdk-input] {
+  background: rgba(3, 8, 16, 0.70) !important;
+  color: var(--docs-text) !important;
+  border-color: var(--docs-border) !important;
+}
+
+/* Scrollbar — cool blue thumb on dark track */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(125, 211, 252, 0.20);
+  border: 3px solid rgba(5, 11, 19, 0.9);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(3, 8, 16, 0.55);
+}
+
+@media (max-width: 768px) {
+  .sl-markdown-content h1 {
+    font-size: 2.25rem;
+  }
+}

@@ -1,0 +1,108 @@
+{
+  "evidenceRef": "plan sql-escape-tool-routing-2026-08-12 P-009 tranche 2 — buildSqlFixture(pair) over agent-authored dev:pg_query calls, 14d window, status=ok",
+  "extractedAt": "2026-08-12",
+  "totalAtoms": 84,
+  "totalSessions": 37,
+  "sample": [
+    {
+      "sid": "su-6eab8a26-2a45-4253-a708-671fd3182607",
+      "ts": "2026-08-03 00:18:35.678-04",
+      "atom": "SELECT filename FROM harness_shared.schema_migrations ORDER BY applied_at DESC LIMIT 4"
+    },
+    {
+      "sid": "su-3a5df0ae-a3a6-43ce-a793-e60b5098c2b3",
+      "ts": "2026-08-03 00:25:56.904-04",
+      "atom": "SELECT filename FROM harness_shared.schema_migrations WHERE filename LIKE '727%'"
+    },
+    {
+      "sid": "su-b8422496-64f5-482d-9361-0bc74ac0cd1a",
+      "ts": "2026-08-09 16:32:56.355-04",
+      "atom": "SELECT filename FROM harness_shared.schema_migrations WHERE filename LIKE '779%'"
+    },
+    {
+      "sid": "su-9e4b7b0f-7efd-4b79-8703-d8fa906276f3",
+      "ts": "2026-08-03 01:10:17.822-04",
+      "atom": "SELECT filename, applied_at FROM harness_shared.schema_migrations ORDER BY applied_at DESC LIMIT 8"
+    },
+    {
+      "sid": "su-5ca1df5d-6b67-47a7-9417-2d2aab9fe3d5",
+      "ts": "2026-08-03 01:32:52.471-04",
+      "atom": "SELECT filename, applied_at FROM harness_shared.schema_migrations ORDER BY filename DESC LIMIT 8"
+    },
+    {
+      "sid": "su-5622daef-b534-4e76-85d8-7867636c29bb",
+      "ts": "2026-08-02 05:15:37.187-04",
+      "atom": "SELECT filename, applied_at FROM harness_shared.schema_migrations WHERE filename LIKE '616%'"
+    },
+    {
+      "sid": "su-cf94c150-6e65-474b-affd-718be583374e",
+      "ts": "2026-08-02 10:00:35.915-04",
+      "atom": "SELECT filename, applied_at FROM harness_shared.schema_migrations WHERE filename LIKE '686%'"
+    },
+    {
+      "sid": "su-07374fbd-e848-4204-87aa-bb86a31e5a92",
+      "ts": "2026-08-02 13:53:13.785-04",
+      "atom": "SELECT filename, applied_at FROM harness_shared.schema_migrations WHERE filename LIKE '72%' ORDER BY filename DESC LIMIT 8"
+    },
+    {
+      "sid": "su-adb03b77-4311-4439-88a8-a0da003b8219",
+      "ts": "2026-08-12 10:54:09.843-04",
+      "atom": "SELECT filename, applied_at FROM harness_shared.schema_migrations WHERE filename LIKE '727%' ORDER BY filename"
+    },
+    {
+      "sid": "su-93019982-b5f9-477e-9459-f398ce81e84b",
+      "ts": "2026-08-08 19:41:52.076-04",
+      "atom": "SELECT filename, applied_at FROM harness_shared.schema_migrations WHERE filename LIKE '741%'"
+    },
+    {
+      "sid": "su-863287b8-7fd2-4c5e-901e-66444b3856e9",
+      "ts": "2026-08-11 19:48:05.385-04",
+      "atom": "SELECT filename, applied_at FROM harness_shared.schema_migrations WHERE filename LIKE '79%' ORDER BY filename DESC LIMIT 8"
+    },
+    {
+      "sid": "su-e2f8b527-3d26-4894-a6f9-bf0bb7f34d71",
+      "ts": "2026-08-11 23:51:56.297-04",
+      "atom": "SELECT filename, applied_at, sha256 FROM harness_shared.schema_migrations WHERE filename = '802-agent-owner-predicate.sql'"
+    },
+    {
+      "sid": "su-b9269a31-fa09-465f-8690-a04e6bb30470",
+      "ts": "2026-08-03 01:27:39.888-04",
+      "atom": "SELECT filename, left(sha256,16) AS recorded_sha16, applied_at FROM harness_shared.schema_migrations WHERE filename LIKE '727-%'"
+    },
+    {
+      "sid": "su-bb5d513f-c15c-4bc7-8a68-edf9430a523a",
+      "ts": "2026-08-03 20:01:35.342-04",
+      "atom": "SELECT filename, to_char(applied_at AT TIME ZONE 'UTC','MM-DD HH24:MI') AS applied FROM harness_shared.schema_migrations WHERE applied_at >= timestamptz '2026-08-01 12:00Z' AND applied_at < timestamptz '2026-08-02 14:00Z' ORDER BY applied_at"
+    },
+    {
+      "sid": "su-3a5df0ae-a3a6-43ce-a793-e60b5098c2b3",
+      "ts": "2026-08-03 00:08:29.727-04",
+      "atom": "SELECT name FROM harness_shared.schema_migrations WHERE name LIKE '727%'"
+    },
+    {
+      "sid": "su-8c6696b4-6a3f-4004-b527-9661ebe49025",
+      "ts": "2026-08-01 14:37:24.744-04",
+      "atom": "SELECT version FROM harness_shared.schema_migrations WHERE version = '566' OR version LIKE '566%'"
+    },
+    {
+      "sid": "su-1c1faa38-1908-4f13-8995-26439379db94",
+      "ts": "2026-08-02 07:49:05.688-04",
+      "atom": "SELECT version FROM harness_shared.schema_migrations WHERE version LIKE '72%' ORDER BY version DESC LIMIT 10"
+    },
+    {
+      "sid": "su-a8424aad-b009-42fa-a997-b1339d8fbb84",
+      "ts": "2026-08-03 01:01:04.148-04",
+      "atom": "SELECT version, applied_at FROM harness_shared.schema_migrations WHERE version = '727-widen-prose-embedding-cols-to-gemma-native-768' OR version LIKE '727%' ORDER BY applied_at DESC LIMIT 5"
+    },
+    {
+      "sid": "su-7c8677a2-f6fe-4d9f-b2ff-d33729695d33",
+      "ts": "2026-08-02 09:11:38.449-04",
+      "atom": "SELECT version, applied_at FROM harness_shared.schema_migrations WHERE version LIKE '72%' ORDER BY version DESC LIMIT 8"
+    },
+    {
+      "sid": "su-bb5d513f-c15c-4bc7-8a68-edf9430a523a",
+      "ts": "2026-08-03 20:01:31.414-04",
+      "atom": "SELECT version, name, to_char(applied_at AT TIME ZONE 'UTC','MM-DD HH24:MI') AS applied FROM harness_shared.schema_migrations WHERE applied_at >= timestamptz '2026-08-02 00:00Z' AND applied_at < timestamptz '2026-08-02 14:00Z' ORDER BY applied_at"
+    }
+  ]
+}

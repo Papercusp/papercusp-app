@@ -1,0 +1,51 @@
+# hier-lead-worker — HIERARCHICAL (elected-lead) coordination topology (benchmark-coordination-topologies).
+#
+# A team with ONE elected LEAD + N workers (coordination.coordinator: elected-lead). The lead runs a single
+# coordination pass over the team's backlog — plan/assign/strategize, recorded in shared state — then the
+# workers execute under it. The lead is a PEER coordinator WITHIN the team, NOT the system Queen (kind:hive):
+# this is the INTERMEDIATE point between flat-distributed (no coordinator) and central-hive (system Queen),
+# answering "does an in-team coordinator's overhead beat flat self-claim?". The lead's calls are charged to
+# the arm's iso-budget (coordination is not free), so a less-efficient coordinator completes fewer tasks.
+id: hier-lead-worker
+extends: base
+version: 0.1.0
+description: >-
+  Hierarchical elected-lead team: one lead runs a coordination pass (plan/assign/strategize) over the team
+  backlog, then workers execute under it. The in-team-coordinator pole between flat-distributed and the Queen.
+
+workItem:
+  kind: feature
+  idPrefix: W
+
+dispatch:
+  concurrency: 4
+
+spine:
+  # Workers self-claim from the team backlog, executing under the lead's broadcast plan; the lead's
+  # coordination rides coordination.coordinator (not the spine), so the spine stays edgeless (self-claim).
+  claimModel: self-claim-fifo
+  maxTurns: 200
+
+dependencies:
+  tools: []
+  packs: []
+  plugins: []
+  blueprints: []
+
+coordination:
+  coordinator: elected-lead   # ONE lead runs a coordination pass, then workers execute under it
+  broadcast: topic            # the lead broadcasts the plan; workers read it
+  review: none
+  sharedState: both
+  team: per-backlog           # one team over the shared backlog → one lead
+
+roles:
+  - id: lead
+    description: >-
+      The elected team coordinator (a PEER, not the system Queen). Runs ONE coordination pass over the team's
+      backlog — decides strategy + assignment/ordering, surfaces shared context — and records the plan in
+      shared state + the team topic. Does NOT write solutions; its value is coordination.
+  - id: worker
+    description: >-
+      Executes the team's tasks under the lead's plan: reads the lead's strategy/assignment from shared state,
+      solves its task accordingly, and reports progress/blockers back so the lead can re-coordinate.

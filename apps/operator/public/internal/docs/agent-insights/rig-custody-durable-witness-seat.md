@@ -1,0 +1,117 @@
+# Rig custody: durable witness seat and 10-minute hand-off runbook
+URL: /internal/docs/agent-insights/rig-custody-durable-witness-seat
+
+Operational runbook for keeping VM-rig custody durable across session death: a standing headless witness, event-driven hand-offs, automatic claim release, and identity-mirror divergence detection.
+
+# Rig custody: durable witness seat and 10-minute hand-off runbook
+
+## Status and scope
+
+This runbook closes the custody failure class tracked by **WI-2039868 / P-005**. It is rig-independent: use it for the local tower↔VM rig, a packaged headless server, or any future two-machine witness. The custody contract is deliberately small:
+
+* one standing headless witness owns the rig lane and writes a durable checkpoint;
+* hand-off is a lifecycle operation completed within 10 minutes, not a chat promise;
+* gate transitions wake parked work through exact event keys;
+* a dead session cannot strand claims or locks; and
+* identity mirrors fail closed and expose divergence before P2P boot.
+
+A witness is custody, not proof that a test passed. The witness records who has the lane, what was last verified, and the exact next action. Evidence still comes from the rig probe and its read-back.
+
+## Why this exists
+
+Rig work previously depended on a transient interactive session. When that session died, the claim survived while the operator had no reliable hand-off context. Recovering the lane required roughly a day of ledger archaeology. The same pattern appeared on the Mac VM when the configured encrypted identity mirror and the legacy `~/.papercusp/identity` mirror diverged (EI-21987155936742109, a recurrence of WI-2018): each file was individually valid, but the process could not know which device key was canonical, so all P2P substrates stayed unbooted.
+
+Do not infer custody from a one-time announcement, a stale claim, or a green in-process test. Read the live claim/holder state and the durable checkpoint.
+
+## Standing witness seat
+
+Create one headless `su` seat for the rig lane and keep it independent of the GUI session. The seat must:
+
+1. claim the rig work-item before touching rig files;
+2. declare intent naming the current plan item and rig boundary;
+3. checkpoint after every probe, deploy, or failed attempt;
+4. park on a declared gate event when the next action is blocked; and
+5. release or complete the claim on hand-off.
+
+The canonical live signal is `fleet:assignments`/`coord:presence`: a claim is a reservation, presence is process liveness, and `last_progress_at` is work progress. A holder marked `orphaned`, `stalled`, or `ended` is not active custody.
+
+A parked witness must await the exact returned key (for example `p008:vm-rig-custody-safe` or `fleet:claim-released:<slug>`). Never poll `fleet:assignments` on a timer while a completion event exists. Use `events:await { event, timeout_sec, on_timeout: 'wake' }`; on timeout, re-check the producer's liveness and progress before re-arming.
+
+## Ten-minute hand-off
+
+The outgoing witness starts the hand-off at the first sign it cannot finish the current atomic step:
+
+1. finish or roll back only the step in hand; never leave a half-written artifact or held file lock;
+2. write `work_items:checkpoint` with: rig host(s), artifact/build identity, probe command, last read-back, open gate, and the single next action;
+3. emit/declare the gate the successor must await (copy the key returned by `events:emit { announce: true }`);
+4. release the file locks and the work-item claim, or mark the item blocked with the exact dependency;
+5. dispatch the lane to a **live or wakeable** successor with `coord:dispatch`/`coord:handoff`; and
+6. verify `woken >= 1` (or `accepted:true` for a hand-off). `woken:0`, `recipient_absent`, `recipient_dead`, or `sessionState:'ended'` is a missed transfer: resolve a live successor or respawn the witness.
+
+The successor re-reads the checkpoint and the live rig state before acting. It does not trust the outgoing message as evidence. If no successor is available within 10 minutes, leave the item explicitly blocked/needs-human with the checkpoint and the missing capability; do not leave a live-looking claim behind.
+
+For this plan, the critical sequence is: build a clean current-HEAD seeded Server artifact (P-101/P-508) → deploy to the VM → run one clean parity sample → fire `p008:vm-rig-custody-safe`. P-004 must not be declared complete from a stale seed log or an in-process result.
+
+## Gate-event parking
+
+Declare the critical-path gate in the kickoff so every parked lane has a key from minute one. Use exact-match event keys and await the returned key. The event emitter owns the completion: a peer's message saying “green” is not the gate. When the gate opens, emit the returned key once; late awaiters receive the latched `already_fired` result and proceed.
+
+Useful custody gates include:
+
+| Condition                    | Park on                                                 | Read-back before proceeding                    |
+| ---------------------------- | ------------------------------------------------------- | ---------------------------------------------- |
+| clean VM-rig sample complete | `p008:vm-rig-custody-safe`                              | parity output + probe timestamps on both hosts |
+| claim returned to pool       | `fleet:claim-released:<fleet>` or `claim:released:<id>` | `fleet:assignments` shows no stale holder      |
+| seeded artifact committed    | `git-sync:committed:<sha>`                              | `dev:pipeline_position` for the artifact path  |
+| staging service restarted    | `service:up:<name>`                                     | `dev:service_health` on `:3170`                |
+
+If a timeout wakes the witness, diagnose the producer. A dead/parked owner, unchanged ledger, or missing emit is a stalled dependency to fix or take over—not a reason to sleep indefinitely.
+
+## Session-death claim release
+
+Two backstops are active and intentionally complementary:
+
+* **Fast path:** the SessionEnd/lease-release path calls the same `releaseWorkItem` implementation used by voluntary release. It clears both the work-item lease (`taken_by`/`assignee`) and the coordination claim ledger, and it writes a mechanical checkpoint when no agent-authored checkpoint exists.
+* **Periodic path:** `idle-session-reaper-action.ts` invokes `runWorkItemLeaseReap` for dead owners and the stale-claim sweep in `work-items-stale-claims.ts`. Dead claims are released after the liveness grace; a confirmed-terminal spawn (`failed`, `cancelled`, `exited`, `killed`) is released immediately (`reason: spawn-exit`). Mid-flight rows are requeued to the unified claimable state, bounded by the requeue cap; cap exhaustion dead-letters to `blocked`.
+
+Liveness is alias-aware and uses recent `coord_presence`, fresh nursery aliases, and the unified `agent_activity` live-turn signal. An armed loop is continuation authority, but it is not itself proof of a live process. The release UPDATE re-checks the holder, so a racing re-claim is not stolen.
+
+A non-holder release is refused (`not_holder`); never “repair” a peer claim by force unless you are the designated reaper/leader and have recorded why. After any release, verify both ledgers and await `claim:released:<id>` or `work-item:claimable` before selecting the item.
+
+## Identity-mirror recurrence guard
+
+`keychainStore` is the sole writer for encrypted fallback files. It stages every configured and legacy mirror first, then atomically publishes all mirrors. If any mirror cannot be staged or published, it restores already-published files and leaves the previous converged pair intact.
+
+`fileLoad` decrypts both mirrors. If both exist but contain different plaintext keys, it returns `io_error` (“identity mirrors disagree”) instead of selecting one or minting a replacement. `keychainProbeTiers` reads every mirror and reports `mirrorsDiverged:true`; epoch boot records `MIRRORS_DIVERGED=true` and remains fail-closed. This is the detector that would have caught the EI-21987155936742109 recurrence before the rig was declared usable.
+
+On a divergence finding:
+
+1. stop P2P boot and do not delete either copy from a request-only sidecar;
+2. capture the keychain id, tier probe, host identity, and boot-history event (never key bytes);
+3. use the primary operator to establish the attested device key as canonical;
+4. run a convergent `keychainStore` and re-probe both mirrors; and
+5. restart the sidecar, then prove presence gossip and parity again.
+
+A healthy pair may have different ciphertext (each mirror uses a random salt/IV); compare decrypted plaintext, never file bytes.
+
+## Verification checklist
+
+Run the cheapest focused checks before claiming custody durable:
+
+```bash
+# Claim/release two-ledger contract
+npm run test:file -- packages/operator-core/lib/work-items-release-claim-honesty.integration.test.ts
+
+# Identity mirror recurrence guard
+npm run test:file -- packages/operator-core/lib/identity/keychain.test.ts
+
+# VM-rig parity driver (requires a built artifact and the local rig)
+cd papercusp-desktop
+bin/vm-rig/parity.sh
+```
+
+The keychain tests must cover: converged mirrors, refusal on divergent plaintext, atomic no-publish on a failed mirror, and `mirrorsDiverged:true` from the probe. The claim test must show a holder release clears both ledgers and a dead/terminal holder is requeueable. Live parity must include read-back from both machines; a summary-only exit code is insufficient.
+
+## Incident disposition
+
+Record the custody outcome on WI-2039868: checkpoint hash, successor/hand-off receipt, gate key and fire time, claim-release evidence, identity probe result, and focused test output. If a step fails, preserve the exact drill id and both host timestamps, keep the gate closed, and create or link one blocker. The durable success condition is not “a witness existed”; it is a live, re-readable custody trail that survives session death and catches identity divergence before the next rig run.

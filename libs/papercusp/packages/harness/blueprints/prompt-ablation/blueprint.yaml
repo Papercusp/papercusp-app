@@ -1,0 +1,61 @@
+# The `prompt-ablation` blueprint — deterministic-blueprints-migration-2026-06-13 (P-121).
+#
+# Prompt sedimentology (self-learning-frontier P-023 / FB-09): weekly, SHADOW-ablate
+# ONE SU-playbook governance rule and replay the llm-testing `su` suite
+# baseline-vs-ablated, scoring the behavioral delta. The two arms are direct `llmCall`s
+# (SUT + sim + judge via the operator runner deps) — a GOVERNED replay battery, NOT a
+# fleet agent spawn via spawnInvokeOnce (there is NO spawnInvokeOnce path in
+# lib/ablation — D-009). NEVER mutates a live prompt: the only writes are evidence rows
+# + the governor spend ledger.
+#
+# So prompt-ablation is structurally a DETERMINISTIC pipeline — one step whose op runs
+# the cap-bound cycle — behavior-neutral with the bespoke `system:prompt-ablation`
+# routine (D-004), not a re-route onto the fleet launch chokepoint.
+#
+# Same flag (`papercusp-prompt-ablation`, default OFF) + governor (loop
+# `prompt-ablation`, the per-cycle budget is the HARD cycle cap) gates as the bespoke
+# routine — the op runs them; dark stays dark. SEEDED INACTIVE.
+id: prompt-ablation
+extends: base
+version: 0.1.0
+description: >-
+  Prompt sedimentology: shadow-ablate ONE SU-playbook governance rule and replay the
+  llm-testing `su` suite baseline-vs-ablated, recording the behavioral-delta evidence
+  — on a weekly cadence. Never mutates a live prompt.
+
+workItem:
+  kind: ablation-run
+  idPrefix: ABL
+
+# Program-mode spine: one deterministic step, NO gate ⇒ deterministic pipeline.
+# `payload.*` are the cycle tunables the routine's payload_template carries (absent ⇒
+# the op's defaults). The per-cycle spend cap is the governor's remainingUsd, applied
+# inside the op (NOT a payload knob).
+spine:
+  steps:
+    - id: ablate
+      op: prompt:ablation
+      args:
+        scenarioIds: "{{ payload.scenarioIds }}"
+        repeat: "{{ payload.repeat }}"
+        ruleKey: "{{ payload.ruleKey }}"
+        ledgerWindowDays: "{{ payload.ledgerWindowDays }}"
+      bind: ablation
+
+knobs:
+  harnessKind: learning
+  requiresRepo: false
+
+# Scheduled trigger (D-004): byte-identical to the bespoke `system:prompt-ablation`
+# routine (weekly Monday 04:35, offset from the deploy rhythm + the weekly owner
+# digest). The routine fires `system:blueprint-run { blueprintId: prompt-ablation }`;
+# the handler detects program-mode and runs the step inline. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 35 4 * * 1"
+      action: system:blueprint-run
+      singleton: true  # P-144/D-018: workspace-singleton cadence — one dark @singleton routine per workspace
+
+dependencies:
+  tools: []
+  plugins: []

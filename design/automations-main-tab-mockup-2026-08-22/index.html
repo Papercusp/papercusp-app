@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Papercusp Automations — consolidated surface</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --canvas: #07111d;
+      --chrome: #0a1523;
+      --panel: #0d1928;
+      --panel-2: #101e2f;
+      --line: #223449;
+      --line-soft: #17283b;
+      --text: #eff7ff;
+      --muted: #89a0b8;
+      --subtle: #617991;
+      --blue: #38bdf8;
+      --blue-soft: rgba(56, 189, 248, .12);
+      --green: #34d399;
+      --green-soft: rgba(52, 211, 153, .11);
+      --amber: #fbbf24;
+      --amber-soft: rgba(251, 191, 36, .10);
+      --purple: #a78bfa;
+      --purple-soft: rgba(167, 139, 250, .10);
+      --danger: #fb7185;
+      --shadow: 0 20px 70px rgba(0, 0, 0, .32);
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--canvas); }
+    body {
+      margin: 0;
+      min-width: 1180px;
+      background:
+        radial-gradient(circle at 82% -10%, rgba(56, 189, 248, .08), transparent 30%),
+        radial-gradient(circle at 8% 20%, rgba(167, 139, 250, .06), transparent 24%),
+        var(--canvas);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    button, input { font: inherit; }
+    button { color: inherit; }
+    .page { width: 1560px; margin: 0 auto; padding: 34px 38px 52px; }
+    .eyebrow { color: var(--blue); font-size: 11px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+    .study-head { display: grid; grid-template-columns: 1fr 430px; gap: 36px; align-items: end; margin-bottom: 24px; }
+    h1 { max-width: 900px; margin: 10px 0 8px; font-size: 46px; line-height: 1.02; letter-spacing: -.045em; }
+    .lede { max-width: 850px; margin: 0; color: #b3c6d8; font-size: 17px; }
+    .decision {
+      border: 1px solid rgba(52, 211, 153, .38);
+      border-radius: 14px;
+      background: var(--green-soft);
+      padding: 18px 20px;
+      box-shadow: var(--shadow);
+    }
+    .decision strong { display: block; margin-bottom: 6px; color: var(--green); font-size: 14px; }
+    .decision span { color: #b8ced5; }
+
+    .label-row { display: flex; align-items: center; justify-content: space-between; margin: 26px 2px 10px; }
+    .label-row strong { font-size: 13px; letter-spacing: .02em; }
+    .label-row span { color: var(--muted); font-size: 11px; }
+    .surface {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--chrome);
+      box-shadow: var(--shadow);
+    }
+    .window-bar { display: flex; align-items: center; justify-content: space-between; height: 38px; padding: 0 14px; border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 10px; }
+    .dots { display: flex; gap: 6px; }
+    .dots i { display: block; width: 7px; height: 7px; border-radius: 50%; background: #33485d; }
+    .window-bar b { color: #a6bdd1; font-weight: 600; }
+    .app { display: grid; grid-template-columns: 180px minmax(0, 1fr); min-height: 780px; }
+    .rail { border-right: 1px solid var(--line-soft); background: #091421; padding: 18px 12px; }
+    .brand { display: flex; align-items: center; gap: 9px; margin: 0 8px 23px; font-weight: 760; }
+    .brand-mark { display: grid; place-items: center; width: 25px; height: 25px; border: 1px solid rgba(56, 189, 248, .35); border-radius: 7px; background: var(--blue-soft); color: var(--blue); font-size: 11px; }
+    .rail-group { margin: 18px 8px 7px; color: var(--subtle); font-size: 8px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    .nav { display: grid; gap: 3px; }
+    .nav-item { display: flex; align-items: center; gap: 9px; min-height: 34px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; color: #8ea5ba; font-size: 11px; }
+    .nav-item .icon { width: 14px; color: #6f8aa3; text-align: center; }
+    .nav-item.active { border-color: rgba(56, 189, 248, .26); background: var(--blue-soft); color: #dff5ff; font-weight: 700; }
+    .nav-item.active .icon { color: var(--blue); }
+    .nav-count { margin-left: auto; padding: 1px 5px; border-radius: 8px; background: #17283a; color: #8da5ba; font-size: 8px; }
+    .rail-foot { margin: 26px 8px 0; padding: 11px; border: 1px solid var(--line-soft); border-radius: 9px; color: var(--muted); font-size: 9px; }
+    .rail-foot b { display: block; margin-bottom: 3px; color: #c3d5e4; }
+
+    .main { min-width: 0; background: #0a1421; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; height: 50px; padding: 0 22px; border-bottom: 1px solid var(--line-soft); }
+    .crumb { color: var(--muted); font-size: 10px; }
+    .crumb b { color: #cee1ef; }
+    .top-actions { display: flex; align-items: center; gap: 8px; }
+    .search { width: 210px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: #0b1725; color: var(--subtle); font-size: 9px; }
+    .avatar { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 8px; background: #183047; color: var(--blue); font-size: 9px; font-weight: 800; }
+    .content { padding: 24px 26px 28px; }
+    .title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+    .title-row h2 { margin: 0; font-size: 23px; letter-spacing: -.025em; }
+    .title-row p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .primary { border: 1px solid #4ac7f7; border-radius: 7px; background: var(--blue); padding: 8px 12px; color: #04121c; font-size: 10px; font-weight: 800; }
+    .view-tabs { display: flex; align-items: center; gap: 5px; margin-top: 18px; padding: 5px; border: 1px solid var(--line-soft); border-radius: 9px; background: #0b1725; }
+    .view-tab { padding: 7px 12px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 9px; font-weight: 700; }
+    .view-tab.active { background: var(--blue-soft); color: #dff6ff; }
+    .view-tab small { margin-left: 5px; color: var(--subtle); font-size: 7px; }
+    .view-tabs > span { margin-left: auto; color: var(--subtle); font-size: 8px; }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin-top: 10px; }
+    .metric { min-height: 76px; padding: 12px 13px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--panel); }
+    .metric.warn { border-color: rgba(251, 191, 36, .30); background: var(--amber-soft); }
+    .metric.spend { border-color: rgba(167, 139, 250, .25); background: var(--purple-soft); }
+    .metric-label { color: var(--muted); font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .metric strong { display: block; margin-top: 6px; font-size: 20px; line-height: 1; }
+    .metric small { display: block; margin-top: 7px; color: var(--subtle); font-size: 8px; }
+    .metric.warn strong { color: var(--amber); }
+    .metric.spend strong { color: var(--purple); }
+
+    .toolbar { display: flex; align-items: center; justify-content: space-between; margin-top: 14px; padding: 8px; border: 1px solid var(--line-soft); border-radius: 9px; background: #0b1725; }
+    .filters { display: flex; gap: 4px; }
+    .filter { padding: 6px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 9px; }
+    .filter.active { background: var(--blue-soft); color: #dff6ff; font-weight: 750; }
+    .toolbar-note { color: var(--subtle); font-size: 8px; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(330px, .72fr); gap: 11px; margin-top: 11px; }
+    .list-panel, .detail-panel { border: 1px solid var(--line-soft); border-radius: 11px; background: var(--panel); }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; min-height: 38px; padding: 0 12px; border-bottom: 1px solid var(--line-soft); }
+    .panel-head strong { font-size: 10px; }
+    .panel-head span { color: var(--subtle); font-size: 8px; }
+    .automation { display: grid; grid-template-columns: minmax(220px, 1.45fr) 145px 120px 82px; align-items: center; gap: 12px; min-height: 69px; padding: 10px 12px; border-bottom: 1px solid var(--line-soft); }
+    .automation:last-child { border-bottom: 0; }
+    .automation.selected { background: linear-gradient(90deg, rgba(56, 189, 248, .08), transparent); box-shadow: inset 2px 0 var(--blue); }
+    .name-line { display: flex; align-items: center; gap: 7px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(52, 211, 153, .08); }
+    .status-dot.running { background: var(--blue); }
+    .status-dot.warn { background: var(--amber); }
+    .automation b { font-size: 10px; }
+    .automation p { overflow: hidden; margin: 3px 0 0 13px; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+    .tag { padding: 2px 5px; border: 1px solid #2b4358; border-radius: 5px; color: #8eabc2; font-size: 7px; font-weight: 700; text-transform: uppercase; }
+    .trigger-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+    .trigger-chip { padding: 2px 6px; border: 1px solid #29465d; border-radius: 999px; background: rgba(56, 189, 248, .06); color: #9fc6dd; font-size: 7px; font-weight: 700; }
+    .trigger-chip.manual { border-color: rgba(167, 139, 250, .30); background: var(--purple-soft); color: #c4b5fd; }
+    .cell strong { display: block; color: #bcd0df; font-size: 9px; }
+    .cell span { display: block; margin-top: 3px; color: var(--subtle); font-size: 7px; }
+    .cost { color: var(--purple) !important; }
+    .row-button { justify-self: end; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: #101f2f; color: #a8bfd2; font-size: 8px; }
+
+    .detail-body { padding: 14px; }
+    .detail-kicker { color: var(--blue); font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .detail-body h3 { margin: 6px 0 3px; font-size: 16px; }
+    .detail-body > p { margin: 0; color: var(--muted); font-size: 9px; }
+    .state-line { display: flex; gap: 6px; margin-top: 12px; }
+    .pill { padding: 4px 7px; border-radius: 99px; background: var(--green-soft); color: var(--green); font-size: 7px; font-weight: 800; }
+    .pill.blue { background: var(--blue-soft); color: var(--blue); }
+    .pill.amber { background: var(--amber-soft); color: var(--amber); }
+    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 12px; }
+    .detail-card { min-height: 62px; padding: 9px; border: 1px solid var(--line-soft); border-radius: 8px; background: #0b1725; }
+    .detail-card span { color: var(--subtle); font-size: 7px; text-transform: uppercase; }
+    .detail-card strong { display: block; margin-top: 5px; color: #c6d9e7; font-size: 10px; }
+    .budget { margin-top: 12px; padding: 10px; border: 1px solid rgba(167, 139, 250, .24); border-radius: 8px; background: var(--purple-soft); }
+    .budget-line { display: flex; justify-content: space-between; font-size: 8px; }
+    .budget-line b { color: var(--purple); }
+    .track { height: 5px; margin-top: 8px; overflow: hidden; border-radius: 99px; background: #1b2b3d; }
+    .track i { display: block; width: 91%; height: 100%; background: linear-gradient(90deg, var(--purple), var(--blue)); }
+    .detail-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 12px; }
+    .detail-actions button { padding: 7px; border: 1px solid var(--line); border-radius: 7px; background: #101f2f; color: #b7cbd9; font-size: 8px; }
+    .detail-actions .pause { border-color: rgba(251, 191, 36, .32); color: var(--amber); }
+    .detail-actions .run-now { border-color: rgba(56, 189, 248, .38); background: var(--blue-soft); color: var(--blue); font-weight: 800; }
+    .trigger-section { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+    .trigger-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+    .trigger-section-head b { font-size: 9px; }
+    .trigger-section-head span { color: var(--subtle); font-size: 7px; }
+    .trigger-list { display: grid; gap: 5px; }
+    .trigger-item { display: grid; grid-template-columns: 54px minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 7px 8px; border: 1px solid var(--line-soft); border-radius: 7px; background: #0b1725; }
+    .trigger-kind { color: var(--blue); font-size: 7px; font-weight: 800; text-transform: uppercase; }
+    .trigger-copy strong { display: block; overflow: hidden; color: #c5d8e6; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+    .trigger-copy span { display: block; margin-top: 2px; color: var(--subtle); font-size: 7px; }
+    .trigger-state { color: var(--green); font-size: 7px; font-weight: 800; }
+    .run-history { margin-top: 12px; }
+    .run-history > b { font-size: 9px; }
+    .run { display: grid; grid-template-columns: 8px 1fr auto; gap: 7px; margin-top: 8px; color: var(--muted); font-size: 8px; }
+    .run i { width: 6px; height: 6px; margin-top: 3px; border-radius: 50%; background: var(--green); }
+    .run .failed { background: var(--danger); }
+    .run em { color: var(--subtle); font-style: normal; }
+
+    .consolidation { display: grid; grid-template-columns: 440px 1fr; gap: 18px; align-items: stretch; }
+    .pane-shell { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--chrome); box-shadow: var(--shadow); }
+    .pane-head { display: flex; align-items: center; justify-content: space-between; height: 45px; padding: 0 14px; border-bottom: 1px solid var(--line-soft); }
+    .pane-head b { font-size: 11px; }
+    .pane-head span { color: var(--subtle); font-size: 8px; }
+    .pane-body { padding: 12px; }
+    .handoff { margin-bottom: 9px; padding: 10px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--panel); }
+    .handoff-top { display: flex; align-items: center; justify-content: space-between; }
+    .handoff-top b { font-size: 9px; }
+    .handoff-top span { color: var(--blue); font-size: 7px; }
+    .handoff p { margin: 4px 0 0; color: var(--muted); font-size: 8px; }
+    .shortcut-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 9px; }
+    .shortcut { padding: 10px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--panel); }
+    .shortcut span { color: var(--subtle); font-size: 7px; font-weight: 800; text-transform: uppercase; }
+    .shortcut strong { display: block; margin-top: 5px; font-size: 11px; }
+    .shortcut em { display: block; margin-top: 4px; color: var(--blue); font-size: 7px; font-style: normal; }
+    .empty-state { padding: 14px; border: 1px dashed #294056; border-radius: 9px; color: var(--muted); text-align: center; font-size: 8px; }
+    .empty-state b { display: block; margin-bottom: 4px; color: #bed1df; font-size: 9px; }
+    .open-link { display: block; width: 100%; margin-top: 10px; padding: 8px; border: 1px solid rgba(56, 189, 248, .28); border-radius: 7px; background: var(--blue-soft); color: var(--blue); font-size: 8px; font-weight: 800; text-align: center; }
+    .rationale { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); padding: 20px; }
+    .rationale h3 { margin: 0 0 5px; font-size: 18px; }
+    .rationale > p { max-width: 780px; margin: 0; color: var(--muted); }
+    .before-after { display: grid; grid-template-columns: 1fr 34px 1fr; gap: 10px; align-items: center; margin-top: 18px; }
+    .state-card { min-height: 116px; padding: 13px; border: 1px solid var(--line-soft); border-radius: 10px; background: #0b1725; }
+    .state-card span { color: var(--subtle); font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .state-card strong { display: block; margin-top: 7px; font-size: 12px; }
+    .state-card ul { margin: 9px 0 0; padding-left: 16px; color: var(--muted); font-size: 9px; }
+    .state-card li + li { margin-top: 4px; }
+    .arrow { color: var(--green); font-size: 22px; text-align: center; }
+    .rules { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+    .rule { padding: 11px; border: 1px solid var(--line-soft); border-radius: 8px; background: #0b1725; }
+    .rule b { display: block; margin-bottom: 4px; color: #c7d9e7; font-size: 9px; }
+    .rule span { color: var(--muted); font-size: 8px; }
+    .footnote { margin-top: 22px; color: var(--subtle); font-size: 9px; text-align: center; }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="study-head">
+      <div>
+        <div class="eyebrow">Papercusp interface decision · background work</div>
+        <h1>One place for everything that runs without you.</h1>
+        <p class="lede">Move discovery, schedules, run state, spend, and controls into a first-class Automations tab. Keep the Papercup middle pane focused on live work and handoffs.</p>
+      </div>
+      <aside class="decision">
+        <strong>Replacement recommendation</strong>
+        <span>Replace the fragmented Agents / System / background-LLM views with this Automations main tab. Do not add another nested middle-pane catalog.</span>
+      </aside>
+    </header>
+
+    <div class="label-row"><strong>1 · Full-width main-tab replacement</strong><span>Catalog-first, with timeline and spend folded into each automation</span></div>
+    <section class="surface" aria-label="Automations main tab mockup">
+      <div class="window-bar"><div class="dots"><i></i><i></i><i></i></div><b>Papercusp · workspace</b><span>illustrative data</span></div>
+      <div class="app">
+        <aside class="rail">
+          <div class="brand"><span class="brand-mark">P</span><span>Papercusp</span></div>
+          <div class="rail-group">Workspace</div>
+          <nav class="nav">
+            <div class="nav-item"><span class="icon">⌂</span><span>Overview</span></div>
+            <div class="nav-item"><span class="icon">◎</span><span>Plans</span><span class="nav-count">3</span></div>
+            <div class="nav-item active"><span class="icon">↻</span><span>Automations</span><span class="nav-count">12</span></div>
+            <div class="nav-item"><span class="icon">▤</span><span>Resolution inbox</span><span class="nav-count">4</span></div>
+          </nav>
+          <div class="rail-group">Observe</div>
+          <nav class="nav">
+            <div class="nav-item"><span class="icon">◫</span><span>Activity</span></div>
+            <div class="nav-item"><span class="icon">◇</span><span>Usage &amp; billing</span></div>
+            <div class="nav-item"><span class="icon">⚙</span><span>Settings</span></div>
+          </nav>
+          <div class="rail-foot"><b>Consolidated navigation</b>Agents and System are no longer competing catalog destinations.</div>
+        </aside>
+
+        <div class="main">
+          <div class="topbar"><div class="crumb">Workspace / <b>Automations</b></div><div class="top-actions"><div class="search">⌕ Search workspace</div><div class="avatar">AV</div></div></div>
+          <div class="content">
+            <div class="title-row">
+              <div><h2>Automations</h2><p>Everything that can run in the background—what it does, when it runs, what it costs, and how to stop it.</p></div>
+              <button class="primary">＋ New automation</button>
+            </div>
+
+            <div class="view-tabs" role="tablist" aria-label="Automation views">
+              <button class="view-tab active">Catalog <small>12</small></button>
+              <button class="view-tab">Activity <small>24h</small></button>
+              <button class="view-tab">Sources <small>3 healthy</small></button>
+              <span>Plans, routines, and system jobs share one automation identity</span>
+            </div>
+
+            <div class="metrics">
+              <div class="metric warn"><span class="metric-label">Needs attention</span><strong>1</strong><small>Customer digest budget nearly reached</small></div>
+              <div class="metric"><span class="metric-label">Running now</span><strong>1</strong><small>Documentation maintenance · 4m</small></div>
+              <div class="metric"><span class="metric-label">Next run</span><strong>18m</strong><small>Customer feedback digest · scheduled trigger</small></div>
+              <div class="metric spend"><span class="metric-label">Spend · 7 days</span><strong>$24.80</strong><small>$15.20 left in workspace budget</small></div>
+            </div>
+
+            <div class="toolbar"><div class="filters"><button class="filter active">All</button><button class="filter">Triggered plans</button><button class="filter">AI routines</button><button class="filter">System tasks</button><button class="filter">Paused</button></div><span class="toolbar-note">12 automations · sorted by attention, then next run</span></div>
+
+            <div class="workspace">
+              <section class="list-panel">
+                <div class="panel-head"><strong>Automation catalog</strong><span>schedule ≠ active run ≠ budget permission</span></div>
+                <div class="automation selected">
+                  <div><div class="name-line"><i class="status-dot warn"></i><b>Customer feedback digest</b><span class="tag">Triggered plan</span></div><p>Turns new customer feedback into a prioritized product brief</p><div class="trigger-chips"><span class="trigger-chip">Schedule</span><span class="trigger-chip">Slack</span><span class="trigger-chip">Gmail</span><span class="trigger-chip manual">Manual</span></div></div>
+                  <div class="cell"><strong>4 triggers · all armed</strong><span>next schedule in 18m · Slack last 2h ago</span></div>
+                  <div class="cell"><strong class="cost">$11.42 / week</strong><span>$1.08 budget left</span></div><button class="row-button">Selected</button>
+                </div>
+                <div class="automation">
+                  <div><div class="name-line"><i class="status-dot running"></i><b>Documentation maintenance</b><span class="tag">Running</span></div><p>Keeps project docs synchronized with code</p></div>
+                  <div class="cell"><strong>Weekdays · 9:00 AM</strong><span>running 4m · next tomorrow</span></div>
+                  <div class="cell"><strong class="cost">$4.26 / week</strong><span>$0.38 so far this run</span></div><button class="row-button">View run</button>
+                </div>
+                <div class="automation">
+                  <div><div class="name-line"><i class="status-dot"></i><b>Weekly workspace briefing</b><span class="tag">AI</span></div><p>Summarizes decisions, progress, and open risks</p></div>
+                  <div class="cell"><strong>Mondays · 8:00 AM</strong><span>next in three days</span></div>
+                  <div class="cell"><strong class="cost">$2.18 / week</strong><span>last run succeeded</span></div><button class="row-button">Details</button>
+                </div>
+                <div class="automation">
+                  <div><div class="name-line"><i class="status-dot"></i><b>Release fixer</b><span class="tag">Event</span></div><p>Investigates a failed release gate when needed</p></div>
+                  <div class="cell"><strong>After a failed gate</strong><span>not clock-scheduled · last 5d ago</span></div>
+                  <div class="cell"><strong class="cost">$1.37 / week</strong><span>only spends when triggered</span></div><button class="row-button">Details</button>
+                </div>
+                <div class="automation">
+                  <div><div class="name-line"><i class="status-dot"></i><b>Git sync</b><span class="tag">System</span></div><p>Commits and publishes the shared staging tree</p></div>
+                  <div class="cell"><strong>Every 2 minutes</strong><span>healthy · next in 1m</span></div>
+                  <div class="cell"><strong>$0 model spend</strong><span>system routine</span></div><button class="row-button">Details</button>
+                </div>
+              </section>
+
+              <aside class="detail-panel">
+                <div class="panel-head"><strong>Automation details</strong><span>one identity across every view</span></div>
+                <div class="detail-body">
+                  <div class="detail-kicker">Triggered plan · needs attention</div><h3>Customer feedback digest</h3><p>One plan, started by time, external events, or a person supplying its declared inputs.</p>
+                  <div class="state-line"><span class="pill">Plan armed</span><span class="pill blue">Not running</span><span class="pill amber">Budget low</span></div>
+                  <div class="detail-grid">
+                    <div class="detail-card"><span>Next scheduled</span><strong>In 18 minutes</strong></div><div class="detail-card"><span>Last trigger</span><strong>Slack · 2h ago</strong></div>
+                    <div class="detail-card"><span>Plan inputs</span><strong>3 fields · ready</strong></div><div class="detail-card"><span>Typical cost</span><strong>$0.62 / run</strong></div>
+                  </div>
+                  <div class="trigger-section">
+                    <div class="trigger-section-head"><b>Triggers</b><span>installed and armed are separate</span></div>
+                    <div class="trigger-list">
+                      <div class="trigger-item"><span class="trigger-kind">Schedule</span><div class="trigger-copy"><strong>Weekdays · 9:00 AM</strong><span>America/New_York · next in 18m</span></div><span class="trigger-state">Armed</span></div>
+                      <div class="trigger-item"><span class="trigger-kind">Slack</span><div class="trigger-copy"><strong>#customer-feedback · new message</strong><span>source connected · last event 2h ago</span></div><span class="trigger-state">Armed</span></div>
+                      <div class="trigger-item"><span class="trigger-kind">Gmail</span><div class="trigger-copy"><strong>Label: Customer feedback</strong><span>source connected · cursor current</span></div><span class="trigger-state">Armed</span></div>
+                      <div class="trigger-item"><span class="trigger-kind">Manual</span><div class="trigger-copy"><strong>Run now with plan inputs</strong><span>topic, date range, urgency</span></div><span class="trigger-state">Ready</span></div>
+                    </div>
+                  </div>
+                  <div class="budget"><div class="budget-line"><span>Automation budget</span><b>$11.42 of $12.50</b></div><div class="track"><i></i></div></div>
+                  <div class="detail-actions"><button class="run-now">Run now…</button><button class="pause">Pause all triggers</button></div>
+                  <div class="run-history"><b>Recent activity</b><div class="run"><i></i><span>Slack trigger · completed · 2h ago</span><em>$0.58</em></div><div class="run"><i></i><span>Schedule trigger · completed · yesterday</span><em>$0.61</em></div></div>
+                </div>
+              </aside>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="label-row"><strong>2 · Papercup middle pane after consolidation</strong><span>Operational attention only; catalog ownership moves to the main tab</span></div>
+    <section class="consolidation">
+      <div class="pane-shell" aria-label="Consolidated middle pane mockup">
+        <div class="pane-head"><b>Workspace pulse</b><span>2 live · 1 needs attention</span></div>
+        <div class="pane-body">
+          <div class="shortcut-grid">
+            <div class="shortcut"><span>Live agents</span><strong>3 running</strong><em>Open HUD →</em></div>
+            <div class="shortcut"><span>System health</span><strong>1 warning</strong><em>Open Health →</em></div>
+          </div>
+          <article class="handoff"><div class="handoff-top"><b>Documentation maintenance</b><span>running · 4m</span></div><p>Live execution only; its schedule and controls live in Automations.</p></article>
+          <article class="handoff"><div class="handoff-top"><b>Release gate</b><span style="color: var(--amber)">needs attention</span></div><p>One failing check is blocking the current staging candidate.</p></article>
+          <article class="handoff"><div class="handoff-top"><b>Customer feedback digest</b><span>next in 18m</span></div><p>Budget is nearly reached; its four triggers remain armed.</p></article>
+          <div class="empty-state"><b>No separate Agents or System catalogs here</b>This pane answers “what needs me now?”—not “what automations exist?”</div>
+          <button class="open-link">Open Automations →</button>
+        </div>
+      </div>
+
+      <div class="rationale">
+        <div class="eyebrow">Consolidation rule</div><h3>Catalog in the main tab. Attention in the middle pane.</h3>
+        <p>The middle pane becomes smaller and calmer because identity, configuration, scheduling, history, and spend live on the full Automations surface.</p>
+        <div class="before-after">
+          <div class="state-card"><span>Before · fragmented</span><strong>Agents + System + background tasks</strong><ul><li>Overlapping inventories</li><li>Schedule and spend live elsewhere</li><li>Enabled is mistaken for running</li></ul></div>
+          <div class="arrow">→</div>
+          <div class="state-card"><span>After · consolidated</span><strong>Automations + workspace pulse</strong><ul><li>One durable automation identity</li><li>All controls and costs in one place</li><li>Middle pane carries only live attention</li></ul></div>
+        </div>
+        <div class="rules"><div class="rule"><b>Schedule</b><span>Enabled, paused, and next-run state stay independent.</span></div><div class="rule"><b>Execution</b><span>Running now is actual work, never inferred from a schedule.</span></div><div class="rule"><b>Spend</b><span>Only attribute cost when a run carries a verified source link.</span></div></div>
+      </div>
+    </section>
+    <div class="footnote">Focused replacement mockup · static illustrative data · Papercusp design study · 22 Aug 2026</div>
+  </main>
+</body>
+</html>

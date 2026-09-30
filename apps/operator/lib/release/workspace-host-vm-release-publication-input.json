@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "image": { "id": "papercusp-workspace-host" },
+  "source": { "repository": "https://github.com/Papercusp/papercusp.git" },
+  "baseImage": {
+    "architecture": "x86_64",
+    "reference": "projects/ubuntu-os-cloud/global/images/ubuntu-2404-noble-amd64-v20260826",
+    "sha256": "01af466feb100306498c86aa6bad1815e33036019aa34d4362c20f374ea5c829"
+  },
+  "builder": {
+    "strategy": "shared",
+    "kind": "papercusp-desktop-sidecar",
+    "templatePath": "papercusp-desktop/bin/build-desktop-sidecar.sh"
+  },
+  "minimumNodeMajor": 24,
+  "materials": [
+    { "path": "papercusp-desktop/bin/lib/vm-release-trust-toolchain.sh", "from": "source" },
+    { "path": "apps/operator/runtime/vm-release-trust-toolchain.json", "from": "bundle" },
+    { "path": "bin/papercusp-deliver-material", "from": "bundle" },
+    { "path": "bin/papercusp-remote-initializer", "from": "bundle" },
+    { "path": "bin/pui", "from": "bundle" },
+    { "path": "papercusp-desktop/bin/audit-release-bundle.py", "from": "source" },
+    { "path": "papercusp-desktop/bin/build-desktop-sidecar.sh", "from": "source" },
+    { "path": "papercusp-desktop/bin/install-workspace-host-entrypoints.sh", "from": "source" },
+    { "path": "papercusp-desktop/bin/verify-sidecar-bundle.sh", "from": "source" },
+    { "path": "pui-companion.wasm", "from": "bundle" },
+    { "path": "pui-install.json", "from": "bundle" },
+    { "path": "bin/papercusp-install", "from": "bundle" },
+    { "path": "bin/papercusp-rollback", "from": "bundle" },
+    { "path": "bin/node", "from": "bundle" },
+    { "path": "bin/papercusp-migrate", "from": "bundle" },
+    { "path": "bin/papercusp-server", "from": "bundle" },
+    { "path": "bin/papercusp-health", "from": "bundle" },
+    { "path": "bin/psu", "from": "bundle" },
+    { "path": "bin/claude", "from": "bundle" },
+    { "path": "bin/codex", "from": "bundle" },
+    { "path": "bin/omp", "from": "bundle" },
+    { "path": "bin/papercusp-content-bootstrap", "from": "bundle" },
+    { "path": "bin/papercusp-desktop-session.cjs", "from": "bundle" }
+  ],
+  "parameters": [
+    { "name": "vite_build_lock_scope", "value": "isolated-output" },
+    { "name": "base_image_digest_semantics", "value": "sha256-of-resolved-etc-os-release-bytes" },
+    { "name": "dependency_generation_skipped", "value": true },
+    { "name": "distribution_profile", "value": "vm-release" },
+    { "name": "pinned_source_build", "value": true },
+    { "name": "privacy_prune_current", "value": true },
+    { "name": "release_audit", "value": true },
+    { "name": "target_arch", "value": "x64" },
+    { "name": "target_os", "value": "linux" }
+  ],
+  "targets": [{ "locations": [], "provider": "gcp" }],
+  "compatibility": [
+    {
+      "actions": ["install", "upgrade", "rollback"],
+      "architecture": "x86_64",
+      "bootstrapContractVersion": "papercusp-workspace-host-bootstrap-v2",
+      "maximumArtifactAgeDays": 30,
+      "provider": "gcp",
+      "ubuntuVersion": "24.04",
+      "agentHomeBundleContractVersions": ["papercusp-workspace-host-agent-home-bundle-v3"]
+    }
+  ]
+}

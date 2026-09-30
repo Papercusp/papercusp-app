@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-native-terminal-toggle"
+description = "Enables the native_terminal_toggle command without any pre-configured scope."
+commands.allow = ["native_terminal_toggle"]
+
+[[permission]]
+identifier = "deny-native-terminal-toggle"
+description = "Denies the native_terminal_toggle command without any pre-configured scope."
+commands.deny = ["native_terminal_toggle"]

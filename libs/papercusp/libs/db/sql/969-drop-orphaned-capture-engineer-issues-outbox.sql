@@ -1,0 +1,61 @@
+-- 969-drop-orphaned-capture-engineer-issues-outbox.sql
+--
+-- EI-21474657831529811 — DROP harness_shared.capture_engineer_issues_outbox(),
+-- a trigger function that NO trigger calls. Dead code, in the shape of a live
+-- federation path.
+--
+-- HOW IT WAS ORPHANED
+-- -------------------
+-- mig-197 created this function AND attached it to two triggers on
+-- harness_shared.engineer_issues, which was then a BASE TABLE:
+--
+--     capture_engineer_issues_outbox_trg      AFTER INSERT OR DELETE
+--     capture_engineer_issues_outbox_upd_trg  AFTER UPDATE (federated fields)
+--
+-- It is bespoke because engineer_issues carries no harness_slug column: the
+-- federation scope lives in `scope` ('harness:<slug>' | 'operator'), so the fn
+-- DERIVES the slug and STAMPS it into the outbox row.
+--
+-- The work-items unification (post-374) INVERTED that topology: work_items became
+-- the base table and engineer_issues a VIEW over it. Row triggers cannot survive
+-- that, so the triggers went and the FUNCTION was left behind. Issue-family rows
+-- have federated through capture_work_items_outbox ever since — which is the one
+-- mig-965 correctly taught the nine new issue columns.
+--
+-- WHY DROP RATHER THAN COMMENT
+-- ----------------------------
+-- The cost of an orphan here is not disk, it is a FALSE DIAGNOSIS with a
+-- convincing fix attached. The function is named exactly what an auditor of "why
+-- don't issue columns federate?" greps for, and what they find is a capture fn
+-- hand-building an outbox jsonb that is missing all nine of mig-965's columns
+-- (admission, admitted_at, admitted_by, state_changed_at, tags, parent_id,
+-- source_plan_slug, source_plan_item_ids, expected_cost_cents). That reads as a
+-- complete answer. It is not: nothing calls it, so the tempting fix — teach it
+-- the nine columns — would change nothing at all and the real bug would survive
+-- the "fix". Two agents were misled in this exact spot before either ran the one
+-- pg_trigger query that separates EXISTING from RUNNING. A comment would leave
+-- the trap armed for anyone who greps the function body without reading its
+-- header; removing the artifact removes the class.
+--
+-- SAFE BY CONSTRUCTION: deliberately NO CASCADE. If any trigger anywhere still
+-- depends on this function, Postgres REFUSES the drop (dependent objects exist)
+-- and this migration fails loudly, rather than silently detaching a live capture.
+-- The drop can only succeed where the function is genuinely unreachable.
+--
+-- FORWARD-COMPAT: the currently-deployed release cannot call this function — it is
+-- a `RETURNS trigger` function, invocable only from a trigger, and zero triggers
+-- reference it (verified via pg_trigger with a passing positive control, and
+-- independently reproduced on a fresh baseline→head migrated database by
+-- stamp-trigger-coverage.integration.test.ts). No TypeScript, SQL, or dynamic-
+-- EXECUTE call site references it either. Dropping it therefore cannot affect the
+-- running release checkout.
+--
+-- RECURRENCE GUARD: the orphan-function guard in
+-- packages/operator-core/lib/sync/hyperbee/__tests__/stamp-trigger-coverage.integration.test.ts
+-- asserts every capture_*_outbox function in harness_shared is attached to at
+-- least one trigger. Every pre-existing guard walked TABLE → TRIGGER and was
+-- structurally blind to this defect (no table names an orphan, so none could
+-- reach it); that guard walks the converse direction. It FAILED against this
+-- exact orphan before this migration and passes after it.
+
+DROP FUNCTION IF EXISTS harness_shared.capture_engineer_issues_outbox();

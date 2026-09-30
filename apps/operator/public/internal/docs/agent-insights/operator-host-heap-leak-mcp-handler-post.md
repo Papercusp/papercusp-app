@@ -1,0 +1,124 @@
+# The :3070 operator heap leak is mcp-handler's stateless POST path (per-request McpServer never closed)
+URL: /internal/docs/agent-insights/operator-host-heap-leak-mcp-handler-post
+
+EI-127 root cause + fix — mcp-handler@1.1.0's POST branch news an McpServer+transport per MCP request and never closes them (its SSE branch does). Patched via patch-package; the memory-watchdog 3.2 GB self-recycle only bounded the symptom.
+
+## What
+
+The `:3070` operator host (`papercup-dev-api`, `bin/hono-host.ts`) "recycled every
+\~12 min" under fleet load (EI-127). That recycle is the **`memory-watchdog.ts`**
+self-recycle firing when RSS crosses **3.2 GB** — a *symptom bound*, not a fix.
+The real leak is **\~0.2 GB/min with no plateau** and its dominant source is a
+dependency bug:
+
+**`mcp-handler@1.1.0`'s stateless POST branch creates an `McpServer` + transport
+per request and never closes them.** `dist/index.mjs` (the ESM build tsx loads;
+`index.js` is the CJS twin) \~L317: `new McpServer()` → `initializeServer()` →
+`server.connect(transport)`, then handles the request and `res.end()`s — with
+**no `server.close()` / `transport.close()`**. Its *SSE* branch DOES close
+(mirror it). The 30 s sweeper only walks the SSE `servers[]` array, which the POST
+branch never populates, and SSE is disabled here (`disableSse: true`) — so nothing
+ever reclaims a POST server. Every spawned agent reaches the operator over
+`mcpServers: { papercusp: { type: 'http', url: '<base>/api/mcp' } }`
+(`role-launch-spec.ts`), so **every `initialize` / `tools/list` / `tools/call`
+from every agent leaks one** McpServer object graph (6 handler closures over the
+tool catalog + the SDK Protocol's response/progress/abort Maps + the transport).
+
+## Why it's non-obvious
+
+* The `memory-watchdog.ts` docstring blames the *symptom* it observed
+  ("spawned-agent MCP mounts raced and failed", "handshakes succeeded-then-dropped")
+  — those are the GC-stall *consequences* of the leak, which reads as MCP being
+  the victim, not the cause.
+* "No explicit close" only leaks because the per-request server graph is retained
+  (transport/Protocol internals) past the handler; absent a retaining root it
+  would just GC. Verify by counting, not by reasoning about GC.
+* The host env was later reconfigured (`--max-old-space-size=131072` + Node-native
+  PSI-GC via `MEMORY_PRESSURE_WATCH`) but the in-process watchdog's threshold was
+  left stale at **3.2 GB** — and once the leak was patched the steady boot baseline
+  (\~3.8 GB; see *Related* below) settled just ABOVE it, so the watchdog
+  **false-tripped on every boot** and crash-looped `:3070` (\~one recycle / 2 min,
+  47 restarts) until the cap was bumped (3.2 GB → 24 GB, 2026-06-14;
+  `operator-memory-and-psu-resilience-2026-06-14` P-005 then retuned it → 12 GB
+  once the fix was verified flat — not lower, since the \~3.8 GB baseline grows
+  O(harness count) and a tight cap would re-trip).
+  Lesson stands: fix the cause, don't just raise the threshold (V8 GC pauses still
+  bite a multi-GB single-thread heap, and a bigger cap only hides the next
+  regression).
+
+## Fix
+
+1. **Dominant:** `patches/mcp-handler+1.1.0.patch` (patch-package — `postinstall`
+   already runs it) adds a `finally` to the POST branch in BOTH `index.mjs` and
+   `index.js` that closes `server.server` + `transport`, mirroring the SSE branch.
+   Proven by `mcp-handler-poststream-leak.test.ts`: N POSTs → 0 closes (leak) →
+   N closes (fixed). mcp-handler 1.1.0 is already `latest`, so a version bump is
+   not an option — patch or replace.
+2. **Secondary (in-repo):** the generic SSE channel registry now has an
+   **idle-reap backstop** (`libs/generic/sse/src/server/channel.ts`,
+   `idleReapMs` default 10 min) — `scheduleGC` only reaps `done()`+0-subs
+   channels, so a producer that dies WITHOUT `done()` (crashed orchestrator that
+   never POSTs its terminal chunk) leaked forever. And `run-chunk-bus.ts` now
+   prunes its bus-level `__runChunkBusClosed__` Set after the GC window (it grew
+   one entry per run).
+
+## Gotcha: a patch-package patch does NOT reach :3070 or green-checkpoint on its own
+
+This bit immediately and is fleet-wide, so read it before adding ANY `patches/*.patch`:
+patch-package applies at **`npm install`** (postinstall) time, but the checkpoint
+and release trees **never `npm install`** — `apps/operator/bin/release/setup-release-checkout.sh`
+**hardlink-copies** node\_modules from the integration tree (step 3) and, in `auto`
+mode, **skips even that copy** when only `patches/` changed (a new patch alters no
+lockfile / workspace-package set). Net effect before the fix below: a committed
+patch reached neither `papercup-checkpoint` nor `papercusp-release` — so
+green-checkpoint ran UNPATCHED and redded the patch's own regression test (a
+self-inflicted deadlock: the red gate blocks the deploy that would apply the patch),
+and `:3070` never got the fix. The setup script now runs `patch-package` after the
+node\_modules step every checkpoint/deploy (idempotent, guarded, non-fatal). If you
+add a dep patch, **verify it's actually applied post-deploy** —
+`grep <your-marker> <tree>/node_modules/<pkg>/...`; don't assume the committed
+`.patch` is live.
+
+**Subsequent hardening in the same script (2026-06-25):** the node\_modules hardlink-copy
+(step 3) is now **atomic** — `sync_one_node_modules()` copies into a sibling temp dir
+first, then swaps into place with two fast renames, so the live operator's cluster workers
+that respawn mid-copy never see a half-populated `node_modules` window (the previous
+in-place `rm -rf "$dest"; cp -al` opened a \~1-minute gap that caused a 2026-06-25
+all-pages connection-refused outage when workers exhausted their respawn budget on
+`MODULE_NOT_FOUND`). The patch-package re-apply in step 3b still follows this copy.
+Additionally, **step 3d** (native-addon ABI guard) verifies each runtime-critical native
+addon (e.g. `better-sqlite3`) loads under the operator's Node ABI and calls `npm rebuild`
+in place on a mismatch, turning a hard crash-loop into an auto-recovery. **Step 3c**
+(workspace-resolution gate, EI-2118): `need_node_modules()` now also checks for dangling
+workspace-package symlinks via `unresolved_workspace_pkgs()` (`-e` follows symlinks;
+the name-set `diff` does not), forcing a re-copy when any `@papercusp`/`@papercup`
+package resolves in the integration tree but not the release tree; a post-copy gate then
+exits 1 **before any restart** if workspace packages are still unresolved — the class of
+outage that triggered EI-2118 (2026-06-20 `@papercusp/plugin-loader` crash-loop).
+
+## Verify / where it lands
+
+`npx vitest run lib/endpoint-route/routes/transport/mcp-handler-poststream-leak.test.ts`
+(operator-core) is the regression guard. The fix flows to `:3070` via the normal
+pipeline (green-checkpoint applies the patch on `npm install` + runs the guard).
+To watch RSS live: `systemctl --user show papercup-dev-api.service -p MemoryPeak`
+and the `[memory-watchdog] RSS above soft threshold` journal lines.
+
+## Related: the steady \~3.8 GB baseline is mostly the substrate, not this leak
+
+Once the leak is patched, RSS plateaus \~3.8 GB. Attribution via a zero-disruption
+control — `:3170` runs the same binary with `PAPERCUSP_BACKGROUND_WORKERS=0` and
+sits flat at **\~1.0 GB** for 13h+:
+
+* **\~1.0 GB** base app = tsx-loaded TS module graph + Hono app + projected tool
+  catalog + 21 warmed plugins + voice cluster + IPC.
+* **\~2.7 GB** background-workers block, dominated by the **Model-B / hyperbee sync
+  substrate booting ALL harnesses at startup** (`[hyperbee-substrate] boot
+  complete — attempted=25 booted=25`), \~108 MB each (Hypercore corestore +
+  Hyperbee + Hyperswarm peer + git-export drain loop), plus the onnxruntime
+  embedder warm.
+
+It's **O(harness count)** — 50 harnesses → \~5 GB. So a "why is :3070 huge / why did
+it false-trip the watchdog" question is usually this baseline, not a live leak.
+Reducing it (lazy + bounded substrate boot via the existing `closeHarnessStore`)
+is tracked in `operator-memory-and-psu-resilience-2026-06-14`.

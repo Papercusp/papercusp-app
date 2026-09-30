@@ -1,0 +1,54 @@
+{
+  "rubricId": "plan-class-feature-ship",
+  "title": "Plan class: feature ship (shared acceptance invariants)",
+  "characteristic": "plan-acceptance",
+  "description": "The CLASS rubric feature-shipping plans' acceptance rubrics reference (acceptance-rubrics-on-every-plan-2026-08-11 D-006): the repo's shared completion invariants, encoded once so per-plan bespoke criteria stay at 3-7 outcome lines. Graded at plan completion by a NON-implementer.",
+  "methodRef": null,
+  "ratingScale": ["pass", "partial", "fail", "unknown"],
+  "version": "0.2.0",
+  "source": "first-party",
+  "criteria": [
+    {
+      "key": "goal-outcomes-met",
+      "title": "Every committed outcome is observably true",
+      "model": "Each outcome the plan's goal + Decisions commit to holds in the shipped system — criteria trace to the plan's stated GOAL, never merely to the diff.",
+      "method": "Read the plan's Background/Design + Decisions; verify each committed outcome against the live system and its tests (plans:get the subject plan; exercise the behavior).",
+      "driftMarkers": "Acceptance criteria that restate what was built instead of what the plan promised; a Decision's commitment with no verifying evidence."
+    },
+    {
+      "key": "tests-ship-with-feature",
+      "title": "Tests landed WITH the feature, in canonical frameworks",
+      "model": "The feature's behavior is pinned by tests in one of the four canonical frameworks (Vitest / Playwright / Cargo / LLM scenarios), landed with the change — a passing typecheck is not a test.",
+      "method": "Name the test files; run them (testing:run { files }) and confirm they exercise the NEW behavior, not just compile it.",
+      "driftMarkers": "Green typecheck offered as test evidence; ad-hoc .mjs/tsx smoke scripts; tests promised as a follow-up."
+    },
+    {
+      "key": "flag-on-default",
+      "title": "Feature flag defaults ENABLED (no unregistered dark ship)",
+      "model": "A gated feature's FLAGS entry defaults ON; default-OFF only for the registered dark-flag exceptions (incomplete / owner-authority / cutover), never for finished work awaiting a verify.",
+      "method": "Read the flag's default in libs/flags/src/types.ts (derived FLAG_DEFAULTS) and confirm it is absent from KNOWN_DARK_FLAGS, or its dark entry carries a legitimate DarkCase.",
+      "driftMarkers": "Built+tested+OFF; a runtime override ON while the types.ts default stays false; a parking-lot dark entry for finished work."
+    },
+    {
+      "key": "gate-green-shipped",
+      "title": "Live through the pipeline, not just edited in the tree",
+      "model": "The change is committed, judged green by the checkpoint gate, and deployed — 'done' claims are made against the gate, not against tree edits or intent.",
+      "method": "dev:pipeline_position { path } for a touched file: read blockedOn/nextAction and serving.startedSinceCodeChange; a red gate at ship time is the shipper's to green.",
+      "driftMarkers": "'Shipped' asserted from local edits; a red gate waited out or routed around; deploy assumed from a git fact."
+    },
+    {
+      "key": "docs-updated",
+      "title": "Agent-facing docs and guidance updated",
+      "model": "Docs, tool guidance, and prompts affected by the change say what the shipped system now does — a new durable surface is discoverable.",
+      "method": "Check the surfaces the change touches: CLAUDE.md doc-parts, tool description/guidance, agent-insights runbooks; confirm none contradicts the shipped behavior.",
+      "driftMarkers": "A new tool/table/flag with no doc trail; stale guidance steering agents into the old behavior."
+    },
+    {
+      "key": "audit-citations-spot-checked",
+      "title": "The independent grader audits the audit",
+      "model": "The independent grader opens a sample of the implementer's plan-audit citations and confirms each sampled code/test reference resolves against the current tree and actually supports the audited item — the audit verdict itself is never accepted as proof.",
+      "method": "Read the subject plan's effective per-item audit. Spot-check at least one resolving code/test citation (and expand the sample after any mismatch): open the cited current blob, compare it with the item requirement and audit claim, and record what was checked. Treat doc, workitem, and none citations as declarations of non-verification, never substitutes for code truth.",
+      "driftMarkers": "A grade copied from the audit's PASS label; no cited blob opened; a stale blob hash ignored; doc/work-item prose treated as proof that code exists."
+    }
+  ]
+}

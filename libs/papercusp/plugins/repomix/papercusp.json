@@ -1,0 +1,129 @@
+{
+  "name": "@papercupai/repomix",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "Pack a project (or a subset of it) into a single LLM-friendly document. Wraps the official Repomix npm package and exposes `pack` as both an HTTP endpoint and an MCP tool. First-party tool for scoper/architect/operator/reviewer/debugger roles when they need a holistic view of the codebase; workers get one call per chunk.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "icon": "Package",
+  "capabilities": [
+    "tools:repomix:pack",
+    "compute:exec:repomix",
+    "compute:exec:npx"
+  ],
+  "tools": [
+    {
+      "name": "pack",
+      "description": "Pack a project (or subset) into a single LLM-friendly document. Returns inline content for small outputs (<50k chars); writes to .papercusp/scratch/ and returns a path reference for larger outputs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Glob patterns to include. Default: everything not in .gitignore."
+          },
+          "ignore": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Glob patterns to ignore (in addition to .gitignore)."
+          },
+          "format": {
+            "enum": [
+              "xml",
+              "markdown",
+              "plain"
+            ],
+            "default": "xml",
+            "description": "Output format. XML is preferred for Claude; markdown for general LLMs; plain for raw concat."
+          },
+          "compress": {
+            "type": "boolean",
+            "default": false,
+            "description": "Strip imports/whitespace, keep signatures only. Useful for very large repos."
+          }
+        }
+      },
+      "capabilities": [
+        "tools:repomix:pack",
+        "compute:exec:repomix",
+        "compute:exec:npx"
+      ],
+      "roles": [
+        "scoper",
+        "architect",
+        "operator",
+        "reviewer",
+        "debugger",
+        "worker"
+      ],
+      "rolesQuota": {
+        "worker": {
+          "perChunk": 1
+        },
+        "scoper": {
+          "perRun": 3
+        },
+        "architect": {
+          "perRun": 5
+        },
+        "reviewer": {
+          "perRun": 2
+        },
+        "debugger": {
+          "perRun": 5
+        }
+      },
+      "timeoutSec": 120,
+      "expose": {
+        "http": {
+          "path": "/api/plugins/repomix/pack",
+          "methods": [
+            "POST"
+          ]
+        },
+        "mcp": {
+          "name": "repomix.pack",
+          "largeOutput": true
+        }
+      },
+      "guidance": {
+        "when": "You need to feed a project (or subset) into the LLM as one document — code reviews, refactor planning, \"summarize this repo\".",
+        "notWhen": "For a git DIFF specifically, use `code2prompt.diff`. For a single URL's content, use `fetch_plus.fetch_clean`."
+      }
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "defaultIgnore": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "node_modules/**",
+          "dist/**",
+          ".papercusp/**",
+          ".next/**",
+          "*.lock",
+          "*.lockb",
+          "package-lock.json",
+          "pnpm-lock.yaml",
+          "yarn.lock"
+        ],
+        "description": "Patterns ignored by default unless overridden by the per-call `ignore` argument."
+      },
+      "inlineThresholdChars": {
+        "type": "number",
+        "default": 50000,
+        "description": "Outputs smaller than this are returned inline; larger ones are written to .papercusp/scratch/ and returned as a path reference."
+      }
+    }
+  }
+}

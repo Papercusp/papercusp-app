@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "$comment": "Project file for the layered build. Composes core + host + routes + client into one tsc --build entry. `files: []` is required by TypeScript when a tsconfig declares only references. Run with: tsc --build apps/operator/layers/tsconfig.layers.json — should exit 0 with no output (empty includes = no files to check, but the structure resolves).",
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.core.json" },
+    { "path": "./tsconfig.host.json" },
+    { "path": "./tsconfig.routes.json" },
+    { "path": "./tsconfig.client.json" }
+  ]
+}

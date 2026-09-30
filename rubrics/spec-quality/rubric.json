@@ -1,0 +1,68 @@
+{
+  "rubricId": "spec-quality",
+  "title": "Plan spec quality",
+  "characteristic": "spec-quality",
+  "description": "Reusable plan-level quality standard applied to one exact current specSetHash. Plans are rows; these criteria grade whether their clause set is safe to promote before implementation begins.",
+  "methodRef": null,
+  "ratingScale": ["pass", "fail", "unknown", "waived", "not-applicable"],
+  "version": "1.0.0",
+  "source": "first-party",
+  "criteria": [
+    {
+      "key": "stable-revision-identity",
+      "title": "Every clause is the exact accepted current revision",
+      "model": "Stable spec and VAL identities resolve uniquely; every relied-on row is the current immutable revision with content hash and acceptance provenance.",
+      "method": "Read plans:get-specs current rows and verify unique ids/aliases, revision=currentRevision, contentHash, acceptedBy, and acceptanceRef.",
+      "driftMarkers": "Duplicate aliases; a historical revision graded as current; an active row with no acceptance authority."
+    },
+    {
+      "key": "item-contract-coverage",
+      "title": "Every plan item owns behavior or an explicit exemption",
+      "model": "Each plan item is covered by at least one active/accepted clause, or by a deliberate non-behavioral exemption; absence is never interpreted as non-behavioral.",
+      "method": "Join current clauses by planItemId and list every uncovered plan item exactly.",
+      "driftMarkers": "Implementation work with no clause; documentation/ops work silently omitted instead of explicitly exempted."
+    },
+    {
+      "key": "atomic-observable-behavior",
+      "title": "Clauses state one observable outcome",
+      "model": "Each active clause is atomic and observable, not a bundle of separately testable outcomes.",
+      "method": "Apply the canonical spec-clause compiler's atomicity checks to every active behavior.",
+      "driftMarkers": "Multiple sentences; semicolon bundles; two observable verbs joined by and/or."
+    },
+    {
+      "key": "falsifiability",
+      "title": "Every behavior can be shown false",
+      "model": "The clause names a concrete outcome whose violation is observable; vague works-correctly or discretionary text does not qualify.",
+      "method": "Apply the canonical compiler's falsifiability checks and report each failing spec id.",
+      "driftMarkers": "Works correctly; TBD; as appropriate; a statement with no possible counterexample."
+    },
+    {
+      "key": "implementation-independence",
+      "title": "Contracts do not prescribe internal code shape",
+      "model": "Clauses describe behavior at a boundary rather than filenames, functions, classes, variables, or other implementation constructs.",
+      "method": "Inspect active behavior text for implementation filenames/constructs and rewrite matches as externally observable outcomes.",
+      "driftMarkers": "handler.ts returns true; rename this method; set a private field."
+    },
+    {
+      "key": "explicit-non-behavioral-exemptions",
+      "title": "Non-behavioral work is exempted explicitly",
+      "model": "An exemption is valid only when lifecycleStatus=exempt, behaviorClass=non-automated, and both justification and provenance are recorded.",
+      "method": "Validate every exempt current clause and refuse silent or mislabeled waivers.",
+      "driftMarkers": "RequiresTest:false treated as a waiver; empty justification; behavioral clause mislabeled exempt."
+    },
+    {
+      "key": "plan-class-specialization",
+      "title": "Clause shape meets the current plan-class standard",
+      "model": "Feature plans carry behavior; bugfixes carry failure/boundary regression contracts; migrations carry data-integrity contracts; investigations carry observability/non-automated contracts or explicit exemptions.",
+      "method": "Evaluate the current behavior-class set against the chosen plan-class rubric.",
+      "driftMarkers": "Bugfix with only a happy path; migration with no integrity clause; investigation with no observable finding contract."
+    },
+    {
+      "key": "spec-set-freshness",
+      "title": "The verdict is pinned to the exact current specSetHash",
+      "model": "The scorecard subject includes the deterministic hash of the complete current clause set; any semantic revision invalidates the old verdict.",
+      "method": "Recompute specSetHash from current clauses and require an exact complete terminal scorecard for that subject.",
+      "driftMarkers": "A scorecard for an older hash accepted after a clause revision; a plan-wide green with no exact set identity."
+    }
+  ]
+}

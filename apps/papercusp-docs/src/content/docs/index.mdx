@@ -1,0 +1,38 @@
+---
+title: Welcome
+description: Public documentation for the Papercusp platform.
+---
+
+**Papercusp** is an open framework for autonomous-harness apps — systems
+that drive AI agents through a structured loop (plan → work → validate
+→ done) against a project goal. This site is the public manual for
+people *using* Papercusp.
+
+If you are looking for the substrate spec or framework-author internals,
+launch the Tauri desktop dev shell (`cd papercusp-desktop && npm run dev`) and
+open the in-shell **Docs** tab — that's the operator's spec docs. The
+standalone webapp on `:3055` is retired (2026-05-14).
+
+## What's here
+
+- **[Using the app](/docs/using-the-app)** — a hands-on walkthrough: install,
+  start your first harness, drive a mission to done, save your work.
+- **[Harness templates](/docs/harness-templates)** — reusable harness
+  configurations. What they are, how to make one, how to publish to the
+  marketplace.
+- **[Harness snapshots](/docs/harness-snapshots)** — frozen harness
+  states. How to capture, restore, and share them.
+- **[Plugins](/docs/plugins)** — extend a harness with new actions,
+  dashboard tabs, integrations. How to author one and publish to the
+  marketplace.
+
+## Quick orientation
+
+A **harness** is one running instance — a project, a goal, a `.papercusp/`
+directory holding state. A **template** is a recipe to create new
+harnesses. A **snapshot** is a frozen copy of a harness's state. A
+**plugin** extends what every harness can do.
+
+All four ship through the same marketplace, install via the same CLI,
+and follow the same capability-based permission model. The pages above
+walk through each one in turn.

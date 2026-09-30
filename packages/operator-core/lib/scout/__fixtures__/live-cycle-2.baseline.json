@@ -1,0 +1,50 @@
+{
+  "meta": {
+    "capturedAt": "2026-06-15T04:43:01.902Z",
+    "cycleId": "scout-live-cycle-2",
+    "rubric": {
+      "version": "scout-quality-baseline-v1",
+      "model": "claude-sonnet-4-6",
+      "temperature": 1,
+      "thinkingBudgetTokens": 1024,
+      "weights": {
+        "d1": 1,
+        "d2": 1,
+        "d3": 1
+      },
+      "dimensions": {
+        "d1": "GROUNDEDNESS — does the proposal genuinely address the cited Hive corpus patterns (listed in the trace as \"Digest patterns cited\"), or is it free-floating cleverness with refs stapled on?",
+        "d2": "NOVELTY VS CORPUS — is the mechanism a real conceptual leap relative to the \"Nearest priors\" the search-first pass surfaced, or a re-wording of something the Hive already has/tried?",
+        "d3": "BETTABILITY — is the cheap experiment genuinely cheap, concrete, and FALSIFIABLE (its falsifiableSignal names an observable that would prove the bet wrong), not a vague \"try it and see\"?"
+      }
+    },
+    "panelSize": 3,
+    "scale": "0-10 per axis (eval-battery judge scale); axisMeans aggregated via judgeAxisScorer",
+    "thresholds": "NONE asserted (plan D-002) — baseline only"
+  },
+  "judgePanel": [],
+  "duplicateRate": {
+    "corpusSize": 0,
+    "noveltyFloor": 0.34,
+    "preCriticIdeas": {
+      "n": 0,
+      "duplicates": 0,
+      "rate": 0
+    },
+    "postCriticSurvivors": {
+      "n": 0,
+      "duplicates": 0,
+      "rate": 0
+    },
+    "postCriticProposals": {
+      "n": 0,
+      "duplicates": 0,
+      "rate": 0
+    }
+  },
+  "spend": {
+    "cycleUsd": 0,
+    "judgesUsd": 0,
+    "totalUsd": 0
+  }
+}

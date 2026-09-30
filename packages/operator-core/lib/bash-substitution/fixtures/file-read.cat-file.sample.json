@@ -1,0 +1,128 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 P-005 / pair file-read.cat-file (re-drawn for EI-18799531134810488: single-file-operand pattern) (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T13:34:00Z",
+  "totalAtoms": 2039,
+  "totalSessions": 72,
+  "sample": [
+    {
+      "sid": "su-9d23464a-a46e-4be8-80d1-50be8f4d0dc4",
+      "ts": "2026-07-19T18:08:32.426Z",
+      "atom": "cat \"/home/dev/.cargo-target/release/bundle/build-provenance.json\""
+    },
+    {
+      "sid": "su-b0971728-8161-44b0-9e6a-9adbe4d42cd6",
+      "ts": "2026-07-26T05:26:35.510Z",
+      "atom": "cat \"/tmp/claude-1000/-home-dev-papercupai-workspace-papercusp/320f2ea5-fa38-4e1a-bddc-162eeb9319fc/tasks/bwtfbxshh.output\" 2>&1"
+    },
+    {
+      "sid": "su-48ed7aaf-a682-4059-b032-42e9488f6620",
+      "ts": "2026-07-26T12:52:52.333Z",
+      "atom": "cat /home/dev/.papercusp-lane-a-fed/instances.env 2>/dev/null"
+    },
+    {
+      "sid": "su-21cd5f76-1476-4ee0-b596-30bc43b98bc9",
+      "ts": "2026-07-21T01:28:00.442Z",
+      "atom": "cat /home/dev/.papercusp/scratch/papercusp-workspace/dev:pg_query/d5a0bb77-c7ac-4a1c-9ff6-08efe1ff3ac6/result-door-1784597246693.md 2>/dev/null"
+    },
+    {
+      "sid": "su-7905fadc-2ba3-4492-897d-99d351a64a68",
+      "ts": "2026-07-26T04:14:49.763Z",
+      "atom": "cat /mnt/data/Backup/db-dumps/STATUS.json 2>&1"
+    },
+    {
+      "sid": "su-cd450e2a-a441-442a-afe6-f112522cbde8",
+      "ts": "2026-07-20T12:15:56.779Z",
+      "atom": "cat /sys/fs/cgroup/cpu.pressure 2>&1"
+    },
+    {
+      "sid": "su-73565638-a17a-4be4-adfd-86a6750ac1c1",
+      "ts": "2026-07-26T02:03:46.970Z",
+      "atom": "cat /tmp/claude-1000/-home-dev-papercupai-workspace-papercusp/0299920e-ce97-4522-8ad8-bff1ef32447b/tasks/b57fbshmi.output 2>/dev/null"
+    },
+    {
+      "sid": "su-92bacd98-b714-4f44-a4fc-08e73ea7ca39",
+      "ts": "2026-07-26T09:28:45.609Z",
+      "atom": "cat /tmp/claude-1000/-home-dev-papercupai-workspace-papercusp/41f8e3dd-17bd-410e-8ba2-93f2b17149bc/tasks/bwtg1nlj8.output 2>&1"
+    },
+    {
+      "sid": "su-772cf615-c6a4-488e-8491-b553ced6b4ac",
+      "ts": "2026-07-20T05:08:42.356Z",
+      "atom": "cat /tmp/claude-1000/-home-dev-papercupai-workspace-papercusp/7d20854e-72bd-4348-8523-385db1d6c0e2/tasks/b5iu11ab5.output 2>/dev/null"
+    },
+    {
+      "sid": "su-7845f434-583f-4801-86ba-d06f350d1071",
+      "ts": "2026-07-26T04:06:59.870Z",
+      "atom": "cat /tmp/claude-1000/-home-dev-papercupai-workspace-papercusp/b593ea46-30a7-4459-a427-e2c59716f22a/tasks/bo4slh6fr.output"
+    },
+    {
+      "sid": "su-21cd5f76-1476-4ee0-b596-30bc43b98bc9",
+      "ts": "2026-07-20T02:51:22.999Z",
+      "atom": "cat /tmp/claude-1000/-home-dev-papercupai-workspace-papercusp/e01d8ad4-3c0e-47b5-bf79-cfd2d08d2727/tasks/b0pga6rx9.output 2>/dev/null"
+    },
+    {
+      "sid": "su-73565638-a17a-4be4-adfd-86a6750ac1c1",
+      "ts": "2026-07-26T02:05:07.568Z",
+      "atom": "cat /tmp/fsa-test.log 2>&1"
+    },
+    {
+      "sid": "su-d93ac1bf-d48f-420d-8136-dea6de467e7f",
+      "ts": "2026-07-20T21:21:14.655Z",
+      "atom": "cat /tmp/live-fed-gate-20260720-163740/provenance 2>/dev/null"
+    },
+    {
+      "sid": "su-d93ac1bf-d48f-420d-8136-dea6de467e7f",
+      "ts": "2026-07-21T11:47:57.476Z",
+      "atom": "cat /tmp/live-fed-gate-20260721-073904/local-matrix.out"
+    },
+    {
+      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
+      "ts": "2026-07-25T22:30:29.452Z",
+      "atom": "cat /tmp/live-fed-gate-forced-2207.log"
+    },
+    {
+      "sid": "su-21cd5f76-1476-4ee0-b596-30bc43b98bc9",
+      "ts": "2026-07-20T06:36:56.251Z",
+      "atom": "cat /tmp/ratchet-final2.log"
+    },
+    {
+      "sid": "su-698e64fa-028b-4adc-b792-c4fb8fadc201",
+      "ts": "2026-07-26T05:47:58.111Z",
+      "atom": "cat /tmp/thorough-2.log"
+    },
+    {
+      "sid": "su-a28a5f3c-4f45-465e-af05-e1e6e05668a9",
+      "ts": "2026-07-26T02:58:41.684Z",
+      "atom": "cat /tmp/wi5853-rate-run/driver.sh 2>&1"
+    },
+    {
+      "sid": "su-a7d08fd3-ba65-45d3-a07f-a335b9004454",
+      "ts": "2026-07-21T00:17:58.124Z",
+      "atom": "cat Makefile 2>/dev/null"
+    },
+    {
+      "sid": "su-33f6b153-38e2-41a2-8cd5-72072b321e93",
+      "ts": "2026-07-19T21:35:29.255Z",
+      "atom": "cat bin/upload-release.sh 2>/dev/null"
+    },
+    {
+      "sid": "su-9d726f46-c7bc-4986-8700-62340b58689d",
+      "ts": "2026-07-26T04:50:07.186Z",
+      "atom": "cat libs/test-config/package.json 2>&1"
+    },
+    {
+      "sid": "su-9d726f46-c7bc-4986-8700-62340b58689d",
+      "ts": "2026-07-26T03:17:30.104Z",
+      "atom": "cat packages/operator-core/lib/agent-tools/locks/coordination-domain.ts"
+    },
+    {
+      "sid": "su-00cb5bbb-979b-4d78-81d8-a1debf876551",
+      "ts": "2026-07-26T06:32:54.459Z",
+      "atom": "cat patches/hyperdht+6.32.0.patch"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T18:58:36.246Z",
+      "atom": "cat ~/.config/systemd/user/papercup-oddsmith-sidecar.service"
+    }
+  ]
+}

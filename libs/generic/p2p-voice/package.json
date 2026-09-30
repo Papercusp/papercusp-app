@@ -1,0 +1,15 @@
+{
+  "name": "@papercusp/p2p-voice",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic P2P voice-channel core: channel join/leave over an injected swarm, per-peer control+audio framing, codec seam, N-peer mixing, per-peer tap. Pure algorithm — swarm and codec are host-injected; zero runtime deps.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  }
+}

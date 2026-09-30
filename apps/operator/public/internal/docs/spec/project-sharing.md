@@ -1,0 +1,2127 @@
+# 15. Snapshots — share working harness state via marketplace (v1.2)
+URL: /internal/docs/spec/project-sharing
+
+Retired snapshot-sharing design history and the live Pot, InstanceSpec, and Cupboard replacements.
+
+import { Aside } from '@astrojs/starlight/components';
+
+**The entire snapshot system this page specifies was retired and physically
+moved to `_retired/snapshot-system/`** (plan
+`retire-snapshots-instance-spec-2026-06-09`; restore tag
+`snapshot-system-retired-2026-06-09`). Gone from the live tree: the
+`@papercusp/export-state` capture/restore lib (was `libs/papercusp-export-state/`),
+the `/api/snapshots/*` endpoint routes (was
+`packages/operator-core/lib/endpoint-route/routes/snapshots/`, incl.
+`fork-from-cupboard.ts`), the `snapshots:list` / `snapshots:get` agent tools,
+the Cupboard `kind='snapshot'` listing path, the R2 tarball blob routes, the
+`SNAPSHOTS` feature flag, and the `harness_shared.snapshot_index` PG discovery
+index (dropped in migration 199). The whole thing was a monolithic-era
+abstraction built when a "harness" *was* the whole world.
+
+Its three jobs were re-homed: **distribution → blueprints** (the Cupboard
+distributes recipes), **backup → git + PG** (code + state are already durable),
+and the one remaining job — the **reproducible clone** — became the lightweight
+**`InstanceSpec`** (`blueprintRef + repoSha + deploymentConfig + genome`;
+`capture` / `boot` / `vary`), which lives at
+`packages/operator-core/lib/instance-spec/` and is exposed as the
+`instance:capture` / `instance:boot` / `instance:clone` agent tools
+(`packages/operator-core/lib/agent-tools/instance/`). So the "fork a captured
+harness" use case this whole spec was written around is now served by
+InstanceSpec, not by snapshots.
+
+**Per-harness sharing as a Comb/Cupboard product surface was retired too**
+(plan `comb-retire-per-harness-sharing-2026-06-11`): the ShareWizard, the
+`share/finalize` + `binding/resolve` + harness `cupboard/publish` routes, and
+the storefront's per-harness Join are gone. Sharing now happens at the **Pot**
+level — `discovery:set_pot` publishes a pot to the P2P directory, the Comb
+indexes its member repos (`hive_pubkey` rows), and joiners join the pot
+(`shared-pot-federation-2026-06-08`, `pot-from-github-url-2026-06-11`).
+`kind='harness'` Cupboard rows remain as the repo→Pot lookup index only;
+the live Cupboard `LISTING_KINDS` are `['harness', 'blueprint', 'plugin',
+'pack', 'knowledge-pack', 'template', 'app', 'rubric', 'plan', 'recipe']` (the `tool-pack` and `learning-pack`
+values still parse as normalized aliases for `pack` / `knowledge-pack`) —
+there is no `snapshot` kind (the D1
+`tarball_*` columns from migration 005 remain only as vestigial/nullable
+columns). Successor product work: `comb-pot-native-sharing-2026-06-11`.
+
+**Note — a different, still-live "iteration snapshot" concept exists.** The
+`harness_shared.harness_snapshots` / `harness_snapshots_consolidated` tables
+(`features_json` / `validation_md` / `iter_num`, trigger-fed + git-exported)
+are a SEPARATE, still-live per-iteration snapshot concept — deliberately NOT
+dropped by migration 199. Do not conflate them with this retired export-state
+snapshot system.
+
+Everything below — the OCI/Gitea/Cosign/ORAS/Cupboard transport, the
+`papercuspai.com/snapshots` marketplace UI, the capture / restore / migration /
+redaction / abuse-and-moderation passes — is preserved as **superseded design
+history**. It never described shipped code at the time it was written, and the
+code it does describe no longer exists in the live tree; the conceptual
+reasoning (redaction, cross-harness leak prevention, deserialization safety,
+schema-migration drift) is the only part worth mining. Note also that **§16
+(Publishing) is a separate feature** — it ships a static-site bundle to a
+public web URL via Cloudflare Pages and the genuinely-live
+`papercusp-publish-auth` library (`libs/papercusp-publish-auth/`), unaffected
+by this retirement.
+
+**Correctness:**
+
+* §15.6 step 7e: shared-row IDs now slug-prefixed (option b) — eliminates
+  the silent-corruption case where same-id-different-bytes collisions
+  fired on common paths (e.g., divergent PM curation between machines)
+* §15.6 step 7b: Postgres advisory lock for concurrent-restore safety
+* §15.6 step 9: slug rewrite restricted to structured contexts; ambiguous
+  matches surface in redaction UI rather than silently rewriting
+* §15.6 step 10: plugin loader verifies declared caps match manifest
+  claim (capability-spoofing fix)
+
+**Security hardening:**
+
+* §15.4: `.git/` excluded by default; substrate-controlled
+  `git-filter-repo` invocation on a copy when user opts in (operators
+  never directly run filter-repo themselves)
+* §15.4: `agent_chats.transcript` and `.papercusp/notes/*` defaults aligned
+  (both excluded by default; opt-in triggers second-tier scan)
+* §15.4: 1GB hard cap / 200MB soft cap pre-tarball, checked at staging
+  walk before tarball composition
+* §15.5 step 11: Cosign-keyless from v1; HMAC-as-signature dropped
+  (it isn't a signature — symmetric secret cannot give third-party
+  provenance)
+* §15.8 + §15.21: HKDF per-feature JWT subkey from `tenantSecret`
+* §15.10: `derivedFrom` redacts upstream identity when parent was
+  private (avoids exposing private creators in public derivative)
+* §15.10: files manifest as separate ndjson blob for >10k file snapshots
+* §15.22: destructive-migration `Snapshot compat:` rule + linter; CI grep
+  for forbidden deserializers (pickle/yaml.load/eval/etc.)
+
+**UX:**
+
+* §15.5 step 1: three drain modes (interactive / autosave / autonomous-
+  one-shot) replace single 30s timeout
+* §15.6 (new step 14): post-restore checklist (`npm ci`, etc.)
+* §15.12: 30/7/1-day email warnings before stale-snapshot archival
+
+**New sections:**
+
+* §15.23 NEW: Trust model — explicit signing chain (identity → Sigstore →
+  Rekor → manifest → tarball); multi-provider OIDC
+* §15.24 NEW: Abuse + moderation — takedown process, ToS gate,
+  code-execution warnings, deserialization-safety subsection
+* §15.25 NEW: Plugin snapshot manifest registry (per-plugin `snapshot:`
+  block in plugin manifest declares what to capture/restore; cross-ref
+  to §10 for the substrate-wide architecture conversation)
+
+- §15.5 step 3: replaced "include all of harness\_shared" with row-level
+  filter registry (prevents cross-harness data leak)
+- §15.5: new step for orchestrator pause + 30s drain timeout
+- §15.6 step 1: references `papercusp snapshot info <id>` compat CLI
+- §15.6 step 6: replaced full-content sed-rewrite with ALTER SCHEMA + narrow
+  directive-only sed (closes substring-collision correctness bug)
+- §15.6 step 6: random 6-base32 fork-slug suffix (cross-machine collision-free)
+- §15.6 step 10: spec'd batch consent UI explicitly
+- §15.10: added `derivedFrom` for fork provenance
+- §15.12: noted OCI server-side dedup; v1.1 client-side chunking
+- §15.15: resolved plugin-cap UX risk + stored-procedure caveat
+- §15.16: **realistic phased timeline (3-4 weeks total, not 6 days)**
+- §15.20 NEW: binary dependencies — postinstall-download model
+- §15.21 NEW: three-library factoring (publish-auth shared; export-build + export-state separate)
+- §15.22 NEW: CI enforcement of shared-table-filter-registry + stored-procedure-conventions
+
+## 15.0 Why this exists
+
+Today, the marketplace distributes **harness templates** — recipes that
+spin up empty harness instances. A user installs `papercup-coding`, runs
+the harness, and watches agents build something from scratch.
+
+What's missing: a way to share **a harness mid-mission** — with all its
+features queue, agent decisions, curated project specs, accumulated memory,
+and source code — so another operator can fork it and continue from where
+the original left off. Use cases:
+
+* **Continue someone else's autonomous work.** "Here's a sheets-clone
+  with 30 features passed and 12 in progress; pick it up from here."
+* **Demo what the system actually does.** Templates are recipes; snapshots
+  are evidence. A marketplace browser sees "F-001 through F-030 passing
+  tests, plus a curated spec the PM wrote — install it and try."
+* **Onboarding by example.** "Install this snapshot to see how a finished
+  papercup-coding mission looks." Beats screencasts for technical readers.
+* **Save-game / experiment.** Even without sharing, a local snapshot
+  is a "save point" — try a breaking change, restore if it goes wrong.
+* **Classroom / team starters.** Instructor pre-builds a mission halfway,
+  ships as a snapshot, students fork and complete.
+
+Without this, sharing in-progress work requires a manual `pg_dump` + tarball
+
+* restore script; nobody does it, and the marketplace stays templates-only.
+
+## 15.1 Goals + non-goals
+
+**Goals**
+
+* One click from the harness header → published snapshot in the marketplace.
+* One click from a snapshot's marketplace listing → fork installed locally.
+* The fork captures **everything** needed to continue the mission: source
+  code, git history, harness-state DB rows, `.papercusp/` operator artifacts,
+  curated PM specs, plugin enablement, model preferences.
+* Default-private; explicit opt-in to publish publicly.
+* Pre-publish secret redaction is mandatory and visible.
+* Cross-instance: a snapshot exported from one machine installs cleanly
+  on another, even with different substrate versions (within compatibility
+  bounds).
+* **Save-game value before share-game value**: v1.0 ships local
+  capture+restore so the feature is useful before the marketplace exists.
+* **No cross-harness leak**: a snapshot from harness A on a multi-harness
+  machine MUST NOT include harness B's data.
+
+**Non-goals (v1)**
+
+* Live-collaborative forks. v1 is "fork once, diverge independently"; no
+  upstream pull. CRDT-based live collaboration is v3+ work (see §15.14).
+* Multi-machine harnesses sharing live state. ElectricSQL/Loro architecture
+  for centralized live sync is filed for the hosted offering, not v1.
+* Hot-restore (resume in-flight without restart). Restore stops the
+  orchestrator, swaps state, restarts. Acceptable downtime is seconds.
+* Federated marketplaces. v1 is one papercuspai.com Gitea/Forgejo instance.
+  Federation between instances is v2+.
+
+## 15.2 The ontological split — three concepts
+
+|                        | **Template**                      | **Snapshot**                                           | **Plugin**                   |
+| ---------------------- | --------------------------------- | ------------------------------------------------------ | ---------------------------- |
+| What it is             | A recipe (config + initial files) | A frozen harness instance (template + state)           | A horizontal capability      |
+| Contains state?        | No                                | **Yes** — DB rows, repo files, agent decisions         | No                           |
+| Marketplace concept    | "Install fresh"                   | "Fork this in-progress work"                           | "Enable on existing harness" |
+| Versioned?             | Yes (semver)                      | Yes (immutable per-publish)                            | Yes (semver)                 |
+| Default visibility     | Public                            | **Private**                                            | Public                       |
+| Lifecycle              | Stable, evolving                  | Snapshot is immutable; new snapshots are new artifacts | Stable, evolving             |
+| Storage size (typical) | \~50 KB                           | 50 MB – 500 MB                                         | \~100 KB                     |
+
+Templates and plugins are about *capabilities*. Snapshots are about
+*outcomes* — the thing the system actually produced. The marketplace value
+of 50 well-curated snapshots is much higher than 50 templates, because
+snapshots are evidence, not specs.
+
+## 15.3 Architecture overview
+
+```text
+┌──────────────────────────┐         ┌──────────────────────────────────┐         ┌────────────────────┐
+│  user's harness          │         │   papercupai marketplace         │         │   Gitea/Forgejo    │
+│  (substrate at :3055)    │         │   (web UI + API)                 │         │   self-hosted      │
+│                          │         │                                  │         │   OCI registry     │
+│  click "Save snapshot"   │         │   POST /snapshots/start          │         │                    │
+│   ↓                      │         │   ├─ JWT validate (HS256)        │         │                    │
+│  capture pass:           │         │   ├─ rate-limit check            │         │                    │
+│  1. pause orchestrator   │         │   ├─ tenant quota                │         │                    │
+│  2. snapshot DB schema   │         │   └─ returns deploymentId +      │         │                    │
+│  3. tar filesystem       │ jwt+    │       upload URLs                │         │                    │
+│  4. trufflehog scan      ├────────►│                                  │         │                    │
+│  5. preview + confirm    │         │   PUT /snapshots/blobs/:id       │         │                    │
+│   ↓                      │ files   │   └─ proxy to Gitea OCI registry ├────────►│  /v2/_blobs        │
+│  ORAS push               ├────────►│                                  │         │                    │
+│   ↓                      │         │   POST /snapshots/finalize       │         │                    │
+│  poll /status/:id        ├────────►│   ├─ create OCI manifest         ├────────►│  /v2/_manifests    │
+│   ↓                      │ status  │   ├─ Cosign sign                 │         │                    │
+│  toast: published        │◄────────┤   └─ index in Typesense          │         │                    │
+└──────────────────────────┘         │                                  │         │                    │
+                                     │   GET /snapshots/list            │         │   Auth, search,    │
+┌──────────────────────────┐ search  │   GET /snapshots/:id/preview     │         │   storage, OCI     │
+│  another user's harness  ├────────►│   POST /snapshots/:id/install    │         │   protocol         │
+│                          │         │                                  │         │                    │
+│  click "Fork snapshot"   │         │   returns artifact pull URL      │         │                    │
+│   ↓                      │         │                                  │         │                    │
+│  ORAS pull               │◄────────┤   proxy from Gitea OCI registry  │◄────────┤  /v2/_blobs        │
+│   ↓                      │         │                                  │         │                    │
+│  restore pass:           │         └──────────────────────────────────┘         └────────────────────┘
+│  1. validate + compat    │                                                              │
+│  2. extract tarball      │                  ┌──────────────────────┐                     │
+│  3. ALTER SCHEMA flow    │                  │  R2 (object store)   │                     │
+│  4. forward migrations   │                  │   = Gitea storage    │◄────────────────────┘
+│  5. slug rewrite         │                  │     backend          │
+│  6. plugin re-enable     │                  └──────────────────────┘
+│  7. batch consent UI     │
+│   ↓                      │
+│  papercusp run           │
+└──────────────────────────┘
+```
+
+The marketplace front-end (`papercuspai.com/snapshots`) is a thin custom UI
+that calls Gitea's API for storage operations and adds snapshot-specific
+affordances (cost preview, fork count, redaction-status badge). Underneath,
+**Gitea provides**: OCI registry, auth, web-based browse fallback, search,
+storage abstraction (R2 backend), webhook events. Same shape npmjs.com is
+a UI on top of the standard npm registry.
+
+## 15.4 The snapshot artifact
+
+Format: **OCI artifact** pushed via ORAS. Internally, the manifest
+references a tarball blob with this layout:
+
+```text
+snapshot-<slug>-<short-hash>.tar.gz
+├── manifest.json              ← meta-manifest (see §15.10)
+├── snapshot.lock              ← pinned versions of template + plugins + models
+├── README.md                  ← human-readable description (renders on detail page)
+├── source/                    ← repo files
+│   ├── apps/, packages/, ...
+│   ├── package.json
+│   └── .git/                  ← optional, user-toggle at publish time
+├── state/
+│   ├── shared-schema.sql      ← harness_shared DDL only (no rows)
+│   ├── shared-projects.csv    ← per-table filtered rows (see §15.5 step 3)
+│   ├── shared-project_spec_revisions.csv
+│   ├── shared-pending_events.csv
+│   ├── shared-routines.csv
+│   ├── db.sql.gz              ← pg_dump of harness_<slug>.* only
+│   └── harness/               ← .papercusp/ subset
+│       ├── notes/             ← operator notes per feature
+│       ├── memory/            ← curator output
+│       ├── proposals/         ← scope-expansion proposals
+│       ├── plan-review.md     ← plan-gate verdict
+│       └── validation-contract.md
+└── docs/
+    └── features/              ← documenter output (per-feature .md files)
+```
+
+Notably **excluded** by default:
+
+* `node_modules/`, `dist/`, `.next/`, `target/` — re-derivable. **Restore
+  docs MUST instruct consumer to run `npm ci` (or equivalent for
+  pip/cargo/poetry/etc.) before `papercusp run`** — the lockfile
+  derives them, but corrupted/missing dep state breaks autonomous workers.
+* `worktrees/` — per-feature checkouts; restored fresh on demand
+* `lanes.json`, `runs/<pid>.log` — per-machine ephemeral
+* `.env`, `.env.*` — secrets, never
+* `~/.papercusp/credentials.json` — substrate-machine secrets, never
+* `.git/hooks/*` — shell scripts the substrate's git operations may
+  invoke; stripped at capture even if `.git/` is included
+* **`.git/` (full git history) — excluded by default.** When user opts
+  in to include git history, the substrate runs `git-filter-repo` on a
+  copy with substrate-controlled invocation (see below). Operators
+  never directly run filter-repo themselves — it's a documented
+  power-tool foot-gun that has destroyed real repos.
+* **`agent_chats.transcript` — excluded by default. Opt-in to include.**
+  When opted in, a second-tier scan pass runs over the transcript content
+  (transcripts often contain user-typed secrets — pasted API keys in
+  natural-language messages — that trufflehog's verifier patterns won't
+  catch).
+* **`.papercusp/notes/*` — excluded by default. Opt-in to include.** Same
+  reasoning as transcripts; same opt-in flow + second-tier scan.
+* Plugin grants from `~/.papercusp/granted-capabilities.json` — consumer
+  re-consents fresh
+
+Excluded files are listed in `manifest.json` under `excluded[]` so the
+consumer knows what's missing without surprises.
+
+### `.git/` capture flow (when user opts in)
+
+When the user opts in to include git history, the capture pass:
+
+1. Copies `<projectDir>/.git/` → `<staging>/source/.git-filtered/`
+2. Runs `git filter-repo` on the copy with conservative defaults:
+   * Strip reflog (`refs/stash`, `HEAD@{N}`)
+   * Strip notes (`refs/notes/*`)
+   * Strip remote-tracking refs (`refs/remotes/*`)
+   * Keep `refs/heads/*` + `refs/tags/*`
+3. Runs gitleaks against the filtered .git
+4. Bundles the filtered `.git/` (NOT the original)
+5. Original `<projectDir>/.git/` is never touched
+
+Separate, more dangerous opt-in: "include full history including reflog
+and remote-tracking refs (NOT recommended unless you've reviewed your
+git history yourself)." Toggling this ON shows a warning explaining
+exactly what's preserved and the leak surface. Default OFF.
+
+### Pre-tarball size limits
+
+Checked at staging-walk time, before tarball composition begins:
+
+* **Hard cap**: 1 GB pre-compression. Refuse the snapshot with a clear
+  error showing the largest files. (Common cause: symbolic link to
+  `~/.cache` accidentally followed; node\_modules included.)
+* **Soft cap**: 200 MB pre-compression. Warn the user with an explicit
+  confirmation prompt:
+
+  ```text
+  This snapshot would be 847 MB compressed.
+  That's larger than typical (200 MB).
+    Largest files:
+      - source/data/sample.parquet (412 MB)
+      - source/.cache/big-fixture.tar (203 MB)
+    - Common causes: node_modules included? .git/ very large?
+    - Continue anyway? [y/N]
+  ```
+
+Caps are pre-compression to fail fast on disk-walk; post-compression
+sizes are reported in `manifest.json` for the consumer's planning.
+
+## 15.5 Capture pass
+
+The substrate's "Save as snapshot" flow runs this sequence. Hardcoded
+order; no pluggable actions in v1.
+
+1. **Pause orchestrator + workers.** Three drain modes with distinct
+   policies. The substrate picks based on how the snapshot was triggered.
+
+   Why a freeze is needed at all: `pg_dump` is transactional, but the
+   filesystem walk isn't. Without a freeze, a worker writing to disk
+   during the walk produces a snapshot where the DB rows say "F-FIX-016
+   is in progress" but the filesystem already has the worker's commit
+   applied — incoherent state for the consumer.
+
+   | Mode                     | Trigger                                                                           | Drain policy                                                                                                                                                                                |
+   | ------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | **Interactive**          | User clicks "Save snapshot" in dashboard                                          | User-decision UX — no fixed cap; show progress for in-flight workers ("Worker on F-FIX-016: claude generating, 12s elapsed"); buttons: Wait / Cancel / Snapshot anyway                      |
+   | **Autosave / scheduled** | Substrate-initiated (e.g., pre-publish auto-checkpoint, periodic save-game ticks) | Bounded wait (5 min). On timeout → skip and retry on next interval. **Never** silent `partial=true` — autosaves silently flagged partial defeat the save-game value.                        |
+   | **Autonomous one-shot**  | `papercusp snapshot create --autonomous` CLI flag (CI/scripted use)               | Bounded wait (5 min). On timeout → `partial=true` with clear log message; exit 0 with warning. The autonomous caller has explicitly chosen "ship something even if not perfectly coherent." |
+
+   `partial=true` only sets when the user (or `--autonomous` caller)
+   explicitly accepted it. Consumer's restore pass refuses to install
+   a `partial=true` snapshot without explicit `--accept-partial` flag.
+
+2. **Stage directory.** Create `<projectDir>/.papercusp/snapshot-staging/`.
+
+3. **DB capture — per-harness schema.**
+   ```bash
+   pg_dump \
+     --schema=harness_<slug> \
+     --no-owner --no-privileges --compress=4 \
+     --file=staging/state/db.sql.gz \
+     papercusp
+   ```
+
+4. **DB capture — `harness_shared` schema (DDL only) + per-table row filter.**
+   This is **critical for preventing cross-harness data leaks.** The
+   substrate ships a per-shared-table filter registry; each future
+   `harness_shared.*` table MUST declare a filter rule or the publish
+   refuses.
+
+   ```bash
+   # Schema structure (DDL only, no data)
+   pg_dump --schema-only --schema=harness_shared papercusp \
+     > staging/state/shared-schema.sql
+
+   # Per-table filtered rows (one COPY per table, defined in registry)
+   psql -c "COPY (SELECT * FROM harness_shared.projects
+                 WHERE id IN (SELECT DISTINCT project_id
+                              FROM harness_<slug>.harness_features
+                              WHERE project_id IS NOT NULL))
+           TO STDOUT WITH (FORMAT csv, HEADER)" \
+     > staging/state/shared-projects.csv
+
+   psql -c "COPY (SELECT * FROM harness_shared.project_spec_revisions
+                 WHERE project_id IN (SELECT id FROM ...included projects...))
+           TO STDOUT WITH (FORMAT csv, HEADER)" \
+     > staging/state/shared-project_spec_revisions.csv
+
+   psql -c "COPY (SELECT * FROM harness_shared.pending_events
+                 WHERE install_slug = '<slug>')
+           TO STDOUT WITH (FORMAT csv, HEADER)" \
+     > staging/state/shared-pending_events.csv
+
+   psql -c "COPY (SELECT * FROM harness_shared.routines
+                 WHERE install_slug = '<slug>')
+           TO STDOUT WITH (FORMAT csv, HEADER)" \
+     > staging/state/shared-routines.csv
+   ```
+
+   The registry was implemented at
+   `_retired/snapshot-system/papercusp-export-state/src/shared-table-filters.ts`
+   (the planned `apps/papercusp/lib/snapshot/` location never existed — there is
+   no `papercusp` app) with one entry per shared table. CI enforces (see §15.22): any new
+   table added to `libs/db/sql/*.sql` under `harness_shared.*` without
+   a corresponding registry entry fails the build. Forces the
+   leak-prevention conversation at PR time, not at incident time.
+
+   ```ts
+   // shared-table-filters.ts (illustrative)
+   export const SHARED_TABLE_FILTERS = {
+     projects: {
+       filter: (slug: string) => `id IN (SELECT DISTINCT project_id
+         FROM harness_${slug}.harness_features WHERE project_id IS NOT NULL)`
+     },
+     project_spec_revisions: {
+       filter: (slug: string) => `project_id IN (SELECT id FROM
+         (${SHARED_TABLE_FILTERS.projects.fullSelect(slug)}) p)`
+     },
+     pending_events: {
+       filter: (slug: string) => `install_slug = '${slug}'`
+     },
+     routines: {
+       filter: (slug: string) => `install_slug = '${slug}'`
+     },
+     // future shared tables MUST be added here or CI fails
+   } as const;
+   ```
+
+5. **Filesystem walk + denylist.** Walk `<projectDir>` recursively, copy
+   files into staging dir. Skip everything in the exclusion patterns
+   (see §15.4). Auto-exclude `agent_chats.transcript` unless user opted in.
+
+6. **Run trufflehog + gitleaks** against staging dir. Block on
+   verified secrets (Stripe keys, AWS keys, etc.). Surface unverified
+   high-recall hits as warnings the user must dismiss before proceeding.
+   See §15.9 for full secret-detection spec.
+
+7. **User review UI.** Show a summary: "X files, Y MB, Z redactions
+   applied, W warnings." User confirms or edits the exclusion list.
+
+8. **Compute canonical-manifest sha256** over the file list + per-file hashes.
+
+9. **tar + gzip + zstd staging dir → snapshot.tar.gz**. Streaming, doesn't
+   buffer everything in memory.
+
+10. **ORAS push** to Gitea via the marketplace API endpoint (which proxies
+    to Gitea's OCI registry). Per-file PUTs are signed-URL'd directly to
+    the registry's `/v2/_blobs` endpoint to avoid bandwidth-through-marketplace.
+
+11. **Cosign-keyless sign** the OCI manifest. The tenant authenticates
+    via a Sigstore-supported OIDC provider (GitHub, Google, Microsoft,
+    GitLab, Buildkite, etc. — any Fulcio-trusted issuer). Sigstore
+    issues a short-lived signing certificate bound to that identity;
+    the signature is published to the public Rekor transparency log.
+
+    HMAC against `tenantSecret` is **not** sufficient and is **not** an
+    alternative. HMAC is symmetric — anyone with the verification key
+    (the marketplace) can also forge. That's authentication, not
+    third-party-verifiable provenance. See §15.23 (Trust model) for
+    the full signing chain.
+
+    Setup cost: \~2-3 hours of OIDC + Fulcio wiring. Ongoing cost: zero
+    (Sigstore is free public infrastructure). The integrity guarantees
+    are worth shipping in v1.
+
+12. **Index in Typesense** for marketplace search (title, description,
+    feature titles, project spec excerpt).
+
+13. **Restart orchestrator** if it was running before step 1.
+
+## 15.6 Restore pass (install)
+
+Installing a snapshot creates a fresh harness instance from someone else's
+captured state. Hardcoded sequence; mirrors Discourse's `Restorer#run`.
+
+1. **Validate target via compat-info CLI.** The substrate exposes
+   `papercusp snapshot info <id>` showing two-direction compatibility
+   before any data is touched:
+
+   ```text
+   $ papercusp snapshot info snap_abc123def456
+   Snapshot snap_abc123def456 (sheets-clone with formula engine v2)
+     Built on substrate v0.7.1, schema v23
+     Requires substrate ≥ v0.7.0
+     Your substrate: v0.7.1, schema v25
+     Compatibility: ✓ COMPATIBLE
+       Schema migration: v23 → v25 (will run 2 forward migrations)
+   ```
+
+   On incompatibility:
+
+   ```text
+     Compatibility: ✗ INCOMPATIBLE
+       This snapshot requires substrate ≥ v0.8.0
+       Your substrate: v0.7.1
+       Action: upgrade substrate first (papercusp upgrade)
+   ```
+
+   The restore command refuses on incompatibility. Same compat checks
+   are run server-side during `papercusp install` to surface errors
+   before a download starts.
+
+2. **Pause autonomous loop.** Stop the orchestrator if running. Drain
+   in-flight worker dispatches (60s timeout). Mark the new harness's
+   future schema as `restoring=true` so any concurrent operations refuse.
+
+3. **ORAS pull.** Download the snapshot artifact from Gitea via the
+   marketplace API. Verify Cosign signature.
+
+4. **Verify integrity.** Recompute canonical-manifest sha256, compare
+   against the manifest's claim. Fail if mismatch. Refuse `partial=true`
+   snapshots without explicit `--accept-partial` flag.
+
+5. **Extract tarball** to a fresh `<projectDir>/`.
+
+6. **Generate fork slug.** Random 6-character base32 suffix appended to
+   the original slug:
+
+   ```
+   sheets → sheets-fork-a3k9q2
+   ```
+
+   Globally unique (32^6 = 1B), human-readable, no counter coordination
+   needed across machines (same snapshot installed on machine A and
+   machine B produce different fork slugs). User can rename via existing
+   harness-rename flow if they want something prettier.
+
+7. **Restore via ALTER SCHEMA + slug-prefix shared rows.** This avoids
+   two distinct correctness bugs:
+
+   * The substring-collision bug (where `sheets` inside `sheets-clone`
+     would get incorrectly rewritten by naive sed)
+   * The shared-row ID collision bug (where `harness_shared.projects.id =
+     'PROJ-XYZ'` exists on both publisher's and consumer's machines with
+     different content — same logical project, divergent local PM
+     curation — and a naive `ON CONFLICT (id) DO NOTHING` would silently
+     attach consumer's content to publisher's features)
+
+   Sequence:
+
+   ```bash
+   # 7a. Detect collision with target slug; fail loudly if exists
+   psql -tAc "SELECT 1 FROM information_schema.schemata
+              WHERE schema_name = 'harness_<new-slug>'" \
+     | grep -q 1 && {
+       echo "ERROR: schema harness_<new-slug> already exists locally"
+       exit 1
+     }
+
+   # 7b. Take Postgres advisory lock to serialize concurrent restores
+   #     of the same original slug. Two parallel restores (or a retry
+   #     while a prior is mid-flight) would otherwise trash each other's
+   #     working schema.
+   psql -c "SELECT pg_advisory_lock(hashtext('snapshot-restore:<original-slug>'))"
+   # (released on success or failure via trap; orphaned locks cleaned
+   #  by `papercusp doctor --release-restore-locks`.)
+
+   # 7c. Drop any leftover restoration schema from a half-failed prior attempt
+   psql -c "DROP SCHEMA IF EXISTS harness_<original-slug>_restoring CASCADE"
+   psql -c "CREATE SCHEMA harness_<original-slug>_restoring"
+
+   # 7d. Stream dump through narrow sed (only 3 directive types — known,
+   #     structured, fixed format pg_dump emits). NO content-substring
+   #     replacement. Substring collisions impossible.
+   sed -E '
+     s|^CREATE SCHEMA harness_<original-slug>;|-- (created above as restoring)|;
+     s|^ALTER SCHEMA harness_<original-slug> OWNER TO [^;]+;|-- (owner not transferred)|;
+     s|^SET search_path = harness_<original-slug>(,.*)?;|SET search_path = harness_<original-slug>_restoring\1;|;
+   ' < state/db.sql > state/db-rewritten.sql
+
+   # 7e. Atomic restore (per-harness schema)
+   psql --single-transaction --variable=ON_ERROR_STOP=1 < state/db-rewritten.sql
+
+   # 7f. Restore harness_shared subset with slug-prefixed IDs.
+   #     For each row, generate the new ID by appending the fork suffix
+   #     (same 6-base32 used for the harness slug). Collision-free.
+   #
+   #     E.g., snapshot's PROJ-XYZ → restored as PROJ-XYZ-fork-a3k9q2
+   #     All FK references in harness_<original-slug>_restoring.* get
+   #     updated in the same transaction.
+   psql --single-transaction --variable=ON_ERROR_STOP=1 <<EOF
+     BEGIN;
+
+     -- Stage shared rows with prefixed IDs into temp tables
+     CREATE TEMP TABLE _shared_projects_in AS
+       SELECT
+         id || '-fork-<6-base32>' AS new_id,
+         id AS old_id,
+         name, slug, status, ... -- all other columns
+       FROM (
+         SELECT * FROM csv_to_table('state/shared-projects.csv')
+       ) src;
+
+     -- Insert with rewritten IDs into harness_shared
+     INSERT INTO harness_shared.projects (id, name, slug, status, ...)
+       SELECT new_id, name, slug, status, ... FROM _shared_projects_in;
+
+     -- Rewrite all FK refs in the restoring schema's tables
+     UPDATE harness_<original-slug>_restoring.harness_features hf
+        SET project_id = m.new_id
+       FROM _shared_projects_in m
+      WHERE hf.project_id = m.old_id;
+
+     -- (repeat for project_spec_revisions, pending_events, routines per registry)
+
+     COMMIT;
+   EOF
+
+   # 7g. Atomic rename to final
+   psql -c "ALTER SCHEMA harness_<original-slug>_restoring
+            RENAME TO harness_<new-slug>"
+
+   # 7h. Release advisory lock
+   psql -c "SELECT pg_advisory_unlock(hashtext('snapshot-restore:<original-slug>'))"
+   ```
+
+   The sed surface is only 3 directive types — known, structured,
+   fixed format pg\_dump emits. No content-substring replacement.
+   Substring collision (`sheets` in `sheets-clone`) is impossible because
+   we're not touching content, only the directive lines.
+
+   The slug-prefix scheme on shared-row IDs eliminates the
+   silent-corruption case entirely. The trade-off: cross-fork project
+   identity is lost (project IDs in fork A don't match fork B). This
+   property was never relied on — projects are per-harness PM curation,
+   not cross-harness primary keys.
+
+   **Stored-procedure caveat**: function bodies containing hardcoded
+   `harness_<original-slug>` references survive ALTER SCHEMA RENAME with
+   the wrong schema name. Substrate today uses zero stored procedures
+   in `harness_<slug>` schemas — only DDL, DML, indexes, FK constraints.
+   See §15.22 for CI enforcement of the no-hardcoded-slug-in-procedure
+   convention.
+
+8. **Run forward migrations.** Substrate's existing migration code
+   brings the dump up to current schema version. Snapshots do not
+   carry migration scripts; the substrate's own migrations handle it.
+   See §15.11 for full schema-migration model.
+
+9. **Slug rewrite pass over text artifacts (structured contexts only).**
+   Walk `.papercusp/notes/`, `.papercusp/memory/`, prompts,
+   validation-contract.md, etc. Naive substring rewrite would re-introduce
+   the same bug ALTER SCHEMA was designed to avoid (slug `sheet` inside
+   words like `worksheet`, `cheatsheet`, `spreadsheet` would corrupt).
+
+   Rewrite **only** in known structured contexts:
+
+   * **Front-matter fields** in markdown: `slug:`, `harness:`,
+     `harness_slug:` keys
+   * **Path components**: substrings preceded/followed by `/`
+     (e.g., `worktrees/sheets/` → `worktrees/sheets-fork-a3k9q2/`)
+   * **Database schema references**: substrings preceded by `harness_`,
+     followed by `.` (e.g., `harness_sheets.harness_features` →
+     `harness_sheets-fork-a3k9q2.harness_features`)
+   * **Explicit `<slug>` template-style placeholders** the substrate
+     writes deliberately
+
+   For matches in any other context (prose mentions, code fences,
+   embedded examples), surface them in the existing redaction-review
+   UI for the user to confirm or skip. Default-skip rather than default-
+   rewrite. The user sees a list:
+
+   ```text
+   Found 7 ambiguous matches of 'sheets' in unstructured text:
+     .papercusp/memory/raw.md:142 — code fence quoting "harness_sheets"
+       as documentation example. Rewrite? [y/N]
+     .papercusp/notes/F-FIX-016.md:23 — prose: "the sheets harness has..."
+       Rewrite? [y/N]
+     ...
+   [ Skip all ]   [ Review individually ]
+   ```
+
+   Conservative default. Better to leave a stale reference than corrupt
+   prose.
+
+10. **Plugin re-enable + batch capability consent UI.** Read
+    `manifest.plugins[]`. For each plugin:
+
+    a) **Verify plugin is installed locally** at the manifest's declared
+    version. If not, prompt to install. Cancellation rolls back the
+    entire restore.
+
+    b) **Verify capability declarations match.** The plugin loader
+    reads the *installed* plugin's `package.json`-declared caps,
+    and compares against the snapshot's `manifest.plugins[].caps`.
+    If they diverge (manifest under-declared what the actual plugin
+    wants), the loader uses the **actual plugin's declarations** and
+    re-prompts the user. This prevents capability-spoofing attacks
+    where a malicious manifest under-declares caps to slip past
+    the consent screen.
+
+    c) **Apply per-plugin snapshot state** per the plugin's
+    `snapshot:` block in its manifest (see §15.25). Files declared
+    under `include` are restored to their declared locations;
+    files in `exclude` are left for the user to re-derive. Plugins
+    without a `snapshot:` block produce a warning at this step.
+
+    Compute the union of capabilities required across all plugins.
+    Show a single consent screen:
+
+    ```text
+    This snapshot uses 4 plugins requiring 12 capabilities:
+
+      cloudflare-pages-hosted (3 caps)
+        ✓ secrets:read:CLOUDFLARE_API_TOKEN
+        ✓ network:fetch:api.cloudflare.com
+        ✓ ui:harness-action:publish-cloudflare
+
+      jira-sync (2 caps)
+        ✓ secrets:read:JIRA_TOKEN
+        ✓ network:fetch:*.atlassian.net
+
+      vscode-server (1 cap)
+        ✓ ui:dashboard-tab:vscode
+
+      pi-companion (6 caps)
+        ✓ ui:harness-tab:pi
+        ✓ process:spawn:pi
+        ✓ ... (4 more)
+
+    [ Trust this source — grant all ]    [ Review individually ]
+    [ Cancel install ]
+    ```
+
+    "Trust this source" approves all capabilities in one click. "Review
+    individually" falls through to per-cap consent for the careful path.
+    Installing a plugin that's not present locally prompts to install
+    it first; cancellation rolls back the entire restore.
+
+11. **Project context restore.** Cross-harness `harness_shared.projects`
+    rows already imported via step 7e. The harness's `feature.project_id`
+    references resolve correctly because the project IDs match.
+
+12. **Final verification.** Read 5 sample features; confirm `claims`,
+    `status`, `feature_audit` references intact. Verify
+    `harness_shared.projects WHERE id IN (...this harness's project_ids...)`
+    returns expected rows.
+
+13. **Restart orchestrator.** Mark restore complete.
+
+14. **Post-restore checklist** (substrate prints, doesn't auto-run).
+    Auto-running these would be a remote code execution surface (see
+    §15.24). The substrate displays:
+
+    ```text
+    Restore complete: harness_<new-slug>
+
+    Before running `papercusp run`:
+      1. Review the restored source code:
+           cd <projectDir> && less docs/features/F-001.md  (etc.)
+      2. Install dependencies (snapshot excluded node_modules/, dist/, etc.):
+           cd <projectDir>
+           npm ci          (Node projects)
+           pip install -r requirements.txt    (Python)
+           cargo build     (Rust)
+           bundle install  (Ruby)
+      3. Configure secrets the snapshot couldn't carry:
+           cp .env.example .env  &&  edit .env
+      4. Optional sanity check:
+           papercusp doctor --slug <new-slug>
+      5. Start the autonomous loop:
+           papercusp run --slug <new-slug>
+    ```
+
+    The substrate does NOT auto-run `npm install` or any other
+    deserializing/script-executing tool against the restored source.
+    See §15.24 (Abuse + moderation) for the full rationale.
+
+Total elapsed time on a 200 MB snapshot: \~30-90 seconds for
+substrate-controlled steps (tarball download + pg\_restore). Dependency
+install and user review are post-restore and not counted. Status is
+reported via the same token-based async pattern as snapshot creation
+(mirrors Sandstorm's `fileTokens` flow).
+
+## 15.7 Marketplace layer
+
+Backend: **self-hosted Gitea** (or Forgejo, the community fork) on
+papercuspai.com. Provides for free:
+
+* OCI registry (Docker / OCI-image / OCI-artifact protocols)
+* Auth (built-in user accounts, OAuth, GitHub/Google SSO)
+* Web UI for fallback browse / package detail pages
+* Search (built-in)
+* Storage abstraction (local disk or S3-compatible — we use R2)
+* Webhook events for "package published" / "package retracted"
+* API for listing, search, install counts, retention policies
+
+Frontend: **thin custom UI** at `papercuspai.com/snapshots` which:
+
+* Browses snapshots by Gitea API + Typesense for advanced search
+* Shows snapshot-specific metadata Gitea doesn't natively render:
+  * Estimated install time + storage size
+  * Estimated cost-to-continue (sum of `expected_cost_cents` on todo features)
+  * Fork count + last-fork date
+  * Redaction-status badge ("✓ scanned, no secrets found")
+  * Origin template + version (links to template page)
+  * PM-curated project spec preview
+  * Sample feature titles
+  * **Provenance chain** (`derivedFrom` — see §15.10): "based on
+    `<original-name>` by `<original-author>`"
+* Fork button → calls substrate's restore flow
+
+This split — Gitea for storage/auth, custom thin UI for branding/affordances —
+is the same pattern as npmjs.com on top of the npm registry protocol.
+
+The Gitea instance is itself a build-block: if papercuspai.com is ever
+suspended or compromised, anyone can `docker run gitea/gitea` and host
+their own snapshot mirror. Federation between instances is a v2+ feature.
+
+## 15.8 Authentication + authorization
+
+Reuse the **publish auth Worker** from §16 (Publishing) — same
+`tenantId` + `tenantSecret` model, same JWT (HS256, `jti`/`sha256`/`exp`/
+`aud` claims, 60s validity, replay-protected via D1 unique-key
+constraint), same rotation primitive, same revoke flow.
+
+Routes split:
+
+* `/publish/*` — cloudflare-pages-hosted (websites)
+* `/snapshots/*` — snapshot artifacts (this spec)
+
+**HKDF per-feature subkeys.** A leak from one feature's request handling
+should not compromise the other. The substrate derives per-feature
+subkeys from `tenantSecret` via HKDF (RFC 5869):
+
+```text
+publish_key  = HKDF-SHA256(tenantSecret, info="papercusp-publish-v1")
+snapshot_key = HKDF-SHA256(tenantSecret, info="papercusp-snapshot-v1")
+```
+
+JWTs for publish-routes are signed with `publish_key`; JWTs for
+snapshot-routes are signed with `snapshot_key`. Verifier additionally
+enforces the `aud` claim:
+
+* `aud: "publish"` on `/publish/*` JWTs; verifier on `/snapshots/*`
+  refuses any JWT with `aud != "snapshot"`
+* `aud: "snapshot"` on `/snapshots/*` JWTs; verifier on `/publish/*`
+  refuses cross-aud
+
+Defense in depth: HKDF subkeys mean a forged HMAC for one feature
+won't validate against the other's verifier even if the `aud` check
+were bypassed somehow.
+
+Same KV-based rate limiting (per-tenant burst + daily), same audit log
+in D1 with route-level distinguishing field.
+
+Snapshot-specific authorization:
+
+* **Visibility**: every snapshot is `private` by default. Tenants can
+  toggle to `public` from the marketplace UI; this updates a Gitea
+  package-visibility flag.
+* **Fork**: anyone with a tenantSecret can pull a public snapshot.
+  Private snapshots require explicit access grants (Gitea's per-package
+  ACL handles this).
+* **Delete / unpublish**: the publishing tenant can soft-delete (Gitea
+  marks the package retracted; new fetches return a "this snapshot was
+  withdrawn" message). 72-hour cooldown before bytes are physically
+  removed from R2, mirroring npm's unpublish policy.
+* **Bans**: a banned tenant gets 403 on all publish + fork routes; their
+  existing snapshots remain accessible to other users (consumer
+  protection — bans are about new abuse, not retroactive).
+
+## 15.9 Secret detection + redaction
+
+This is mandatory and load-bearing. Without it, the first user to publish
+leaks an `OPENAI_API_KEY` from their `.env`, every other published snapshot
+is then suspect, and the feature is dead within a week.
+
+Two-tier scan:
+
+**Tier A — verified credentials. BLOCK PUBLISH if any found.**
+
+* trufflehog with `--only-verified`. Validates suspected keys against APIs.
+* Catches: AWS keys, Stripe keys, Slack tokens, GCP service accounts,
+  GitHub PATs, etc. \~700 detector types.
+* High-confidence true positives. The user can't override these without
+  a separate "I really mean it" flow that requires typing the leaked
+  string + acknowledging.
+
+**Tier B — high-recall pattern matches. WARN on each, user must dismiss.**
+
+* gitleaks for git-history-aware scanning (covers `.git/` if included).
+* detect-secrets for high-recall pattern matching with baseline support.
+* Catches: anything that looks like a key (high entropy strings, AWS-style
+  format, Bearer tokens). False positive rate is real (\~10-30%); user
+  triages each.
+* UI shows: filename, line, surrounding context, "this looks like a
+  password / API key / token". User clicks "this is fine" or "redact this
+  file" or "redact this line."
+
+**Filename denylist** (auto-excluded with a notice; user can override):
+
+* `.env`, `.env.*`
+* `*.pem`, `*.key`, `*.p12`, `*.pfx`
+* `id_rsa*`, `id_ed25519*`
+* `~/.aws/`, `~/.ssh/`, `~/.config/`
+* `agent_chats.transcript` (potentially user-typed secrets; opt-out by default)
+* `.papercusp/notes/*` (operator-typed; opt-in inclusion)
+
+**Pre-publish diff view**. Before the upload starts, the substrate shows:
+
+* Files included (count, total size, sample list)
+* Files excluded (count, why-excluded summary)
+* Redactions applied (per-file)
+* Warnings dismissed
+* "Ship it" button only enabled after the user has acknowledged the
+  scan summary.
+
+This is non-skippable. The setting `parallelChat.requireRedactionReview`
+defaults to `true` and removing it requires editing `~/.papercusp/credentials.json`
+manually.
+
+## 15.10 Manifest schema
+
+JSON, stored at `manifest.json` inside the tarball. Cap'n Proto-style
+typed schema is deferred to v2 (see §15.14); v1 uses JSON with strict
+JSON Schema validation.
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "snapshot",
+  "id": "snap_abc123def456",
+  "name": "sheets-clone with formula engine v2",
+  "description": "papercup-coding mission, 30 features passing, paused while waiting for HF date-coercion fix",
+  "createdAt": "2026-04-28T08:00:00Z",
+  "createdBy": {
+    "kind": "tenant",
+    "tenantId": "tnt_abc123",
+    "displayName": "alice",
+    "githubUser": null
+  },
+  "derivedFrom": null,
+  "template": {
+    "id": "papercup-coding",
+    "version": "0.4.2",
+    "registry": "papercupai/templates"
+  },
+  "substrate": {
+    "version": "0.7.1",
+    "minSubstrateVersion": "0.7.0",
+    "schemaVersion": 23
+  },
+  "originalSlug": "sheets",
+  "partial": false,
+  "stats": {
+    "featuresTotal": 47,
+    "featuresPassing": 30,
+    "featuresFailing": 0,
+    "featuresInProgress": 5,
+    "featuresTodo": 12,
+    "missionCostUsdSpent": 19.53,
+    "expectedRemainingCostUsd": 8.40,
+    "auditEntriesTotal": 1247
+  },
+  "plugins": [
+    { "id": "@papercupai/cloudflare-pages-hosted", "version": "0.2.1", "enabled": true },
+    { "id": "@papercupai/jira-sync", "version": "0.1.1", "enabled": false }
+  ],
+  "modelPreferences": {
+    "orchestrator": "claude-sonnet-4-6",
+    "worker": "claude-sonnet-4-6",
+    "validator": "claude-sonnet-4-6",
+    "architect": "claude-opus-4-7"
+  },
+  "license": { "spdx": "MIT" },
+  "tags": ["spreadsheet", "react", "fastapi", "papercup-coding"],
+  "redaction": {
+    "scanRunAt": "2026-04-28T07:55:00Z",
+    "verifiedSecretsFound": 0,
+    "warningsDismissed": 3,
+    "filesExcludedByDenylist": 5
+  },
+  "excluded": [
+    { "path": ".env", "reason": "denylist" },
+    { "path": "node_modules/", "reason": "denylist" },
+    { "path": ".papercusp/notes/F-FIX-016.md", "reason": "user-removed (contained API key)" }
+  ],
+  "files": [
+    { "path": "source/apps/web/src/App.tsx", "sha256": "deadbeef...", "bytes": 1247 }
+    // ... entire file list (inline for snapshots ≤ 10k files)
+  ],
+  "filesNdjson": null,
+  "manifestSha256": "feedface..."
+}
+```
+
+The `manifestSha256` is the canonical-form sha256 of this object's `files`
+array (sorted by path, no whitespace, deterministic numbers per RFC 8785).
+The publish JWT carries this sha256 as a claim, binding the JWT to a
+specific manifest.
+
+**Files manifest as separate ndjson blob for >10k file snapshots.** A
+500 MB snapshot with 50k files produces a \~5 MB inline `files[]` array,
+which balloons the manifest itself. For snapshots above 10,000 files,
+the substrate ships a separate `files.ndjson` blob (one JSON object
+per line, sorted by path) as an OCI layer reference, and `manifest.json`
+points at it via `filesNdjson: { sha256: "...", bytes: N }`. Below 10k
+files, inline `files[]` is fine.
+
+The `manifestSha256` is computed over both the inline `files[]` (if
+any) AND the `filesNdjson` reference, so the integrity binding works
+either way. Consumer's restore pass downloads `files.ndjson` if
+referenced and verifies its sha256 before walking it.
+
+**`derivedFrom` field**: when user A forks user B's snapshot and
+publishes their own snapshot, `derivedFrom` is mandatory and records
+the provenance.
+
+For **public-→-public** forks (parent was public when forked, child is
+being published publicly), full provenance is fine — the upstream
+opted to be public.
+
+```json
+"derivedFrom": {
+  "snapshotId": "snap_xyz789",
+  "tenantId": "tnt_def456",
+  "displayName": "bob",
+  "name": "sheets-clone original",
+  "publicParent": true,
+  "forkedAt": "2026-04-28T07:00:00Z"
+}
+```
+
+For **private-→-public** forks (parent was private when forked, child
+is being published publicly), upstream identity is **redacted by
+default**. Bob never opted to be public; Alice's publication shouldn't
+expose his name and tenant ID.
+
+```json
+"derivedFrom": {
+  "snapshotId": null,
+  "tenantId": null,
+  "displayName": "private upstream",
+  "name": null,
+  "publicParent": false,
+  "forkedAt": "2026-04-28T07:00:00Z"
+}
+```
+
+The temporal chain (`forkedAt`) is preserved either way for abuse-
+response purposes. User can override the redaction with a checkbox
+("the upstream creator approved being credited") at publish time;
+default UI is redact.
+
+Used by the marketplace UI to render "based on `<original-name>` by
+`<original-author>`" attribution and by the abuse-response chain — if
+the original is later flagged for problematic content, derived works
+are auto-flagged for review (even when identity was redacted, the
+internal `forkedAt` + the marketplace's audit log map back to the
+original).
+
+**`partial` field**: true if the capture pass exceeded the 30s
+orchestrator-drain timeout (see §15.5 step 1). The consumer's restore
+pass refuses to install a `partial=true` snapshot without explicit
+`--accept-partial` flag, since the captured state may be inconsistent
+between filesystem and DB.
+
+## 15.11 Schema migration model
+
+Snapshots carry a substrate `schemaVersion` integer. The restore pass
+handles drift via Discourse's pattern:
+
+1. Snapshot was made under `schemaVersion: N`.
+2. Consumer's substrate is at `schemaVersion: M`.
+3. If `N > M`: refuse with "snapshot was made on a newer substrate; upgrade
+   first."
+4. If `N == M`: restore normally.
+5. If `N < M`: rename old `harness_<new-slug>` schema to `harness_<new-slug>__pre_restore`,
+   `pg_restore` the dump into a fresh `harness_<new-slug>` schema, then
+   run the substrate's existing forward-migration files (substrate ships
+   `db/migrate/v23__v24.sql`, `db/migrate/v24__v25.sql`, etc.) against the
+   restored schema. If anything fails, rename back. After 7 days,
+   `__pre_restore` is dropped.
+
+**Migration files ship with the substrate, not the snapshot.** This is
+critical — it means snapshots are pure data + a version number; the
+substrate's own migration code brings them forward. Same model
+Discourse has used in production for \~10 years.
+
+If `N` is older than `minSnapshotSchemaVersion` (the substrate's
+backward-compat horizon), refuse with: "this snapshot is too old to
+restore on this substrate; install substrate v0.X to restore it."
+
+The compat-info CLI (§15.6 step 1) surfaces this matrix to the user
+without trial-and-error.
+
+## 15.12 Concurrency, isolation, retention
+
+**Snapshot creation pauses the orchestrator** (see §15.5 step 1) — 30s
+drain timeout, then `partial=true` if exceeded. This avoids the
+filesystem-vs-DB inconsistency window that would exist with a fully
+non-blocking capture.
+
+**Restore requires pausing the target harness.** The orchestrator stops,
+in-flight workers drain (60s timeout), then schema swap happens
+atomically. Total downtime for a 200 MB snapshot: \~30-90s.
+
+**Per-snapshot fork is independent.** Two operators forking the same
+snapshot get two completely-independent harness instances. No shared
+state, no upstream pull. (Live forks are v3+; see §15.14.)
+
+**OCI layer deduplication**:
+
+* **Server-side dedup is automatic for v1.** OCI registries deduplicate
+  by content-hash; if the substrate pushes a blob whose sha256 matches
+  one already in storage, the registry recognizes it and skips. Free at
+  the registry level. Two snapshots that share 99% of bytes (e.g.,
+  same source code, different state) ship as one full pack + small deltas.
+* **Client-side chunking is v1.1.** v1 ships single-layer-per-snapshot.
+  v1.1 chunks the snapshot tarball into multiple OCI layers (one per
+  logical group: `source/`, `state/db.sql.gz`, `.git/`, `state/harness/`)
+  so unchanged groups are reused on repeat publishes. For 200 MB
+  snapshots being republished frequently, this is the difference between
+  feeling instant and feeling slow.
+
+**Storage retention policies on Gitea side:**
+
+* Snapshots older than 90 days with zero forks → flagged "stale"
+* Snapshots older than 365 days with zero forks → eligible for archival
+  (still listable, marked "archived"; bytes moved to cold storage)
+* Withdrawn snapshots → 72-hour cooldown before R2 deletion
+* A tenant can request "delete all my snapshots" via the marketplace UI;
+  same 72-hour cooldown
+
+**Email warnings before archival** (mandatory; creators returning after
+a year shouldn't find their work archived without warning):
+
+* 30 days before archival: email "your snapshot `<name>` will be
+  archived in 30 days unless it's used or you publish a new version"
+* 7 days before: same email, escalated language
+* 1 day before: final warning
+* On archival: notification "snapshot has been moved to cold storage;
+  it remains listable but takes \~24h to reactivate. Click to reactivate."
+
+## 15.13 Snapshots vs Publishing — the relationship
+
+Two sibling features. Same auth fabric, same redaction pipeline, same
+audit log. Different artifact, different audience, different lifecycle.
+
+| Concern                  | Publishing (§16)                              | Snapshots (this spec)                        |
+| ------------------------ | --------------------------------------------- | -------------------------------------------- |
+| Artifact                 | Built site (HTML/CSS/JS in `out/`)            | Source + DB rows + .papercusp/ + git history |
+| Audience                 | Anyone with the URL — non-technical end users | Operators with substrate installed           |
+| Consumed how             | Browser request → CF Pages                    | `papercusp install --from-snapshot`          |
+| Hosting                  | Cloudflare Pages                              | Gitea OCI registry                           |
+| Lifecycle                | Latest replaces in-place                      | Versioned + immutable                        |
+| Default visibility       | Public                                        | Private                                      |
+| Build step required      | Yes (`npm run build`)                         | No                                           |
+| Restore pass on consumer | None (browser request)                        | Heavy (DB + plugins + caps)                  |
+| Forking                  | "View source" only                            | Real fork = independent harness              |
+| Size                     | 1-25 MB                                       | 50-500 MB                                    |
+
+**Shared infrastructure** (the `papercusp-publish-auth` library — see
+§15.21):
+
+* `tenantId` + `tenantSecret` + JWT auth with `jti`+`sha256` replay protection
+* KV burst+daily rate limiting per tenant
+* D1 audit log
+* Canonical-manifest sha256 hashing (RFC 8785 JCS)
+
+**Diverging infrastructure** (separate libraries — see §15.21; neither is live
+today: `papercusp-export-build` was never built, and `papercusp-export-state`
+is retired to `_retired/snapshot-system/`):
+
+* `papercusp-export-build` — was to provide publishing's smaller,
+  build-output-specific capture (never created)
+* `papercusp-export-state` — provided snapshots' bigger,
+  harness-state-specific capture (this spec; retired)
+
+The substrate's two top-right buttons:
+
+* **Publish website** → §16 flow (build + cloudflare-pages-hosted)
+* **Save as snapshot** → §15 flow (this spec)
+
+Don't merge them into one button. Different mental models.
+
+## 15.14 Future work — v2+ paths
+
+These are filed for future phases. Not v1 work.
+
+### v2: hosted papercuspai.com with Neon-branched snapshots
+
+Once papercuspai.com runs as a hosted service with multi-tenant centralized
+state, switch the snapshot creation primitive from `pg_dump` to **Neon
+copy-on-write branching**. Concretely:
+
+* All hosted users' harnesses live on a shared Neon Postgres instance
+* "Save snapshot" = `neon branch create` — instant, no data copy
+* "Fork snapshot" = `neon branch create --from <branch-id>` — instant
+* Storage cost grows only with divergence (CoW)
+* Cross-instance sharing (to self-hosted users) still uses pg\_dump-from-branch
+  * ORAS push to the marketplace
+
+Neon's branching is for same-instance use, so it doesn't apply to the
+self-hosted v1, but it dramatically simplifies the hosted-instance internals.
+Apache 2.0; self-hostable; production-ready today.
+
+### v2: snapshot preview via E2B sandbox
+
+"Preview this snapshot" button on the marketplace listing → spin up an
+E2B sandbox with the snapshot pre-installed. User browses the harness in
+a temporary cloud environment, decides whether to fork locally. Drives
+discovery and trust before download.
+
+### v2: ORAS-native federation
+
+Multiple papercupai instances mirroring snapshots between Gitea OCI
+registries via standard OCI replication. A snapshot pushed to one
+instance is discoverable on others without proprietary federation
+protocols.
+
+### v3+: live collaborative forks (CRDT substrate)
+
+If the product roadmap ever lands on "fork a running mission, edit in
+parallel with someone else, merge changes back" — this is **Loro CRDT
+territory**. Not just snapshots; substrate rewrite.
+
+In that world:
+
+* Harness state lives in a Loro document tree (instead of Postgres rows)
+* `fork()` is a Loro primitive, instant
+* `merge()` reconciles divergent forks
+* Sync via Iroh or similar transport
+* Access control via Keyhive (Ink & Switch capability-based caps)
+
+This is months of work and a different product surface. The v1 snapshot
+spec doesn't preclude this future, but doesn't enable it either.
+
+### v3+: P2P decentralized snapshot distribution
+
+If centralization through papercuspai.com Gitea becomes a problem, a
+P2P stack (Iroh + iroh-blobs for transport, p2panda for protocol) could
+distribute snapshots peer-to-peer with no central host. Pre-production
+today; revisit in 2-3 years.
+
+## 15.15 Risks worth naming up front
+
+**Secret leakage.** The single largest risk. Mitigated by mandatory
+two-tier scan + denylist + pre-publish diff view (§15.9). Without these,
+first leak ends the feature.
+
+**Cross-harness data leak.** Operator on a multi-harness machine
+inadvertently ships harness B's data when publishing harness A's
+snapshot. Mitigated by per-shared-table row filter registry (§15.5
+step 4) + CI enforcement (§15.22). Including the entire `harness_shared`
+schema would have been a real leak vector — explicitly avoided.
+
+**Storage cost growth.** Snapshots at 200 MB average × 1000 users × 5
+snapshots each = 1 TB of R2. At R2 pricing ($0.015/GB/month), that's
+$15/month for storage; manageable. Egress on installs is metered too —
+1000 installs/month × 200 MB = 200 GB egress, free on R2 (zero egress
+fees). Stale-snapshot archival policy keeps growth bounded. v1.1
+client-side OCI chunking further reduces costs for repeat publishes.
+
+**Cross-version restore breakage.** Schema migration files must be
+forward-compatible from any supported snapshot version. Substrate
+authors must add a migration file every time the schema changes. This
+is enforced via CI: a snapshot from substrate vN must restore cleanly
+on substrate v(N+1). Discourse has done this for 10 years; it's
+operationally mature.
+
+**Accidental private-data publication.** Mitigated by default-private +
+pre-publish review. Mitigated further by 72-hour unpublish cooldown
+that physically deletes bytes from R2.
+
+**Master Cloudflare account suspension** (R2 specifically is at risk
+if CF suspends our account). Self-hosted Gitea on a non-CF VPS
+sidesteps this. R2-specific risk mitigated by cross-region S3 replication
+of the Gitea storage backend.
+
+**Plugin compat drift.** A snapshot was made on plugin v1.2; consumer
+has plugin v2.0. Plugins follow semver; major-version mismatch refuses
+the install with "upgrade plugin first." Same model as substrate version
+guards.
+
+**Capability re-prompt UX overhead — RESOLVED.** Restoring a snapshot
+with 12 plugin caps would mean 12 sequential prompts. Mitigated by the
+batch consent UI (§15.6 step 10) — single "Trust this source" gesture
+or per-cap fallback. No longer a deferred concern.
+
+**Capability spoofing in manifest — RESOLVED.** A malicious manifest
+could under-declare its plugins' caps to slip past the consent screen.
+§15.6 step 10b verifies the *installed* plugin's package.json caps
+against the manifest's claim; on divergence, uses the actual plugin's
+declarations and re-prompts.
+
+**Stored-procedure schema-name leakage.** Function bodies with hardcoded
+`harness_<original-slug>` references survive ALTER SCHEMA RENAME with
+the wrong name. Substrate today uses no stored procedures in
+`harness_<slug>` schemas; CI enforcement (§15.22) prevents the regression
+class going forward.
+
+**Filesystem/DB inconsistency window.** The orchestrator-drain in
+capture (§15.5 step 1) keeps this small. The three-mode policy
+(interactive / autosave / autonomous-one-shot) ensures `partial=true`
+only sets when explicitly accepted by the user.
+
+**Shared-row ID collision corruption — RESOLVED.** Two machines having
+`harness_shared.projects.id = 'PROJ-XYZ'` with different content (e.g.,
+divergent local PM curation) would silently attach consumer's content
+to publisher's features under naive ON CONFLICT DO NOTHING. Mitigated
+by slug-prefixing all shared-row IDs at restore time (§15.6 step 7f) —
+collision-free, no silent corruption. Trade-off: cross-fork project
+identity is lost (acceptable; was never relied on).
+
+**Concurrent restore race — RESOLVED.** Two parallel restores of the
+same slug would trash each other's working schema. Mitigated by
+Postgres advisory lock keyed on `hash('snapshot-restore:<slug>')`
+acquired in §15.6 step 7b.
+
+**`.git/` history is a leakier surface than the redaction section
+admits.** Once a secret has touched git, it's effectively permanent
+via reflog/loose-objects/packed-refs even after `git filter-repo`.
+Mitigated by (1) `.git/` excluded by default, (2) substrate-controlled
+`git-filter-repo` invocation on a copy with conservative defaults when
+user opts in, (3) gitleaks scan against the filtered .git, (4) clear
+warning UX explaining history scans are best-effort. See §15.4.
+
+**Provenance chain leaks identity through private parents — RESOLVED.**
+If Alice forks Bob's private snapshot and publishes hers publicly,
+Bob's identity was previously exposed in `derivedFrom`. Mitigated by
+default-redact-when-parent-private (§15.10); user can override with
+explicit checkbox if upstream creator approved.
+
+**Deserialization vector for malicious snapshots.** A snapshot is
+untrusted code AND untrusted data. Auto-running `npm install`,
+`pickle.load`, `yaml.load` (unsafe), `eval`, SQLite extension load,
+or `.git/hooks/*` against captured artifacts is a confirmed RCE surface.
+Mitigated by §15.24 (deserialization safety) — substrate refuses
+unsafe deserializers on captured artifacts; safe-list is JSON / CSV
+/ pg\_restore / plain markdown / plain text only. CI enforces (§15.22).
+
+**Schema migration data loss.** Forward-only migrations don't make
+destructive operations safe — DROP COLUMN, RENAME TABLE applied to
+old snapshot data lose information silently. §15.22 mandates a
+`-- Snapshot compat:` comment on any destructive migration explaining
+the preservation strategy; linter enforces.
+
+**HMAC-as-signature misframe — RESOLVED.** v1.0/v1.1 spec hand-waved
+HMAC against tenantSecret as an alternative to Cosign. HMAC is symmetric;
+it provides authentication, not third-party-verifiable provenance.
+v1.2 ships Cosign-keyless from day one (§15.5 step 11, §15.23 trust
+model). HMAC is no longer mentioned as a signing option.
+
+**Plugin out-of-Postgres state silently lost — RESOLVED via plugin
+manifest registry.** Plugins that persist data in `~/.papercusp/plugins/<x>/`
+or similar would silently drop state across snapshot/restore. Mitigated
+by the per-plugin `snapshot:` block in plugin manifests (§15.25);
+plugins without one produce a warning at install time. The broader
+"plugins must be stateless" architectural decision is filed to §10
+(Capabilities) — not annexed into this snapshot spec.
+
+## 15.16 Implementation plan
+
+**Phased delivery** — each phase ships standalone value:
+
+### v1.0 — local capture + restore (\~2 weeks)
+
+Deliverable: "I can save my harness, experiment with breaking changes,
+restore the saved state if it goes wrong." A backup/restore tool, useful
+even before the marketplace exists.
+
+| Step                                                           | Estimated time   | Notes                                                       |
+| -------------------------------------------------------------- | ---------------- | ----------------------------------------------------------- |
+| 1. `papercusp-export-state` library skeleton                   | 4h               | Walks harness, produces tarball                             |
+| 2. Per-harness pg\_dump + filter-registry-driven shared tables | 6h               | Includes registry plus \~4 starter entries                  |
+| 3. Filesystem walk + denylist + agent\_chats opt-out           | 4h               | Substrate-specific                                          |
+| 4. trufflehog + gitleaks integration with two-tier scan        | 6h               | Block on verified, warn on high-recall                      |
+| 5. Pre-publish review UI (file list, redactions, warnings)     | 6h               | Substrate-specific                                          |
+| 6. Manifest schema implementation + canonical sha256           | 4h               | RFC 8785 JCS canonicalizer                                  |
+| 7. tar+gzip+zstd packaging                                     | 2h               | Standard library                                            |
+| 8. Local restore: ALTER SCHEMA flow + integrity verify         | **3-4 days**     | Production-grade port of Discourse's `database_restorer.rb` |
+| 9. Forward-migration runner                                    | 4h               | Calls existing substrate migrations                         |
+| 10. Slug rewrite pass over text artifacts                      | 4h               | Substrate-specific                                          |
+| 11. Batch consent UI for plugin re-enable                      | 6h               | Substrate-specific                                          |
+| 12. `papercusp snapshot create/list/get/delete/install` CLI    | 6h               | Mirror Daytona's API surface                                |
+| 13. `papercusp snapshot info <id>` compat-info CLI             | 2h               | Reads manifest, compares versions                           |
+| 14. End-to-end test: capture → restore on same machine         | **2-3 days**     | Real data, real round trip                                  |
+| **Subtotal v1.0**                                              | **\~10-12 days** | Realistic with testing                                      |
+
+### v1.1 — cross-machine marketplace (\~1 week)
+
+Deliverable: "I can share a snapshot for someone else to fork."
+
+| Step                                                           | Estimated time | Notes                                             |
+| -------------------------------------------------------------- | -------------- | ------------------------------------------------- |
+| 1. Stand up Gitea/Forgejo on R2-backed storage + skin          | **1-2 days**   | Forgejo S3 backend has rough edges per their docs |
+| 2. Marketplace API (proxy to Gitea + add snapshot affordances) | 4h             | Routes split from §16 publish                     |
+| 3. ORAS push to Gitea via marketplace                          | 4h             | Signed-URLs direct to blobs                       |
+| 4. Cosign signing + Sigstore wiring (or HMAC fallback for v1)  | 4h             | Reuse §16 patterns                                |
+| 5. ORAS pull on consumer + signature verify                    | 2h             | Mirror of push                                    |
+| 6. Cross-machine end-to-end test                               | **2 days**     | Two machines, real capture+install                |
+| **Subtotal v1.1**                                              | **\~5-7 days** |                                                   |
+
+### v1.2 — marketplace UI polish (\~3-5 days)
+
+Deliverable: "I can browse snapshots."
+
+| Step                                                     | Estimated time | Notes                              |
+| -------------------------------------------------------- | -------------- | ---------------------------------- |
+| 1. Custom marketplace UI (snapshot detail + fork button) | **2 days**     | Thin layer on Gitea API            |
+| 2. Typesense indexing of snapshot metadata               | 4h             | Reuse template-marketplace indexer |
+| 3. Cost-to-continue estimation + provenance display      | 4h             | Reads manifest, renders in UI      |
+| 4. Provenance chain UI (`derivedFrom` rendering)         | 2h             | Marketplace UI affordance          |
+| 5. Polish + UX testing                                   | **1 day**      | Real users, real feedback          |
+| **Subtotal v1.2**                                        | **\~3-5 days** |                                    |
+
+### Total: \~3-4 weeks
+
+This is materially longer than the v1.0 spec's "6 days" estimate, which
+was best-case-everything-works. Real engineering on substrate-spanning
+features (DB capture/restore, plugin re-enable, cross-machine round trip)
+takes time. Discourse's `database_restorer.rb` is \~600 LOC of production-
+hardened Ruby developed over years; a "direct port" with comparable
+robustness is several days, not 6 hours.
+
+**Implementation order on day 1 of v1.0:**
+
+1. Manifest schema + JSON Schema validator (\~2h) — types everything
+   else depends on
+2. `shared-table-filters.ts` registry skeleton (\~1h) — gets the
+   leak-prevention infrastructure in place before any capture code
+3. `papercusp-export-state` library skeleton (\~4h) — gets the capture
+   path running with no upload
+
+## 15.17 Prior art studied
+
+Architectural patterns adopted, with sources:
+
+| Pattern                                              | Source                              | Location in source                                          |
+| ---------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------- |
+| Schema swap + forward migrations                     | Discourse                           | `lib/backup_restore/database_restorer.rb`                   |
+| `--single-transaction --variable=ON_ERROR_STOP=1`    | Discourse                           | same                                                        |
+| Sed-based pg\_dump SQL massaging across versions     | Discourse                           | same, lines 103-122                                         |
+| DB-resident metadata captured via dump               | Discourse                           | `BackupMetadata` model                                      |
+| Filename-encoded version pattern                     | Discourse                           | `meta_data_handler.rb`                                      |
+| Pluggable storage backend abstraction                | Discourse                           | `backup_store.rb` family                                    |
+| Token-based async backup flow                        | Sandstorm                           | `shell/imports/server/backup.js:46-115`                     |
+| Quota check before restore                           | Sandstorm                           | same, line 130                                              |
+| Refuse-if-app-not-installed                          | Sandstorm                           | same, line 160                                              |
+| `minUpgradableAppVersion` field                      | Sandstorm                           | `package.capnp:96`                                          |
+| App vs grain separation                              | Sandstorm                           | the SPK/grain split, our template/snapshot split            |
+| OCI-image-as-snapshot model                          | Daytona                             | snapshot API                                                |
+| Snapshot lifecycle states                            | Daytona                             | `Pending → Building → Pulling → Active → Inactive → Failed` |
+| API surface (`create/get/list/delete/activate`)      | Daytona                             | their SDK                                                   |
+| `BLAKE3-verified streams` for content addressing     | OCI artifacts ecosystem             | reference                                                   |
+| Two-tier secret scan (verified vs high-recall)       | trufflehog + gitleaks combination   | their docs                                                  |
+| 72-hour unpublish cooldown                           | npm                                 | their unpublish policy                                      |
+| Postinstall binary download to substrate-private dir | esbuild, sharp, ripgrep, swc, biome | their npm install hooks                                     |
+
+**OSS dependencies actually used:**
+
+* Gitea or Forgejo (marketplace backend)
+* ORAS (OCI artifact CLI / library)
+* Cosign + Sigstore (signing + transparency log)
+* pg\_dump / pg\_restore (Postgres native)
+* isomorphic-git (in-process git for the install pass)
+* trufflehog + gitleaks (secret scanning)
+* Typesense (search indexing, already used by template marketplace)
+
+**Surveyed but not adopted, with reasoning:**
+
+* *CRDT substrates (Loro, Automerge, Yjs)*: would require migrating
+  Postgres state to CRDT documents. Months of work. Filed for v3+ if
+  going live-collaborative.
+* *git-as-transport (Hugging Face style)*: secrets-in-history retention
+  problem (force-push doesn't propagate to clones). Tarballs are
+  retractable; git history isn't.
+* *IPFS / Helia*: P2P content addressing without registry ecosystem;
+  marketplace UX requires building everything on top. Iroh same shelf.
+* *jj (Jujutsu)*: CLI, not library. Can't embed in substrate. Filed for
+  v2 end-user CLI option.
+* *Dolt (git for data)*: required reinventing git internals; their
+  ecosystem is small. Pg + ORAS achieves snapshot/transport without
+  rewriting Postgres.
+* *Sandstorm's `backup.c++` user-namespace sandbox*: overkill for v1
+  single-user local install. Filed for if/when papercuspai.com runs
+  multi-tenant snapshot creation on shared infra.
+* *AFFiNE / BlockSuite*: editor-domain frameworks; harness state isn't
+  document-shaped.
+* *Single shared `papercusp-export` library with `kind` parameter*:
+  smell of two libraries pretending to be one. Replaced with three-library
+  factoring (§15.21).
+
+## 15.18 Related sections
+
+* **§7** — Plugin extension points (snapshot install pass calls plugin
+  loader's enable-for-harness path)
+* **§10** — Capabilities (snapshot install triggers batch capability
+  re-consent; caps don't restore from the snapshot)
+* **§11** — Distribution (this spec is part of distribution; will fold
+  into §11 once shipped)
+* **§14** — Plugin marketplace (separate marketplace, but reuses
+  publish/sign/sbom pipeline)
+* **§16** — Publishing (sibling feature; shared `papercusp-publish-auth`
+  library; see §15.21)
+
+## 15.19 Open questions
+
+1. **License field default**: should snapshots default to `MIT` (permissive)
+   or `none` (no rights granted)? Argument for MIT: encourages community
+   reuse. Argument for none: protects users who didn't think about
+   licensing. Likely answer: explicit license picker at publish time;
+   no default; refuse to publish without user-selected license.
+
+2. **Cost-to-continue estimation accuracy**: should the marketplace UI
+   show "this snapshot has 12 todo features ≈ $8 to drive to passed"
+   based on `expected_cost_cents`? Pro: helps users decide. Con:
+   estimates may be wildly inaccurate. Proposed: show with explicit
+   "estimate, actuals will vary" caveat.
+
+3. **Retention for free tier**: should free-tier snapshots have a
+   shorter shelf life (e.g., 30 days unless paid)? Pro: cost control.
+   Con: undermines the "permanent artifact" property. Proposed: free
+   tier limits *count* (e.g., 10 active snapshots) but not lifespan.
+
+4. **Binary distribution: bundle vs postinstall download**: §15.20
+   commits to postinstall download from upstream releases. Open:
+   should we mirror these binaries on R2 to avoid GitHub release-API
+   rate-limiting during high-publish windows? \~50 MB × N platforms
+   \= \~250 MB R2 storage. Probably yes for production reliability.
+
+5. **Stored-procedure conventions for harness schemas**: §15.22
+   commits to a CI-enforced "no hardcoded `harness_<slug>` in function
+   bodies" rule. Open: do we ever actually need stored procedures in
+   per-harness schemas, or should we ban them entirely? Banning is
+   simpler; allowing requires careful schema-aware procedure authoring.
+
+## 15.20 Binary dependencies
+
+The substrate ships with a postinstall hook that downloads pinned binary
+dependencies into `~/.papercusp/bin/`. Same pattern as esbuild, sharp,
+ripgrep, swc, biome — well-trodden in the Node ecosystem.
+
+**Why not system installers (apt, brew, winget)**:
+
+* Most distros require sudo for system installs. The substrate doesn't
+  run as root. Asking the user to retry under sudo breaks the "user
+  just installs papercusp" promise.
+* Package-manager fragmentation on Linux. `apt` vs `dnf` vs `zypper` vs
+  `pacman` vs `apk` — each needs its own command. Detecting which one's
+  available is real code, and any non-listed distro fails.
+* macOS without Homebrew. Real users; sudo-less install isn't possible.
+* Versions drift. Whatever ships in `apt-get install trufflehog` is
+  whatever Debian/Ubuntu pinned, possibly years stale. We'd need to
+  validate version compatibility on every install.
+
+**Postinstall download model**:
+
+```text
+On `npm install -g papercusp`, postinstall script:
+  1. Detect platform (darwin-arm64, darwin-x64, linux-arm64, linux-x64,
+     win32-x64).
+  2. Download pinned binaries from upstream GitHub releases:
+     - trufflehog (https://github.com/trufflesecurity/trufflehog/releases/...)
+     - gitleaks (https://github.com/zricethezav/gitleaks/releases/...)
+     - cosign (https://github.com/sigstore/cosign/releases/...)
+     - oras (https://github.com/oras-project/oras/releases/...)
+  3. Verify sha256 against the substrate-pinned manifest (the binary probes
+     lived in the now-retired export-state lib at
+     `_retired/snapshot-system/papercusp-export-state/src/binaries.ts`; the
+     planned `apps/papercusp/lib/snapshot/binary-versions.ts` path never
+     existed — there is no `papercusp` app).
+  4. Write to ~/.papercusp/bin/.
+  5. Add to PATH for substrate's child processes (NOT user shell).
+```
+
+`papercusp doctor` verifies binary integrity (sha256 against pinned
+manifest) and re-downloads if missing/corrupt. `papercusp upgrade`
+pulls a new pinned manifest, re-downloads.
+
+**Storage**: \~50 MB total across all 4 binaries × 5 platforms.
+Acceptable; node\_modules already adds 200+ MB. Pinned versions
+guarantee consistent behavior across substrate installs.
+
+**Failure modes**:
+
+* Network failure during postinstall: substrate proceeds; first attempt
+  to use `papercusp snapshot create` runs the download lazily with
+  same logic.
+* Sha256 mismatch: refuse to use, log loudly. Could indicate compromise
+  or upstream tampering.
+* Platform unsupported: refuse with clear "your platform isn't
+  supported for snapshots; supported: darwin-arm64, darwin-x64,
+  linux-arm64, linux-x64, win32-x64".
+
+**v1.1 enhancement (under consideration)**: mirror binaries on R2 so
+GitHub release-API rate-limiting can't block users during high-publish
+windows. See §15.19 question 4.
+
+## 15.21 Library factoring
+
+The substrate ships **three** libraries for the publish/snapshot work,
+not one library with a `kind` parameter (which is a smell of two
+libraries pretending to be one):
+
+### `papercusp-publish-auth` — genuinely shared (\~300 LOC)
+
+Used by both publishing and snapshots. Ships:
+
+* JWT minting + validation (HS256, `jti`/`sha256`/`exp` claims)
+* Replay-protection D1 unique-key constraint
+* Canonical-form sha256 hashing (RFC 8785 JCS)
+* Audit log writer (D1)
+* Rate-limit client (KV burst + daily counters)
+
+Located at `libs/papercusp-publish-auth/`.
+
+### `papercusp-export-build` — publishing-specific (\~400 LOC) — NEVER BUILT
+
+This planned publishing-only library was never created (no
+`libs/papercusp-export-build/` ever existed in the tree). It was to ship:
+
+* File selection from `<exportDir>/` (built site output)
+* Light redaction policy (build artifacts rarely leak secrets;
+  source maps are the main concern)
+* Tarball composition optimized for 5-25 MB sites
+* Cloudflare Pages deployment client
+
+### `papercusp-export-state` — snapshot-specific (\~600 LOC) — RETIRED
+
+This snapshot-only library was built but is now **retired** along with the rest
+of the snapshot system; it lives at
+`_retired/snapshot-system/papercusp-export-state/`, not `libs/`. It shipped:
+
+* Whole-harness file selection with denylist
+* Heavy redaction policy (source + .papercusp/ + agent transcripts)
+* pg\_dump + filter-registry-driven shared-table CSV exports
+* Tarball composition for 50-500 MB snapshots
+* ALTER SCHEMA-based restore flow
+* Slug rewrite over text artifacts
+
+Of the three libraries this section names, **only `papercusp-publish-auth`
+(`libs/papercusp-publish-auth/`) is genuinely live.**
+
+### Why three libraries instead of one
+
+Looking at the divergence:
+
+| Concern              | Publishing                                  | Snapshot                                 |
+| -------------------- | ------------------------------------------- | ---------------------------------------- |
+| File selection       | `<exportDir>/` only                         | Whole harness, sans denylist             |
+| Redaction aggression | Light (build artifacts rarely leak secrets) | Heavy (source + .papercusp/)             |
+| Artifact format      | Tarball of files                            | Tarball of files + DB dump + shared CSVs |
+| Size target          | 5-25 MB                                     | 50-500 MB                                |
+| Auth                 | JWT against `publish.papercuspai.com`       | JWT against `papercuspai.com/snapshots`  |
+
+Five of six concerns diverge. The shared concern (auth) extracts cleanly.
+A single library with a `kind: 'for-publish' | 'for-snapshot'` parameter
+forces every read to branch on `kind`, which adds complexity without
+saving code. Three libraries is the cleaner factoring.
+
+## 15.22 CI enforcement
+
+Two correctness-critical conventions need *enforcement*, not just
+documentation. Without enforcement, both rules will rot within 6
+months of shipping.
+
+### Shared-table-filter-registry check
+
+When a developer adds a new `harness_shared.<table>` in
+`libs/db/sql/*.sql`, the corresponding entry must also exist in the
+shared-table-filter registry (implemented at
+`_retired/snapshot-system/papercusp-export-state/src/shared-table-filters.ts`;
+the planned `apps/papercusp/lib/snapshot/` location never existed). Otherwise
+snapshots from harnesses that have rows in that table would silently
+omit them on capture, or include all rows globally on capture (cross-
+harness leak).
+
+CI check: parse all `CREATE TABLE harness_shared.X` statements from
+SQL migrations; assert each has a corresponding `SHARED_TABLE_FILTERS.X`
+entry. Fails the build if missing.
+
+```yaml
+# .github/workflows/ci.yml (excerpt)
+- name: Check shared-table-filter-registry
+  run: |
+    npx tsx scripts/check-shared-table-filters.ts
+```
+
+### Stored-procedure-no-hardcoded-slug check
+
+Function bodies containing hardcoded `harness_<slug>` references survive
+ALTER SCHEMA RENAME with the wrong name (Postgres treats function bodies
+as opaque text; renaming the schema doesn't update the body).
+
+CI check: grep for `CREATE FUNCTION` blocks in SQL migrations; within
+each block, check for `harness_<` patterns. Any match fails the build
+with: "function bodies must use `current_schema()` or accept schema
+as parameter; no hardcoded `harness_<slug>` references."
+
+```yaml
+- name: Check no hardcoded harness slug in stored procedures
+  run: |
+    npx tsx scripts/check-no-hardcoded-slug-in-functions.ts
+```
+
+Both checks add \~30 minutes of one-time work. They prevent regression
+classes that would otherwise surface as silent data corruption.
+
+### Cross-version restore CI matrix
+
+Beyond the two checks above, snapshot tests run a matrix:
+
+* For each supported substrate version `vN, vN-1, vN-2, ...`:
+  * Capture snapshot on substrate version `vN`
+  * Restore on substrate version `vN+1` (and verify)
+  * Restore on substrate version current
+* Matrix runs nightly + on each release-candidate PR.
+
+This is the substrate's equivalent of Discourse's 10-year-mature
+"backups across versions" testing. Catches schema-migration
+incompatibilities before they ship.
+
+### Destructive-migration `Snapshot compat:` rule
+
+Forward-only migrations don't make destructive operations safe.
+A `DROP COLUMN`, `RENAME TABLE`, or `DROP TABLE` applied to old
+snapshot data loses information silently. The cross-version CI matrix
+catches the gross failures, but a destructive migration that
+"successfully" drops data on restore passes the matrix while losing
+the user's work.
+
+CI check: any migration matching the destructive pattern must contain
+a `-- Snapshot compat:` comment block explaining the preservation
+strategy. Linter fails the PR otherwise.
+
+```sql
+-- migrations/v25__rename_features_table.sql
+-- Snapshot compat: snapshots from v <= 24 carry harness_features rows;
+-- this migration MUST preserve them. Renaming is non-destructive
+-- (data preserved); but if we ever drop columns or merge tables,
+-- a CONVERTING-migration must run the data-preservation logic.
+
+ALTER TABLE harness_features RENAME TO harness_features_v2;
+```
+
+```sql
+-- migrations/v27__drop_unused_legacy_metadata.sql
+-- Snapshot compat: this column was added in v18 and never read after v22.
+-- Snapshots from v18-v22 will lose this column's data on restore.
+-- Acceptable because: column was an experimental field never surfaced
+-- in UI; no users relied on it; verified by grep of substrate codebase.
+
+ALTER TABLE harness_features DROP COLUMN legacy_metadata;
+```
+
+The reviewer assesses whether the preservation strategy is honest.
+The linter just checks the comment exists.
+
+### Forbidden-deserializer CI grep
+
+A snapshot is untrusted code AND untrusted data (see §15.24).
+Substrate code that touches captured artifacts must use safe
+deserializers only. CI greps the substrate codebase for forbidden
+calls anywhere a captured-artifact path is involved:
+
+* `pickle.load`, `pickle.loads`, `dill.load`, `cloudpickle.load`
+* `yaml.load` (PyYAML default — unsafe; use `yaml.safe_load`)
+* `eval(`, `Function(`, `vm.runInNewContext(`, `Reflect.apply(`
+* SQLite open without `SQLITE_DBCONFIG_NO_LOAD_EXTENSION=1`
+* Direct shell-out to anything in `<projectDir>/.git/hooks/`
+
+Any match in code paths that touch the snapshot staging dir, restore
+artifacts, or `<projectDir>/.papercusp/` fails the build with a clear
+"deserialize captured data through safe path only — see §15.24."
+
+```yaml
+- name: Check forbidden deserializers in snapshot code paths
+  run: |
+    npx tsx scripts/check-forbidden-deserializers.ts \
+      --paths _retired/snapshot-system/papercusp-export-state/
+```
+
+## 15.23 Trust model
+
+A snapshot is an artifact installed on a consumer's machine that
+restores DB rows, source code, plugin enablement, and capability
+grants. The integrity guarantees the consumer needs:
+
+1. **Authenticity**: this snapshot was published by the identity it
+   claims (not a marketplace impersonator)
+2. **Integrity**: the bytes received match what the publisher signed
+   (not tampered in transit or at rest)
+3. **Auditability**: the publication event is recorded somewhere
+   the publisher can't unilaterally erase
+4. **Revocability**: the publisher can take down a snapshot they
+   regret publishing; a compromised secret can be rotated
+
+The signing chain delivers all four:
+
+```text
+                  Tenant (publisher)
+                       │
+                       │  authenticates via OIDC
+                       ▼
+   ┌────────────────────────────────────────┐
+   │  Sigstore Fulcio (CA)                  │
+   │  Accepts: GitHub, Google, Microsoft,   │
+   │  GitLab, Buildkite, ... (any           │
+   │  Fulcio-trusted OIDC issuer)           │
+   └─────────────┬──────────────────────────┘
+                 │  short-lived signing cert
+                 │  (10-min validity)
+                 ▼
+   ┌────────────────────────────────────────┐
+   │  Cosign signs manifest.sha256          │
+   │  Signature includes:                   │
+   │    - identity (verified OIDC)          │
+   │    - cert chain                        │
+   │    - manifest sha256                   │
+   └─────────────┬──────────────────────────┘
+                 │  signature event
+                 ▼
+   ┌────────────────────────────────────────┐
+   │  Sigstore Rekor (transparency log)     │
+   │  Append-only, public, Merkle-proof'd   │
+   └─────────────┬──────────────────────────┘
+                 │
+                 ▼
+   ┌────────────────────────────────────────┐
+   │  manifest.json includes:               │
+   │    - manifestSha256                    │  binds
+   │    - filesNdjson.sha256 OR files[]     ├─►  to
+   │    - file[].sha256 (per-file content)  │  bytes
+   └────────────────────────────────────────┘
+                 │
+                 ▼
+            Tarball blobs
+```
+
+**Consumer's verification path** (run automatically by `papercusp install`):
+
+1. Download manifest + signature from Gitea OCI registry
+2. Verify signature against Rekor (the signature must have been logged)
+3. Verify the OIDC identity in the cert chain matches the publishing
+   tenant's known identity (marketplace records the binding at first
+   publish)
+4. Verify `manifest.manifestSha256` matches the downloaded manifest
+5. For each file in `files[]` (or via `filesNdjson`), verify the
+   downloaded content's sha256 matches
+6. If any check fails, refuse install with a clear diagnostic
+
+**What this guarantees**:
+
+* Authenticity: ✓ via OIDC + Fulcio cert chain
+* Integrity: ✓ via per-file sha256 + manifest sha256 + Cosign signature
+* Auditability: ✓ via Rekor (anyone can independently verify a
+  snapshot was logged at publish time, even if marketplace later
+  becomes compromised)
+* Revocability: ✓ via marketplace's withdrawn-snapshot flow + tenant
+  secret rotation (compromised secret invalidates future signatures)
+
+**What this does NOT guarantee**:
+
+* That the snapshot's *content* is benign (signing != safety; see
+  §15.24 abuse + moderation)
+* That the publisher's identity is who they claim to *humans*
+  (Sigstore verifies the OIDC identity; humans on the marketplace
+  may still be impersonators of well-known names — display the OIDC
+  email/handle prominently in the UI)
+
+**HMAC against tenantSecret is NOT a signature**. HMAC is symmetric:
+the marketplace knows the secret (to validate); anyone with the secret
+can forge a "signed" manifest. That's authentication, not third-party-
+verifiable provenance. v1.0/v1.1 mentioned HMAC as an alternative to
+Cosign; v1.2 drops that — Cosign-keyless is required from day one.
+
+**OIDC provider breadth**. Sigstore Fulcio accepts (as of writing)
+GitHub, Google, Microsoft, GitLab, Buildkite, and others. Tenants
+authenticate via whichever they prefer; identity is preserved in
+the cert chain. Saying "GitHub OAuth" would lock out non-GitHub
+users; the marketplace doesn't.
+
+## 15.24 Abuse + moderation
+
+A public marketplace for installable snapshots is a public-distribution
+problem. The spec covers secret leakage thoroughly (§15.9); this
+section covers the rest of the abuse surface.
+
+### Code execution warning at install
+
+Restoring a snapshot installs untrusted code AND untrusted data on
+the consumer's machine. The pre-restore consent screen (§15.6 step 10)
+includes a prominent warning:
+
+```text
+This snapshot contains executable code from <tenant-display-name>.
+
+  Source code:    <N> files, <M> MB
+  Database state: <K> rows
+  Plugins:        <P> plugin(s) requiring <C> capabilities
+
+After restore, the source code is on your machine. Reviewing it before
+running `papercusp run` is recommended:
+
+    cd <projectDir> && less docs/features/F-001.md  (etc.)
+
+The substrate will NOT auto-run `npm install`, `pip install`, or
+`papercusp run` — you do that explicitly after reviewing.
+
+Reviewing the code: this snapshot's source/ contains <N> files;
+inspect for unfamiliar dependencies, post-install scripts, etc.
+
+  [ Cancel install ]   [ Review source first ]   [ Continue install ]
+```
+
+### Deserialization safety
+
+A snapshot is untrusted code AND untrusted data. Every common
+unsafe-deserializer pattern is a confirmed RCE vector:
+
+* `pickle.load` on Python state — Python pickles execute arbitrary
+  code by design
+* `yaml.load` (PyYAML default) instead of `yaml.safe_load` — YAML's
+  `!!python/object` tag is RCE
+* `eval` / `Function()` / `vm.runInNewContext` on captured strings —
+  including substrate-internal "we'll just eval this cached query"
+  paths
+* SQLite database with `SQLITE_LOAD_EXTENSION` enabled at open —
+  extension load runs arbitrary binary code
+* Shell-out to `.git/hooks/*` if `.git/` is included — hooks are
+  shell scripts the substrate's git operations would invoke
+
+The substrate's deserialization posture is a hard rule: use **only
+safe deserializers** on captured artifacts.
+
+**Safe list (allowed)**:
+
+* `JSON.parse` (with reasonable size limits)
+* CSV via `csv-parse` (well-trodden, no eval semantics)
+* `pg_restore` (constrained by Postgres semantics; SQL injection
+  pre-mitigated via `--single-transaction --variable=ON_ERROR_STOP=1`)
+* Plain markdown via standard parser (no embedded script execution;
+  HTML in markdown is rendered through a sanitizing parser)
+* Plain text
+
+**Forbidden on captured artifacts**:
+
+* `pickle`, `dill`, `cloudpickle`, any Python serializer with
+  code-execution semantics
+* `yaml.load` — use `yaml.safe_load`
+* `eval`, `Function`, `vm.runInNewContext`, `Reflect.apply` on
+  captured strings
+* SQLite open without `SQLITE_DBCONFIG_NO_LOAD_EXTENSION=1`
+* `.git/hooks/*` execution — hooks are stripped at capture time
+  (§15.4)
+
+CI enforces (§15.22) — any forbidden deserializer call in code paths
+that touch snapshot staging or restored artifacts fails the build.
+
+### Takedown process
+
+* **Public [abuse@papercuspai.com](mailto:abuse@papercuspai.com) mailbox**, monitored. 48-hour SLA for
+  initial response on legal-content takedowns; 1-week SLA for terms-of-
+  service complaints.
+* **Marketplace UI report button** on every public snapshot detail
+  page: "Report this snapshot" → category picker (illegal content /
+  malware / impersonation / copyright / other) → free-text → emailed
+  to abuse\@.
+* **Soft-delete on first plausible report** within 72-hour cooldown.
+  Bytes physically removed from R2 after the cooldown if the report
+  is upheld.
+* **Provenance chain auto-flagging**: if a snapshot is removed for
+  illegal content, all snapshots with `derivedFrom.snapshotId` matching
+  it (or in its derivative chain) are auto-flagged for review. The
+  reviewer decides whether each derivative also requires takedown.
+* **Audit log**: every takedown decision (date, reporter, reviewer,
+  outcome, original tenant) recorded in an audit table that even
+  the marketplace operator cannot delete.
+
+### Illegal content reporting
+
+If hosted snapshots contain CSAM, the marketplace operator is required
+under US law (18 U.S.C. § 2258A) to report to NCMEC's CyberTipline.
+The marketplace ships with the NCMEC reporting flow built in:
+
+* abuse@ inbox monitored for CSAM-flagged reports
+* Verified CSAM → CyberTipline report within 24 hours (legally
+  mandated; faster if possible)
+* Snapshot bytes preserved for law-enforcement subpoena (90 days
+  minimum), separate from the public R2 retention policy
+
+For other illegal content (US-DMCA copyright, jurisdiction-specific
+hate speech, malware), the takedown process above applies; specific
+legal-counsel review required for jurisdiction-specific issues.
+
+### ToS gate at first publish
+
+Tenants must accept the marketplace ToS before first publish. The
+ToS commits the tenant to:
+
+* "I won't publish malware, illegal content, or content I don't have
+  the right to distribute"
+* "I understand my snapshots may be reviewed and removed"
+* "I understand my OIDC-verified identity is recorded with each
+  publish for abuse-response purposes"
+* "I agree to NCMEC reporting flows for CSAM"
+* DMCA-style "I agree the marketplace is a safe-harbor host; I am
+  responsible for content I publish"
+
+Standard terms; specific drafting requires legal review pre-launch.
+
+### First-run sandbox option (v1.1+)
+
+Per §15.14 future work: "Try this snapshot in an E2B sandbox before
+installing locally" — limits blast radius for evaluating untrusted
+snapshots. v1 ships without this; v1.1 adds it as a button on the
+marketplace detail page.
+
+## 15.25 Plugin snapshot manifest registry
+
+Plugins that persist state outside per-harness Postgres schemas
+(e.g., binary tool caches, vector embeddings) need an explicit
+declaration of what to capture and restore. Without it, snapshots
+silently drop the plugin's state across fork boundaries.
+
+The substrate's `papercusp.json` plugin manifest gains a `snapshot:`
+block (mirroring the shared-table-filter registry pattern from §15.5):
+
+```json
+{
+  "id": "@papercupai/example-plugin",
+  "version": "0.4.2",
+  "snapshot": {
+    "include": [
+      {
+        "kind": "pg-schema",
+        "name": "harness_<slug>.plugin_vscode_settings",
+        "comment": "Per-harness vscode preferences"
+      },
+      {
+        "kind": "file-glob",
+        "pattern": "<projectDir>/.papercusp/plugins/vscode/config.json",
+        "comment": "Per-harness vscode config; small, JSON, safe"
+      }
+    ],
+    "exclude": [
+      {
+        "kind": "file-glob",
+        "pattern": "<projectDir>/.papercusp/plugins/vscode/cache/",
+        "comment": "Re-derivable on first run"
+      }
+    ]
+  }
+}
+```
+
+### Capture pass behavior
+
+For each enabled plugin in `manifest.plugins[]`:
+
+* If plugin has a `snapshot:` block:
+  * Walk `include[]` paths, copy into `<staging>/state/plugin-<slug>/`
+  * Skip everything matching `exclude[]` patterns
+  * Plugin's pg schemas captured as part of the per-harness pg\_dump
+    (already done in §15.5 step 3)
+* If plugin has no `snapshot:` block:
+  * Print warning: `plugin <id> has no snapshot block; per-plugin
+    state may not be captured (consult plugin author)`
+  * Continue capture (don't block; warning is the deterrent)
+
+### Restore pass behavior
+
+For each plugin in `manifest.plugins[]`:
+
+* Verify plugin is installed locally (§15.6 step 10a)
+* Verify cap declarations match actual installed (§15.6 step 10b)
+* For plugins with a `snapshot:` block: copy `state/plugin-<slug>/`
+  contents back to the declared `include[]` paths
+* For plugins without one: warn, don't restore plugin state, continue
+
+### Cross-reference to §10 (Capabilities)
+
+The broader question — "should the substrate force plugins to live
+only in per-harness Postgres schemas, or allow opt-out filesystem
+state via the snapshot block?" — is a §10 architectural conversation,
+not a snapshot-spec decision. The §15.25 registry pattern is the
+v1 mechanism for the practical need; whether to harden it via
+capability denials (`filesystem:write:outside-projectdir = false`
+for all plugins forever) is a §10 owner decision separate from this
+spec.
+
+For v1: registry as documented above. For v2+: §10 owner decides.
+
+### CI enforcement
+
+Plugin manifests without a `snapshot:` block produce an install-time
+warning. Plugin authors who want to declare "we have no per-plugin
+state to snapshot" do so explicitly via:
+
+```json
+{
+  "snapshot": { "kind": "stateless" }
+}
+```
+
+This silences the warning. Plugins with neither a real `snapshot:`
+block nor `stateless` declaration get the warning every install,
+which incentivizes plugin authors to make the explicit declaration.

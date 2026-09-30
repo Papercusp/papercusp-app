@@ -1,0 +1,101 @@
+# Patching memory METADATA (scope / kind / workspace / anchors) — vec-safe, via memory:update
+URL: /internal/docs/agent-insights/patching-memory-metadata-canonical-store
+
+The mem0 store is harness_shared.memory_canonical (+ memory_vec_<model> for embeddings); scope/kind/workspace_id/anchors all live in the payload jsonb, NOT in the embedding. So metadata is vec-safe to patch with no re-embed — and memory:update now does it (kind/workspaceId/scope), instead of the raw DB surgery this used to force. mem0's OSS update is text-only; that was the gap.
+
+## TL;DR
+
+To fix a memory's **metadata** — re-tag its `kind`, fix a wrong `workspaceId`, or
+move it to the right recall **pool** — call `memory:update` with the new fields
+(no `content` needed):
+
+```
+memory:update { id, kind: 'reference' }                  // re-categorise (single)
+memory:update { id, workspaceId: 'papercusp-workspace' } // fix workspace tag (single)
+memory:update { id, scope: 'harness:papercup' }          // MOVE recall pool (single)
+
+memory:update { ids:['id1','id2'], kind: 'reference' }   // bulk re-tag (homogeneous)
+memory:update { items:[{ id:'id1', kind:'reference' }, { id:'id2', scope:'harness:foo' }] }
+                                                          // heterogeneous bulk
+```
+
+The bulk call shapes follow the house standard (bulk-endpoint-standardization-2026-06-21):
+
+* **Single** `{ id, …patch }` — the shorthand.
+* **Homogeneous many** `{ ids:[…], …patch }` — same patch applied to every id.
+* **Heterogeneous many** `{ items:[{ id, …patch }] }` — per-item control.
+
+All forms return `{ ok, results:[{ ok, id, error? }], counts }`. A **not-found id**
+returns that item's `{ ok:false }` without failing the rest (graceful, not a throw).
+
+You can combine metadata fields, and combine with a `content` edit. This is **vec-safe**: it
+never re-embeds (see why below). Before 2026-06-21 (EI-2032) there was **no tool**
+for this — `memory:update` was text-only and the backend threw on a metadata patch —
+which forced raw DB surgery on the shared store. Don't do that anymore.
+
+## Where the store actually is (the part that wastes your time)
+
+The mem0 store is **`harness_shared.memory_canonical`** plus one
+**`harness_shared.memory_vec_<model>`** table per embedder (`memory_vec_openai`,
+`memory_vec_local`), defined by migration 081. It is reached via
+`memoryHost().getAdminUrl()` → `getHarnessAdminUrl()` — the operator admin DB.
+
+* One **canonical row** per fact holds the text + ALL metadata in a single
+  `payload` jsonb: `data` (the text), `user_id` (the recall **scope**/pool),
+  `workspace_id`, `kind`, `scope` (a descriptor like `"user"`), `anchors`, `hash`,
+  `textLemmatized`, …
+* The **embedding** lives in the separate `memory_vec_<model>` table, keyed by
+  `memory_id` (FK to canonical). Switching embedder mode only changes which vec
+  table recall reads — the canonical text/metadata never moves.
+* Recall (`CanonicalVectorStore.search`/`list`) filters per scope on
+  `payload->>'user_id'`. A row with a null/wrong `user_id` is recalled in the
+  wrong pool (or not at all). `kind`/`workspace_id` are filter/display fields.
+
+Gotcha: mem0's *collection* name is `operator_memory_<mode>` — that is mem0's
+internal bookkeeping label, **not** a physical table. Don't go looking for an
+`operator_memory_*` table; the data is in `memory_canonical`.
+
+## Why metadata is vec-safe to patch (no re-embed)
+
+The embedding is computed from the **text only** and lives in `memory_vec_*`.
+`user_id`, `workspace_id`, `kind`, `anchors` are *filter/display* fields in the
+`payload` jsonb — none are embedded. So fixing them is a pure jsonb merge on
+`memory_canonical`; the vector is never touched and recall ranking is unchanged.
+
+The implementation (`CanonicalVectorStore.updatePayload`,
+`libs/generic/memory/src/canonical-store.ts`) is a single:
+
+```sql
+UPDATE harness_shared.memory_canonical
+   SET payload = payload || $patch::jsonb, updated_at = now()
+ WHERE id = $1 AND NOT (payload ? 'entityType')   -- never an mem0 entity-linking row
+```
+
+`payload || patch` is a shallow merge: patch keys override, unspecified keys are
+preserved. `Mem0Backend.update({ metadata })` routes here (`updateMemoryPayload`
+in `mem0-client.ts`); the text path still uses mem0's `update(id, text)`.
+
+## The gap this closed (mem0 OSS update is text-only)
+
+mem0ai's `Memory.update(id, text)` only replaces the embedded text. Our
+`Mem0Backend.update` used to **throw** on a `{ metadata }` patch
+("mem0 backend does not support metadata patches"). So the EI-2032 audit's "correct
+in place" actions (re-scope, re-tag, re-root anchors) were impossible through any
+tool — agents resorted to hand-editing `memory_canonical`. The fix added the
+canonical-store merge + the `kind`/`workspaceId`/`scope` args on `memory:update`,
+so hygiene rides the sanctioned surface (which keeps the store consistent).
+
+## Don't reach for raw SQL
+
+If you're tempted to `UPDATE memory_canonical` directly: use `memory:update`
+instead. Raw SQL bypasses the tool layer (audit, the client's TTL cache, future
+consistency hooks) and is easy to point at the wrong DB. The one legitimate
+DB-level case is a **bulk backfill** of thousands of rows; even then, prefer
+scripting `memory:update` calls, and remember the store is `memory_canonical`
+reached via `getHarnessAdminUrl()`, not a guessed table.
+
+## Related
+
+* `mem0-entity-store-collection-leak` — the `entityType` discriminator the
+  `updatePayload` guard relies on (entity rows vs memory rows share the table).
+* `mem0-unavailable-outage-or-swallowed-bug` — when the store is unreachable.

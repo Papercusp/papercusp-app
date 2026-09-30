@@ -1,0 +1,32 @@
+/*
+ * Default popover surface for every <Popover> (harness/Popover.tsx).
+ *
+ * RP.Content used to carry no background at all, so a caller that forgot to
+ * paint `contentClassName` (or passed one with no surface rule) rendered a
+ * fully transparent panel over the page — every DOM/structural assertion
+ * still passes, only a screenshot shows the panel is unreadable
+ * (EI-21925095206580441; caught live on LearningPotRail's
+ * `.pc-potrail__popwrap`, which is why this fix's shape mirrors that one).
+ *
+ * `:where()` gives this rule ZERO specificity — the floor. Any consumer's
+ * inline `contentStyle` (highest priority) OR a `contentClassName` that
+ * declares its own `background` always wins regardless of source order, so
+ * every already-painted call site (`.pc-user-menu`, `.pc-potrail__popwrap`,
+ * ...) is untouched; only the unpainted ones gain a surface.
+ *
+ * Mirrors the house "anchored panel" pattern (`.pc-user-menu`,
+ * `.pc-potrail__popwrap`) rather than Modal.css's lighter treatment: a
+ * popover has no backdrop scrim behind it, so border + shadow matter for
+ * depth in a way an already-dimmed modal doesn't need.
+ */
+:where(.pc-popover-content) {
+  background: var(--bg-1);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow:
+    0 18px 46px rgba(0, 0, 0, 0.58),
+    0 0 0 1px rgba(255, 255, 255, 0.045),
+    inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  backdrop-filter: none;
+}

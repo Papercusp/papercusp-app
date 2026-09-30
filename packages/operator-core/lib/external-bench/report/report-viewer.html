@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Papercup benchmark report</title>
+<!--
+  Portable, dependency-FREE benchmark report viewer (plan benchmark-report-portable-trace-2026-06-17).
+  Renders a BenchReportBundle (report-schema.ts). NO external libraries — vanilla HTML/CSS/JS only, so a
+  built report-<runId>.html is a single double-clickable file that works offline anywhere.
+
+  Data source, in priority order:
+    1. window.__BENCH_REPORT__  — injected by report-builder.ts into the built per-run file (the portable case).
+    2. ?bundle=<url>            — fetch a bundle.json (dev / served case).
+    3. a file picker / drag-drop — load a bundle.json by hand.
+-->
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a; --fg:#e6e9ef; --dim:#9aa3b2;
+    --accent:#6ea8fe; --good:#5fd07a; --bad:#f0746a; --warn:#e9c46a; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:5; }
+  h1 { font-size:16px; margin:0 0 4px; } h1 .suite { color:var(--accent); }
+  .sub { color:var(--dim); font-size:12px; }
+  .meta { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:8px; font-size:12px; color:var(--dim); }
+  .meta b { color:var(--fg); font-weight:600; }
+  nav { display:flex; gap:2px; padding:0 14px; background:var(--panel); border-bottom:1px solid var(--line); position:sticky; top:64px; z-index:4; flex-wrap:wrap; }
+  nav button { background:none; border:none; color:var(--dim); padding:9px 12px; cursor:pointer; font-size:13px; border-bottom:2px solid transparent; }
+  nav button.active { color:var(--fg); border-bottom-color:var(--accent); }
+  nav button .n { color:var(--dim); font-size:11px; }
+  main { padding:16px 20px 80px; max-width:1300px; }
+  .tab { display:none; } .tab.active { display:block; }
+  .cards { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:16px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; min-width:150px; }
+  .card .k { color:var(--dim); font-size:12px; } .card .v { font-size:20px; font-weight:600; margin-top:2px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th,td { text-align:left; padding:6px 9px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--dim); font-weight:600; position:sticky; top:0; background:var(--panel); cursor:default; }
+  tr.row { cursor:pointer; } tr.row:hover { background:var(--panel2); }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .pill { padding:1px 7px; border-radius:10px; font-size:11px; font-weight:600; }
+  .pill.good { background:rgba(95,208,122,.16); color:var(--good); }
+  .pill.bad { background:rgba(240,116,106,.16); color:var(--bad); }
+  .pill.warn { background:rgba(233,196,106,.16); color:var(--warn); }
+  .pill.dim { background:var(--panel2); color:var(--dim); }
+  .detail { background:var(--panel2); } .detail td { padding:10px 14px; }
+  .kv { display:grid; grid-template-columns:max-content 1fr; gap:2px 14px; }
+  .kv .k { color:var(--dim); } .kv .v { font-family:var(--mono); font-size:12px; word-break:break-word; }
+  pre { background:#0b0d11; border:1px solid var(--line); border-radius:6px; padding:10px; overflow:auto; font-family:var(--mono); font-size:12px; max-height:480px; margin:6px 0; }
+  .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:10px; }
+  input[type=search]{ background:var(--panel2); border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:6px 10px; width:340px; max-width:60vw; }
+  .muted { color:var(--dim); } .accent { color:var(--accent); }
+  details.jt { margin-left:12px; } details.jt > summary { cursor:pointer; color:var(--dim); font-family:var(--mono); font-size:12px; }
+  .jt .leaf { font-family:var(--mono); font-size:12px; } .jt .leaf .key { color:var(--accent); }
+  .tree li { list-style:none; } .tree ul { margin:0; padding-left:18px; border-left:1px solid var(--line); }
+  .empty { color:var(--dim); padding:40px; text-align:center; }
+  #drop { border:2px dashed var(--line); border-radius:10px; padding:50px; text-align:center; color:var(--dim); margin:40px auto; max-width:520px; }
+  code { font-family:var(--mono); font-size:12px; color:var(--accent); }
+  .right { margin-left:auto; }
+</style>
+</head>
+<body>
+<div id="app"><div class="empty" id="boot">Loading report…</div></div>
+
+<script>
+"use strict";
+// ---------- tiny DOM helpers (no libs) ----------
+const $ = (sel, root=document) => root.querySelector(sel);
+const el = (tag, attrs={}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k,v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v;
+    else if (k === "html") n.innerHTML = v;
+    else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2), v);
+    else if (v != null) n.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null) n.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  return n;
+};
+const fmt = {
+  usd: n => n == null ? "—" : "$" + Number(n).toLocaleString(undefined,{maximumFractionDigits:2}),
+  int: n => n == null ? "—" : Number(n).toLocaleString(),
+  pct: (a,b) => (b ? Math.round(100*a/b) : 0) + "%",
+  ms: n => n == null ? "—" : n < 1000 ? n+"ms" : n < 60000 ? (n/1000).toFixed(1)+"s" : (n/60000).toFixed(1)+"m",
+  score: n => n == null ? "—" : (Math.round(1000*n)/1000).toString(),
+};
+const pill = (txt, cls) => el("span",{class:"pill "+cls}, txt);
+// collapsible JSON tree (for config / args / result / suiteData)
+function jsonTree(v, key) {
+  if (v === null || typeof v !== "object") {
+    return el("div",{class:"leaf"}, key!=null ? el("span",{class:"key"}, key+": ") : null, String(v));
+  }
+  const entries = Array.isArray(v) ? v.map((x,i)=>[i,x]) : Object.entries(v);
+  const d = el("details",{class:"jt"});
+  d.append(el("summary",{}, (key!=null?key+" ":"") + (Array.isArray(v)?`[${entries.length}]`:`{${entries.length}}`)));
+  for (const [k,val] of entries) d.append(jsonTree(val, k));
+  return d;
+}
+const stop = e => { e.stopPropagation(); };
+
+// ---------- bundle loading ----------
+function loadBundle(cb) {
+  if (window.__BENCH_REPORT__) return cb(window.__BENCH_REPORT__);
+  const u = new URLSearchParams(location.search).get("bundle");
+  if (u) return fetch(u).then(r=>r.json()).then(cb).catch(e=>renderError("Failed to fetch "+u+": "+e));
+  // file picker / drag-drop
+  const app = $("#app"); app.innerHTML = "";
+  const drop = el("div",{id:"drop"}, "Drop a benchmark ", el("code",{},"bundle.json"), " here, or ",
+    el("label",{class:"accent",style:"cursor:pointer;text-decoration:underline"}, "choose a file",
+      el("input",{type:"file",accept:".json",style:"display:none",onchange:e=>readFile(e.target.files[0],cb)})));
+  ["dragover","dragenter"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.style.borderColor="var(--accent)";}));
+  drop.addEventListener("dragleave",()=>drop.style.borderColor="var(--line)");
+  drop.addEventListener("drop",e=>{e.preventDefault(); readFile(e.dataTransfer.files[0],cb);});
+  app.append(drop);
+}
+function readFile(f, cb){ if(!f) return; const r=new FileReader(); r.onload=()=>{ try{cb(JSON.parse(r.result));}catch(e){renderError("Invalid JSON: "+e);} }; r.readAsText(f); }
+function renderError(msg){ $("#app").innerHTML=""; $("#app").append(el("div",{class:"empty"}, "⚠ "+msg)); }
+
+// ---------- render ----------
+let TABS = [];
+function render(b) {
+  if (!b || !b.run) return renderError("Not a benchmark report bundle (missing run header).");
+  const app = $("#app"); app.innerHTML = "";
+  const r = b.run;
+  // header
+  app.append(el("header",{},
+    el("h1",{}, "Papercup benchmark report — ", el("span",{class:"suite"}, b.suite || r.suite)),
+    el("div",{class:"sub"}, (r.label?r.label+" · ":"") + "run ", el("code",{}, r.runId), r.createdAt?" · "+r.createdAt:""),
+    el("div",{class:"meta"},
+      kv("arms", (r.arms||[]).join(", ")),
+      kv("models", Object.entries(r.models||{}).map(([k,v])=>k+"="+v).join("  ") || "—"),
+      r.prereg ? kv("prereg", r.prereg.hash + (r.prereg.gitCommitSha?(" @ "+String(r.prereg.gitCommitSha).slice(0,8)):"")) : null,
+      r.harnessGitSha ? kv("harness sha", String(r.harnessGitSha).slice(0,8)) : null,
+    )));
+  // nav + tabs
+  const nav = el("nav",{}); const main = el("main",{}); app.append(nav, main);
+  TABS = [
+    ["Overview", true, ()=>tabOverview(b)],
+    ["Rollouts", (b.rollouts||[]).length, ()=>tabRollouts(b)],
+    ["Coordination", (b.coordTrace||[]).length, ()=>tabCoord(b)],
+    ["Spawn tree", (b.spawnTree||[]).length, ()=>tabSpawnTree(b)],
+    ["Call log", (b.callLog||[]).length, ()=>tabCallLog(b)],
+    ["Suite data", b.suiteData && Object.keys(b.suiteData).length, ()=>tabSuite(b)],
+    ["Replay / raw", true, ()=>tabRaw(b)],
+  ].filter(t=>t[1]);
+  TABS.forEach(([name,n,build],i)=>{
+    const btn = el("button",{class:i===0?"active":"", onclick:()=>selectTab(i)}, name,
+      typeof n==="number" ? el("span",{class:"n"}, " "+n) : null);
+    nav.append(btn);
+  });
+  const panels = TABS.map(()=>el("div",{class:"tab"}));
+  panels[0].classList.add("active"); panels[0].append(TABS[0][2]());
+  panels.forEach(p=>main.append(p));
+  main._panels = panels; main._built = [true];
+  window._selectTab = selectTab;
+  function selectTab(i){
+    nav.querySelectorAll("button").forEach((btn,j)=>btn.classList.toggle("active", i===j));
+    panels.forEach((p,j)=>p.classList.toggle("active", i===j));
+    if (!main._built[i]) { panels[i].append(TABS[i][2]()); main._built[i]=true; }
+  }
+}
+function kv(k,v){ return el("span",{}, el("b",{},k+": "), v); }
+
+function tabOverview(b){
+  const wrap = el("div",{});
+  const t = b.run.totals||{};
+  wrap.append(el("div",{class:"cards"},
+    card("Tasks", fmt.int(t.tasks)), card("Total cost", fmt.usd(t.costUsd)),
+    card("Tokens", fmt.int((t.tokensIn||0)+(t.tokensOut||0))), card("Wall", fmt.ms(t.wallMs)),
+    card("Arms", String((b.run.arms||[]).length))));
+  // per-arm table
+  const rows = (b.arms||[]).map(a=>{
+    const acc = a.meanScore!=null ? fmt.score(a.meanScore) : (a.scored ? fmt.pct(a.resolved||0,a.scored) : "—");
+    return el("tr",{class:"row"},
+      el("td",{}, el("b",{},a.arm)),
+      el("td",{}, a.meanScore!=null ? "mean score "+acc : (a.resolved||0)+"/"+(a.scored||0)+" = "+acc),
+      el("td",{class:"num"}, a.infraExcluded!=null?fmt.int(a.infraExcluded):"—"),
+      el("td",{class:"num"}, fmt.usd(a.costUsd)),
+      el("td",{class:"num"}, fmt.int(a.tokensTotal)),
+      el("td",{class:"num"}, a.concurrency?`${a.concurrency.avg?.toFixed?.(2)??a.concurrency.avg} / ${a.concurrency.peak}`:"—"));
+  });
+  wrap.append(el("h3",{},"Per-arm summary"),
+    el("table",{}, el("thead",{}, el("tr",{},
+      el("th",{},"Arm"), el("th",{},"Accuracy / score"), el("th",{class:"num"},"infra-excl"),
+      el("th",{class:"num"},"Cost"), el("th",{class:"num"},"Tokens"), el("th",{class:"num"},"concur avg/peak"))),
+      el("tbody",{}, ...rows)));
+  if (b.run.envFingerprint) wrap.append(el("h3",{},"Environment fingerprint"), jsonTree(b.run.envFingerprint,"env"));
+  return wrap;
+}
+function card(k,v){ return el("div",{class:"card"}, el("div",{class:"k"},k), el("div",{class:"v"},v)); }
+
+function tabRollouts(b){
+  const wrap = el("div",{}); const q = el("input",{type:"search",placeholder:"filter by task / arm / stop / status…"});
+  wrap.append(el("div",{class:"toolbar"}, q, el("span",{class:"muted right"}, (b.rollouts||[]).length+" rows")));
+  const tbody = el("tbody",{});
+  const draw = () => { tbody.innerHTML=""; const f=(q.value||"").toLowerCase();
+    (b.rollouts||[]).filter(ro => !f || JSON.stringify([ro.taskId,ro.arm,ro.stopReason,ro.graderStatus]).toLowerCase().includes(f))
+      .forEach(ro => addRollout(tbody, ro)); };
+  q.addEventListener("input", draw);
+  wrap.append(el("table",{}, el("thead",{}, el("tr",{},
+    el("th",{},"Task"), el("th",{},"Arm"), el("th",{},"Outcome"), el("th",{},"Stop"),
+    el("th",{class:"num"},"Cost"), el("th",{class:"num"},"Tokens"), el("th",{class:"num"},"Wall"))), tbody));
+  draw(); return wrap;
+}
+function outcomePill(ro){
+  if (ro.resolved===true) return pill("resolved","good");
+  if (ro.score!=null) return pill("score "+fmt.score(ro.score), ro.score>=0.5?"warn":"dim");
+  if (ro.resolved===false) return pill("failed","bad");
+  return pill(ro.stopReason||"excluded","dim");
+}
+function addRollout(tbody, ro){
+  const row = el("tr",{class:"row"},
+    el("td",{}, el("code",{}, shortId(ro.taskId))), el("td",{}, ro.arm),
+    el("td",{}, outcomePill(ro)), el("td",{}, pill(ro.stopReason||"—", ro.stopReason==="done"?"good":ro.stopReason==="error"||ro.stopReason==="infra-failed"||ro.stopReason==="timeout"?"dim":"warn")),
+    el("td",{class:"num"}, fmt.usd(ro.costUsd)), el("td",{class:"num"}, fmt.int(ro.tokensTotal)), el("td",{class:"num"}, fmt.ms(ro.wallMs)));
+  const det = el("tr",{class:"detail",style:"display:none"});
+  const cell = el("td",{colspan:7}); det.append(cell);
+  let built=false;
+  row.addEventListener("click",()=>{ const open=det.style.display==="none"; det.style.display=open?"":"none";
+    if (open && !built){ built=true; cell.append(rolloutDetail(ro)); } });
+  tbody.append(row, det);
+}
+function rolloutDetail(ro){
+  const w = el("div",{});
+  const kvg = el("div",{class:"kv"});
+  const add=(k,v)=>{ if(v==null||v==="") return; kvg.append(el("div",{class:"k"},k), el("div",{class:"v"}, String(v))); };
+  add("rolloutId",ro.rolloutId); add("seed",ro.seed); add("model",ro.modelId+(ro.modelVersion?(" / "+ro.modelVersion):""));
+  add("harness",ro.harnessVersion+(ro.harnessGitSha?(" @ "+String(ro.harnessGitSha).slice(0,8)):""));
+  add("turns",ro.turns); add("graderStatus",ro.graderStatus); add("generationError",ro.generationError);
+  add("trajectory",ro.trajectoryRef?(ro.trajectoryKind?ro.trajectoryKind+": ":"")+ro.trajectoryRef:null);
+  w.append(kvg);
+  if (ro.configSnapshot) w.append(el("h4",{},"config snapshot"), jsonTree(ro.configSnapshot,"config"));
+  if (ro.failToPass||ro.passToPass) w.append(el("h4",{},"tests"),
+    el("div",{class:"muted"}, "FAIL_TO_PASS "+passCount(ro.failToPass)+" · PASS_TO_PASS "+passCount(ro.passToPass)),
+    jsonTree({failToPass:ro.failToPass,passToPass:ro.passToPass},"tests"));
+  if (ro.submission) w.append(el("h4",{},"submission (graded)"), el("pre",{}, ro.submission));
+  if (ro.rawGraderOutput) w.append(el("h4",{},"raw grader output (verbatim)"), el("pre",{}, ro.rawGraderOutput));
+  return w;
+}
+function passCount(a){ if(!a||!a.length) return "—"; const p=a.filter(x=>x.passed).length; return p+"/"+a.length; }
+function shortId(id){ return id ? String(id).replace(/^instance_/,"").slice(0,46) : "—"; }
+
+function tabCoord(b){
+  const wrap=el("div",{}); const q=el("input",{type:"search",placeholder:"filter coordination events…"});
+  wrap.append(el("div",{class:"toolbar"}, q, el("span",{class:"muted right"},(b.coordTrace||[]).length+" events")));
+  const list=el("div",{}); wrap.append(list);
+  const draw=()=>{ list.innerHTML=""; const f=(q.value||"").toLowerCase();
+    (b.coordTrace||[]).filter(e=>!f||JSON.stringify(e).toLowerCase().includes(f)).forEach(e=>{
+      const head=el("div",{class:"row",style:"padding:6px 0;border-bottom:1px solid var(--line)"},
+        el("span",{class:"muted",style:"font-family:var(--mono);font-size:12px"}, (e.ts||"")+"  "),
+        pill(e.kind||"?","dim"), " ",
+        el("span",{}, (e.from?e.from+" ":"")+(e.to?"→ "+e.to.join(","):"")+"  "),
+        el("span",{class:"accent"}, e.summary||""));
+      list.append(head);
+      if (e.body){ const pre=el("pre",{style:"display:none"}, e.body); head.style.cursor="pointer";
+        head.addEventListener("click",()=>pre.style.display=pre.style.display==="none"?"":"none"); list.append(pre); }
+    }); };
+  q.addEventListener("input",draw); draw(); return wrap;
+}
+
+function tabSpawnTree(b){
+  const nodes=b.spawnTree||[]; const byParent={};
+  nodes.forEach(n=>{ (byParent[n.parentSpawnId||"__root__"] ||= []).push(n); });
+  const wrap=el("div",{class:"tree"});
+  const build=(pid)=> el("ul",{}, ...(byParent[pid]||[]).map(n=> el("li",{},
+    pill(n.role,"dim")," ", el("code",{},n.spawnId), " ",
+    n.taskId?el("span",{class:"muted"},"· "+shortId(n.taskId)):null,
+    n.model?el("span",{class:"muted"}," · "+n.model):null,
+    n.status?el("span",{class:"muted"}," · "+n.status):null,
+    n.costUsd!=null?el("span",{class:"muted"}," · "+fmt.usd(n.costUsd)):null,
+    byParent[n.spawnId]?build(n.spawnId):null)));
+  wrap.append(build("__root__")); return wrap;
+}
+
+function tabCallLog(b){
+  const wrap=el("div",{}); const q=el("input",{type:"search",placeholder:"filter by tool / role / spawn…"});
+  wrap.append(el("div",{class:"toolbar"}, q, el("span",{class:"muted right"},(b.callLog||[]).length+" calls · the replay-grade audit")));
+  const tbody=el("tbody",{});
+  const draw=()=>{ tbody.innerHTML=""; const f=(q.value||"").toLowerCase();
+    (b.callLog||[]).filter(c=>!f||JSON.stringify([c.tool,c.role,c.spawnId]).toLowerCase().includes(f)).slice(0,5000).forEach(c=>{
+      const row=el("tr",{class:"row"},
+        el("td",{class:"muted",style:"font-family:var(--mono);font-size:11px"}, c.ts||""),
+        el("td",{}, el("code",{},c.tool)), el("td",{}, c.role||"—"),
+        el("td",{}, c.spawnId?el("code",{},String(c.spawnId).slice(0,14)):"—"),
+        el("td",{}, c.ok===false?pill("err","bad"):pill("ok","good")),
+        el("td",{class:"num"}, c.durationMs!=null?fmt.ms(c.durationMs):"—"),
+        el("td",{class:"num"}, c.costUsd!=null?fmt.usd(c.costUsd):"—"));
+      const det=el("tr",{class:"detail",style:"display:none"}); const cell=el("td",{colspan:7}); det.append(cell); let built=false;
+      row.addEventListener("click",()=>{ const open=det.style.display==="none"; det.style.display=open?"":"none";
+        if(open&&!built){built=true; cell.append(el("h4",{},"args"), jsonTree(c.args??null,"args"), el("h4",{},"result"), jsonTree(c.result??null,"result")); } });
+      tbody.append(row,det);
+    }); };
+  q.addEventListener("input",draw);
+  wrap.append(el("table",{}, el("thead",{}, el("tr",{},
+    el("th",{},"ts"), el("th",{},"tool"), el("th",{},"role"), el("th",{},"spawn"),
+    el("th",{},"ok"), el("th",{class:"num"},"dur"), el("th",{class:"num"},"cost"))), tbody));
+  draw(); return wrap;
+}
+
+function tabSuite(b){
+  const wrap=el("div",{});
+  wrap.append(el("div",{class:"muted",style:"margin-bottom:8px"}, "Benchmark-specific data for ", el("code",{}, b.suite), ". (Shared sections cover arms / rollouts / coordination / calls.)"));
+  wrap.append(jsonTree(b.suiteData||{}, b.suite));
+  return wrap;
+}
+function tabRaw(b){
+  const wrap=el("div",{});
+  wrap.append(el("div",{class:"muted",style:"margin-bottom:8px"},
+    "This bundle carries the replay fingerprint per rollout (config, exact model/harness version + git sha, env fingerprint, the verbatim graded submission + grader output, the trajectory pointer) and the full defineTool call-log — enough to THEORETICALLY reconstruct the run."),
+    el("button",{onclick:()=>{ const blob=new Blob([JSON.stringify(b,null,2)],{type:"application/json"});
+      const a=el("a",{href:URL.createObjectURL(blob),download:(b.run.runId||"report")+".bundle.json"}); a.click(); }}, "Download bundle.json"));
+  const pre=el("pre",{style:"max-height:600px"}, JSON.stringify(b,null,2).slice(0,200000));
+  wrap.append(pre); return wrap;
+}
+
+loadBundle(render);
+</script>
+</body>
+</html>

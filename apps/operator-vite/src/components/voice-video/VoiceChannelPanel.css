@@ -1,0 +1,162 @@
+/* VoiceChannelPanel — desktop twin of the pui Voice tab (P-015, D-014).
+   Semantic tokens only (design/tokens theme contract). */
+
+.pc-voice-chan {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 8px;
+  font-size: 12px;
+  color: var(--fg, #e7f7ff);
+}
+
+.pc-voice-chan__banner {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  color: var(--warn, #fbbf24);
+}
+
+.pc-voice-chan__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pc-voice-chan__empty {
+  color: var(--fg-mute, #888);
+  padding: 6px 4px;
+  list-style: none;
+}
+
+.pc-voice-chan__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--bg-1, #0b1220);
+}
+
+.pc-voice-chan__row[data-active='true'] {
+  background: var(--bg-3, rgba(255, 255, 255, 0.075));
+  outline: 1px solid var(--accent, #38bdf8);
+}
+
+.pc-voice-chan__row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pc-voice-chan__btn {
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 4px;
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  color: var(--fg, #e7f7ff);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.pc-voice-chan__btn:hover:not(:disabled) {
+  background: var(--bg-3, rgba(255, 255, 255, 0.075));
+}
+
+.pc-voice-chan__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.pc-voice-chan__btn--leave {
+  color: var(--warn, #fbbf24);
+}
+
+.pc-voice-chan__create {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.pc-voice-chan__input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 4px;
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  color: var(--fg, #e7f7ff);
+  font-size: 11px;
+  padding: 3px 6px;
+}
+
+.pc-voice-chan__session {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border, #2a2a2a);
+  padding-top: 8px;
+}
+
+.pc-voice-chan__session-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pc-voice-chan__session-name {
+  font-weight: 600;
+}
+
+.pc-voice-chan__meter {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+  overflow: hidden;
+}
+
+.pc-voice-chan__meter-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--good, #34d399);
+  transition: width 80ms linear;
+}
+
+.pc-voice-chan__agent {
+  color: var(--accent, #38bdf8);
+}
+
+.pc-voice-chan__peers {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pc-voice-chan__peer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.pc-voice-chan__peer[data-speaking='true'] {
+  background: var(--bg-2, rgba(255, 255, 255, 0.045));
+}
+
+.pc-voice-chan__peer-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg-mute, #888);
+  flex: none;
+}
+
+.pc-voice-chan__peer[data-speaking='true'] .pc-voice-chan__peer-dot {
+  background: var(--good, #34d399);
+}

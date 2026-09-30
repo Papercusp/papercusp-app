@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Default (public / Pot) favicon = the Papercup cup mark. The Swarm skin
+         swaps in a bee favicon at runtime via HiveThemeBridge, but only when the
+         THE_HIVE testing flag is on (it appends a later <link rel="icon">, which
+         wins); flag off leaves this cup. restore-pot-lexicon P-011. -->
+    <link rel="icon" type="image/svg+xml" href="/brand/papercup/favicon.svg" />
+    <title>Papercusp Operator</title>
+    <script>
+      (() => {
+        const suppress =
+          location.origin === 'http://localhost:3070'
+          || location.origin === 'http://127.0.0.1:3070'
+          || location.origin === 'http://localhost:4173'
+          || location.origin === 'http://127.0.0.1:4173';
+        if (!suppress) return;
+
+        try {
+          const originalReload = location.reload.bind(location);
+          const originalAssign = location.assign.bind(location);
+          const originalReplace = location.replace.bind(location);
+          // Stash the genuine reload/assign/replace FIRST — before the
+          // reload/assign/replace overrides below, which can throw on some
+          // webviews (WebKitGTK) and would otherwise abort this block before the
+          // escape hatches are set, leaving hardReload() (lib/hard-reload.ts) and
+          // hardNavigate() (lib/client-navigation.ts) with no genuine method to
+          // bypass the suppression. The assign/replace stashes let a DELIBERATE
+          // hard navigation (a workspace switch → /harness?ws=<id>) force a real
+          // document load; without them the override below downgrades it to a
+          // soft pushState and the switch silently no-ops.
+          Object.defineProperty(window, '__papercuspOriginalReload', {
+            configurable: true,
+            value: originalReload,
+          });
+          Object.defineProperty(window, '__papercuspOriginalAssign', {
+            configurable: true,
+            value: originalAssign,
+          });
+          Object.defineProperty(window, '__papercuspOriginalReplace', {
+            configurable: true,
+            value: originalReplace,
+          });
+          const softNavigate = (target, replace) => {
+            try {
+              const next = new URL(String(target), location.href);
+              if (next.origin !== location.origin) return false;
+              const href = `${next.pathname}${next.search}${next.hash}`;
+              if (replace) history.replaceState({}, '', href);
+              else history.pushState({}, '', href);
+              window.dispatchEvent(new PopStateEvent('popstate'));
+              return true;
+            } catch {
+              return false;
+            }
+          };
+          Object.defineProperty(location, 'reload', {
+            configurable: true,
+            value: () => {
+              console.info('[Papercusp] JS reload suppressed on static desktop host — use Cmd/Ctrl+R for manual refresh.');
+            },
+          });
+          Object.defineProperty(location, 'assign', {
+            configurable: true,
+            value: (target) => {
+              if (softNavigate(target, false)) return;
+              originalAssign(target);
+            },
+          });
+          Object.defineProperty(location, 'replace', {
+            configurable: true,
+            value: (target) => {
+              if (softNavigate(target, true)) return;
+              originalReplace(target);
+            },
+          });
+          document.addEventListener('click', (event) => {
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            const anchor = target.closest('a[href]');
+            if (!(anchor instanceof HTMLAnchorElement)) return;
+            if (event.defaultPrevented) return;
+            if (event.button !== 0) return;
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            if (anchor.hasAttribute('download')) return;
+            if (anchor.target === '_blank') return;
+            if (softNavigate(anchor.href, false)) {
+              event.preventDefault();
+            }
+          }, true);
+        } catch {
+          // Best effort — some browsers disallow redefining location methods.
+        }
+      })();
+    </script>
+    <!--
+      Color theme (pre-paint).
+
+      The Vite root (`apps/operator-vite/src/routes/__root.tsx`) owns the shell;
+      this pre-paint bootstrap supersedes the retired Next layout's
+      themeBootstrapScript. This SPA is
+      client-rendered, so without this the page would paint frost then flip to
+      the saved theme once React mounts the selector. Sets data-theme on <html>
+      synchronously from the wsLocalKey-scoped value (pc:ws:<id>:papercusp.theme),
+      using the same getBrowserWorkspaceId() resolution as lib/theme.ts so this
+      read and the React lib always agree on the key. Frost is the :root default.
+    -->
+    <script>
+      (() => {
+        const KEY = 'papercusp.theme';
+        const DEFAULT = 'frost';
+        // The portal owns the embedded document's palette. Resolve its query
+        // contract synchronously, before the ordinary PG/local cache path, so
+        // an iframe never paints frost and flips after React mounts.
+        try {
+          const params = new URL(window.location.href).searchParams;
+          const embedValue = params.get('portalEmbed');
+          const embedded = params.has('portalEmbed')
+            && (embedValue === '' || embedValue === '1' || embedValue === 'true' || embedValue === 'yes');
+          if (embedded) {
+            const requested = params.get('portalTheme');
+            const portalTheme = requested === 'light' || requested === 'dark' || requested === 'system'
+              ? requested
+              : 'system';
+            const systemDark = portalTheme === 'system'
+              && typeof window.matchMedia === 'function'
+              && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            document.documentElement.dataset.portalEmbed = 'true';
+            document.documentElement.dataset.portalEmbedTheme = portalTheme;
+            document.documentElement.dataset.theme = portalTheme === 'dark' || systemDark
+              ? 'portal-dark'
+              : 'portal-light';
+            return;
+          }
+        } catch (e) {}
+        const wsId = () => {
+          try { if (window.__PAPERCUSP_WS__ && String(window.__PAPERCUSP_WS__).trim()) return window.__PAPERCUSP_WS__; } catch (e) {}
+          try { const ws = new URL(window.location.href).searchParams.get('ws'); if (ws && ws.trim()) return ws; } catch (e) {}
+          return 'default';
+        };
+        const valid = (v) => typeof v === 'string' && (v === 'frost' || v === 'black' || v === 'honeycomb' || (v.indexOf('custom:') === 0 && v.length > 7));
+        try {
+          // PG is the source of truth: the host injects window.__PAPERCUSP_PREFS__
+          // .theme_id from the user profile (see bin/host-spa.ts). Prefer it; the
+          // localStorage cache is the fallback (dev origins without injection /
+          // offline). Frost is the :root default.
+          const injected = (window.__PAPERCUSP_PREFS__ && window.__PAPERCUSP_PREFS__.theme_id) || null;
+          const cacheKey = 'pc:ws:' + wsId() + ':' + KEY;
+          let id = valid(injected) ? injected : window.localStorage.getItem(cacheKey);
+          if (!valid(id)) id = DEFAULT;
+          document.documentElement.dataset.theme = id;
+          if (id.indexOf('custom:') === 0) {
+            try {
+              const metaRaw = window.localStorage.getItem('pc:ws:' + wsId() + ':papercusp.customThemesMeta');
+              const meta = metaRaw ? JSON.parse(metaRaw) : {};
+              const selected = meta[id] || {};
+              document.documentElement.dataset.themeBase = selected.baseTheme || DEFAULT;
+              document.documentElement.style.colorScheme = selected.colorScheme === 'light' ? 'light' : 'dark';
+            } catch (e) {
+              document.documentElement.dataset.themeBase = DEFAULT;
+              document.documentElement.style.colorScheme = 'dark';
+            }
+          }
+          // Seed the per-device cache from the injected value so the React lib's
+          // synchronous readActiveTheme() agrees with the painted theme even if
+          // this device's cache was stale/empty.
+          if (valid(injected)) { try { window.localStorage.setItem(cacheKey, injected); } catch (e) {} }
+        } catch (e) {
+          document.documentElement.dataset.theme = DEFAULT;
+        }
+        // Re-inject the cached custom-theme CSS (written by applyCustomThemes in
+        // lib/theme.ts) so a `custom:<id>` active theme paints correctly pre-fetch.
+        try {
+          const css = window.localStorage.getItem('pc:ws:' + wsId() + ':papercusp.customThemesCss');
+          if (css) {
+            const st = document.createElement('style');
+            st.id = 'pc-custom-themes';
+            st.textContent = css;
+            document.head.appendChild(st);
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <!--
+      Visual-effects mode (pre-paint).
+
+      The Vite root (`apps/operator-vite/src/routes/__root.tsx`) owns the shell;
+      this pre-paint bootstrap supersedes the retired Next layout's
+      visualEffectsBootstrapScript.
+      Sets data-visual-effects + data-visual-effects-mode on <html> before
+      React mounts, so intro/ambient animations don't flash on at full
+      strength when the saved mode is 'minimal' (or 'system' under
+      prefers-reduced-motion). Reads the wsLocalKey-scoped value
+      (pc:ws:<id>:papercusp.visualEffectsMode) with the same
+      getBrowserWorkspaceId() resolution lib/visual-effects.ts uses, so this
+      read and the React lib always agree on the key. 'full' is the fallback.
+    -->
+    <script>
+      (() => {
+        const KEY = 'papercusp.visualEffectsMode';
+        const REDUCED = '(prefers-reduced-motion: reduce)';
+        const wsId = () => {
+          try { if (window.__PAPERCUSP_WS__ && String(window.__PAPERCUSP_WS__).trim()) return window.__PAPERCUSP_WS__; } catch (e) {}
+          try { const ws = new URL(window.location.href).searchParams.get('ws'); if (ws && ws.trim()) return ws; } catch (e) {}
+          return 'default';
+        };
+        try {
+          // PG source of truth via host injection (see bin/host-spa.ts); the
+          // localStorage cache is the fallback.
+          const injected = (window.__PAPERCUSP_PREFS__ && window.__PAPERCUSP_PREFS__.visual_effects_mode) || null;
+          const cacheKey = 'pc:ws:' + wsId() + ':' + KEY;
+          let mode = injected || window.localStorage.getItem(cacheKey);
+          if (mode !== 'system' && mode !== 'full' && mode !== 'minimal') mode = 'system';
+          const reduced = mode === 'system'
+            && typeof window.matchMedia === 'function'
+            && window.matchMedia(REDUCED).matches;
+          const effective = mode === 'minimal' || reduced ? 'minimal' : 'full';
+          document.documentElement.dataset.visualEffects = effective;
+          document.documentElement.dataset.visualEffectsMode = mode;
+          if (injected) { try { window.localStorage.setItem(cacheKey, mode); } catch (e) {} }
+        } catch (e) {
+          document.documentElement.dataset.visualEffects = 'full';
+          document.documentElement.dataset.visualEffectsMode = 'system';
+        }
+      })();
+    </script>
+    <!--
+      Operator-chat sidebar width reservation: REMOVED (native-terminal-desktop
+      D-011 / P-016 / D-017). An unconditional body-start bootstrap used to add
+      `has-op-chat` + `--op-chat-w` pre-paint, but flags are unknowable
+      pre-paint, so when the flag-gated sidebar never mounted the app kept a
+      permanent blank left column. The sidebar is LIVE again
+      (operator-chat-sidebar-revival-2026-07-13, gated by
+      FLAGS.OPERATOR_CHAT_SIDEBAR) but reserves its own space ONLY at mount
+      (OperatorChatSidebar sets the class/var + carries the padding rules in
+      OP_CHAT_SIDEBAR_CSS, removing them on unmount); the one-frame layout
+      shift on first paint is the accepted cost. Guarded by
+      src/lib/index-html-no-op-chat-reservation.test.ts — do not re-add.
+    -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

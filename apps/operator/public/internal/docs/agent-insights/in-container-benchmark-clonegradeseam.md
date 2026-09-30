@@ -1,0 +1,67 @@
+# Integrating an in-container, own-scorer benchmark (the CloneGradeSeam pattern)
+URL: /internal/docs/agent-insights/in-container-benchmark-clonegradeseam
+
+How to add a benchmark whose tasks self-grade inside their own Docker container (FrontierSWE, TheAgentCompany, METR-HCAST) — the CloneGradeSeam seam, the reward read-back contract, and the continuous-score denominator/NaN gotchas.
+
+import { Aside } from '@astrojs/starlight/components';
+
+Some external benchmarks are **not** diff-batch (clone repo → git-diff → external eval). They are
+**in-container, own-scorer**: the agent works *inside* the task's Docker image over a long horizon, and the
+task ships its OWN verifier that emits a score in place. FrontierSWE is the worked example
+(`benchmark-suite-frontier-swe-2026-06-18`); TheAgentCompany and METR-HCAST are the same shape. If you're
+adding one, this is the path that avoids a week of false starts.
+
+## 1. It's a `CloneGradeSeam`, not a grader-from-scratch
+
+Wire to the shared `external-bench/coordination-topology.ts` `CloneGradeSeam<H>` — the per-benchmark
+clone/grade half every coordination-topology arm shares (fairness C5). You supply ONE seam + a task-set and get
+every topology (central-Mug / distributed / ensemble / baseline) for free; you do **not** author arm code or
+re-roll the run driver (that's the shared topology runtime — D-007). For FrontierSWE see
+`makeFrontierSweCloneGradeSeam` (`external-bench/frontier-swe-seam.ts`):
+
+* `clone(task)` → `docker run -d <graderMeta.dockerImage> sleep infinity` → a container handle (the agent
+  execs in; the workspace is baked into the image). Add `--gpus all` when `graderMeta.gpus > 0`.
+* `grade(task, handle)` → run the task's OWN verifier (`docker exec … bash /tests/test.sh`), then read the
+  reward back. **You author no scorer.**
+* `teardown(handle)` → `docker rm -f`, **never-throw** (it's called on every path — success / capability-fail /
+  infra-fail — so a run never leaks containers).
+
+## 2. The reward read-back is a file, not stdout
+
+The non-obvious bit: the verifier writes the score to a **file inside the container**, not stdout. For
+FrontierSWE every task's `tests/test.sh` → `compute_reward.py` writes `/logs/verifier/reward.txt` (the bare
+`[0,1]` scalar — the uniform primary) + `reward.json` (structured, per-task keys). Read `reward.txt` first,
+fall back to `reward.json`'s `reward`/`score` key. `HARBOR_ORACLE_MODE=1` runs the gold/oracle path (skips
+anti-cheat) — use it with `solution/solve.sh` as the C9 positive control.
+
+## 3. Continuous score → the denominator discipline (where bugs hide)
+
+These suites grade a **continuous `score ∈ [0,1]`** (no model fully solves the hard tasks), so `resolved` is
+degenerate (`score === 1`) and the headline is mean\@k / best\@k + rank, never a resolved%. Two traps:
+
+* A verifier that RAN and emitted a numeric reward — **including `0`** (empty / no-progress workspace) — is a
+  genuine capability outcome that **COUNTS** in the denominator. Never a vanished row.
+* A verifier that FAILED to produce a reward (image/OOM/timeout/gateway) is **infra** → `graderStatus:'error'`,
+  `score:null`, EXCLUDED + surfaced symmetrically across arms (C6). Never silently scored 0.
+* In cross-arm rollups (`@papercusp/bench-metrics` `frontierRankReport`), an arm with **no opponents** on a task
+  (e.g. a per-bucket filter leaving one arm) must get `dominance: NaN` ("no comparison"), **not `0`** ("lost
+  everything") — `0` falsely ranks it below a 50-50 arm. Same for an undefined `meanAtK`/`avgRank` → NaN.
+
+## 4. Gates that will bite
+
+* **GPU / wall-clock**: long-horizon tasks (FrontierSWE: 4–20 h/task) need iso-budget that bounds **wall-clock**
+  as a first-class dim, and some tasks need datacenter GPUs (B200/H100) a dev box doesn't have — provide a
+  GPU-free task-set variant (`frontier-swe-cpu`) for local work.
+* **Disk**: GB-scale per-task images — grade on a **dedicated volume**, never the shared checkout (disk-eviction
+  risk), prune between tasks.
+* **Resumability**: long runs WILL be interrupted — keep a durable `results.jsonl` and re-run only the missing
+  `(task, seed)` trials (infra rows re-run; scored rows skip). See `external-bench/frontier-swe-resume.ts`.
+* **License**: vendored task repos may ship no LICENSE — research/eval use only, no redistribution of derived
+  data without owner sign-off.
+
+## 5. Fairness is the hard part
+
+Every number ships with the **C1–C10 pre-claim audit** (`buildFairnessAudit`); see
+[Benchmark Fairness Criteria](/benchmarks/fairness-criteria). Feed every arm's `TaskRunResult` rows straight
+into `buildCapabilityAttribution` + `buildFairnessAudit` — one fair denominator, iso-budget, model verified
+from telemetry, ≥2 seeds, reference reproduces a published number.

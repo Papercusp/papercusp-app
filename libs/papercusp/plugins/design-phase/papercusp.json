@@ -1,0 +1,500 @@
+{
+  "name": "@papercupai/design-phase",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "papercusp": "^0.1.0",
+  "description": "MCP + HTTP tools for the design-phase agent loop. Designer agents use these to validate IR specs, lint anti-patterns, persist accepted specs to PG, browse design memos, and resolve the per-harness DESIGN_SPEC.md fallback chain. Plan: apps/operator-docs/src/content/docs/design/design-phase-plan.mdx.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "capabilities": [
+    "tools:design:validate_spec",
+    "tools:design:lint_spec",
+    "tools:design:submit_spec",
+    "tools:design:list_memos",
+    "tools:design:read_memo",
+    "tools:design:get_design_spec",
+    "tools:design:search_registry",
+    "tools:design:get_registry_component",
+    "tools:design:list_tokens",
+    "tools:design:read_token",
+    "tools:design:get_accepted_spec",
+    "tools:design:record_review",
+    "tools:design:ratify_reference",
+    "tools:design:compare_render",
+    "tools:design:get_design_evidence",
+    "fs:read:design_memos",
+    "fs:read:design_tokens",
+    "db:write:harness_design_artifacts",
+    "db:write:harness_features_consolidated"
+  ],
+  "tools": [
+    {
+      "name": "validate_spec",
+      "description": "Schema-validate a UI IR document against the v0.1 JSON Schema. Returns structured errors. Use this before submit_spec to fail fast on shape problems.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ir": { "type": "object", "description": "The IR document to validate." }
+        },
+        "required": ["ir"]
+      },
+      "capabilities": ["tools:design:validate_spec"],
+      "roles": ["designer", "reviewer", "architect", "operator"],
+      "rolesQuota": {
+        "designer": { "perRun": 50 },
+        "reviewer": { "perRun": 20 },
+        "architect": { "perRun": 10 },
+        "operator": { "perRun": 100 }
+      },
+      "timeoutSec": 5
+    },
+    {
+      "name": "lint_spec",
+      "description": "Run anti-pattern lint rules over a UI IR document. Errors block acceptance; warnings flow to the design-crit prompt. Use this alongside validate_spec before submit_spec.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ir": { "type": "object" },
+          "knownTokens": { "type": "array", "items": { "type": "string" } },
+          "knownComponents": { "type": "array", "items": { "type": "string" } },
+          "knownIcons": { "type": "array", "items": { "type": "string" } },
+          "maxDepth": { "type": "integer", "minimum": 1 }
+        },
+        "required": ["ir"]
+      },
+      "capabilities": ["tools:design:lint_spec"],
+      "roles": ["designer", "reviewer", "architect", "operator"],
+      "rolesQuota": {
+        "designer": { "perRun": 50 },
+        "reviewer": { "perRun": 20 },
+        "architect": { "perRun": 10 }
+      },
+      "timeoutSec": 5
+    },
+    {
+      "name": "submit_spec",
+      "description": "Validate + lint + persist a UI IR spec to PG. Writes a row to harness_shared.harness_design_artifacts (kind='spec') and updates harness_features_consolidated.design_status. Refuses if validation or lint errors exist (warnings are OK).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "featureId": { "type": "string", "minLength": 1 },
+          "ir": { "type": "object" },
+          "metadata": {
+            "type": "object",
+            "description": "Cost/token telemetry; passes through to the artifact row.",
+            "properties": {
+              "tokensIn": { "type": "integer" },
+              "tokensOut": { "type": "integer" },
+              "costUsd": { "type": "number" },
+              "modelId": { "type": "string" },
+              "elapsedMs": { "type": "integer" }
+            }
+          }
+        },
+        "required": ["featureId", "ir"]
+      },
+      "capabilities": ["tools:design:submit_spec", "db:write:harness_design_artifacts"],
+      "roles": ["designer"],
+      "rolesQuota": {
+        "designer": { "perRun": 5 }
+      },
+      "timeoutSec": 10
+    },
+    {
+      "name": "list_memos",
+      "description": "List design memos at apps/operator-docs/src/content/docs/design/*.mdx with their slug, title, and (when frontmatter declares one) status.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "enum": ["open", "addressed", "wontfix", "any"],
+            "default": "any"
+          }
+        }
+      },
+      "capabilities": ["tools:design:list_memos", "fs:read:design_memos"],
+      "roles": ["designer", "reviewer", "architect", "operator"],
+      "rolesQuota": {
+        "designer": { "perRun": 10 },
+        "reviewer": { "perRun": 10 }
+      },
+      "timeoutSec": 5
+    },
+    {
+      "name": "read_memo",
+      "description": "Read a single design memo's full markdown body by slug.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "slug": { "type": "string", "minLength": 1 } },
+        "required": ["slug"]
+      },
+      "capabilities": ["tools:design:read_memo", "fs:read:design_memos"],
+      "roles": ["designer", "reviewer", "architect", "operator"],
+      "rolesQuota": {
+        "designer": { "perRun": 20 },
+        "reviewer": { "perRun": 20 }
+      },
+      "timeoutSec": 5
+    },
+    {
+      "name": "get_design_spec",
+      "description": "Resolve the active DESIGN_SPEC.md via the harness → workspace → app-default → empty fallback chain. Returns the layer it came from, the source path, the body markdown, and parsed frontmatter.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "harnessRoot": { "type": "string" },
+          "workspaceRoot": { "type": "string" }
+        }
+      },
+      "capabilities": ["tools:design:get_design_spec", "fs:read:design_memos"],
+      "roles": ["designer", "reviewer", "architect", "operator"],
+      "rolesQuota": {
+        "designer": { "perRun": 5 }
+      },
+      "timeoutSec": 5
+    },
+    {
+      "name": "search_registry",
+      "description": "Search the active ecosystem's component registry. Returns matching primitives with id, summary, inputs, variants. Designer agents call this first to pick from existing components instead of inventing new ones. v0.1 ships a hand-curated set for react-tailwind.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ecosystem": { "type": "string", "default": "react-tailwind" },
+          "query": { "type": "string", "description": "free-text filter; matches id/summary/input names" }
+        }
+      },
+      "capabilities": ["tools:design:search_registry"],
+      "roles": ["designer", "reviewer", "architect", "operator"],
+      "rolesQuota": {
+        "designer": { "perRun": 30 },
+        "reviewer": { "perRun": 10 }
+      },
+      "timeoutSec": 5
+    },
+    {
+      "name": "get_registry_component",
+      "description": "Get a single registry component's full entry by id (e.g. 'action.primary'). Returns the per-ecosystem source pointer, importHint, propMap, variants, states, examples — everything the implementer agent needs to consume the component.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "ecosystem": { "type": "string", "default": "react-tailwind" }
+        },
+        "required": ["id"]
+      },
+      "capabilities": ["tools:design:get_registry_component"],
+      "roles": ["designer", "reviewer", "architect", "operator", "worker"],
+      "rolesQuota": {
+        "designer": { "perRun": 30 },
+        "worker": { "perRun": 30 }
+      },
+      "timeoutSec": 5
+    },
+    {
+      "name": "list_tokens",
+      "description": "List DTCG tokens from the workspace token store (design/tokens/base.json). Returns flattened entries with id, type, value, description, group. Optional category filter (e.g. 'color', 'space', 'duration'). Designer agents call this to learn what tokens exist before composing IR; lint catches references to unknown tokens.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": { "type": "string", "description": "Filter by id prefix (e.g. 'color') or DTCG type (e.g. 'dimension')." }
+        }
+      },
+      "capabilities": ["tools:design:list_tokens", "fs:read:design_tokens"],
+      "roles": ["designer", "reviewer", "architect", "operator", "worker"],
+      "rolesQuota": {
+        "designer": { "perRun": 20 },
+        "worker": { "perRun": 20 }
+      },
+      "timeoutSec": 5
+    },
+    {
+      "name": "read_token",
+      "description": "Read a single DTCG token by id (e.g. 'color.bg.surface'). Returns its type, value, description, and group.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "minLength": 1 }
+        },
+        "required": ["id"]
+      },
+      "capabilities": ["tools:design:read_token", "fs:read:design_tokens"],
+      "roles": ["designer", "reviewer", "architect", "operator", "worker"],
+      "rolesQuota": {
+        "designer": { "perRun": 50 },
+        "worker": { "perRun": 50 }
+      },
+      "timeoutSec": 5
+    },
+    {
+      "name": "get_accepted_spec",
+      "description": "Fetch the accepted UI IR spec for a feature, resolved via design_spec_id. Returns the IR JSON, metadata (cost telemetry), and creation timestamp. Reviewer agents call this at the start of a post-ship review pass.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "featureId": { "type": "string", "minLength": 1 }
+        },
+        "required": ["featureId"]
+      },
+      "capabilities": ["tools:design:get_accepted_spec"],
+      "roles": ["reviewer", "designer", "architect", "operator"],
+      "rolesQuota": {
+        "reviewer": { "perRun": 30 },
+        "designer": { "perRun": 10 }
+      },
+      "timeoutSec": 10
+    },
+    {
+      "name": "record_review",
+      "description": "Record a reviewer verdict on a feature's accepted spec. Verdicts: 'approved' (keeps design_status=accepted, terminal), 'rejected' (flips design_status back to pending so the orchestrator re-spawns a designer), 'changes-requested' (same flip, with notes for the next designer). Plan §4.2.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "featureId": { "type": "string", "minLength": 1 },
+          "verdict": { "enum": ["approved", "rejected", "changes-requested"] },
+          "notes": { "type": "string" },
+          "specId": { "type": "string", "description": "Optional: the spec id this review applies to (recorded for audit)." }
+        },
+        "required": ["featureId", "verdict"]
+      },
+      "capabilities": ["tools:design:record_review", "db:write:harness_design_artifacts", "db:write:harness_features_consolidated"],
+      "roles": ["reviewer", "operator"],
+      "rolesQuota": {
+        "reviewer": { "perRun": 20 },
+        "operator": { "perRun": 50 }
+      },
+      "timeoutSec": 10
+    },
+    {
+      "name": "ratify_reference",
+      "description": "Ratify an approved design image as the immutable visual reference for a feature, or revise one. Records source provenance plus the contracted capture environment and the cases that must pass; a new revision invalidates evidence bound to the previous one. Submit the revision number you believe you are creating — a stale number is refused rather than reallocated. Who ratified is taken from your session, not from input.",
+      "inputSchema": {
+        "type": "object",
+        "$defs": {
+          "environment": {
+            "type": "object",
+            "properties": {
+              "viewport": {
+                "type": "object",
+                "properties": {
+                  "width": { "type": "integer", "exclusiveMinimum": 0 },
+                  "height": { "type": "integer", "exclusiveMinimum": 0 }
+                },
+                "required": ["width", "height"]
+              },
+              "deviceScaleFactor": { "type": "number", "exclusiveMinimum": 0 },
+              "browser": { "type": "string", "minLength": 1 },
+              "theme": { "type": "string", "minLength": 1 },
+              "fontSet": { "type": "string", "minLength": 1 },
+              "fixture": { "type": "string" },
+              "state": { "type": "string" }
+            },
+            "required": ["viewport", "deviceScaleFactor", "browser", "theme", "fontSet"]
+          }
+        },
+        "properties": {
+          "featureId": { "type": "string", "minLength": 1 },
+          "referenceId": { "type": "string", "minLength": 1 },
+          "revision": { "type": "integer", "exclusiveMinimum": 0 },
+          "referenceClass": {
+            "enum": ["artifact-capture", "figma-export", "raster-mockup", "derived-reference"],
+            "description": "How the image was produced. Only some classes can carry a deterministic gate; a model-painted raster is advisory-only."
+          },
+          "contentSha256": { "type": "string", "minLength": 1 },
+          "image": {
+            "type": "object",
+            "properties": {
+              "mediaType": { "enum": ["image/png", "image/jpeg"] },
+              "locator": { "type": "string", "minLength": 1 },
+              "byteLength": { "type": "integer", "minimum": 0 },
+              "width": { "type": "integer", "exclusiveMinimum": 0 },
+              "height": { "type": "integer", "exclusiveMinimum": 0 }
+            },
+            "required": ["mediaType", "locator", "byteLength", "width", "height"]
+          },
+          "referenceEnvironment": { "$ref": "#/$defs/environment" },
+          "approval": {
+            "type": "object",
+            "description": "Adopt versioned UI acceptance. featureId must equal planSlug. Every case must name its state and exact page route. Ratification returns the revision/hash binding for implementing work-items; later revisions cannot remove this contract.",
+            "additionalProperties": false,
+            "properties": {
+              "schemaVersion": { "const": 1 },
+              "approvalRef": { "type": "string", "minLength": 1 },
+              "planSlug": { "type": "string", "minLength": 1 },
+              "planItemIds": { "type": "array", "minItems": 1, "maxItems": 40, "uniqueItems": true, "items": { "type": "string", "pattern": "^P-[0-9]{3,}$" } },
+              "targetRoute": { "type": "string", "pattern": "^/(?!/)" },
+              "rollout": {
+                "type": "object", "additionalProperties": false,
+                "properties": {
+                  "schemaVersion": { "const": 1 },
+                  "policyPath": { "type": "string", "minLength": 1 },
+                  "policySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                  "reviewCardRef": { "type": "string", "pattern": "^EI-[0-9]+$" }
+                },
+                "required": ["schemaVersion", "policyPath", "policySha256", "reviewCardRef"]
+              },
+              "acceptance": {
+                "type": "object", "additionalProperties": false,
+                "properties": {
+                  "schemaVersion": { "type": "integer", "const": 1 },
+                  "contractPath": { "type": "string", "minLength": 1 },
+                  "contractSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                  "evidencePath": { "type": "string", "minLength": 1 }
+                },
+                "required": ["schemaVersion", "contractPath", "contractSha256", "evidencePath"]
+              },
+              "adaptations": {
+                "type": "array", "maxItems": 32,
+                "items": { "type": "object", "additionalProperties": false, "properties": { "reason": { "type": "string", "minLength": 1 }, "approvalRef": { "type": "string", "minLength": 1 } }, "required": ["reason", "approvalRef"] }
+              }
+            },
+            "required": ["schemaVersion", "approvalRef", "planSlug", "planItemIds", "targetRoute"]
+          },
+          "requiredCases": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "caseId": { "type": "string", "minLength": 1 },
+                "environment": { "$ref": "#/$defs/environment" },
+                "target": {
+                  "type": "object",
+                  "properties": {
+                    "targetId": { "type": "string", "minLength": 1 },
+                    "targetKind": { "enum": ["storybook-story", "page-route", "component"] }
+                  },
+                  "required": ["targetId", "targetKind"]
+                },
+                "rationale": { "type": "string", "minLength": 1 }
+              },
+              "required": ["caseId", "environment", "target", "rationale"]
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "properties": {
+              "source": { "type": "string", "minLength": 1 },
+              "sourceRef": { "type": "string", "minLength": 1 },
+              "derivedFrom": { "type": "string", "description": "Required when referenceClass is derived-reference: the incommensurable reference this came from." }
+            },
+            "required": ["source", "sourceRef"]
+          }
+        },
+        "required": [
+          "featureId", "referenceId", "revision", "referenceClass",
+          "contentSha256", "image", "referenceEnvironment", "requiredCases", "provenance"
+        ]
+      },
+      "capabilities": ["tools:design:ratify_reference", "db:write:harness_design_artifacts"],
+      "roles": ["reviewer", "architect", "operator"],
+      "rolesQuota": {
+        "reviewer": { "perRun": 20 },
+        "architect": { "perRun": 10 },
+        "operator": { "perRun": 50 }
+      },
+      "timeoutSec": 20
+    },
+    {
+      "name": "compare_render",
+      "description": "Compare one captured implementation render against the active ratified reference and store the normalized result as evidence. Refuses before invoking any engine when the capture environment is not the one the reference is contracted at, or when geometry disagrees. A verdict of 'invalid' is a real outcome, never a silent pass. Capture the image first; this verb compares, it does not render.",
+      "inputSchema": {
+        "type": "object",
+        "$defs": {
+          "environment": {
+            "type": "object",
+            "properties": {
+              "viewport": {
+                "type": "object",
+                "properties": {
+                  "width": { "type": "integer", "exclusiveMinimum": 0 },
+                  "height": { "type": "integer", "exclusiveMinimum": 0 }
+                },
+                "required": ["width", "height"]
+              },
+              "deviceScaleFactor": { "type": "number", "exclusiveMinimum": 0 },
+              "browser": { "type": "string", "minLength": 1 },
+              "theme": { "type": "string", "minLength": 1 },
+              "fontSet": { "type": "string", "minLength": 1 },
+              "fixture": { "type": "string" },
+              "state": { "type": "string" }
+            },
+            "required": ["viewport", "deviceScaleFactor", "browser", "theme", "fontSet"]
+          }
+        },
+        "properties": {
+          "featureId": { "type": "string", "minLength": 1 },
+          "referenceId": { "type": "string", "minLength": 1 },
+          "target": {
+            "type": "object",
+            "properties": {
+              "targetId": { "type": "string", "minLength": 1 },
+              "targetKind": { "enum": ["storybook-story", "page-route", "component"] },
+              "implementationRevision": { "type": "string", "minLength": 1 }
+            },
+            "required": ["targetId", "targetKind", "implementationRevision"]
+          },
+          "environment": { "$ref": "#/$defs/environment" },
+          "policy": {
+            "type": "object",
+            "description": "The versioned threshold policy to judge under. There is no default: the build-regression threshold is not a design-fidelity threshold.",
+            "properties": {
+              "policyVersion": { "type": "string", "minLength": 1 },
+              "referenceClass": { "enum": ["artifact-capture", "figma-export", "raster-mockup", "derived-reference"] },
+              "eligibility": { "enum": ["gateable", "advisory-only"] },
+              "maxDiffRatio": { "type": "number", "minimum": 0, "maximum": 1 },
+              "derivedFrom": { "type": "string", "minLength": 1 }
+            },
+            "required": ["policyVersion", "referenceClass", "eligibility", "maxDiffRatio", "derivedFrom"]
+          },
+          "actualImagePath": { "type": "string", "minLength": 1 },
+          "diffImagePath": { "type": "string", "minLength": 1, "description": "Required. The engine returns a vacuous pass when invoked without somewhere to write the difference." },
+          "expectedDimensions": {
+            "type": "object",
+            "properties": {
+              "width": { "type": "integer", "exclusiveMinimum": 0 },
+              "height": { "type": "integer", "exclusiveMinimum": 0 }
+            },
+            "required": ["width", "height"]
+          },
+          "timeoutMs": { "type": "integer", "exclusiveMinimum": 0 },
+          "advisoryNotes": { "type": "string", "description": "Explanatory prose. Recorded beside the evidence and never able to change a verdict." },
+          "renderObservation": { "type": "object", "description": "Structured state/viewport/theme geometry, controls, fixture-versus-real provenance, capture hash and optional side-by-side review. Validated by the host against this exact target, environment and actual image bytes; stored on the existing comparison artifact, separately from the pixel verdict." }
+        },
+        "required": [
+          "featureId", "referenceId", "target", "environment",
+          "policy", "actualImagePath", "diffImagePath"
+        ]
+      },
+      "capabilities": ["tools:design:compare_render", "db:write:harness_design_artifacts"],
+      "roles": ["designer", "reviewer", "architect", "operator", "worker"],
+      "rolesQuota": {
+        "designer": { "perRun": 30 },
+        "reviewer": { "perRun": 30 },
+        "worker": { "perRun": 50 },
+        "operator": { "perRun": 100 }
+      },
+      "timeoutSec": 120
+    },
+    {
+      "name": "get_design_evidence",
+      "description": "Read the current visual-fidelity evidence for a feature's reference: its active revision and revision history, every stored comparison split into deterministic result and advisory prose, which required cases have current evidence, and how much stored evidence is stale. Use this instead of re-running a comparison to find out where a design stands.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "featureId": { "type": "string", "minLength": 1 },
+          "referenceId": { "type": "string", "minLength": 1 }
+        },
+        "required": ["featureId", "referenceId"]
+      },
+      "capabilities": ["tools:design:get_design_evidence"],
+      "roles": ["designer", "reviewer", "architect", "operator", "worker"],
+      "rolesQuota": {
+        "designer": { "perRun": 30 },
+        "reviewer": { "perRun": 50 },
+        "worker": { "perRun": 30 },
+        "operator": { "perRun": 100 }
+      },
+      "timeoutSec": 15
+    }
+  ]
+}

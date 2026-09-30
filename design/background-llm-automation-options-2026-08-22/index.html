@@ -1,0 +1,1023 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07101d">
+  <title>Background LLM automations — interface options</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg-deepest: #02060c;
+      --bg-deeper: #030a14;
+      --bg: #07101d;
+      --panel: #0b1220;
+      --surface: rgba(255, 255, 255, .045);
+      --hover: rgba(255, 255, 255, .075);
+      --raised: #112235;
+      --fg: #e7f7ff;
+      --fg-dim: #b9d4e8;
+      --fg-mute: #7f9bb4;
+      --border: rgba(125, 211, 252, .15);
+      --border-strong: rgba(125, 211, 252, .32);
+      --accent: #38bdf8;
+      --accent-strong: #7dd3fc;
+      --accent-ink: #051827;
+      --good: #34d399;
+      --warn: #fbbf24;
+      --bad: #f87171;
+      --purple: #a78bfa;
+      --shadow: 0 28px 74px rgba(0, 0, 0, .34);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; background: var(--bg-deepest); }
+
+    body {
+      min-width: 320px;
+      margin: 0;
+      color: var(--fg);
+      background:
+        radial-gradient(circle at 12% -10%, rgba(56, 189, 248, .13), transparent 34rem),
+        radial-gradient(circle at 92% 10%, rgba(167, 139, 250, .09), transparent 28rem),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg-deepest) 72%);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    button { font: inherit; }
+
+    .page {
+      width: min(2040px, 100%);
+      margin: 0 auto;
+      padding: 34px clamp(18px, 3vw, 54px) 72px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+      gap: 30px;
+      align-items: end;
+      margin-bottom: 26px;
+    }
+
+    .eyebrow {
+      margin: 0 0 9px;
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 980px;
+      margin: 0;
+      font-size: clamp(34px, 4.4vw, 66px);
+      line-height: .98;
+      letter-spacing: -.048em;
+    }
+
+    .lede {
+      max-width: 860px;
+      margin: 16px 0 0;
+      color: var(--fg-dim);
+      font-size: clamp(15px, 1.25vw, 19px);
+      line-height: 1.55;
+    }
+
+    .recommendation {
+      padding: 16px;
+      border: 1px solid rgba(52, 211, 153, .38);
+      border-radius: 12px;
+      background: rgba(52, 211, 153, .075);
+      color: var(--fg-dim);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .recommendation strong {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--good);
+      font-size: 14px;
+    }
+
+    .toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin: 0 -8px 22px;
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(7, 16, 29, .88);
+      backdrop-filter: blur(18px);
+    }
+
+    .view-switch {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      padding: 4px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--panel);
+    }
+
+    .view-switch button {
+      min-height: 32px;
+      padding: 0 12px;
+      border: 0;
+      border-radius: 7px;
+      color: var(--fg-mute);
+      background: transparent;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .view-switch button:hover { color: var(--fg); background: var(--hover); }
+
+    .view-switch button[aria-pressed="true"] {
+      color: var(--accent-ink);
+      background: var(--accent);
+    }
+
+    .toolbar-note { color: var(--fg-mute); font-size: 12px; text-align: right; }
+
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(430px, 1fr));
+      gap: 18px;
+      align-items: start;
+      min-width: 1330px;
+    }
+
+    .gallery-wrap { overflow-x: auto; padding: 2px 2px 24px; }
+
+    body[data-view="a"] .concept:not([data-concept="a"]),
+    body[data-view="b"] .concept:not([data-concept="b"]),
+    body[data-view="c"] .concept:not([data-concept="c"]) { display: none; }
+
+    body:not([data-view="all"]) .gallery {
+      grid-template-columns: minmax(0, 1380px);
+      justify-content: center;
+      min-width: 0;
+    }
+
+    .concept {
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(11, 18, 32, .9);
+      box-shadow: var(--shadow);
+    }
+
+    .concept.recommended {
+      border-color: rgba(52, 211, 153, .46);
+      box-shadow: 0 28px 78px rgba(52, 211, 153, .07), var(--shadow);
+    }
+
+    .concept-head {
+      min-height: 176px;
+      padding: 18px 18px 16px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(145deg, rgba(255, 255, 255, .035), transparent 58%);
+    }
+
+    .concept-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .option {
+      color: var(--accent);
+      font-size: 10px;
+      font-weight: 850;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+
+    .badge {
+      padding: 3px 8px;
+      border: 1px solid rgba(52, 211, 153, .4);
+      border-radius: 999px;
+      color: var(--good);
+      background: rgba(52, 211, 153, .08);
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    h2 { margin: 0; font-size: 23px; letter-spacing: -.03em; }
+
+    .concept-summary {
+      min-height: 42px;
+      margin: 8px 0 12px;
+      color: var(--fg-mute);
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+
+    .tradeoff {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .tradeoff span {
+      padding: 8px 9px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: var(--fg-mute);
+      background: var(--surface);
+      font-size: 10.5px;
+      line-height: 1.35;
+    }
+
+    .tradeoff strong { display: block; margin-bottom: 2px; color: var(--fg-dim); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+
+    .mock-app {
+      min-height: 720px;
+      background:
+        linear-gradient(180deg, rgba(56, 189, 248, .018), transparent 160px),
+        var(--bg-deeper);
+    }
+
+    .appbar {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      height: 43px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(7, 16, 29, .94);
+    }
+
+    .brandmark {
+      display: grid;
+      width: 23px;
+      height: 23px;
+      place-items: center;
+      border: 1px solid var(--border-strong);
+      border-radius: 7px;
+      color: var(--accent);
+      background: rgba(56, 189, 248, .08);
+      font-size: 11px;
+      font-weight: 900;
+    }
+
+    .crumb { color: var(--fg-mute); font-size: 10px; }
+    .crumb b { color: var(--fg-dim); font-weight: 650; }
+    .appbar-spacer { flex: 1; }
+
+    .top-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--fg-dim);
+      background: var(--surface);
+      font-size: 9px;
+    }
+
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-mute); box-shadow: 0 0 0 3px rgba(127, 155, 180, .1); }
+    .dot.good { background: var(--good); box-shadow: 0 0 0 3px rgba(52, 211, 153, .1); }
+    .dot.warn { background: var(--warn); box-shadow: 0 0 0 3px rgba(251, 191, 36, .1); }
+    .dot.bad { background: var(--bad); box-shadow: 0 0 0 3px rgba(248, 113, 113, .1); }
+    .dot.live { background: var(--accent); box-shadow: 0 0 0 3px rgba(56, 189, 248, .13); }
+
+    .mock-body { padding: 15px; }
+
+    .screen-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 13px;
+    }
+
+    .screen-title { margin: 0; font-size: 18px; letter-spacing: -.025em; }
+    .screen-subtitle { margin: 4px 0 0; color: var(--fg-mute); font-size: 10px; line-height: 1.45; }
+
+    .primary-button,
+    .ghost-button,
+    .mini-button {
+      border-radius: 6px;
+      cursor: default;
+      font-weight: 700;
+    }
+
+    .primary-button { padding: 7px 10px; border: 0; color: var(--accent-ink); background: var(--accent); font-size: 10px; }
+    .ghost-button { padding: 6px 9px; border: 1px solid var(--border); color: var(--fg-dim); background: var(--surface); font-size: 9px; }
+    .mini-button { padding: 5px 7px; border: 1px solid var(--border); color: var(--fg-dim); background: transparent; font-size: 8.5px; }
+    .mini-button.pause { color: var(--warn); border-color: rgba(251, 191, 36, .25); }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 7px;
+      margin-bottom: 11px;
+    }
+
+    .summary-card {
+      min-width: 0;
+      padding: 9px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .summary-card.is-alert { border-color: rgba(251, 191, 36, .3); background: rgba(251, 191, 36, .055); }
+    .summary-card.is-spend { border-color: rgba(167, 139, 250, .28); background: rgba(167, 139, 250, .05); }
+    .summary-label { display: block; color: var(--fg-mute); font-size: 8px; text-transform: uppercase; letter-spacing: .075em; }
+    .summary-value { display: block; margin-top: 4px; color: var(--fg); font-size: 15px; font-weight: 760; letter-spacing: -.02em; }
+    .summary-note { display: block; margin-top: 2px; color: var(--fg-mute); font-size: 7.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .filterbar {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-bottom: 9px;
+      padding: 6px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(11, 18, 32, .78);
+    }
+
+    .filter {
+      padding: 5px 8px;
+      border: 0;
+      border-radius: 5px;
+      color: var(--fg-mute);
+      background: transparent;
+      font-size: 8.5px;
+      font-weight: 680;
+    }
+
+    .filter.active { color: var(--accent-ink); background: var(--accent); }
+    .filter-spacer { flex: 1; }
+    .search { min-width: 84px; padding: 5px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--fg-mute); background: var(--surface); font-size: 8px; }
+
+    .section-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 12px 1px 6px;
+      color: var(--fg-mute);
+      font-size: 8.5px;
+      font-weight: 780;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .section-label em { color: var(--fg-mute); font-size: 8px; font-style: normal; font-weight: 500; letter-spacing: 0; text-transform: none; }
+
+    .automation-list { display: grid; gap: 6px; }
+
+    .automation-row {
+      display: grid;
+      grid-template-columns: minmax(145px, 1.42fr) minmax(105px, .95fr) minmax(84px, .7fr) auto;
+      gap: 8px;
+      align-items: center;
+      min-height: 62px;
+      padding: 9px 9px 9px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(11, 18, 32, .88);
+    }
+
+    .automation-row.attention { border-color: rgba(251, 191, 36, .28); background: rgba(251, 191, 36, .045); }
+    .automation-row.running { border-color: rgba(56, 189, 248, .27); background: rgba(56, 189, 248, .04); }
+    .identity { min-width: 0; }
+    .identity-line { display: flex; align-items: center; gap: 6px; }
+    .name { overflow: hidden; color: var(--fg); font-size: 10.5px; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
+    .purpose { display: block; margin-top: 3px; overflow: hidden; color: var(--fg-mute); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+
+    .state-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex: 0 0 auto;
+      padding: 3px 5px;
+      border-radius: 999px;
+      color: var(--fg-dim);
+      background: var(--surface);
+      font-size: 7px;
+      font-weight: 760;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+
+    .schedule, .money { min-width: 0; }
+    .schedule strong, .money strong { display: block; overflow: hidden; color: var(--fg-dim); font-size: 8.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+    .schedule span, .money span { display: block; margin-top: 3px; overflow: hidden; color: var(--fg-mute); font-size: 7.5px; text-overflow: ellipsis; white-space: nowrap; }
+    .money strong { color: var(--purple); }
+    .money .free { color: var(--good); }
+    .row-actions { display: flex; flex-direction: column; gap: 4px; }
+
+    .folded-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 7px;
+      padding: 9px 10px;
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      color: var(--fg-mute);
+      background: rgba(255, 255, 255, .018);
+      font-size: 8.5px;
+    }
+
+    .folded-row b { color: var(--fg-dim); }
+
+    /* Timeline option */
+    .timeline-summary {
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .now-card,
+    .spend-card {
+      padding: 11px;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: var(--surface);
+    }
+
+    .now-card { border-color: rgba(56, 189, 248, .27); background: rgba(56, 189, 248, .045); }
+    .card-kicker { display: block; color: var(--fg-mute); font-size: 7.5px; font-weight: 760; letter-spacing: .07em; text-transform: uppercase; }
+    .now-title { display: block; margin-top: 6px; font-size: 11px; font-weight: 730; }
+    .now-meta { display: block; margin-top: 4px; color: var(--fg-mute); font-size: 8px; }
+    .progress { height: 3px; margin-top: 9px; overflow: hidden; border-radius: 99px; background: var(--hover); }
+    .progress span { display: block; width: 58%; height: 100%; border-radius: inherit; background: var(--accent); }
+    .spend-card strong { display: block; margin-top: 6px; color: var(--purple); font-size: 17px; }
+    .spend-card small { color: var(--fg-mute); font-size: 7.5px; }
+
+    .timeline {
+      position: relative;
+      display: grid;
+      gap: 0;
+      padding-left: 60px;
+    }
+
+    .timeline::before {
+      content: "";
+      position: absolute;
+      top: 8px;
+      bottom: 8px;
+      left: 46px;
+      width: 1px;
+      background: var(--border-strong);
+    }
+
+    .time-group { position: relative; padding: 0 0 12px 10px; }
+    .time-label { position: absolute; top: 8px; right: calc(100% + 4px); width: 55px; color: var(--fg-mute); font-size: 8px; text-align: right; }
+    .time-node { position: absolute; top: 10px; left: -18px; width: 7px; height: 7px; border: 2px solid var(--bg-deeper); border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px rgba(56, 189, 248, .2); }
+    .time-node.future { background: var(--fg-mute); box-shadow: 0 0 0 2px rgba(127, 155, 180, .15); }
+
+    .event-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(11, 18, 32, .9);
+    }
+
+    .event-card + .event-card { margin-top: 5px; }
+    .event-title { font-size: 10px; font-weight: 720; }
+    .event-purpose { margin-top: 3px; color: var(--fg-mute); font-size: 8px; }
+    .event-tags { display: flex; gap: 4px; margin-top: 7px; }
+    .tiny-tag { padding: 3px 5px; border-radius: 4px; color: var(--fg-mute); background: var(--surface); font-size: 7px; }
+    .event-cost { color: var(--purple); font-size: 9px; font-weight: 720; text-align: right; }
+    .event-cost span { display: block; margin-top: 3px; color: var(--fg-mute); font-size: 7px; font-weight: 500; }
+
+    /* Spend option */
+    .budget-card {
+      padding: 12px;
+      border: 1px solid rgba(167, 139, 250, .3);
+      border-radius: 10px;
+      background: linear-gradient(145deg, rgba(167, 139, 250, .08), rgba(56, 189, 248, .035));
+    }
+
+    .budget-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .budget-head strong { font-size: 11px; }
+    .budget-head span { color: var(--fg-mute); font-size: 8px; }
+    .budget-total { margin-top: 7px; font-size: 22px; font-weight: 780; letter-spacing: -.035em; }
+    .budget-total em { color: var(--fg-mute); font-size: 9px; font-style: normal; font-weight: 500; letter-spacing: 0; }
+    .budget-track { display: grid; grid-template-columns: 64% 36%; height: 6px; margin-top: 10px; overflow: hidden; border-radius: 99px; background: var(--hover); }
+    .budget-track span:first-child { background: linear-gradient(90deg, var(--purple), var(--accent)); }
+    .budget-track span:last-child { background: transparent; }
+    .budget-foot { display: flex; justify-content: space-between; margin-top: 6px; color: var(--fg-mute); font-size: 7.5px; }
+
+    .risk-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; margin-top: 8px; }
+    .risk-card { padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+    .risk-card.alert { border-color: rgba(251, 191, 36, .28); background: rgba(251, 191, 36, .045); }
+    .risk-card span { color: var(--fg-mute); font-size: 7.5px; }
+    .risk-card strong { display: block; margin-top: 4px; font-size: 11px; }
+
+    .spender-list { display: grid; gap: 6px; }
+    .spender {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 65px 72px;
+      gap: 9px;
+      align-items: center;
+      padding: 9px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(11, 18, 32, .88);
+    }
+
+    .spender-name { font-size: 9.5px; font-weight: 700; }
+    .spender-meta { display: block; margin-top: 3px; color: var(--fg-mute); font-size: 7px; }
+    .spark { display: flex; align-items: end; gap: 2px; height: 19px; }
+    .spark i { flex: 1; min-width: 3px; border-radius: 2px 2px 0 0; background: rgba(167, 139, 250, .48); }
+    .spark i:nth-child(1) { height: 24%; }
+    .spark i:nth-child(2) { height: 38%; }
+    .spark i:nth-child(3) { height: 31%; }
+    .spark i:nth-child(4) { height: 65%; }
+    .spark i:nth-child(5) { height: 48%; }
+    .spark i:nth-child(6) { height: 84%; background: var(--purple); }
+    .spender-cost { color: var(--purple); font-size: 10px; font-weight: 760; text-align: right; }
+    .spender-cost span { display: block; margin-top: 2px; color: var(--fg-mute); font-size: 7px; font-weight: 500; }
+
+    .honesty-note {
+      display: flex;
+      gap: 7px;
+      margin-top: 10px;
+      padding: 9px;
+      border: 1px solid rgba(251, 191, 36, .22);
+      border-radius: 7px;
+      color: var(--fg-mute);
+      background: rgba(251, 191, 36, .035);
+      font-size: 7.5px;
+      line-height: 1.45;
+    }
+
+    .concept-foot {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding: 14px;
+      border-top: 1px solid var(--border);
+      background: rgba(7, 16, 29, .68);
+    }
+
+    .foot-block { color: var(--fg-mute); font-size: 10.5px; line-height: 1.45; }
+    .foot-block strong { display: block; margin-bottom: 3px; color: var(--fg-dim); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
+
+    .comparison-notes {
+      margin-top: 24px;
+      padding: 20px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(11, 18, 32, .72);
+    }
+
+    .comparison-notes h3 { margin: 0 0 13px; font-size: 18px; letter-spacing: -.025em; }
+
+    .matrix {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .matrix th, .matrix td { padding: 10px 12px; border-top: 1px solid var(--border); text-align: left; vertical-align: top; }
+    .matrix th { color: var(--fg-mute); font-size: 10px; font-weight: 720; letter-spacing: .05em; text-transform: uppercase; }
+    .matrix td { color: var(--fg-dim); line-height: 1.45; }
+    .matrix td:first-child { color: var(--fg-mute); font-weight: 650; }
+    .winner { color: var(--good); font-weight: 760; }
+
+    .invariants {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .invariant { padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+    .invariant strong { display: block; margin-bottom: 4px; font-size: 11px; }
+    .invariant span { color: var(--fg-mute); font-size: 10px; line-height: 1.45; }
+
+    .disclaimer { margin: 16px 2px 0; color: var(--fg-mute); font-size: 10px; line-height: 1.5; }
+
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; }
+      .recommendation { max-width: none; }
+      .toolbar { align-items: flex-start; flex-direction: column; }
+      .toolbar-note { text-align: left; }
+      .matrix { min-width: 760px; }
+      .comparison-notes { overflow-x: auto; }
+      .invariants { grid-template-columns: 1fr; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+    }
+  </style>
+</head>
+<body data-view="all">
+  <main class="page">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Papercusp interface study · background LLMs</p>
+        <h1>Make invisible automation feel obvious.</h1>
+        <p class="lede">Three ways to help someone immediately understand what exists, what is running, what happens next, what it costs, and how to stop it.</p>
+      </div>
+      <aside class="recommendation">
+        <strong>Recommendation: Option A</strong>
+        Use the catalog-first Automation Center as the primary surface. Borrow Option B’s timeline inside each automation’s details, and Option C’s budget signal in the overview.
+      </aside>
+    </header>
+
+    <nav class="toolbar" aria-label="Mockup view">
+      <div class="view-switch">
+        <button type="button" data-view-button="all" aria-pressed="true">All side by side</button>
+        <button type="button" data-view-button="a" aria-pressed="false">A · Catalog</button>
+        <button type="button" data-view-button="b" aria-pressed="false">B · Timeline</button>
+        <button type="button" data-view-button="c" aria-pressed="false">C · Spend</button>
+      </div>
+      <span class="toolbar-note">Illustrative data only · click an option above to inspect it at full width</span>
+    </nav>
+
+    <div class="gallery-wrap">
+      <section class="gallery" aria-label="Three interface options">
+        <article class="concept recommended" data-concept="a">
+          <header class="concept-head">
+            <div class="concept-meta">
+              <span class="option">Option A · Catalog-first</span>
+              <span class="badge">Recommended</span>
+            </div>
+            <h2>Automation Center</h2>
+            <p class="concept-summary">One searchable inventory. Every row answers purpose, state, next run, last outcome, cost, and control.</p>
+            <div class="tradeoff">
+              <span><strong>Strongest at</strong>Everyday understanding and control</span>
+              <span><strong>Tradeoff</strong>Timing is clear, but not spatial</span>
+            </div>
+          </header>
+
+          <div class="mock-app">
+            <div class="appbar">
+              <span class="brandmark">P</span>
+              <span class="crumb">Workspace / <b>Automations</b></span>
+              <span class="appbar-spacer"></span>
+              <span class="top-status"><span class="dot live"></span> one running</span>
+            </div>
+            <div class="mock-body">
+              <div class="screen-head">
+                <div>
+                  <h3 class="screen-title">Automations</h3>
+                  <p class="screen-subtitle">Everything that runs in the background, in one place.</p>
+                </div>
+                <button class="primary-button">New automation</button>
+              </div>
+
+              <div class="summary-grid">
+                <div class="summary-card is-alert">
+                  <span class="summary-label">Needs attention</span>
+                  <span class="summary-value">one</span>
+                  <span class="summary-note">budget nearly reached</span>
+                </div>
+                <div class="summary-card">
+                  <span class="summary-label">Running now</span>
+                  <span class="summary-value">one</span>
+                  <span class="summary-note">started four minutes ago</span>
+                </div>
+                <div class="summary-card">
+                  <span class="summary-label">Next run</span>
+                  <span class="summary-value">in 18m</span>
+                  <span class="summary-note">research digest</span>
+                </div>
+                <div class="summary-card is-spend">
+                  <span class="summary-label">Spend · 7 days</span>
+                  <span class="summary-value">$24.80</span>
+                  <span class="summary-note">measured model usage</span>
+                </div>
+              </div>
+
+              <div class="filterbar">
+                <button class="filter active">Uses AI</button>
+                <button class="filter">System tasks</button>
+                <button class="filter">Paused</button>
+                <span class="filter-spacer"></span>
+                <span class="search">⌕ Search automations</span>
+              </div>
+
+              <div class="section-label"><span>Needs attention</span><em>highest-impact first</em></div>
+              <div class="automation-list">
+                <div class="automation-row attention">
+                  <div class="identity">
+                    <div class="identity-line"><span class="dot warn"></span><span class="name">Research scout</span><span class="state-pill">enabled</span></div>
+                    <span class="purpose">Finds product opportunities and files proposals</span>
+                  </div>
+                  <div class="schedule"><strong>Every 30 minutes</strong><span>next in 18m · last succeeded</span></div>
+                  <div class="money"><strong>$11.42 this week</strong><span>$1.08 left in budget</span></div>
+                  <div class="row-actions"><button class="mini-button pause">Pause</button><button class="mini-button">Details</button></div>
+                </div>
+              </div>
+
+              <div class="section-label"><span>Running now</span><em>actual executions, not enabled schedules</em></div>
+              <div class="automation-list">
+                <div class="automation-row running">
+                  <div class="identity">
+                    <div class="identity-line"><span class="dot live"></span><span class="name">Documentation maintenance</span><span class="state-pill">running</span></div>
+                    <span class="purpose">Keeps project docs synchronized with code</span>
+                  </div>
+                  <div class="schedule"><strong>Weekdays at 9:00 AM</strong><span>running 4m · next tomorrow</span></div>
+                  <div class="money"><strong>$4.26 this week</strong><span>Claude Sonnet · measured</span></div>
+                  <div class="row-actions"><button class="mini-button pause">Pause</button><button class="mini-button">View run</button></div>
+                </div>
+              </div>
+
+              <div class="section-label"><span>Coming up</span><em>sorted by next run</em></div>
+              <div class="automation-list">
+                <div class="automation-row">
+                  <div class="identity">
+                    <div class="identity-line"><span class="dot good"></span><span class="name">Weekly workspace briefing</span><span class="state-pill">enabled</span></div>
+                    <span class="purpose">Summarizes decisions, progress, and open risks</span>
+                  </div>
+                  <div class="schedule"><strong>Monday at 8:00 AM</strong><span>next in three days · last succeeded</span></div>
+                  <div class="money"><strong>$2.18 this week</strong><span>Claude Haiku · measured</span></div>
+                  <div class="row-actions"><button class="mini-button pause">Pause</button><button class="mini-button">Details</button></div>
+                </div>
+                <div class="automation-row">
+                  <div class="identity">
+                    <div class="identity-line"><span class="dot good"></span><span class="name">Release fixer</span><span class="state-pill">event</span></div>
+                    <span class="purpose">Investigates a failed release gate when needed</span>
+                  </div>
+                  <div class="schedule"><strong>After a failed gate</strong><span>not clock-scheduled · last 5d ago</span></div>
+                  <div class="money"><strong>$1.37 this week</strong><span>only spends when triggered</span></div>
+                  <div class="row-actions"><button class="mini-button pause">Disable</button><button class="mini-button">Details</button></div>
+                </div>
+              </div>
+
+              <div class="folded-row"><span>›</span><b>Healthy system tasks</b><span>git sync, cleanup, health probes · no model spend</span></div>
+            </div>
+          </div>
+
+          <footer class="concept-foot">
+            <div class="foot-block"><strong>User question it answers</strong>“What exists, and can I understand or stop any of it?”</div>
+            <div class="foot-block"><strong>Best implementation path</strong>Consolidate the existing catalog, schedule, and spend surfaces.</div>
+          </footer>
+        </article>
+
+        <article class="concept" data-concept="b">
+          <header class="concept-head">
+            <div class="concept-meta">
+              <span class="option">Option B · Time-first</span>
+            </div>
+            <h2>Upcoming Timeline</h2>
+            <p class="concept-summary">A chronological agenda makes “what is running, and what happens next?” the dominant interaction.</p>
+            <div class="tradeoff">
+              <span><strong>Strongest at</strong>Timing and collision awareness</span>
+              <span><strong>Tradeoff</strong>Weakest for inventory and bulk control</span>
+            </div>
+          </header>
+
+          <div class="mock-app">
+            <div class="appbar">
+              <span class="brandmark">P</span>
+              <span class="crumb">Workspace / <b>Automation timeline</b></span>
+              <span class="appbar-spacer"></span>
+              <span class="top-status"><span class="dot live"></span> live</span>
+            </div>
+            <div class="mock-body">
+              <div class="screen-head">
+                <div>
+                  <h3 class="screen-title">Automation timeline</h3>
+                  <p class="screen-subtitle">Now, next, and recently completed.</p>
+                </div>
+                <button class="ghost-button">Calendar view</button>
+              </div>
+
+              <div class="timeline-summary">
+                <div class="now-card">
+                  <span class="card-kicker">Running now</span>
+                  <span class="now-title">Documentation maintenance</span>
+                  <span class="now-meta">Claude Sonnet · started four minutes ago · $0.38 so far</span>
+                  <div class="progress"><span></span></div>
+                </div>
+                <div class="spend-card">
+                  <span class="card-kicker">Spend · 7 days</span>
+                  <strong>$24.80</strong>
+                  <small>across all background runs</small>
+                </div>
+              </div>
+
+              <div class="filterbar">
+                <button class="filter active">Next 24 hours</button>
+                <button class="filter">Week</button>
+                <button class="filter">History</button>
+                <span class="filter-spacer"></span>
+                <button class="filter">AI only</button>
+              </div>
+
+              <div class="timeline">
+                <div class="time-group">
+                  <span class="time-label">Now</span><span class="time-node"></span>
+                  <div class="event-card">
+                    <div>
+                      <div class="event-title">Documentation maintenance</div>
+                      <div class="event-purpose">Keeps project docs synchronized with code</div>
+                      <div class="event-tags"><span class="tiny-tag">running</span><span class="tiny-tag">Claude Sonnet</span><span class="tiny-tag">4m elapsed</span></div>
+                    </div>
+                    <div class="event-cost">$0.38<span>so far</span></div>
+                  </div>
+                </div>
+
+                <div class="time-group">
+                  <span class="time-label">in 18m</span><span class="time-node future"></span>
+                  <div class="event-card">
+                    <div>
+                      <div class="event-title">Research scout</div>
+                      <div class="event-purpose">Finds product opportunities and files proposals</div>
+                      <div class="event-tags"><span class="tiny-tag">every 30m</span><span class="tiny-tag">budget low</span></div>
+                    </div>
+                    <div class="event-cost">~$0.62<span>typical run</span></div>
+                  </div>
+                </div>
+
+                <div class="time-group">
+                  <span class="time-label">9:00 AM</span><span class="time-node future"></span>
+                  <div class="event-card">
+                    <div>
+                      <div class="event-title">Workspace health review</div>
+                      <div class="event-purpose">Checks failures that need human attention</div>
+                      <div class="event-tags"><span class="tiny-tag">daily</span><span class="tiny-tag">Claude Haiku</span></div>
+                    </div>
+                    <div class="event-cost">~$0.09<span>typical run</span></div>
+                  </div>
+                </div>
+
+                <div class="time-group">
+                  <span class="time-label">tomorrow</span><span class="time-node future"></span>
+                  <div class="event-card">
+                    <div>
+                      <div class="event-title">Documentation maintenance</div>
+                      <div class="event-purpose">Weekday scheduled run</div>
+                      <div class="event-tags"><span class="tiny-tag">9:00 AM</span><span class="tiny-tag">America/New_York</span></div>
+                    </div>
+                    <div class="event-cost">~$0.44<span>typical run</span></div>
+                  </div>
+                  <div class="event-card">
+                    <div>
+                      <div class="event-title">Research scout</div>
+                      <div class="event-purpose">Grouped recurring runs throughout the day</div>
+                      <div class="event-tags"><span class="tiny-tag">48 possible runs</span><span class="tiny-tag">budget capped</span></div>
+                    </div>
+                    <div class="event-cost">≤ $1.08<span>budget left</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <footer class="concept-foot">
+            <div class="foot-block"><strong>User question it answers</strong>“What is happening now, and when will the next thing start?”</div>
+            <div class="foot-block"><strong>Best implementation path</strong>Use as a view inside Option A or inside an automation detail drawer.</div>
+          </footer>
+        </article>
+
+        <article class="concept" data-concept="c">
+          <header class="concept-head">
+            <div class="concept-meta">
+              <span class="option">Option C · Risk-first</span>
+            </div>
+            <h2>Spend &amp; Safety Console</h2>
+            <p class="concept-summary">Budgets, expensive automations, and anomalies lead; schedule details become supporting information.</p>
+            <div class="tradeoff">
+              <span><strong>Strongest at</strong>Cost governance and surprise prevention</span>
+              <span><strong>Tradeoff</strong>Makes harmless schedules feel secondary</span>
+            </div>
+          </header>
+
+          <div class="mock-app">
+            <div class="appbar">
+              <span class="brandmark">P</span>
+              <span class="crumb">Workspace / <b>Automation spend</b></span>
+              <span class="appbar-spacer"></span>
+              <span class="top-status"><span class="dot warn"></span> one warning</span>
+            </div>
+            <div class="mock-body">
+              <div class="screen-head">
+                <div>
+                  <h3 class="screen-title">Spend &amp; safety</h3>
+                  <p class="screen-subtitle">Model usage, budgets, and the automations behind them.</p>
+                </div>
+                <button class="ghost-button">Budget settings</button>
+              </div>
+
+              <div class="budget-card">
+                <div class="budget-head"><strong>Background AI budget</strong><span>This billing week</span></div>
+                <div class="budget-total">$24.80 <em>of $40.00</em></div>
+                <div class="budget-track"><span></span><span></span></div>
+                <div class="budget-foot"><span>$15.20 remaining</span><span>resets Monday</span></div>
+              </div>
+
+              <div class="risk-grid">
+                <div class="risk-card alert"><span>Needs attention</span><strong>Research scout</strong><span>Budget nearly reached</span></div>
+                <div class="risk-card"><span>Projected this week</span><strong>$34–$39</strong><span>based on recent runs</span></div>
+                <div class="risk-card"><span>Running now</span><strong>one automation</strong><span>$0.38 so far</span></div>
+                <div class="risk-card"><span>Unattributed</span><strong>$1.12</strong><span>usage missing a source link</span></div>
+              </div>
+
+              <div class="section-label"><span>Highest spend</span><em>last seven days</em></div>
+              <div class="spender-list">
+                <div class="spender">
+                  <div><span class="spender-name">Research scout</span><span class="spender-meta">every 30m · next in 18m · enabled</span></div>
+                  <span class="spark"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                  <span class="spender-cost">$11.42<span>46% of total</span></span>
+                </div>
+                <div class="spender">
+                  <div><span class="spender-name">Documentation maintenance</span><span class="spender-meta">weekdays 9:00 AM · running now</span></div>
+                  <span class="spark"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                  <span class="spender-cost">$4.26<span>17% of total</span></span>
+                </div>
+                <div class="spender">
+                  <div><span class="spender-name">Workspace briefing</span><span class="spender-meta">Monday 8:00 AM · next in three days</span></div>
+                  <span class="spark"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                  <span class="spender-cost">$2.18<span>9% of total</span></span>
+                </div>
+                <div class="spender">
+                  <div><span class="spender-name">Release fixer</span><span class="spender-meta">after failed gate · last ran five days ago</span></div>
+                  <span class="spark"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                  <span class="spender-cost">$1.37<span>event-driven</span></span>
+                </div>
+              </div>
+
+              <div class="section-label"><span>Controls</span><em>stop spend without hunting for the schedule</em></div>
+              <div class="automation-list">
+                <div class="automation-row attention">
+                  <div class="identity">
+                    <div class="identity-line"><span class="dot warn"></span><span class="name">Research scout</span></div>
+                    <span class="purpose">Allowed to run · budget has $1.08 remaining</span>
+                  </div>
+                  <div class="schedule"><strong>Next run in 18m</strong><span>last run succeeded</span></div>
+                  <div class="money"><strong>$11.42</strong><span>this week</span></div>
+                  <div class="row-actions"><button class="mini-button pause">Pause</button><button class="mini-button">Set budget</button></div>
+                </div>
+              </div>
+
+              <div class="honesty-note"><span>△</span><span>Cost is only shown on an automation when a run carries a verified source link. Unlinked usage remains visible as “Unattributed” instead of being guessed.</span></div>
+            </div>
+          </div>
+
+          <footer class="concept-foot">
+            <div class="foot-block"><strong>User question it answers</strong>“What is costing me money, and where should I intervene?”</div>
+            <div class="foot-block"><strong>Best implementation path</strong>Use its budget card and anomaly ordering inside Option A’s overview.</div>
+          </footer>
+        </article>
+      </section>
+    </div>
+
+    <section class="comparison-notes">
+      <h3>Decision matrix</h3>
+      <table class="matrix">
+        <thead><tr><th>Question</th><th>A · Automation Center</th><th>B · Upcoming Timeline</th><th>C · Spend &amp; Safety</th></tr></thead>
+        <tbody>
+          <tr><td>Discover everything that exists</td><td class="winner">Best</td><td>Only upcoming/recent items are prominent</td><td>Low-cost jobs are easy to miss</td></tr>
+          <tr><td>Understand what runs next</td><td>Clear next-run column</td><td class="winner">Best</td><td>Visible, but secondary to cost</td></tr>
+          <tr><td>Understand and control spend</td><td>Strong, integrated with each automation</td><td>Visible per event, weaker as a system</td><td class="winner">Best</td></tr>
+          <tr><td>Pause or inspect one automation</td><td class="winner">Best</td><td>Easy for visible events, awkward for dormant jobs</td><td>Excellent for costly jobs</td></tr>
+          <tr><td>Works as the primary navigation destination</td><td class="winner">Yes</td><td>Better as a secondary view</td><td>Better as an overview module</td></tr>
+        </tbody>
+      </table>
+
+      <div class="invariants">
+        <div class="invariant"><strong>One automation, one identity</strong><span>Use a human name and purpose everywhere; keep raw routine IDs in technical details.</span></div>
+        <div class="invariant"><strong>Three states, never one</strong><span>Show schedule enabled, current execution, and budget permission independently.</span></div>
+        <div class="invariant"><strong>Measured means measured</strong><span>Label estimates and unattributed usage. Never imply per-automation cost until the run is linked.</span></div>
+      </div>
+    </section>
+
+    <p class="disclaimer">These mockups compare information architecture, not final copy or exact production metrics. Dollar figures and run times are intentionally illustrative.</p>
+  </main>
+
+  <script>
+    const buttons = Array.from(document.querySelectorAll('[data-view-button]'));
+    buttons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const view = button.getAttribute('data-view-button') || 'all';
+        document.body.setAttribute('data-view', view);
+        buttons.forEach((candidate) => candidate.setAttribute('aria-pressed', String(candidate === button)));
+        window.scrollTo({ top: document.querySelector('.toolbar').offsetTop, behavior: 'smooth' });
+      });
+    });
+  </script>
+</body>
+</html>

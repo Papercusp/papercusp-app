@@ -1,0 +1,71 @@
+# A native Claude-Code Bash run_in_background task can be killed with no explanation under extreme host load (EI-13910)
+URL: /internal/docs/agent-insights/native-bash-background-task-killed-under-host-overload
+
+A long-lived, lightweight run_in_background:true Bash task (a guarded poll loop, negligible CPU/mem) was externally killed ~2min after launch with status:killed/'was stopped', no exit code, no error in its own log, and the process fully gone from the process table (not zombied). No papercusp-owned code is responsible: the only related hook (pretooluse-bash-resource-gate.sh) is a PreToolUse gate that only ALLOWS/DENIES a command before it starts — it never signals an already-running child, and it has no polling/reaper loop. The kill correlated with a period of very high host load (1-min loadavg 140-175 on this shared multi-agent box), which independently melted the host to load 3000+ at least twice the same week (see the heavy-admission gate in the same hook file). The most likely mechanisms are the Linux OOM-killer or Claude Code's own CLI-internal background-task lifetime/concurrency management — both outside papercusp's repo and therefore not fixable here. Actionable takeaway: for an unbounded/long wait, prefer a SHORT re-arm loop (ScheduleWakeup / loop:arm, re-firing every few minutes) over one long-lived run_in_background poller — a re-arm loop that dies just means a missed wake (recoverable on the next scheduled check), while a killed long-lived poller silently strands the wait with no re-arm at all.
+
+## The report (EI-13910)
+
+An su session launched a long-lived guarded background sequencer via Claude
+Code's native `Bash { run_in_background: true }` tool — a bash script polling
+load/gate conditions every \~2min against a 240min deadline, used to serialize a
+heavy two-instance smoke test on a shared load-sensitive box (a fleet-leader
+house rule: "poll for a safe window, then fire"). It logged its one "armed"
+line, then \~2 minutes later the session received a task-notification with
+`status: "killed"`, summary `"was stopped"` — no exit code, no error in its own
+log, and the process was **gone from `pgrep` entirely** (not zombied/defunct).
+This was not something the agent did (no kill/stop call on its side), and the
+notification self-identified as a system-generated event with no human
+involvement. It happened 3x total across one session's guarded-sequencer
+pattern; only this one instance was actually externally killed (the other two
+ran to their own natural exit/timeout).
+
+## What was ruled out
+
+The only papercusp-repo mechanism that touches raw agent `Bash` calls is
+`apps/operator/scripts/hooks/cc/pretooluse-bash-resource-gate.sh` — a
+**PreToolUse** hook. It only runs **once, before a command starts**, and can
+only **allow or deny the launch** (named-resource-lock collisions, the
+native-scheduler lockout, the systemd-exit guard, the tauri-agent-tools target
+guard, the destructive-git-op guard, and the WI-3821 heavy-command admission
+gate for `vitest`/`tsc`/`npm run build`/etc. above a load1 threshold). None of
+these — nor anything else found in the papercusp repo — polls for or signals
+an **already-running** child process. So no papercusp-owned code is
+responsible for reaping a background task mid-execution; the native
+`run_in_background` lifecycle for Claude Code's own `Bash` tool is implemented
+inside the Claude Code CLI itself (Anthropic's product), which is outside this
+repo and outside what an in-repo fix can reach.
+
+`dmesg`/`journalctl` had no surviving OOM-killer record at investigation time
+(the incident's exact timestamp had already rotated out of the logs) — so the
+OOM-killer hypothesis could be neither confirmed nor ruled out after the fact.
+If this recurs, capture `dmesg -T | grep -i oom` and `journalctl --since
+'<the exact kill time>' | grep -i oom` **immediately**, before the ring buffer
+rotates, to settle whether it's kernel OOM vs. a Claude-Code-CLI-internal cap.
+
+## Why it's plausible under this host's known load profile
+
+The WI-3821 heavy-admission comment in the same hook file documents that
+**uncoordinated concurrent heavy commands melted this host to load 3000+ at
+least twice in one week** even with per-agent worker caps — i.e., extreme
+transient overload is a real, recurring, already-documented condition on this
+shared box, not a hypothetical. A lightweight poll loop dying during a
+140-175 loadavg window is consistent with either the kernel OOM-killer
+reaping a process under memory pressure, or a CLI-side resource/concurrency
+governor shedding load by killing background children — both plausible, and
+both outside papercusp's fixable surface.
+
+## Actionable guidance for agents
+
+For a pattern of "wait an unbounded/long time for a safe window, then act":
+
+* **Prefer a short, re-armed wake** (`ScheduleWakeup` for the current turn,
+  or `loop:arm` for a persisted su loop) that re-checks the condition every
+  few minutes, over one long-lived `run_in_background` poller running for
+  hours. A missed wake in a re-arm pattern just means the next scheduled
+  check catches it late; a killed long-lived poller silently strands the
+  entire wait with **no** re-arm, and — as this incident showed — the kill
+  notification may not even surface promptly.
+* If you must run a long `run_in_background` task, treat "no output for an
+  unexpectedly long stretch" as a signal to actively re-verify liveness
+  (`ps`/`pgrep` the recorded PID) rather than assuming the task-notification
+  channel will always deliver a kill event in time.

@@ -1,0 +1,181 @@
+# Plugin migration story
+URL: /internal/docs/spec/plugin-migration
+
+How plugin authors and host operators handle Papercusp runtime version bumps, deprecations, and breaking changes.
+
+This page describes the contract Papercusp gives plugin authors when the
+runtime evolves: how breaking changes are announced, how the loader treats
+out-of-range plugins, and how authors should structure plugins to make
+upgrades cheap.
+
+The current runtime version lives at `PAPERCUSP_RUNTIME_VERSION` in
+`@papercusp/plugin-sdk` (today: **0.1.1**). Plugins declare a compatible
+range via the `papercusp` field in their manifest:
+
+```json
+{ "name": "@my/plugin", "version": "0.1.0", "papercusp": "^0.1.0", ... }
+```
+
+## Bump rules
+
+The runtime version follows semver, with one twist for the leading-zero
+caret semantics every plugin uses today (`^0.1.0` → `>=0.1.0 <0.2.0`).
+
+| Bump  | When                                                               | Plugin author response                       |
+| ----- | ------------------------------------------------------------------ | -------------------------------------------- |
+| patch | Bug fixes, internals invisible to plugins.                         | None.                                        |
+| minor | Adds optional surface (new lifecycle hook, service, ctx field).    | Optional — adopt new features at will.       |
+| major | Removes / renames existing surface, or changes existing semantics. | **Required**: see the migration steps below. |
+
+A breaking change is anything that would cause a plugin written against the
+old runtime to fail in a way it couldn't have anticipated:
+
+* A capability string is removed or renamed.
+* A lifecycle hook's signature changes (added a required positional arg, or
+  the host stops calling it).
+* A service method is removed, or its return shape narrows.
+* The `PapercuspContext` shape loses a field plugins were reading.
+
+Adding a new field to `PapercuspContext`, a new optional method to a service,
+or a new lifecycle hook is **never** breaking — those are minor bumps.
+
+## What the loader does to out-of-range plugins
+
+When a plugin **declares** a range, the loader runs
+`satisfies(runtimeVersion, range)` (the range is read as
+`plugin.papercusp ?? manifest.papercusp` — the entry-object value wins over
+the manifest). Plugins outside the range are **rejected**, not silently
+skipped — they appear in `loadErrors` with a clear message:
+
+```
+plugin "@my/plugin" requires papercusp runtime "^0.1.0" but host is "0.2.0"
+```
+
+A plugin that **omits** the `papercusp` field is treated as legacy and
+loaded **without** any runtime-version check — the range gate is conditional
+on a declared range. So omitting the field, not just declaring `*`, opts a
+plugin out of the SLA (one more reason to declare `^X.Y.Z`; see below).
+
+There are in fact **two independent version gates**:
+
+* **Runtime version** — the `papercusp:` range vs `PAPERCUSP_RUNTIME_VERSION`
+  (today `0.1.1`), described above.
+* **Wire protocol** — an optional `protocol:` range vs `PROTOCOL_VERSION`
+  (today `1.0.0`). If a plugin declares a `protocol:` range the host doesn't
+  satisfy, the load is rejected with a distinct message:
+  `plugin "@my/plugin" requires plugin-protocol "^2.0" but host implements "1.0.0"`.
+  This is deliberately decoupled from the runtime version so lifecycle and
+  capability shapes can evolve independently of release cycles; the protocol
+  version is bumped only on backwards-incompatible wire-protocol changes.
+
+The host operator sees load failures in `GET /api/plugins/runtime/status`
+and on the operator's **Plugin runtime** settings page (the runtime
+diagnostics view). Refusing to load is intentional: a plugin
+running against an incompatible runtime can corrupt host state in ways
+that no try/catch around its hooks would catch.
+
+Note that the status endpoint surfaces the `loadErrors[]` array (each entry
+is `{ error, path }`) but does **not** report the host runtime version or
+each plugin's declared range — the per-plugin columns are Name / Version /
+Source only. For the current runtime version, see the implementation-status
+doc linked below.
+
+## Major-version migration recipe (author side)
+
+When the runtime bumps from `0.x` to `1.0` (the first such bump expected
+post-v1.0 freeze), the plugin author:
+
+1. **Read the CHANGELOG entry.** `@papercusp/plugin-sdk/CHANGELOG.md`
+   describes every breaking change with a "before / after" snippet.
+2. **Update `papercusp:` in the manifest.** Bump from `^0.x.y` to
+   whatever range covers the new runtime — typically `^1.0.0`. This is
+   the gate; until the plugin's range admits the host runtime, it
+   refuses to load.
+3. **Bump the plugin's own `version`.** The marketplace requires a fresh
+   version per publish, and downstream `papercusp.lock` entries pin the
+   old (incompatible) version. (There is no `install --update` flag —
+   `papercusp install` takes only `--harness`, `--accept-capabilities[=current|=all]`,
+   and `--from-lock`.) Consumers re-pin a withdrawn/outdated lockfile entry
+   with `papercusp upgrade-pin <slug>` for a single entry, or
+   `papercusp lock upgrade-all` to sweep every withdrawn/quarantined entry —
+   the lockfile's own error message points users at `papercusp upgrade-pin`.
+4. **Update code for the breaking changes.** The CHANGELOG specifies
+   the migrations; common patterns:
+   * Renamed capability → update both manifest `capabilities[]` and
+     each service call that referenced the old string.
+   * Removed lifecycle hook → move logic to a different hook (the
+     CHANGELOG suggests a target).
+   * Service-method shape change → adapt the call site; if you can't,
+     downgrade to the previous runtime range and refuse to ship.
+5. **Republish.** `papercusp publish` from the plugin dir; the
+   marketplace catalog updates within seconds.
+
+## Major-version migration recipe (host operator side)
+
+When upgrading the host runtime past the range some installed plugins
+declare:
+
+1. **Inventory.** `papercusp doctor` checks prerequisites (node, Postgres,
+   agent CLI, credentials, marketplace, substrate, audit migrations) and
+   prints a single count of installed plugins (`N plugins installed under …`)
+   — it does **not** list per-plugin ranges or render a runtime-compatibility
+   badge. For plugin-level checks use the `papercusp plugin doctor`
+   subcommand, which does static capability analysis (manifest-declared caps
+   vs `ctx.*` usage in source — missing / unused / unverified), not a
+   runtime-range inventory. The actual range check runs at load time; stale
+   plugins surface in `loadErrors` (see the audit step below).
+2. **Hold or upgrade.** For each range-incompatible plugin: either pin the
+   host to the last compatible runtime (via the
+   `PAPERCUSP_RUNTIME_VERSION_OVERRIDE` escape hatch — emergency-only, see
+   below) or update / replace the plugin to a version whose range admits the
+   new runtime.
+3. **Sweep.** Once every incompatible plugin has a compatible successor
+   available, bump the host runtime via `npm install @papercusp/plugin-sdk@<major>`
+   and restart.
+4. **Audit.** First request after restart hits `/api/plugins/runtime/status`;
+   `loadErrors` should be empty. Stale plugins surface here, not silently.
+
+### Escape hatch: `PAPERCUSP_RUNTIME_VERSION_OVERRIDE`
+
+For incident response only. Setting this env var to e.g. `0.1.99` makes
+the loader treat that string as the runtime version when validating
+plugin ranges. Useful when an emergency host upgrade revealed an
+unanticipated plugin breakage and rolling forward (publishing patched
+plugins) is cheaper than rolling the host back.
+
+This override is **not** the way to avoid keeping plugins up to date —
+plugins running against a version they weren't tested on can corrupt
+data. Use it to buy time, never to skip the work.
+
+## Why "refuse to load" instead of "load with a warning"
+
+A plugin's `init()` may register actions, schedule routines, write to
+plugin-private storage, or open an HTTP connection. If the runtime
+contract has shifted — say, a service it depends on now returns a
+different shape — those side effects may corrupt host state in ways
+that surface only on the next mission run, when debugging the plugin
+is hard.
+
+Failing fast at load time means:
+
+* The host operator sees a clear "this plugin needs an update" entry in
+  `loadErrors` (surfaced on the Plugin runtime page and the status endpoint).
+* No half-initialized plugin state ends up in Postgres.
+* Other plugins are unaffected — the loader continues past the failed
+  one.
+
+## The "minor bump everywhere" frustration
+
+Plugin authors sometimes want to declare `papercusp: "*"` to dodge the
+range game entirely. Don't.
+
+`*` opts you out of the only mechanism that gives you a chance to react
+to a breaking change before your users hit it. Declaring `^X.Y.Z` (with
+the runtime version current at publish time) is the right default; the
+loader's strict-by-default behavior is the SLA you depend on when
+shipping a real plugin.
+
+## See also
+
+* [Implementation status](/internal/docs/implementation/status) — current runtime version + recently shipped surface.
+* The CHANGELOG at `@papercusp/plugin-sdk/CHANGELOG.md`.

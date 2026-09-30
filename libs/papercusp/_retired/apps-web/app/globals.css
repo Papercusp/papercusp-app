@@ -1,0 +1,297 @@
+/* Papercusp baseline — neutral, dark-first, system-font. */
+
+:root {
+  color-scheme: dark;
+  --bg-1: #0a0a0a;
+  --bg-2: #111;
+  --bg-3: #181818;
+  --bg-4: #232323;
+  --fg: #e7e7e7;
+  --fg-dim: #9a9a9a;
+  --fg-mute: #6b6b6b;
+  --border: #2a2a2a;
+  --border-strong: #3a3a3a;
+  --accent: #6ea8ff;
+  --accent-strong: #4f8df0;
+  --good: #22c55e;
+  --warn: #f59e0b;
+  --bad: #ef4444;
+  --warn-bg: rgba(245, 158, 11, 0.08);
+  --warn-border: rgba(245, 158, 11, 0.35);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-1);
+  color: var(--fg);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+code, pre, kbd {
+  font-family: ui-monospace, "JetBrains Mono", "Menlo", monospace;
+  font-size: 0.92em;
+}
+
+.pc-shell {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+.pc-header {
+  position: sticky;
+  top: 0;
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.pc-header .brand {
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--fg);
+  text-transform: uppercase;
+  font-size: 13px;
+}
+.pc-header nav {
+  display: flex;
+  gap: 16px;
+  margin-left: auto;
+}
+.pc-header nav a {
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+.pc-header nav a:hover {
+  color: var(--fg);
+  text-decoration: none;
+}
+.pc-header nav a.active {
+  color: var(--fg);
+}
+
+h1 {
+  font-size: 36px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 24px 0 12px;
+}
+h2 {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 32px 0 12px;
+}
+h3 {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 24px 0 8px;
+  color: var(--fg);
+}
+p { margin: 8px 0 16px; color: var(--fg-dim); }
+
+.pc-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.pc-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-3);
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.pc-button:hover { background: var(--bg-4); border-color: var(--fg-mute); }
+.pc-button.primary {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: #fff;
+}
+.pc-button.primary:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.pc-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pc-input {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-1);
+  color: var(--fg);
+  font-family: ui-monospace, "JetBrains Mono", "Menlo", monospace;
+  font-size: 13px;
+}
+.pc-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.pc-warn {
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 0 0 20px;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.pc-warn strong { color: var(--warn); }
+
+.pc-grid {
+  display: grid;
+  gap: 16px;
+}
+.pc-grid.cards-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 720px) {
+  .pc-grid.cards-3 { grid-template-columns: 1fr; }
+}
+
+.pc-skeleton {
+  background: linear-gradient(90deg, var(--bg-2) 0%, var(--bg-3) 50%, var(--bg-2) 100%);
+  background-size: 200% 100%;
+  animation: pc-skeleton 1.4s linear infinite;
+  border-radius: 6px;
+  height: 80px;
+}
+@keyframes pc-skeleton {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+.pc-settings-shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 32px;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px;
+}
+@media (max-width: 720px) {
+  .pc-settings-shell { grid-template-columns: 1fr; }
+}
+.pc-settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pc-settings-nav a {
+  padding: 8px 12px;
+  border-radius: 6px;
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+.pc-settings-nav a:hover { background: var(--bg-3); color: var(--fg); text-decoration: none; }
+.pc-settings-nav a.active { background: var(--bg-3); color: var(--fg); }
+
+.pc-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.pc-form-row label {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--fg);
+}
+.pc-form-row .help {
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+.pc-form-row .placeholder-mask {
+  color: var(--fg-mute);
+  font-style: italic;
+}
+
+
+/* Header chrome text sharpness: avoid glow/filter compositing on nav boxes. */
+.pc-header :is(.pc-header-cta, .pc-voice-btn, .pc-voice-settings-link, nav a) {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.pc-header :is(.pc-header-cta, .pc-header-cta *, .pc-voice-btn, .pc-voice-btn *, .pc-voice-settings-link, .pc-voice-settings-link *, nav a) {
+  text-shadow: none !important;
+}
+
+.pc-header :is(.pc-header-cta, .pc-header-cta--mission.is-current, .pc-voice-btn, .pc-voice-btn-icon, .pc-voice-settings-link) {
+  filter: none !important;
+}
+
+.pc-header :is(.pc-header-cta, .pc-voice-btn) {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.pc-header :is(.pc-header-cta-label, .pc-header-cta-glyph, .pc-voice-btn-label) {
+  transform: none !important;
+}
+
+/* Keep bursty notifications collapsed immediately. Sonner expands the whole
+   toast list on hover/focus and during some mount transitions; when several
+   app events fire together that briefly fills the upper-right of the UI.
+   Force non-front toasts into Sonner's compact stack state even if the
+   library has data-expanded=true. */
+[data-sonner-toaster] [data-sonner-toast][data-front='false'] {
+  --scale: calc(var(--toasts-before) * 0.05 + 1) !important;
+  --y: translateY(calc(var(--lift-amount) * var(--toasts-before))) scale(calc(-1 * var(--scale))) !important;
+  height: var(--front-toast-height) !important;
+  pointer-events: none !important;
+}
+
+[data-sonner-toaster] [data-sonner-toast][data-front='false'][data-styled='true'] > * {
+  opacity: 0 !important;
+}
+
+[data-sonner-toaster] [data-sonner-toast][data-front='false']::after {
+  content: none !important;
+}
+
+[data-sonner-toaster] [data-sonner-toast] {
+  transition:
+    transform 140ms ease,
+    opacity 140ms ease,
+    height 140ms ease,
+    box-shadow 140ms ease !important;
+}

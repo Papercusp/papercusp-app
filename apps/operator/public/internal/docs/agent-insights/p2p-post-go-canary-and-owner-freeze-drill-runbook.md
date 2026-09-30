@@ -1,0 +1,158 @@
+# P2P post-GO canary (P-501) and owner-freeze drill (P-502): execution runbook
+URL: /internal/docs/agent-insights/p2p-post-go-canary-and-owner-freeze-drill-runbook
+
+Exact preconditions, commands, pass/fail predicates, evidence and abort rules for the 72h canary soak and the Leg G owner-freeze/recovery drill under endgame D-022, verified read-only on the tower 2026-09-23.
+
+Command-level execution runbook for `p2p-public-release-endgame-2026-09-01` P-501 (72h canary soak, = git-activation P-402) and P-502 (Leg G owner-freeze/recovery drill, = git-activation P-308 as re-scoped by endgame D-022). The policy (ordering, what may not be claimed, no failover) lives in [hive-git P2P ops runbook § Public-release post-GO canary](/internal/docs/agent-insights/hive-git-p2p-ops-runbook-2026-07-09); this page adds the exact preconditions, commands, pass/fail predicates, evidence and abort rules. Written 2026-09-23 under WI-10002542. Every command and query below was run read-only on the tower that day, except the live Phase G run and the hourly `post-go-canary-observe` sample, which only runs at execution time. That producer, and the C1–C6 checks in the verifier, landed under WI-10002545.
+
+## Governing decisions
+
+* remaining-lanes D-158: the soak and Leg G move post-GO and do not gate GO.
+* endgame D-016: the plan ships only after the canary, the chaos exercise, P-503 and closeout are terminal.
+* endgame D-022: single owning-hive authority. P-502 proves freeze and recovery; it does NOT test lease takeover or automatic failover. git-activation P-308's older "lease failover + epoch fence" wording is superseded.
+
+## P-501 — 72h canary soak
+
+### Preconditions (all must hold; record each as evidence)
+
+1. **Independent GO exists for the exact candidate** (P-401 signed). Record `candidateSha`, `approvedAt`, `reviewerOwnerId` (must differ from `implementationOwnerId`) and `attestationRef`.
+2. **The candidate is what is running.** `/api/health` on every host in the canary hive reports `candidateSha`. `for p in 3070 3170; do curl -s 127.0.0.1:$p/api/health; done` on the tower, plus the VM equivalent.
+3. **The canary hive is `hello-world-3-pot` (endgame D-044).** git-activation P-401 named `shared-hive-test`, which has no `github_bridge` metadata at all. `hive-canary` (pinned briefly by D-041) is bridged in config only. Measured 2026-09-23, its bridge reports `ran:false`, `skipped:'no_github_remote'`, `egress_target:'skipped'` and a null `egress_head`. Its `divergence:'clear'` is the idle default, so C5 can never pass there. `hello-world-3-pot` reports `ran:true`, `egress_target:'fork'`, a real `egress_head` and divergence `clear`. This precondition is enforced mechanically. The first `post-go-canary-observe` call is the soak START, and it REFUSES unless the bridge ran with a real egress target and head, divergence is clear, and no escalation is open.
+4. **Baseline is clean at T0.** Run the observation query below: divergence `clear`, `needs_owner` false, `errors` empty, no open escalations, `watchdog_alerted`/`eligibility_alerted` false.
+
+### Observation query (run at T0, then at least hourly, and at T0+72h)
+
+```sql
+SELECT now() AS at, r.active, r.last_fired_at,
+       r.metadata->>'last_status'                       AS last_status,
+       r.metadata->'github_bridge'->>'divergence'       AS divergence,
+       r.metadata->'github_bridge'->>'needs_owner'      AS needs_owner,
+       r.metadata->'github_bridge'->'errors'            AS bridge_errors,
+       r.metadata->'github_bridge'->>'egress_head'      AS egress_head,
+       r.metadata->'github_bridge'->>'egress_target'    AS egress_target,
+       COALESCE((r.metadata->>'watchdog_alerted')::boolean,false)    AS watchdog_alerted,
+       COALESCE((r.metadata->>'eligibility_alerted')::boolean,false) AS eligibility_alerted,
+       (SELECT count(*) FROM harness_shared.harness_escalations e
+         WHERE e.workspace_id=r.workspace_id AND e.harness_slug='<canary>'
+           AND e.escalation IS NOT NULL)               AS open_escalations
+  FROM harness_shared.routines r
+ WHERE r.workspace_id='papercusp-workspace' AND r.name='git-sync'
+   AND r.install_slug='<canary>';
+```
+
+Run it with `dev:pg_query`. Store each result row verbatim as a sample receipt on the P-501 work-item.
+
+**Machine-sampled form (use this one; WI-10002545).** The producer captures the same row as one typed sample. The sample adds the open-escalation count and a `git ls-remote` of the fork's `refs/heads/staging`, and it is appended atomically (tmp file + rename) to a samples file:
+
+```sh
+npx tsx packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts \
+  post-go-canary-observe hello-world-3-pot /path/to/p501-samples.json
+```
+
+Run it at T0, when the first call starts the soak and enforces precondition 3. Then run it every hour, and once more at or after T0+72h. Consecutive samples must be at most 1 hour apart; a missed hour fails coverage. The sampler still appends a bad hour, because the verifier, not the sampler, judges the window. Whoever executes P-501 owns the hourly cadence. Keep each run's stdout on the P-501 work-item as the sample receipt.
+
+### Pass predicates (every one must hold for the whole window)
+
+| #  | predicate                                                                                                                                                                                                                                                                                                                                                 | measured by                  |
+| -- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| C1 | divergence quiet: every sample has `divergence='clear'`, `needs_owner='false'`, `bridge_errors=[]`                                                                                                                                                                                                                                                        | observation query            |
+| C2 | no open escalation on the canary hive in any sample, for phases `github-bridge`, `git-sync`, `git-sync-watchdog`, `git-sync-eligibility-watchdog`                                                                                                                                                                                                         | `open_escalations = 0`       |
+| C3 | zero watchdog false alarms: every page in the window that names the canary hive is adjudicated. A page raised while the hive's commits were landing is a FALSE alarm and fails C3. A true-positive page fails C4 instead.                                                                                                                                 | alarm-history query below    |
+| C4 | member commit loops healthy: `active=true`; `last_fired_at` never older than 3x the routine interval at any sample; `last_status` never `error`/`quarantined` across two consecutive samples; no `watchdog_alerted=true`                                                                                                                                  | observation query            |
+| C5 | fork current via bridge egress: at each sample `git ls-remote <egress_target> refs/heads/staging` equals `egress_head`, or lags by at most one bridge tick                                                                                                                                                                                                | ls-remote + query            |
+| C6 | alarms wired: during the window, a synthetic regression is NOT injected (that would be a live drill step). Instead cite that `github-divergence.ts` and `git-sync-stall-watchdog.ts` both call `notifyAttention(importance:'urgent')`, plus one real page in the last 14 days proving the rail delivers (`desktop_succeeded` or `mobile_succeeded` true). | source + alarm-history query |
+
+Alarm-history query. Watchdog pages carry `harness_slug` NULL, so match the install slug in the payload:
+
+```sql
+SELECT created_at, title, importance, desktop_succeeded, mobile_succeeded
+  FROM harness_shared.attention_notifications
+ WHERE workspace_id='papercusp-workspace'
+   AND created_at BETWEEN '<startedAt>' AND '<finishedAt>'
+   AND (title ILIKE 'git-sync%' OR title ILIKE '%bridge%' OR title ILIKE '%diverg%')
+   AND (harness_slug='<canary>' OR data::text ILIKE '%<canary>%' OR body ILIKE '%<canary>%')
+ ORDER BY created_at;
+```
+
+### Abort / stop rules
+
+* The candidate identity changes on any canary host: STOP. The epoch is void; restart only after a fresh GO for the new candidate. Never extend or relabel a failed epoch.
+* C1, C2 or C4 fails in two consecutive samples: STOP and diagnose. A `needs_owner=true` divergence goes to the owner (divergence triage in the ops runbook). Never auto-clear an open escalation.
+* A sample gap longer than 1h makes the window incomplete, and the verifier rejects it (`gap over 1 hour`). Keep observing, but re-anchor the 72h clock at the first sample after the gap. Set `canary.startedAt` there and drop the earlier samples, because a sample before `startedAt` fails as outside the window.
+
+### Evidence and verification
+
+Build `post-go-canary-input.json` (schema `hive-git-post-go-release-canary/v1`) as follows:
+
+* `independentGo` comes from the preconditions.
+* `canary` = `{ candidateSha, startedAt, finishedAt, hive: 'hello-world-3-pot', routineIntervalSec, observations, alarms, alarmRail }`.
+* `observations` is the samples file, verbatim.
+* `alarms` is the alarm-history query result as `{ createdAt, title, adjudication, ref }`. Use an empty list when the window was quiet. Every page must be adjudicated `false-alarm` or `true-positive`.
+* `alarmRail` records C6 as `{ divergenceNotifiesUrgent, stallWatchdogNotifiesUrgent, deliveredPageAt, deliveredPageRef }`.
+* `ownerFreezeChaos` is filled after P-502.
+
+Then run:
+
+```sh
+npx tsx packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts \
+  post-go-canary-verify /path/to/post-go-canary-input.json
+```
+
+Since WI-10002545 the verifier checks C1–C6 over the samples, on top of GO ordering, candidate identity, the actual 72h duration and the P-502 block. It also fails closed when `observations` is missing.
+
+* **Coverage:** a sample at least hourly. The first comes within 1h of `startedAt` and the last within 1h of `finishedAt`, all on the one pinned hive.
+* **C4:** fails on a last fire older than 3x the routine interval, and on an `error`/`quarantined` status in two consecutive samples.
+* **C5:** tolerates one sample where the fork lags the egress head, but not two in a row and not at the final sample.
+* **Pages:** any page in the window fails, under C4 if it is a true positive and under C3 otherwise.
+
+A verifier `ok:true` counts as acceptance evidence only together with the sample receipts it was computed from.
+
+## P-502 — Leg G owner-freeze/recovery drill
+
+Runs only after the full P-501 window has completed on the same candidate.
+
+### Preconditions
+
+1. The P-501 predicates passed and the verifier accepted the canary block.
+2. The two physical devices (tower + VM) run `candidateSha`. The rig lock is held by the drill executor for the whole window. Take it only at execution time, never during prep.
+3. The owning hive and its signing key are identified. D-022: exactly one owner; no replacement owner is elected.
+
+### Commands
+
+```sh
+# live drill — execution time only
+npx tsx packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts \
+  phase-g-run <tower-device-key> <vm-device-key> <run-id>
+# verify the private run input it produced
+npx tsx packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts \
+  phase-g-verify <private-run-input.json>
+```
+
+`phase-g-verify` enforces schema `hive-git-physical-phase-g-input/v2`, `planItem='P-308'`, two distinct physical device keys, ephemeral Ed25519 protocol signers that are not presented as physical hosts, the same-run window, and outer manifest host receipts.
+
+### Pass predicates
+
+| #  | predicate                                                                                                                                                                                                                                                                 |
+| -- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G1 | During owner outage: protected effects `frozen`. A non-owner / device-only / missing / foreign / stale proof attempt is refused with `missing-hive-authority`, and canonical staging, release promotion, canonical GitHub push and fork/PR publication are all unchanged. |
+| G2 | Replication of a previously owner-authorized monotonic snapshot may continue. It is not counted as a fresh protected effect.                                                                                                                                              |
+| G3 | After owner recovery: owning-hive proof `restored`, then one fresh owner-countersigned monotonic advance succeeds (`protectedEffects: 'resumed'`).                                                                                                                        |
+| G4 | The entire Phase G evidence window lies inside the `ownerFreezeChaos.window`, which starts after `canary.finishedAt`.                                                                                                                                                     |
+| G5 | `phase-g-verify` returns ok, then `post-go-canary-verify` returns ok on the completed input.                                                                                                                                                                              |
+
+### Abort rules
+
+* Any protected ref moves during the outage without an owner proof: FAIL and STOP. This is a release-blocking fencing defect. Preserve refs, receipts and logs; do not retry to green.
+* Owner recovery does not produce a fresh advance within one bridge tick after proof restoration: FAIL. Diagnose; do not start a failover.
+* Never elect a replacement owner, replicate the hive private key, or treat a roster change as authority.
+
+## Readiness check performed 2026-09-23 (read-only)
+
+| surface                                      | result                                                                                                                    |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `post-go-canary-verify` on a malformed input | runs; exit 1 with the full error list                                                                                     |
+| `phase-g-verify` on an empty input           | runs; exit 1 with the full Phase G error list                                                                             |
+| observation query                            | runs; `hive-canary` divergence `clear`, errors `[]`, 0 open escalations                                                   |
+| alarm-history query                          | runs (positive control: 4,866 rows in 14d); watchdog pages have NULL `harness_slug`                                       |
+| owner paging                                 | `notifyAttention(urgent)` present in `github-divergence.ts` and `git-sync-stall-watchdog.ts`                              |
+| gaps (closed 2026-09-23)                     | C1–C6 machine-checked and `post-go-canary-observe` added (WI-10002545); canary hive pinned to `hello-world-3-pot` (D-044) |

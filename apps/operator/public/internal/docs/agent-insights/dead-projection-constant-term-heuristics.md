@@ -1,0 +1,111 @@
+# A projection nobody populates makes its consumers CONSTANT — and 'fixing' it the obvious way flips the constant, not the bug
+URL: /internal/docs/agent-insights/dead-projection-constant-term-heuristics
+
+coord_presence.current_files was empty for 113 of 113 live agents, because coord:orient — the mandated every-wake bootstrap — re-declared intent WITHOUT the arg, and declare-intent treated an omitted current_files as CLEAR (`args.current_files ?? []`) while documenting the OPPOSITE convention for its sibling `items` arg. Four consumers read that column; each degraded silently, because a term that is constant-false does not throw, it just stops discriminating. The trap on the way out: deriving the column from the LOCK plane makes locks/enrich-busy's holder_focused constant-TRUE instead, killing the orphan-lock signal in the other direction. Includes the 2-minute diagnostic for 'is this projection actually populated?'.
+
+## The shape of the bug
+
+`coord_presence.current_files` is the "which files is this agent on?" projection. It is
+written only by `coord:declare-intent`, whose handler did:
+
+```ts
+currentFiles: args.current_files ?? [],   // omitted ⇒ CLEAR
+```
+
+`coord:orient` — the bootstrap **every agent is instructed to call on every wake** —
+re-declares intent and does not pass `current_files`. So every wake, every agent, silently
+zeroed its own row. Measured on the live box before the fix:
+
+```sql
+SELECT count(*) AS live,
+       count(*) FILTER (WHERE jsonb_array_length(COALESCE(current_files,'[]'::jsonb))>0) AS with_files
+FROM harness_shared.coord_presence
+WHERE heartbeat_at > now() - interval '10 minutes';
+-- live=113, with_files=0
+```
+
+The tell that this was a bug and not a design choice was **inside the same tool**: its
+sibling `items` argument documents the opposite convention in its own describe text —
+*"Omit to leave claims untouched."* Two arguments, one tool, opposite omission semantics,
+only one of them documented.
+
+## Why nobody noticed for so long
+
+**A dead signal does not fail. It stops discriminating.** Every consumer kept running and
+returning plausible answers:
+
+| consumer                                | the term                                                    | what it silently became                                                                                                                                |
+| --------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `coord:send` `@file:<path>`             | audience includes agents whose `current_files` has the path | resolved to ZERO recipients while a peer verifiably held a lock (EI-18772330418885814)                                                                 |
+| `locks/enrich-busy` `holder_focused`    | `p.currentFiles.includes(b.path)`                           | constant **false** ⇒ the `holder_intent_diverged !== true` veto never fired ⇒ a live, actively-focused lock holder got advertised as "likely orphaned" |
+| `fleet/place_batch` touch-set exclusion | peer lanes ∪ bee files                                      | peer half always empty ⇒ conflict avoidance could not see other agents at all                                                                          |
+| git-sync derived attribution            | presence fill for the edit ledger                           | `.filter(e => e.files.length > 0)` dropped every presence entry                                                                                        |
+
+None of these throw. None show up in a test that mocks the projection — a fixture that
+hands `currentFiles: ['a.ts']` to the consumer proves the consumer works *given data*,
+which was never the failing half.
+
+## The trap on the way out (this is the part worth remembering)
+
+The obvious fix is *"nobody declares files, so populate the column automatically from the
+agent's live LOCK holdings — the lock plane already knows, and the edit hook maintains it
+with no agent discipline."* That is wrong, and it is wrong in a way that looks right.
+
+`enrich-busy` asks: **is the holder of this contended lock still focused on this path?**
+A holder holds a lock on the contended path *by definition* — that is why the row is
+contended. So a lock-derived `current_files` makes `holder_focused` constant **TRUE**, the
+veto always fires, and `holder_intent_diverged` can never be reported again.
+
+You would have replaced a constant-false term with a constant-true one, "fixed" the
+measured symptom (the column is populated now!), and silently deleted a different feature.
+Both directions are invisible.
+
+The resolution is that these are **two different signals** and the system needs both:
+
+* **Declared** (`current_files`) — what the agent *said* it is working on. Intent. This is
+  what `enrich-busy` must compare against, because its whole question is whether the
+  holder's stated focus has moved off the lock.
+* **Observed** (the lock plane) — what the agent is *actually* touching. Activity. This is
+  what collision-avoidance wants, and it is automatic: the PreToolUse edit hook takes a
+  lock on every `Edit`/`Write`.
+
+So the fix was: make the declared field stop wiping itself, and point the consumers that
+want the *automatic* answer at the lock plane instead — `locks/live-lock-paths.ts`, the one
+shared read (`readQueue` with `coordinationDomain: null`, holders only, fail-soft to `[]`).
+`coord:send`'s own `@file:` miss message already states the principle: **the lock plane is
+the authority on who is on a file.**
+
+## The diagnostic: before trusting a consumer, prove its input is populated
+
+Two minutes, and it would have caught all four of these at once.
+
+1. **Count the projection in production, not in a fixture.** `SELECT count(*), count(*)
+   FILTER (WHERE <field is non-empty>)` over live rows. A `0 / N` result means every
+   consumer of that field is currently a no-op, whatever its tests say.
+2. **Find every writer.** `grep` the field name across the tree and separate *producers*
+   from *consumers*. Here there were four consumers and exactly one producer — an optional
+   argument that essentially no caller passes.
+3. **Check the hot path for an omission.** If a high-frequency bootstrap (`coord:orient`,
+   a heartbeat, a watchdog heal) writes the same row, ask what its *omitted* fields do.
+   Omitted-means-clear plus a frequent writer is a self-zeroing column.
+4. **Read the term, not the function.** For any boolean guard, ask "can this be constant?"
+   `holder_focused !== true` reads like a real condition and compiles to `true`.
+
+## Conventions this leaves behind
+
+* On `coord_presence.current_files` and `session_briefs.current_files`: **omitted ⇒
+  untouched, explicit `[]` ⇒ clear**, matching `items`. NULL is the on-the-wire sentinel
+  (the columns are `NOT NULL`, so it can never be a legitimate value); the `VALUES` clause
+  `COALESCE`s to `'[]'` for a fresh insert, and the `ON CONFLICT` clause reads the
+  **parameter** rather than `EXCLUDED` (which the `VALUES` coalesce has already flattened).
+* `current_plan_slug` was deliberately **not** changed with it: it is genuinely populated
+  (37/113 live rows at the time), and preserving it would strand a stale plan association
+  on an agent that has moved off the plan. Same-looking column, different correct answer —
+  measure before you generalize a fix to a neighbour.
+* Guarding this needs **real Postgres**, not a recording mock. The entire claim is that a
+  JS `undefined`, marshalled as a bound NULL through `COALESCE($n::text::jsonb, <existing>)`,
+  preserves the row. A fake `sql` that captures interpolated values only proves you *passed*
+  null — your own mental model — not that the database kept the data. See
+  `packages/operator-core/lib/presence-current-files.integration.test.ts`, which provisions
+  its own database (and therefore also dodges the shared baseline container's migration
+  drift, EI-18779962385972529).

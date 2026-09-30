@@ -1,0 +1,169 @@
+/**
+ * run-lifecycle-bar (bulk-review-report-legibility-and-lifecycle-2026-08-31
+ * P-007) — the run's own state strip inside a report takeover.
+ *
+ * Palette = the app's own vars only, same rule as review-report.css: this sits
+ * directly under the report header and must follow the live theme with it.
+ */
+
+.run-lifecycle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--bg-2), transparent 30%);
+}
+
+.run-lifecycle__icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  border-radius: 7px;
+  font-size: 13px;
+  background: color-mix(in oklab, currentColor 16%, transparent);
+}
+
+.run-lifecycle__text {
+  min-width: 0;
+}
+
+.run-lifecycle__text b {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.run-lifecycle__text > div {
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.run-lifecycle__progress {
+  width: min(240px, 40vw);
+  height: 4px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+
+.run-lifecycle__progress i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 200ms ease;
+}
+
+.run-lifecycle__actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.run-lifecycle__btn {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-2);
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.run-lifecycle__btn:hover:not(:disabled) {
+  background: var(--bg-3);
+}
+
+.run-lifecycle__btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.run-lifecycle__btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.run-lifecycle__btn--ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--fg-dim, var(--muted));
+}
+
+.run-lifecycle__btn--primary {
+  border-color: color-mix(in oklab, var(--good), transparent 40%);
+  background: color-mix(in oklab, var(--good) 20%, transparent);
+  color: color-mix(in oklab, var(--good), white 30%);
+}
+
+.run-lifecycle__btn--warn {
+  border-color: color-mix(in oklab, var(--warn), transparent 45%);
+  background: color-mix(in oklab, var(--warn) 14%, transparent);
+  color: color-mix(in oklab, var(--warn), white 30%);
+}
+
+.run-lifecycle__btn--danger {
+  border-color: color-mix(in oklab, var(--bad), transparent 45%);
+  background: color-mix(in oklab, var(--bad) 14%, transparent);
+  color: color-mix(in oklab, var(--bad), white 30%);
+}
+
+/* Tone drives the icon colour and the strip's edge; the words always carry the
+ * meaning on their own, so colour is never the sole signal. */
+.run-lifecycle--live {
+  border-color: color-mix(in oklab, var(--accent), transparent 62%);
+  background: color-mix(in oklab, var(--accent) 7%, transparent);
+}
+.run-lifecycle--live .run-lifecycle__icon {
+  color: var(--accent);
+}
+
+.run-lifecycle--good {
+  border-color: color-mix(in oklab, var(--good), transparent 62%);
+  background: color-mix(in oklab, var(--good) 6%, transparent);
+}
+.run-lifecycle--good .run-lifecycle__icon {
+  color: var(--good);
+}
+
+.run-lifecycle--warn {
+  border-color: color-mix(in oklab, var(--warn), transparent 58%);
+  background: color-mix(in oklab, var(--warn) 7%, transparent);
+}
+.run-lifecycle--warn .run-lifecycle__icon {
+  color: var(--warn);
+}
+
+.run-lifecycle--bad {
+  border-color: color-mix(in oklab, var(--bad), transparent 58%);
+  background: color-mix(in oklab, var(--bad) 7%, transparent);
+}
+.run-lifecycle--bad .run-lifecycle__icon {
+  color: var(--bad);
+}
+
+@container (max-width: 620px) {
+  .run-lifecycle {
+    flex-wrap: wrap;
+  }
+
+  .run-lifecycle__actions {
+    margin-left: 38px;
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+}

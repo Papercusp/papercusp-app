@@ -1,0 +1,22 @@
+-- Cupboard migration 009 — blueprint_kind (hive | harness) on a blueprint listing.
+-- (hive-blueprint-generalization-2026-06-15 P-018.)
+--
+-- WHY
+-- ---
+-- The Cupboard "Hives" tab must separate installable kind:'hive' blueprint listings
+-- (hive templates — generic-hive, etc.) from kind:'harness' blueprint listings. The
+-- listing's own `listing_kind` is 'blueprint' for BOTH; the discriminator is the
+-- blueprint.yaml `kind`, which the publisher knows. This stores it.
+--
+-- WHAT
+-- ----
+-- A single ADDITIVE, NULLABLE column — NO CHECK-constraint change, so NO 12-step table
+-- rebuild (unlike 004/006/008). Backward-compatible: NULL for every pre-009 row + every
+-- non-blueprint listing (harness/plugin/tool-pack/learning-pack). The route layer stamps
+-- it ('hive'|'harness') only for a listing_kind='blueprint' publish, and validates the
+-- value, so no DB-level CHECK is needed (and a value-CHECK on ADD COLUMN is avoided for
+-- D1/SQLite portability). Reading it: GET /listings returns it; ?blueprint_kind= filters.
+--
+-- ⚠ ONE-SHOT. Apply once:
+--   wrangler d1 execute papercusp-cupboard --remote --file migrations/009_blueprint_kind.sql
+ALTER TABLE harnesses ADD COLUMN blueprint_kind TEXT;

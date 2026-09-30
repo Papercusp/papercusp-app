@@ -1,0 +1,168 @@
+# \"It never bound\" usually means you asked the wrong port
+URL: /internal/docs/agent-insights/a-process-that-never-bound-may-be-bound-elsewhere
+
+A single-port probe cannot distinguish 'this process is wedged' from 'this process is healthy and listening somewhere else' — and the two look identical in ps: 0% CPU, STAT Ss, flat RSS. A packaged `local` env operator served HTTP 200 on :3071 for 26 minutes and was filed as a 26-minute hang because every probe asked :3055. Includes the falsifier (lsof by PID, not by port), why `sample` settles wedged-vs-idle in one call, and the ambient-PORT leak that aimed it at the wrong port in the first place.
+
+## The shape
+
+You are checking whether a child process came up. You run the obvious thing:
+
+```bash
+lsof -nP -iTCP:3055 -sTCP:LISTEN   # (nothing)
+curl 127.0.0.1:3055                # 000
+```
+
+Nothing. The process is alive, so it must be hung. You now have a *hang* to
+diagnose, and every subsequent measurement will be interpreted through that frame.
+
+**That inference does not hold.** `lsof -iTCP:<port>` asks "is anyone on THIS
+port". It cannot answer "did my process bind". The gap between those two
+questions is where a healthy, fully-working server hides.
+
+## What it cost, concretely
+
+On 2026-08-03 the packaged mac dogfood install's `local` env operator (the Vite
+SPA) was filed as **EI-19424980348813193: "hung \~26min without ever binding"**.
+The evidence looked airtight and was all real:
+
+| observation                        | read as        | actually meant                                 |
+| ---------------------------------- | -------------- | ---------------------------------------------- |
+| `lsof -iTCP:3055` empty for 26 min | never bound    | never bound *to 3055*                          |
+| `%CPU 0.0` at two separate samples | not doing work | not doing work *because it was done*           |
+| `STAT Ss` (interruptible sleep)    | parked/wedged  | idle event loop — the normal state of a server |
+| RSS flat across 14 min             | no progress    | no progress *needed*                           |
+
+Every one of those is equally consistent with a **correct, idle, serving**
+process. The item accumulated two days of investigation, a disproven
+optimizer-contention hypothesis, and a disproven crash-looping-sibling
+hypothesis, before anyone asked the process what it was bound to:
+
+```bash
+lsof -nP -p 70799 -a -i
+# 40u  IPv4  TCP 127.0.0.1:3071 (LISTEN)
+
+curl 127.0.0.1:3071/
+# 200 — the real operator SPA
+```
+
+It had been serving the whole time, 16 ports away.
+
+## The falsifier: ask the PID, not the port
+
+Make this reflexive. Whenever you are about to conclude a process failed to
+listen:
+
+```bash
+lsof -nP -p <pid> -a -i        # every socket THIS process holds
+```
+
+Empty output is a real negative. A `(LISTEN)` line on an unexpected port is the
+answer, and it arrives in one call. The inverted form (`-iTCP:<port>`) is fine
+for "who owns this port" and useless for "what did my process do".
+
+## `sample` settles wedged-vs-idle in one call (macOS)
+
+If you genuinely need to know whether a process is stuck or merely quiet, read
+its stacks rather than inferring from CPU:
+
+```bash
+sample <pid> 3 -file /tmp/s.txt
+```
+
+A node process parked like this is an **idle event loop**, not a deadlock:
+
+```
+main-thread
+  node::SpinEventLoopInternal
+    uv_run  ->  uv__io_poll  ->  kevent
+```
+
+That is what "waiting for the next request" looks like. A real wedge shows a
+synchronous frame at the top — your code, a mutex, a blocking syscall that is not
+`kevent`/`epoll_wait`. (Linux: `eu-stack -p <pid>`, `gdb -p <pid> -batch -ex bt`,
+or `node --inspect` via `kill -USR1`.)
+
+Also worth knowing: a node process with an idle loop and **no** live handles
+would have *exited*. If it is idle and still alive, something is holding the loop
+open — often exactly the thing you are looking for. Here it was the fsevents
+watcher, which is a file-watching dev server behaving correctly.
+
+## Why it was on the wrong port: ambient `PORT` leaks into children
+
+The root cause is a trap worth knowing on its own, because it is not specific to
+vite.
+
+`apps/operator-vite/vite.config.ts` resolves its listen port as:
+
+```ts
+port: Number(process.env.OPERATOR_E2E_PORT ?? process.env.PORT) || 3055,
+```
+
+The `PORT` fallback is safe for every *human* caller — a shell, `bin/dev`, the
+Tauri desktop — where `PORT` is simply unset. It is **not** safe for a child of a
+service. `env-operator-launcher` spawned vite with `env: { ...process.env }`, and
+in a papercusp operator `PORT` already means *"the port I myself listen on"*
+(`defaultSelfPort()` reads `PAPERCUSP_HONO_PORT ?? PORT`). So the child inherited
+`PORT=3070` — the parent's own port — and aimed there.
+
+Then the second half:
+
+* 3070 was held by that same parent.
+* The spawn passed **no `--strictPort`**, so vite *walked* to the next free port.
+* 3071 was held by a sibling operator, but only as IPv6 `*:3071`. Node's V6ONLY
+  bind leaves the IPv4 half open, so vite's probe saw 3071 free and took
+  `127.0.0.1:3071`.
+
+Three benign-looking behaviours composing into a silent mis-bind.
+
+### The fix, and why it is two halves
+
+```ts
+viteChildArgv(cli, port)  // [cli, '--port', String(port), '--strictPort']
+viteChildEnv(base, tree, selfPort)  // ...then: delete env.PORT; delete env.OPERATOR_E2E_PORT
+```
+
+* **`--strictPort` is the class fix.** Without it, a wrong port degrades into a
+  *silent success somewhere else* — the worst failure shape there is. With it, a
+  collision is a loud immediate crash you cannot misread.
+* **Scrubbing `PORT` removes the second, contradictory answer.** Overriding it
+  would have worked too, but leaving a stale `PORT` in the child's env keeps a
+  trap armed for the next reader.
+
+The unit test re-evaluates vite.config's own port expression against the produced
+child env (asserting 3070-before / 3055-after), so the cross-file coupling is
+policed rather than assumed.
+
+## The detector failure underneath it all
+
+Ask what *should* have caught this. Vite prints, on every single boot:
+
+```
+  ->  Local:   http://127.0.0.1:3055/
+```
+
+It names its bound port outright. That line existed every time and was **thrown
+away**, because the launcher spawned with `stdio: 'ignore'` — the child was
+unobservable by construction (fixed separately in EI-19423766332560955, which
+routes each env's output to `~/.papercusp/logs/env-operator-<id>.log`).
+
+That is the real lesson, and it generalises past ports: **a system that emits no
+signal distinguishing "working" from "broken" will convert every one of its bugs
+into an expensive mystery.** Fixing the probe is a mitigation. Fixing the signal
+is the fix.
+
+## Rules of thumb
+
+1. **Absence measured through a filter is not absence.** "No listener on 3055",
+   "no rows for that key", "no match in that file" — each is a statement about
+   your *query*, not about the world. Before reporting an absence, ask what the
+   unfiltered read says.
+2. **`0% CPU` is not a symptom.** Most healthy processes use 0% CPU almost all
+   the time. It is evidence only in combination with a terminal marker that
+   should have been reached and wasn't.
+3. **When spawning a child, audit the env you are handing it.** `PORT`, `HOST`,
+   `NODE_ENV`, `DEBUG`, `TMPDIR` are ambient names that mean different things to
+   parent and child. `{ ...process.env }` is a convenience with a blast radius.
+4. **Prefer strict/fail-fast options in spawned services.** `--strictPort` and
+   friends trade a loud failure for a silent wrong one. On an unattended path
+   that trade is always worth making.

@@ -1,0 +1,10 @@
+{
+  "ref": "spec-test-adequacy",
+  "id": "spec-test-adequacy",
+  "title": "Spec test adequacy",
+  "description": "Reusable per-spec proof-quality standard: exact traceability, fixture calibration, falsifiability, correct layer and path reachability, oracle independence, execution integrity, freshness, and the plan-class risk floor.",
+  "category": "testing",
+  "scope": "rubric",
+  "version": "1.0.0",
+  "source": "first-party"
+}

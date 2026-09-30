@@ -1,0 +1,252 @@
+{
+  "audit": "WI-10001230",
+  "observed_date": "2026-09-13",
+  "read_only_subject": true,
+  "source_heads": {
+    "initial": "1d46df0059db5950e3ef6717ccfc847cc5bdb036",
+    "later": "8333227e6274473e8976e7534fe5115bc71e6a63"
+  },
+  "fixed_window": {
+    "from_inclusive": "2026-09-12T23:00:00Z",
+    "to_exclusive": "2026-09-13T23:00:00Z"
+  },
+  "dispatch_statuses": {
+    "ok": 371664,
+    "error": 3208,
+    "timeout": 207,
+    "invalid-input": 2834,
+    "refused": 1999,
+    "role-not-allowed": 79,
+    "replayed": 12,
+    "total": 380003,
+    "ok_p95_ms": 14175,
+    "caveats": [
+      "Dispatch records, not unique business operations.",
+      "Wrapper/child records may both exist.",
+      "Test and diagnostic traffic was not comprehensively excluded.",
+      "Not an application availability measurement."
+    ]
+  },
+  "session_read": {
+    "probe_args": {"session": "self", "tail": 1, "text_limit": 100},
+    "probe_result": "handler_error: invalid escape string",
+    "release_host": "port-3070",
+    "release_build_observed": "e66be3c4ff",
+    "fixed_window_release_errors": 1716,
+    "fixed_window_release_invalid_input": 25,
+    "fixed_window_release_ok_records": 0,
+    "positive_controls": {
+      "port-3170_ok": 58,
+      "port-3271_ok": 1114
+    },
+    "source_difference": {
+      "release": "substring(text FROM ${textOffset + 1} FOR ${textLimit})",
+      "staging": "substring(text FROM ${textOffset + 1}::int FOR ${textLimit}::int)"
+    }
+  },
+  "pty_census": {
+    "at": "2026-09-13T22:57:54.631Z",
+    "population": "Discovery records with live PIDs; events after later of current host start and preceding 24h",
+    "live_pid_records": 115,
+    "readable_event_files": 107,
+    "missing_event_files": 8,
+    "tail_bound_bytes": 2097152,
+    "files_exceeding_tail_bound": 0,
+    "invalid_event_lines": 0,
+    "hosts_with_deferral_or_drop": 79,
+    "current_source_hash": "9b23b0e77e89ea1f327cd40f2cfe3e87123d39a0214c5d74f095fc2b18505654",
+    "matching_host_hash": 67,
+    "different_host_hash": 48,
+    "unknown_host_hash": 0,
+    "events": {
+      "busy-gate-expired": 1618,
+      "wake-turn-deferred-for-pending-respawn": 1505,
+      "respawn-carry-dropped": 457,
+      "respawn-rearm-queued": 610,
+      "respawn-carry-delivered": 1818,
+      "inject-mutex-stuck": 23,
+      "turn-deferred-quota-blocked": 130,
+      "mcp-reconnect-started": 77,
+      "mcp-reconnect-failed": 77
+    },
+    "later_identity_positive_control": {
+      "at": "2026-09-13T23:09:47.704Z",
+      "live_pid_records": 113,
+      "proc_cmdline_verified_hosts": 113,
+      "existing_sockets": 113,
+      "missing_event_files": 8
+    },
+    "caveats": [
+      "Event counts are not distinct lost messages.",
+      "Terminated hosts are excluded.",
+      "Different snapshots must not be combined into one denominator.",
+      "Missing event file is unobserved, not failed.",
+      "A different hash does not establish absence of a particular fix."
+    ]
+  },
+  "pty_reason_slice": {
+    "at": "2026-09-13T22:59:36.082Z",
+    "busy_modes": {"carry-respawn": 699, "reset": 85, "turn": 824, "recycle": 15},
+    "carry_drop_reasons": {
+      "carry-stale": 380,
+      "superseded": 61,
+      "submit-verification-aborted-quota-blocked": 2,
+      "turn-start-unverified": 14
+    },
+    "reconnect_failure_steps": {"open-dialog": 75, "await-connected": 2}
+  },
+  "persistent_recovery_episodes": [
+    {
+      "owner": "su-d70effba-60a5-47ab-9726-e1a3e7fb76b7",
+      "kind": "respawn-failed",
+      "reason": "argv-build-failed",
+      "detail": "ENOENT reading $HOME/.papercusp/su-codex-homes/session-22472/AGENTS.md",
+      "count_in_later_rolling_read": 181,
+      "first_in_that_read": "2026-09-12T23:07:42.257Z",
+      "last_in_that_read": "2026-09-13T22:58:46.418Z",
+      "file_check": "Parent directory exists; AGENTS.md absent.",
+      "unresolved": "Actor or process that removed the file was not established."
+    },
+    {
+      "owner": "su-respawn-2a7d64092bc19a458c439097eaf16747",
+      "backend": "claude",
+      "kind": "mcp-reconnect-failed",
+      "count": 77,
+      "first": "2026-09-12T23:51:53.367Z",
+      "last": "2026-09-13T22:17:40.709Z",
+      "unresolved": "Exact UI/configuration/transport cause of missing dialog text was not established."
+    }
+  ],
+  "coalescing_counterexample": {
+    "type": "Pure component-level probe; no live injection",
+    "module": "apps/operator/scripts/psu-pty-host.mjs",
+    "procedure": [
+      "Create actual makeDeliveryDedup and makeTurnCoalescer factories.",
+      "Admit A under a source key and mark A pending.",
+      "Admit B under that same source key; observe folded=true.",
+      "Mirror the live host branch by marking B completed.",
+      "Mirror parent busy deferral by claiming/clearing the coalescer and clearing A pending.",
+      "Read both dedup states."
+    ],
+    "actual": {"first_admit_returns_folded": false, "second_admit_returns_folded": true, "A": null, "B": "completed"},
+    "expected": "B remains pending with parent or becomes retryable if parent did not submit.",
+    "scope_limit": "Does not prove a named live message was lost."
+  },
+  "corpus_fixed_window": {
+    "initialize": {"ok": 952, "timed-out": 3673, "total": 4625, "timeout_pct": 79.4},
+    "turn-start": {"ok": 1012, "timed-out": 621, "total": 1633, "timeout_pct": 38.0},
+    "claim": {"ok": 439, "timed-out": 207, "total": 646, "timeout_pct": 32.0},
+    "mid-turn": {"ok": 9871, "timed-out": 3210, "no-query": 58, "total": 13139, "timeout_pct": 24.4},
+    "default_whole_leg_budget_ms": 2000,
+    "empty_result_semantics": {
+      "embedderAvailable": false,
+      "legs": null,
+      "outcome": "timed-out",
+      "warning": "false does not identify the embedder as the initiating cause of timeout"
+    },
+    "independent_epoch_observation": {"session_records_bumped_in_rolling_24h": 124},
+    "delivered_coverage_warning": {
+      "source": "session_turn",
+      "embedded_pct": 68.2,
+      "independently_recensused": false
+    }
+  },
+  "scheduler": {
+    "initial_active_durable_cron_rows": 240,
+    "initial_active_durable_overdue_10m": 141,
+    "later_exact_papercusp_install_overdue_10m": 53,
+    "overdue_examples_minutes": {
+      "work-item-admission-fail-open": 294,
+      "presence-transition-sweep": 178,
+      "plan-item-orphan-reconcile": 174,
+      "sample_loop_wake": 150,
+      "inbox-bulk-resolve": 144,
+      "personal-vault-import": 137,
+      "reconcile-silent-halts": 105
+    },
+    "journal": {
+      "unit": "papercusp-bg-host.service",
+      "since": "2026-09-13T22:00:00Z",
+      "read_at_approximately": "2026-09-13T23:05:00Z",
+      "held_dispatch_lines": 164,
+      "pool_starvation_lines": 21,
+      "sample_acquire_and_select_probe_ms": 2669,
+      "missing_standing_action_alarm_count": 13
+    },
+    "recent_pull_incident": {
+      "error": "syntax error at or near last_released_by",
+      "records_in_rolling_24h": 205,
+      "recorded_owner_identities": 47,
+      "last_observed": "2026-09-13T08:34:02.796Z",
+      "mechanism": "Promise assimilation of postgres-js fragment executed it independently; inspected wrapper source avoids thenable observation.",
+      "ongoing_failure_claimed": false
+    },
+    "caveats": [
+      "Out-of-work-scope jobs can be intentionally held.",
+      "Admission is checked before claim and held rows retain due time.",
+      "Every overdue row's individual reason was not classified."
+    ]
+  },
+  "hooks": {
+    "fixed_window_activity_report_invalid": 682,
+    "recorded_owner_identities": 40,
+    "serving_host": "port-3070",
+    "serving_build": "e66be3c4ff",
+    "rejected_field": "role",
+    "source_comparison": "Staging accepts role; inspected release schema does not."
+  },
+  "incident_capture": {
+    "rolling_24h_unique_constraint_failures": 268,
+    "constraint": "work_items_watchdog_identity_uq",
+    "session_read_invalid_escape_title_family_since": "2026-09-06T23:00:00Z",
+    "title_family_counts": {"open": 174, "done": 124, "dropped": 27, "resolved": 4},
+    "caveat": "Title family is not a proof of identical root cause for every record."
+  },
+  "communication": {
+    "rolling_wake_channel_records": {
+      "suppressed-redundant": 4809,
+      "psu-socket-inject": 761,
+      "coalesced": 352,
+      "inbox": 335
+    },
+    "park_attempt_ceiling": 8,
+    "park_recheck_ms": 45000,
+    "fixed_window_coord_send_timeout_records": 42,
+    "coord_send_timeout_p50_ms": 74804,
+    "caveat": "Inbox storage, coalescing, suppression and native turn pickup are distinct outcomes."
+  },
+  "governor": {
+    "observed_unknown_lenses": ["health", "admission", "recovery"],
+    "queue_depth_states": ["queued", "eligible", "leased", "running"],
+    "later_waiting_receipt_split": {
+      "process": {"queued": 71, "oldest_enqueue_age_h": 5.76},
+      "agent": {"queued": 7, "oldest_enqueue_age_h": 7.17}
+    },
+    "validity_of_oldest_demand_established": false,
+    "host_memory_assessment": {"state": "stable", "free_pct": 25, "point_in_time_only": true}
+  },
+  "coverage": {
+    "surface_census": 2066,
+    "surfaces_with_evidence_basis": 8,
+    "below_floor_unwaived": 2058,
+    "unobservable_surfaces": 254,
+    "not_a_line_coverage_measurement": true,
+    "caveat": "Missing attached coverage evidence is not proof that tests do not exist."
+  },
+  "backup": {
+    "workspace": "papercusp-workspace",
+    "latest_application_ledger_success_finished_at": "2026-09-07T17:45:11.011971Z",
+    "status": "ok",
+    "db_dump_ok": true,
+    "has_snapshot_id": true,
+    "restore_performed": false,
+    "independent_destination_freshness_established": false,
+    "caveat": "Do not infer failure of every backup mechanism from this application ledger."
+  },
+  "representative_queries": {
+    "dispatch": "SELECT status,count(*),percentile_cont(.95) WITHIN GROUP(ORDER BY duration_ms) FROM harness_shared.tool_invocations WHERE invoked_at>='2026-09-12T23:00:00Z' AND invoked_at<'2026-09-13T23:00:00Z' GROUP BY status",
+    "corpus": "SELECT surface,admission->'corpus'->>'outcome',count(*) FROM harness_shared.memory_recall_stats WHERE created_at>='2026-09-12T23:00:00Z' AND created_at<'2026-09-13T23:00:00Z' GROUP BY surface,admission->'corpus'->>'outcome'",
+    "scoped_routine_lateness": "SELECT name,target_role,next_fire_at,last_fired_at,metadata FROM harness_shared.routines WHERE workspace_id='papercusp-workspace' AND install_slug='papercusp' AND active AND next_fire_at<now()-interval '10 minutes' ORDER BY next_fire_at",
+    "backup": "SELECT status,db_dump_ok,(kopia_snapshot_id IS NOT NULL) has_snapshot,started_at,finished_at FROM harness_shared.backup_snapshots WHERE workspace_id='papercusp-workspace' ORDER BY started_at DESC LIMIT 3"
+  }
+}

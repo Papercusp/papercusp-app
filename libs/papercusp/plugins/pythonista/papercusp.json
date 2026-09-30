@@ -1,0 +1,31 @@
+{
+  "name": "pythonista",
+  "version": "0.1.0",
+  "description": "Batch I7 bundled smoke daemon: tiny Python JSON-RPC peer over stdio. Single action 'run-script' evals a Python expression.",
+  "license": "Elastic-2.0",
+  "papercusp": "^0.1",
+  "protocol": "^1",
+  "capabilities": [
+    "daemon:spawn"
+  ],
+  "actions": [
+    {
+      "name": "run-script",
+      "capabilities": [
+        "daemon:spawn"
+      ]
+    }
+  ],
+  "runtime": {
+    "kind": "daemon",
+    "daemonCommand": [
+      "/usr/bin/python3",
+      "daemon.py"
+    ],
+    "daemonRestart": {
+      "policy": "on-failure",
+      "maxRestarts": 5,
+      "backoffMs": 500
+    }
+  }
+}

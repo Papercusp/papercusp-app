@@ -1,0 +1,105 @@
+# papercusp-ops-pots — aspect: the agentic plan/work-item execution plane +
+# the ONE typed app seam. Machine twin: @papercusp/template-kit
+# src/reference-templates.ts PAPERCUSP_OPS_HIVES_TEMPLATE — the kit's suite
+# pins this file to it.
+id: papercusp-ops-pots
+version: "0.1.0"
+scope: aspect
+category: agentic
+summary: >-
+  The agentic work plane: typed blueprint operations target app-owned plan
+  templates, which promote through Papercusp's canonical plan-to-work-item
+  path, preserve their blocked-by DAG, assign only the actionable frontier to
+  a configured stable app agent, and durably wake its live adopting session.
+  Validated operation results cross into the deterministic app at exactly ONE
+  typed seam; confinement is enforced at install and the app's
+  blueprints/README.md states the rule.
+components:
+  - id: pot-app-seam
+    version: "0.1.0"
+  - id: typed-contracts
+    version: "0.0.1"
+blueprints:
+  - app-agent
+contracts:
+  - candidate-set
+decisionPoints:
+  - id: seam-work-item-kind
+    prompt: >-
+      What work_item kind and id prefix cross the seam (worked instances:
+      purchase-research/PR, bet-analysis/BA)?
+  - id: plan-template
+    prompt: >-
+      Which app-owned plan template defines the run inputs and blocked-by DAG
+      for this work, and which external binding or schedule starts it?
+  - id: operation-contract
+    prompt: >-
+      What stable operation id/version, pinned plan-template revision/hash,
+      typed input schema, typed result schema, and request-key source expose
+      that plan as one reusable task?
+  - id: execution-target
+    prompt: >-
+      Which app harness owns the plan runs/work queue, and which stable agent
+      name adopts assignments and receives required wakes?
+  - id: contract-shape
+    prompt: >-
+      What does the down-leg contract carry (specialize the candidate-set
+      template; one parse gate, rejects emitted as events)?
+  - id: domain-lexicon
+    prompt: >-
+      What are the domain nouns/verbs for hives, roles, and work (replaces the
+      placeholder lexicon in the starter blueprints)?
+  - id: domain-roles
+    prompt: >-
+      Which role prompt and capability envelope does the stable app agent need
+      to complete assigned work (confinement stays inviolable)?
+  - id: app-tables
+    prompt: >-
+      Which app tables does ingested contract output land in, and what is the
+      app-plane read model over them?
+composesWith:
+  - papercusp-tauri-desktop-shell
+  - papercusp-app
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+checks:
+  - id: confinement-guard
+    run: checks/confinement-guard.test.ts
+    summary: >-
+      no hive role holds cart/checkout/vault/approvals-write-analog
+      capabilities
+  - id: seam-round-trip
+    run: checks/seam-round-trip.test.ts
+    summary: >-
+      enqueue → complete with payload → contract parse gate ingests → app
+      table row exists
+  - id: gym-signals
+    run: checks/gym-signals.test.ts
+    summary: the stable app agent's guardrail gym signals are present and wired
+musts:
+  - id: canonical-plan-work-plane
+    rule: "Every reusable external or scheduled agentic run invokes a declared blueprint operation that targets an app-owned plan template and canonical plan-item promotion; never raw work-item inserts, direct work_items:create, a copied DAG, or a parallel scheduler"
+    enforcedBy: prose-only
+  - id: operation-first-task-binding
+    rule: "Every new reusable task binding names a typed, versioned operation and stable request key; only blueprint:result state=ready may carry output across the app parse gate, while legacy launch-plan bindings stay operational until individually parity-tested"
+    enforcedBy: seam-round-trip
+  - id: stable-agent-direct-dispatch
+    rule: "Every agentic binding/schedule carries execution { appHarnessSlug, agentName }; promotion assigns and durably wakes that stable agent for the actionable frontier only, while blocked descendants remain unassigned until canonical prerequisite completion"
+    enforcedBy: prose-only
+  - id: target-failure-is-loud
+    rule: "A dead, absent, or unwakeable adopting session is a structured retryable failure with queue state preserved — never false execution success or a silent stall"
+    enforcedBy: prose-only
+  - id: seam-only-crossing
+    rule: "Every judgment-plane crossing composes @papercusp/pot-app-seam (bootstrap, operation submit/status/result, compatibility plan launch, ingest loop) — never hand-rolled calls against /api/harness/*"
+    enforcedBy: seam-round-trip
+  - id: one-parse-gate
+    rule: "An app-owned contracts package with strict schemas both directions; the parse gate is the ONLY path from agent output to an app table and rejects emit events, never silent drops"
+    enforcedBy: seam-round-trip
+  - id: confinement-inviolable
+    rule: "Every hive role is read + propose-only against the app dangerous surface, pinned via role capability envelopes; the app blueprints/README.md is the canonical statement of the rule"
+    enforcedBy: confinement-guard
+  - id: nothing-else-crosses
+    rule: "No second transport, no side-channel table writes, no direct DB access from a role"
+    enforcedBy: prose-only

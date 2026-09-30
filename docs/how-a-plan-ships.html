@@ -1,0 +1,1033 @@
+<title>How a Plan Ships</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  color-scheme: light;
+  --ground:#F1F3F7;
+  --surface:#FFFFFF;
+  --surface-2:#F7F9FC;
+  --ink:#151922;
+  --ink-2:#3D4658;
+  --muted:#6C7688;
+  --line:#D4DAE4;
+  --line-2:#E4E8EF;
+  --accent:#2B4A80;
+  --accent-soft:#E6ECF7;
+  --ok:#2C6A4E;
+  --ok-soft:#E1EFE7;
+  --warn:#8E6318;
+  --warn-soft:#F6EEDB;
+  --bad:#93372A;
+  --bad-soft:#F7E6E2;
+  --shadow:0 1px 2px rgba(21,25,34,.05), 0 10px 30px -18px rgba(21,25,34,.30);
+  --display:"Newsreader", Georgia, "Times New Roman", serif;
+  --body:"IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --ground:#0E1116;
+    --surface:#161A22;
+    --surface-2:#1B212B;
+    --ink:#E3E7EF;
+    --ink-2:#AEB7C6;
+    --muted:#828C9E;
+    --line:#2A3140;
+    --line-2:#222833;
+    --accent:#8BADE4;
+    --accent-soft:#18202E;
+    --ok:#69B792;
+    --ok-soft:#152621;
+    --warn:#D9AB53;
+    --warn-soft:#282216;
+    --bad:#E08674;
+    --bad-soft:#2A1B18;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 12px 32px -18px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --ground:#0E1116;
+  --surface:#161A22;
+  --surface-2:#1B212B;
+  --ink:#E3E7EF;
+  --ink-2:#AEB7C6;
+  --muted:#828C9E;
+  --line:#2A3140;
+  --line-2:#222833;
+  --accent:#8BADE4;
+  --accent-soft:#18202E;
+  --ok:#69B792;
+  --ok-soft:#152621;
+  --warn:#D9AB53;
+  --warn-soft:#282216;
+  --bad:#E08674;
+  --bad-soft:#2A1B18;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 12px 32px -18px rgba(0,0,0,.8);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--ground);
+  color:var(--ink);
+  font-family:var(--body);
+  font-size:16px;
+  line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1140px;margin-inline:auto;padding-inline:clamp(20px,4vw,44px)}
+.prose{max-width:70ch}
+
+a{color:var(--accent);text-decoration-thickness:1px;text-underline-offset:2px}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:3px}
+
+code,.mono{font-family:var(--mono);font-size:.86em;letter-spacing:-.01em}
+p code,li code,td code{
+  background:var(--surface-2);
+  border:1px solid var(--line-2);
+  border-radius:4px;
+  padding:.08em .34em;
+  white-space:nowrap;
+}
+
+/* ---------- masthead ---------- */
+.masthead{
+  border-bottom:1px solid var(--line);
+  background:var(--surface);
+  padding-block:clamp(38px,6vw,64px) 0;
+}
+.eyebrow{
+  font-family:var(--mono);
+  font-size:.7rem;
+  font-weight:500;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+  color:var(--accent);
+  margin:0 0 18px;
+}
+h1{
+  font-family:var(--display);
+  font-weight:500;
+  font-size:clamp(2.3rem,5.4vw,3.4rem);
+  line-height:1.05;
+  letter-spacing:-.022em;
+  margin:0 0 22px;
+  text-wrap:balance;
+}
+.lede{
+  font-size:clamp(1.06rem,1.5vw,1.2rem);
+  line-height:1.6;
+  color:var(--ink-2);
+  max-width:60ch;
+  margin:0 0 30px;
+}
+.lede strong{color:var(--ink);font-weight:600}
+
+.toc{
+  display:flex;flex-wrap:wrap;gap:0 22px;
+  list-style:none;margin:0;padding:22px 0;
+  border-top:1px solid var(--line-2);
+  font-family:var(--mono);font-size:.76rem;letter-spacing:.02em;
+}
+.toc a{color:var(--muted);text-decoration:none}
+.toc a:hover{color:var(--accent);text-decoration:underline}
+
+/* ---------- sections ---------- */
+section{padding-block:clamp(46px,6vw,72px);border-bottom:1px solid var(--line)}
+section:last-of-type{border-bottom:0}
+h2{
+  font-family:var(--display);
+  font-weight:500;
+  font-size:clamp(1.55rem,2.8vw,2.05rem);
+  line-height:1.18;
+  letter-spacing:-.015em;
+  margin:0 0 6px;
+  text-wrap:balance;
+}
+.kicker{
+  font-family:var(--mono);font-size:.7rem;font-weight:500;
+  letter-spacing:.15em;text-transform:uppercase;color:var(--muted);
+  margin:0 0 12px;
+}
+h3{
+  font-family:var(--body);font-weight:600;font-size:1.02rem;
+  letter-spacing:-.005em;margin:34px 0 8px;
+}
+p{margin:0 0 16px}
+.prose > p:last-child{margin-bottom:0}
+
+/* ---------- figures ---------- */
+figure{
+  margin:34px 0 0;
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:12px;
+  padding:22px 22px 18px;
+  box-shadow:var(--shadow);
+}
+.figscroll{overflow-x:auto}
+figure svg{display:block;width:100%;min-width:640px;height:auto;color:var(--ink-2)}
+figcaption{
+  margin-top:16px;padding-top:14px;
+  border-top:1px solid var(--line-2);
+  font-size:.86rem;line-height:1.55;color:var(--muted);
+  max-width:78ch;
+}
+figcaption strong{color:var(--ink-2);font-weight:600}
+
+/* ---------- tables ---------- */
+.tablewrap{overflow-x:auto;margin-top:28px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;min-width:660px;font-size:.875rem;font-variant-numeric:tabular-nums}
+th{
+  text-align:left;font-family:var(--mono);font-size:.68rem;font-weight:500;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+  padding:13px 16px;border-bottom:1px solid var(--line);
+  white-space:nowrap;
+}
+td{padding:12px 16px;border-bottom:1px solid var(--line-2);vertical-align:top;line-height:1.5}
+tbody tr:last-child td{border-bottom:0}
+td:first-child{white-space:nowrap}
+.famrow td{
+  background:var(--surface-2);
+  font-family:var(--mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-2);padding-block:9px;
+}
+.famrow.code td{border-left:3px solid var(--accent)}
+.famrow.rubric td{border-left:3px solid var(--warn)}
+.step{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:20px;height:20px;border-radius:50%;
+  background:var(--accent);color:var(--surface);
+  font-family:var(--mono);font-size:.7rem;font-weight:500;
+}
+.rc{color:var(--bad);font-family:var(--mono);font-size:.8rem;font-weight:500}
+
+/* ---------- callout ---------- */
+.callout{
+  margin:34px 0 0;
+  border-left:3px solid var(--accent);
+  background:var(--surface);
+  border-radius:0 12px 12px 0;
+  padding:24px 26px;
+  max-width:74ch;
+}
+.callout p{margin:0}
+.callout p + p{margin-top:12px}
+.callout .q{
+  font-family:var(--display);font-size:1.16rem;line-height:1.48;
+  color:var(--ink);letter-spacing:-.008em;
+}
+.callout .src{
+  font-family:var(--mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);margin-top:14px;
+}
+
+/* ---------- trap cards ---------- */
+.traps{
+  display:grid;gap:16px;margin-top:30px;
+  grid-template-columns:repeat(auto-fit,minmax(290px,1fr));
+}
+.trap{
+  background:var(--surface);border:1px solid var(--line);
+  border-top:3px solid var(--warn);
+  border-radius:10px;padding:18px 19px 19px;
+}
+.trap h4{
+  margin:0 0 12px;font-size:.95rem;font-weight:600;line-height:1.35;
+  letter-spacing:-.005em;
+}
+.trap dl{margin:0;font-size:.855rem;line-height:1.52}
+.trap dt{
+  font-family:var(--mono);font-size:.64rem;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--muted);margin-bottom:2px;
+}
+.trap dd{margin:0 0 11px;color:var(--ink-2)}
+.trap dd:last-child{margin-bottom:0;color:var(--ink)}
+.ref{
+  display:inline-block;margin-top:11px;
+  font-family:var(--mono);font-size:.68rem;color:var(--muted);
+  border-top:1px solid var(--line-2);padding-top:9px;width:100%;
+}
+
+/* ---------- misc blocks ---------- */
+.pill{
+  display:inline-block;padding:.16em .55em;border-radius:5px;
+  font-family:var(--mono);font-size:.7rem;font-weight:500;letter-spacing:.02em;
+  border:1px solid;
+}
+.pill.ok{color:var(--ok);background:var(--ok-soft);border-color:var(--ok)}
+.pill.no{color:var(--muted);background:var(--surface-2);border-color:var(--line)}
+
+.split{display:grid;gap:26px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:30px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px 22px}
+.panel h3{margin-top:0}
+.panel ul{margin:0;padding-left:1.1em;font-size:.9rem;line-height:1.58;color:var(--ink-2)}
+.panel li{margin-bottom:7px}
+.panel li:last-child{margin-bottom:0}
+.panel li strong{color:var(--ink);font-weight:600}
+.panel.waives{border-left:3px solid var(--ok)}
+.panel.never{border-left:3px solid var(--bad)}
+
+dl.meta{margin:30px 0 0;font-size:.9rem}
+dl.meta div{display:flex;gap:14px;padding:9px 0;border-top:1px solid var(--line-2)}
+dl.meta dt{
+  font-family:var(--mono);font-size:.68rem;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--muted);flex:0 0 118px;padding-top:3px;
+}
+dl.meta dd{margin:0;color:var(--ink-2)}
+
+footer{
+  padding-block:44px 60px;
+  font-size:.84rem;line-height:1.6;color:var(--muted);
+}
+footer p{max-width:74ch}
+footer a{color:var(--muted)}
+
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+</style>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">Papercusp · acceptance system</p>
+    <h1>How a plan ships</h1>
+    <p class="lede">A plan is not done because its items are done. It is done when two independent
+      families of evidence agree — the <strong>code truth</strong> the implementer audits, and the
+      <strong>graded acceptance bar</strong> that someone else reads. This is the mechanism that
+      enforces the gap between them.</p>
+    <ul class="toc">
+      <li><a href="#requirement">The requirement</a></li>
+      <li><a href="#path">The path</a></li>
+      <li><a href="#evidence">What counts as evidence</a></li>
+      <li><a href="#independence">Independence</a></li>
+      <li><a href="#pin">The revision pin</a></li>
+      <li><a href="#refusals">Refusals</a></li>
+      <li><a href="#traps">Six false readings</a></li>
+      <li><a href="#force">Force</a></li>
+    </ul>
+  </div>
+</header>
+
+<main class="wrap">
+
+<!-- ═══════════════════ 1. THE REQUIREMENT ═══════════════════ -->
+<section id="requirement">
+  <div class="prose">
+    <p class="kicker">One authority, three sections</p>
+    <h2>A requirement is a promise, a standard of proof, and a method</h2>
+    <p>There is no separate requirements store. A requirement lives as one rubric criterion, and that
+      criterion owns three sections: <strong>Intent</strong> (the requested outcome and where it came
+      from), <strong>Acceptance</strong> — the BAR — (what must be true, and what would falsify it),
+      and <strong>Verification</strong> (how that outcome is demonstrated, and how to replicate the
+      demonstration).</p>
+    <p>The distinction that matters operationally is which of the three you may revise freely.
+      Improving a method or recording missing provenance leaves the promise intact. Changing the
+      success condition, the falsifier, the required scope, the evidence plane, the proof depth, the
+      mandatory role, or the passing thresholds <em>is</em> a change to the promise, and takes the
+      recorded amendment path instead.</p>
+  </div>
+
+  <figure>
+    <div class="figscroll">
+    <svg viewBox="0 0 940 360" role="img" aria-label="A rubric criterion holds three sections: Intent, Acceptance (the BAR), and Verification. Amending Intent or Verification preserves the BAR's identity; amending Acceptance moves the BAR and requires a preview, an authenticated approval, and a revision-bound transaction.">
+      <defs>
+        <marker id="f1arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--warn)"></path>
+        </marker>
+      </defs>
+
+      <!-- criterion card -->
+      <rect x="40" y="48" width="470" height="300" rx="10" fill="var(--surface)" stroke="var(--line)"></rect>
+      <text x="58" y="74" font-family="var(--mono)" font-size="10" letter-spacing="1.2" fill="var(--accent)">ONE RUBRIC CRITERION</text>
+      <text x="492" y="74" text-anchor="end" font-size="9.5" fill="var(--muted)">the canonical authority</text>
+
+      <!-- Intent -->
+      <rect x="56" y="88" width="438" height="68" rx="6" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="72" y="108" font-size="10" font-weight="600" letter-spacing="1" fill="var(--ink)">INTENT</text>
+      <text x="72" y="126" font-family="var(--mono)" font-size="9" fill="var(--muted)">request · rationale · constraints · sourceRefs</text>
+      <text x="72" y="143" font-size="9.5" fill="var(--ink-2)">the requested outcome and its original provenance</text>
+      <rect x="362" y="97" width="118" height="22" rx="5" fill="var(--ok-soft)" stroke="var(--ok)"></rect>
+      <text x="421" y="112" text-anchor="middle" font-size="9.5" font-weight="600" fill="var(--ok)">BAR preserved</text>
+
+      <!-- Acceptance -->
+      <rect x="56" y="166" width="438" height="96" rx="6" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"></rect>
+      <text x="72" y="188" font-size="10" font-weight="600" letter-spacing="1" fill="var(--ink)">ACCEPTANCE — THE BAR</text>
+      <text x="72" y="210" font-family="var(--mono)" font-size="9" fill="var(--ink-2)">condition · falsifier · role · mandatory</text>
+      <text x="72" y="226" font-family="var(--mono)" font-size="9" fill="var(--ink-2)">requiredScope · evidencePlane · requiredTestLayers · passRatings</text>
+      <text x="72" y="246" font-size="9.5" fill="var(--ink-2)">the promise: what must be true, and what would falsify it</text>
+      <rect x="362" y="175" width="118" height="22" rx="5" fill="var(--warn-soft)" stroke="var(--warn)"></rect>
+      <text x="421" y="190" text-anchor="middle" font-size="9.5" font-weight="600" fill="var(--warn)">THE BAR MOVES</text>
+
+      <!-- Verification -->
+      <rect x="56" y="272" width="438" height="68" rx="6" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="72" y="292" font-size="10" font-weight="600" letter-spacing="1" fill="var(--ink)">VERIFICATION</text>
+      <text x="72" y="310" font-family="var(--mono)" font-size="9" fill="var(--muted)">method · structured check · replication</text>
+      <text x="72" y="327" font-size="9.5" fill="var(--ink-2)">how the outcome is demonstrated, and how to replicate it</text>
+      <rect x="362" y="281" width="118" height="22" rx="5" fill="var(--ok-soft)" stroke="var(--ok)"></rect>
+      <text x="421" y="296" text-anchor="middle" font-size="9.5" font-weight="600" fill="var(--ok)">BAR preserved</text>
+
+      <!-- arrow to amendment path -->
+      <path d="M514,214 L550,214" fill="none" stroke="var(--warn)" stroke-width="1.6" marker-end="url(#f1arrow)"></path>
+
+      <!-- amendment box -->
+      <rect x="554" y="160" width="346" height="112" rx="10" fill="var(--surface)" stroke="var(--warn)" stroke-width="1.4"></rect>
+      <text x="574" y="184" font-family="var(--mono)" font-size="10" letter-spacing="1.2" fill="var(--warn)">AMENDING THE BAR</text>
+      <text x="574" y="208" font-family="var(--mono)" font-size="9.5" fill="var(--muted)">1</text>
+      <text x="592" y="208" font-size="10" fill="var(--ink-2)">preview with rubrics:amend { dryRun }</text>
+      <text x="574" y="230" font-family="var(--mono)" font-size="9.5" fill="var(--muted)">2</text>
+      <text x="592" y="230" font-size="10" fill="var(--ink-2)">obtain the authenticated approval</text>
+      <text x="574" y="252" font-family="var(--mono)" font-size="9.5" fill="var(--muted)">3</text>
+      <text x="592" y="252" font-size="10" fill="var(--ink-2)">apply its revision-bound transaction</text>
+
+      <text x="554" y="300" font-size="9.5" fill="var(--muted)">Re-proposing the rubric, editing template data, or revising</text>
+      <text x="554" y="315" font-size="9.5" fill="var(--muted)">a method cannot bypass these guards.</text>
+    </svg>
+    </div>
+    <figcaption><strong>Two of the three sections are freely amendable; one is not.</strong> A
+      Verification-only amendment preserves the BAR's identity and hash while advancing the dependent
+      revision pins — evidence graded against the earlier revision stays historical and must be
+      refreshed. Supplying both a section and a conflicting older field refuses with
+      <code>requirement_alias_conflict</code> rather than silently picking one.</figcaption>
+  </figure>
+</section>
+
+<!-- ═══════════════════ 2. THE PATH ═══════════════════ -->
+<section id="path">
+  <div class="prose">
+    <p class="kicker">The completion path</p>
+    <h2>Eight steps across three parties</h2>
+    <p>The order is deliberate. The audit runs first, while the implementation is still warm and
+      code-truth gaps are cheap to find. The rubric is authored <em>afterwards</em>, against as-built
+      reality — never at plan creation, and never maintained alongside the implementation, because a
+      bar written before the work describes the plan rather than the result. The independent grading
+      supplies the honesty leg a self-audit structurally cannot.</p>
+    <p>Read the figure by its lanes rather than its arrows: the vertical zigzag <em>is</em> the design.
+      Every drop out of the implementer's lane is a point where the system stops trusting the person
+      who did the work.</p>
+  </div>
+
+  <figure>
+    <div class="figscroll">
+    <svg viewBox="0 0 1040 376" role="img" aria-label="The eight-step ship path drawn as three party lanes. The implementer finishes items, audits code truth, proposes the rubric, attests it against the meta-rubric, records the accept or reject verdict, and ships. A critic critiques the rubric in a separate lane; a non-implementer grades every criterion in a third lane. A rejected verdict returns the work to implementation.">
+      <defs>
+        <marker id="f2arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+        </marker>
+        <marker id="f2warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--warn)"></path>
+        </marker>
+      </defs>
+
+      <!-- evidence family rules -->
+      <text x="266" y="28" text-anchor="middle" font-family="var(--mono)" font-size="9.5" letter-spacing="1.4" fill="var(--accent)">CODE TRUTH</text>
+      <path d="M170,48 L362,48 M170,42 L170,54 M362,42 L362,54" stroke="var(--accent)" stroke-width="2" fill="none"></path>
+      <text x="651" y="28" text-anchor="middle" font-family="var(--mono)" font-size="9.5" letter-spacing="1.4" fill="var(--accent)">ACCEPTANCE RUBRIC</text>
+      <path d="M390,48 L912,48 M390,42 L390,54 M912,42 L912,54" stroke="var(--accent)" stroke-width="2" fill="none"></path>
+      <text x="981" y="28" text-anchor="middle" font-family="var(--mono)" font-size="9.5" letter-spacing="1.4" fill="var(--muted)">RELEASE</text>
+      <path d="M940,48 L1022,48" stroke="var(--muted)" stroke-width="1.2" fill="none" opacity=".55"></path>
+
+      <!-- lane stripes -->
+      <rect x="164" y="60" width="864" height="66" rx="5" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <rect x="164" y="152" width="864" height="66" rx="5" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <rect x="164" y="244" width="864" height="66" rx="5" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+
+      <!-- lane labels -->
+      <text x="152" y="88" text-anchor="end" font-size="10" font-weight="600" letter-spacing="1" fill="var(--ink)">IMPLEMENTER</text>
+      <text x="152" y="103" text-anchor="end" font-size="9.5" fill="var(--muted)">authors the rubric</text>
+      <text x="152" y="180" text-anchor="end" font-size="10" font-weight="600" letter-spacing="1" fill="var(--ink)">CRITIC</text>
+      <text x="152" y="195" text-anchor="end" font-size="9.5" fill="var(--muted)">a live peer, via consult</text>
+      <text x="152" y="272" text-anchor="end" font-size="10" font-weight="600" letter-spacing="1" fill="var(--ink)">GRADER</text>
+      <text x="152" y="287" text-anchor="end" font-size="9.5" fill="var(--muted)">outside the author's lineage</text>
+
+      <!-- spine -->
+      <g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#f2arrow)">
+        <path d="M252,93 L278,93"></path>
+        <path d="M362,93 L388,93"></path>
+        <path d="M472,93 L486,93 L486,185 L498,185"></path>
+        <path d="M582,185 L596,185 L596,93 L608,93"></path>
+        <path d="M692,93 L706,93 L706,277 L718,277"></path>
+        <path d="M802,277 L816,277 L816,93 L828,93"></path>
+        <path d="M912,93 L938,93"></path>
+      </g>
+
+      <!-- step boxes: lane A -->
+      <g>
+        <rect x="170" y="72" width="82" height="42" rx="6" fill="var(--surface)" stroke="var(--line)"></rect>
+        <text x="211" y="91" text-anchor="middle" font-size="9.5" fill="var(--ink)">Finish or drop</text>
+        <text x="211" y="104" text-anchor="middle" font-size="9.5" fill="var(--ink)">every item</text>
+        <circle cx="170" cy="72" r="10" fill="var(--accent)"></circle>
+        <text x="170" y="75.5" text-anchor="middle" font-family="var(--mono)" font-size="10" font-weight="500" fill="var(--surface)">1</text>
+      </g>
+      <g>
+        <rect x="280" y="72" width="82" height="42" rx="6" fill="var(--surface)" stroke="var(--line)"></rect>
+        <text x="321" y="91" text-anchor="middle" font-family="var(--mono)" font-size="8.5" fill="var(--ink)">plans:audit</text>
+        <text x="321" y="104" text-anchor="middle" font-size="9.5" fill="var(--muted)">code truth</text>
+        <circle cx="280" cy="72" r="10" fill="var(--accent)"></circle>
+        <text x="280" y="75.5" text-anchor="middle" font-family="var(--mono)" font-size="10" font-weight="500" fill="var(--surface)">2</text>
+      </g>
+      <g>
+        <rect x="390" y="72" width="82" height="42" rx="6" fill="var(--surface)" stroke="var(--line)"></rect>
+        <text x="431" y="91" text-anchor="middle" font-family="var(--mono)" font-size="8.5" fill="var(--ink)">rubrics:propose</text>
+        <text x="431" y="104" text-anchor="middle" font-size="9.5" fill="var(--muted)">the as-built bar</text>
+        <circle cx="390" cy="72" r="10" fill="var(--accent)"></circle>
+        <text x="390" y="75.5" text-anchor="middle" font-family="var(--mono)" font-size="10" font-weight="500" fill="var(--surface)">3</text>
+      </g>
+      <g>
+        <rect x="610" y="72" width="82" height="42" rx="6" fill="var(--surface)" stroke="var(--line)"></rect>
+        <text x="651" y="91" text-anchor="middle" font-size="9.5" fill="var(--ink)">Attest against</text>
+        <text x="651" y="104" text-anchor="middle" font-size="9.5" fill="var(--ink)">meta-rubric</text>
+        <circle cx="610" cy="72" r="10" fill="var(--accent)"></circle>
+        <text x="610" y="75.5" text-anchor="middle" font-family="var(--mono)" font-size="10" font-weight="500" fill="var(--surface)">5</text>
+      </g>
+      <g>
+        <rect x="830" y="72" width="82" height="42" rx="6" fill="var(--surface)" stroke="var(--line)"></rect>
+        <text x="871" y="91" text-anchor="middle" font-size="9.5" fill="var(--ink)">Record accept</text>
+        <text x="871" y="104" text-anchor="middle" font-size="9.5" fill="var(--ink)">or reject</text>
+        <circle cx="830" cy="72" r="10" fill="var(--accent)"></circle>
+        <text x="830" y="75.5" text-anchor="middle" font-family="var(--mono)" font-size="10" font-weight="500" fill="var(--surface)">7</text>
+      </g>
+      <g>
+        <rect x="940" y="72" width="82" height="42" rx="6" fill="var(--surface)" stroke="var(--ok)" stroke-width="1.4"></rect>
+        <text x="981" y="91" text-anchor="middle" font-size="9.5" font-weight="600" fill="var(--ok)">Ship</text>
+        <text x="981" y="104" text-anchor="middle" font-family="var(--mono)" font-size="8" fill="var(--muted)">set-plan-status</text>
+        <circle cx="940" cy="72" r="10" fill="var(--ok)"></circle>
+        <text x="940" y="75.5" text-anchor="middle" font-family="var(--mono)" font-size="10" font-weight="500" fill="var(--surface)">8</text>
+      </g>
+
+      <!-- step box: lane B -->
+      <g>
+        <rect x="500" y="164" width="82" height="42" rx="6" fill="var(--surface)" stroke="var(--line)"></rect>
+        <text x="541" y="183" text-anchor="middle" font-size="9.5" fill="var(--ink)">Critique</text>
+        <text x="541" y="196" text-anchor="middle" font-size="9.5" fill="var(--ink)">the rubric</text>
+        <circle cx="500" cy="164" r="10" fill="var(--accent)"></circle>
+        <text x="500" y="167.5" text-anchor="middle" font-family="var(--mono)" font-size="10" font-weight="500" fill="var(--surface)">4</text>
+      </g>
+
+      <!-- step box: lane C -->
+      <g>
+        <rect x="720" y="256" width="82" height="42" rx="6" fill="var(--surface)" stroke="var(--line)"></rect>
+        <text x="761" y="275" text-anchor="middle" font-size="9.5" fill="var(--ink)">Grade every</text>
+        <text x="761" y="288" text-anchor="middle" font-size="9.5" fill="var(--ink)">criterion</text>
+        <circle cx="720" cy="256" r="10" fill="var(--accent)"></circle>
+        <text x="720" y="259.5" text-anchor="middle" font-family="var(--mono)" font-size="10" font-weight="500" fill="var(--surface)">6</text>
+      </g>
+
+      <!-- reject return -->
+      <path d="M871,114 L871,356 L211,356 L211,116" fill="none" stroke="var(--warn)" stroke-width="1.5"
+            stroke-dasharray="5 4" marker-end="url(#f2warn)"></path>
+      <text x="541" y="348" text-anchor="middle" font-size="10" fill="var(--warn)">reject ⇒ the work returns to implementation</text>
+    </svg>
+    </div>
+    <figcaption><strong>Step 5 is a self-grade — the one deliberate exception to “the grader is not the
+      author.”</strong> It grades the <em>rubric</em>, with the critic's critique folded in; the
+      scorecard that grades the <em>work</em> still requires a non-implementer. Steps 1–2 and 3–7 are
+      the two evidence families, and they are gated independently: turning the rubric family off
+      leaves the audit demanded, and vice versa.</figcaption>
+  </figure>
+</section>
+
+<!-- ═══════════════════ 3. EVIDENCE ═══════════════════ -->
+<section id="evidence">
+  <div class="prose">
+    <p class="kicker">What counts as evidence</p>
+    <h2>Two citation kinds verify; two declare that nothing was verified</h2>
+    <p>The per-item audit reads the source tree — never a work-item, a doc, or the memory of having
+      written the code. Each submitted item stores its own audited SHA, timestamp and item-text hash;
+      each verifying citation stores a Git-compatible blob SHA. At ship time the gate folds the newest
+      audit entry per item and rechecks only what can have changed: item status, item text, citation
+      resolution, and the cited bytes.</p>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Citation</th><th>Verifies?</th><th>Requires</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>code</code></td>
+          <td><span class="pill ok">counts</span></td>
+          <td>A resolving repo-relative path; an optional <code>line</code> in range; an optional <code>symbol</code> that literally exists</td>
+        </tr>
+        <tr>
+          <td><code>test</code></td>
+          <td><span class="pill ok">counts</span></td>
+          <td>The same resolution rules. An <code>implemented</code> verdict needs at least one resolving <code>code</code> or <code>test</code> citation</td>
+        </tr>
+        <tr>
+          <td><code>doc</code></td>
+          <td><span class="pill no">declares non-verification</span></td>
+          <td><code>ref</code> plus <code>reason</code>. Not a failure — an explicit, counted statement that no code artifact backs this item</td>
+        </tr>
+        <tr>
+          <td><code>none</code></td>
+          <td><span class="pill no">declares non-verification</span></td>
+          <td><code>reason</code>. <code>not-code</code> and <code>dropped</code> verdicts require explanatory notes</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <p class="q">The citation resolver proves that a cited path exists at audit and ship time, that
+      line and symbol anchors resolve, and that cited bytes did not move unnoticed. It does not prove
+      that a real file actually implements the item.</p>
+    <p class="src">Plan completion runbook — “what the mechanics prove, and what they do not”</p>
+  </div>
+
+  <div class="prose">
+    <p style="margin-top:26px">That residual gap is the entire reason for the second evidence family.
+      A machine can confirm that bytes are where you said they were; it cannot confirm that those bytes
+      keep the promise. So the independent grader spot-checks the implementer's citations rather than
+      trusting the coverage summary, and the author must then say <em>accept</em> or <em>reject</em>
+      in their own name.</p>
+    <p>The same asymmetry shows up one level down. A passing unit test of a helper cannot establish a
+      promised end-to-end capability; the BAR's required scope, evidence plane and proof layers have
+      to be met through the promised entry path. Documenting a tested seam for a future consumer does
+      not discharge a promise of a working user-facing capability, and generic ship force cannot
+      discharge an unrealized requirement.</p>
+    <p>Audit verdicts record findings; they do not themselves block shipping. <strong>Item lifecycle is
+      the blocking truth</strong> — in-scope gaps get fixed or the item gets deliberately dropped with
+      a reason. Out-of-scope findings never make a plan uncloseable, but a finding marked
+      <code>filed</code> must name the work-item that now owns it.</p>
+
+    <h3>The six meta-criteria a rubric is vetted against</h3>
+    <p>Before an acceptance rubric may satisfy the gate, its author vets it against
+      <code>meta-acceptance-rubric</code>. The six criteria are a set, not a sequence:</p>
+    <ul style="font-size:.94rem;line-height:1.6;color:var(--ink-2);padding-left:1.15em">
+      <li style="margin-bottom:8px"><strong>Outcomes, not diff restatements.</strong> “The function was extracted” fails; “a contradicted pass-rating refuses the emit” passes.</li>
+      <li style="margin-bottom:8px"><strong>Traces to the plan goal or a Decision.</strong> An untraceable criterion is scope invention.</li>
+      <li style="margin-bottom:8px"><strong>Falsifiable with evidence.</strong> Name the concrete observation that would fail it. If you cannot, rewrite the criterion.</li>
+      <li style="margin-bottom:8px"><strong>Failure modes covered.</strong> At least one criterion catches the plan's plausible regression, not only the happy path.</li>
+      <li style="margin-bottom:8px"><strong>Non-overlapping.</strong> Two criteria that always fail together on the same observation are one criterion.</li>
+      <li><strong>Structured check preferred.</strong> Where an outcome is objectively checkable, bind it — a <code>tests</code> check whose files are actually run at grading time, or an instrument. Prose-only criteria for checkable outcomes are rated down on purpose; that pressure is the criterion's whole point.</li>
+    </ul>
+    <p style="margin-top:18px">For any criterion phrased as a negative, author the <em>falsifier</em>,
+      not the confirming pattern: enumerate what could exhibit a violation and say what makes that
+      enumeration complete. Grepping for the compliant helper cannot reveal a bypass that omits it,
+      and an empty or partial enumeration is <code>unknown</code>, never clean.</p>
+  </div>
+</section>
+
+<!-- ═══════════════════ 4. INDEPENDENCE ═══════════════════ -->
+<section id="independence">
+  <div class="prose">
+    <p class="kicker">Independence</p>
+    <h2>The guard is about parties, not ordering</h2>
+    <p>Vet first and the grading refuses with <code>grader_is_sole_vetting_critic</code>: vetting the
+      rubric made you its only recorded critic, so rubric fitness and work compliance would both be
+      attested by the same party. Grade first to escape that ordering and the readiness projection
+      refuses instead with <code>bar_snapshot_vetting_missing</code>. Refused before, refused after —
+      which is why every agent who meets this pair reads it as a deadlock.</p>
+    <p>It is not one. The guard unions the recorded critics across <em>both</em> vetting channels at
+      the current revision and collapses them to distinct parties, refusing only when every one of
+      them is the same party as the grader. Add a single critic who is not you and the very same
+      grader becomes eligible — in either order.</p>
+  </div>
+
+  <figure>
+    <div class="figscroll">
+    <svg viewBox="0 0 960 424" role="img" aria-label="Two panels with the same grader. On the left, the only recorded critic is the author, so the critics collapse to one party equal to the grader's party and the grading is refused. On the right, a peer outside the author's lineage is recorded on the other channel, producing two distinct parties, and the grading is admitted.">
+      <defs>
+        <marker id="f3arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+        </marker>
+      </defs>
+
+      <!-- ============ PANEL A ============ -->
+      <rect x="24" y="28" width="440" height="384" rx="12" fill="var(--surface-2)" stroke="var(--bad)" stroke-width="1.4"></rect>
+      <text x="48" y="62" font-size="12.5" font-weight="600" fill="var(--ink)">You vet the rubric alone</text>
+      <rect x="356" y="46" width="84" height="22" rx="5" fill="var(--bad-soft)" stroke="var(--bad)"></rect>
+      <text x="398" y="61" text-anchor="middle" font-size="9.5" font-weight="600" fill="var(--bad)">REFUSED</text>
+
+      <text x="48" y="94" font-family="var(--mono)" font-size="9" letter-spacing="1" fill="var(--muted)">RECORDED CRITICS AT THIS REVISION</text>
+      <rect x="48" y="104" width="188" height="56" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+      <text x="62" y="123" font-family="var(--mono)" font-size="8.5" fill="var(--muted)">vettingConsult</text>
+      <text x="62" y="143" font-size="10.5" fill="var(--ink)">you (the author)</text>
+      <rect x="252" y="104" width="188" height="56" rx="7" fill="var(--surface)" stroke="var(--line)" stroke-dasharray="4 3"></rect>
+      <text x="266" y="123" font-family="var(--mono)" font-size="8.5" fill="var(--muted)">vettingWorkItem</text>
+      <text x="266" y="143" font-size="10.5" fill="var(--muted)">— nobody —</text>
+      <text x="244" y="177" text-anchor="middle" font-size="9" fill="var(--muted)">an attestation carries exactly one channel</text>
+      <path d="M244,186 L244,204" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#f3arrow)"></path>
+
+      <text x="48" y="224" font-family="var(--mono)" font-size="9" letter-spacing="1" fill="var(--muted)">COLLAPSE TO DISTINCT PARTIES</text>
+      <rect x="48" y="232" width="188" height="30" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="142" y="251" text-anchor="middle" font-size="10" fill="var(--ink)">the author's party</text>
+      <text x="48" y="280" font-size="9" fill="var(--muted)">your spawn and rebind identities collapse in here too</text>
+      <path d="M244,290 L244,308" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#f3arrow)"></path>
+
+      <text x="48" y="326" font-family="var(--mono)" font-size="9" letter-spacing="1" fill="var(--muted)">THE GRADER</text>
+      <rect x="48" y="332" width="392" height="30" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="244" y="351" text-anchor="middle" font-size="10" fill="var(--ink)">the author's party</text>
+
+      <rect x="48" y="372" width="392" height="30" rx="6" fill="var(--bad-soft)" stroke="var(--bad)"></rect>
+      <text x="244" y="391" text-anchor="middle" font-family="var(--mono)" font-size="9.5" font-weight="500" fill="var(--bad)">grader_is_sole_vetting_critic</text>
+
+      <!-- ============ PANEL B ============ -->
+      <rect x="496" y="28" width="440" height="384" rx="12" fill="var(--surface-2)" stroke="var(--ok)" stroke-width="1.4"></rect>
+      <text x="520" y="62" font-size="12.5" font-weight="600" fill="var(--ink)">A peer vets it as well</text>
+      <rect x="828" y="46" width="84" height="22" rx="5" fill="var(--ok-soft)" stroke="var(--ok)"></rect>
+      <text x="870" y="61" text-anchor="middle" font-size="9.5" font-weight="600" fill="var(--ok)">ADMITTED</text>
+
+      <text x="520" y="94" font-family="var(--mono)" font-size="9" letter-spacing="1" fill="var(--muted)">RECORDED CRITICS AT THIS REVISION</text>
+      <rect x="520" y="104" width="188" height="56" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+      <text x="534" y="123" font-family="var(--mono)" font-size="8.5" fill="var(--muted)">vettingConsult</text>
+      <text x="534" y="143" font-size="10.5" fill="var(--ink)">you (the author)</text>
+      <rect x="724" y="104" width="188" height="56" rx="7" fill="var(--surface)" stroke="var(--ok)" stroke-width="1.4"></rect>
+      <text x="738" y="123" font-family="var(--mono)" font-size="8.5" fill="var(--muted)">vettingWorkItem</text>
+      <text x="738" y="143" font-size="10.5" fill="var(--ink)">a peer, outside your lineage</text>
+      <text x="716" y="177" text-anchor="middle" font-size="9" fill="var(--muted)">so the second critic must use the other channel</text>
+      <path d="M716,186 L716,204" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#f3arrow)"></path>
+
+      <text x="520" y="224" font-family="var(--mono)" font-size="9" letter-spacing="1" fill="var(--muted)">COLLAPSE TO DISTINCT PARTIES</text>
+      <rect x="520" y="232" width="188" height="30" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="614" y="251" text-anchor="middle" font-size="10" fill="var(--ink)">the author's party</text>
+      <rect x="724" y="232" width="188" height="30" rx="6" fill="var(--ok-soft)" stroke="var(--ok)"></rect>
+      <text x="818" y="251" text-anchor="middle" font-size="10" fill="var(--ok)">the peer's party</text>
+      <text x="520" y="280" font-size="9" fill="var(--muted)">two distinct parties are now on record</text>
+      <path d="M716,290 L716,308" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#f3arrow)"></path>
+
+      <text x="520" y="326" font-family="var(--mono)" font-size="9" letter-spacing="1" fill="var(--muted)">THE GRADER — UNCHANGED</text>
+      <rect x="520" y="332" width="392" height="30" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="716" y="351" text-anchor="middle" font-size="10" fill="var(--ink)">the author's party</text>
+
+      <rect x="520" y="372" width="392" height="30" rx="6" fill="var(--ok-soft)" stroke="var(--ok)"></rect>
+      <text x="716" y="391" text-anchor="middle" font-size="10" font-weight="600" fill="var(--ok)">a critic party ≠ the grader — grading admitted</text>
+    </svg>
+    </div>
+    <figcaption><strong>Same grader, same ordering — only the critic set differs.</strong> Three things
+      look like the escape and are not: a second critic inside your own spawn or rebind lineage
+      (identities collapse to one party), grading first to get ahead of the attestation (that only
+      swaps which refusal you receive), and re-vetting yourself at a newer revision (that re-records
+      the same sole party). The refusal now carries this route as a structured
+      <code>remedy</code> — which matters, because it fires at the <em>end</em> of the ceremony, after
+      the implementation, the audit and the rubric authoring are all paid for.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <p style="margin-top:26px">Recruit the second critic directly: find a live session outside your
+      lineage with <code>coord:presence</code>, then <code>coord:dispatch</code>, or
+      <code>work_items:create</code> naming them in <code>assign_to</code> — which is born-admitted and
+      claimable in the same write. Do not launch one: <code>grader-eligibility.ts</code> resolves the
+      rubric author as the implementer and refuses anyone in that author's spawn or rebind lineage, so
+      a grader you spawn is ineligible by construction, and you discover it only after paying for the
+      boot and the grading pass.</p>
+  </div>
+</section>
+
+<!-- ═══════════════════ 5. THE PIN ═══════════════════ -->
+<section id="pin">
+  <div class="prose">
+    <p class="kicker">Revision currency</p>
+    <h2>One edit voids both cards at once</h2>
+    <p>Every scorecard pins the rubric plan row's version at emit time, and any
+      <code>rubrics:propose</code> of the same rubric bumps that version. This is deliberately strict:
+      a typo-only re-propose voids the attestation too, because only re-reading the rubric can judge
+      whether a change was material. The expensive consequence is that the attestation and a peer's
+      completed grading pin to the same number, so a single late edit un-counts both.</p>
+  </div>
+
+  <figure>
+    <div class="figscroll">
+    <svg viewBox="0 0 880 400" role="img" aria-label="Before an edit, the vetting attestation and the independent grading are both pinned to rubric version 9 and the ship gate is satisfied. A rubrics:propose call bumps the version to 10, and both cards are voided at once, leaving the gate refusing with acceptance_rubric_unvetted and acceptance_ungraded.">
+      <defs>
+        <marker id="f4arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+        </marker>
+      </defs>
+
+      <!-- BEFORE -->
+      <rect x="30" y="44" width="110" height="44" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="85" y="71" text-anchor="middle" font-family="var(--mono)" font-size="11.5" fill="var(--accent)">rubric v9</text>
+
+      <rect x="200" y="44" width="190" height="44" rx="8" fill="var(--surface)" stroke="var(--ok)" stroke-width="1.3"></rect>
+      <text x="295" y="64" text-anchor="middle" font-size="10.5" fill="var(--ink)">vetting attestation</text>
+      <text x="295" y="79" text-anchor="middle" font-family="var(--mono)" font-size="8.5" fill="var(--ok)">rubricRevision 9</text>
+
+      <rect x="410" y="44" width="190" height="44" rx="8" fill="var(--surface)" stroke="var(--ok)" stroke-width="1.3"></rect>
+      <text x="505" y="64" text-anchor="middle" font-size="10.5" fill="var(--ink)">independent grading</text>
+      <text x="505" y="79" text-anchor="middle" font-family="var(--mono)" font-size="8.5" fill="var(--ok)">rubricRevision 9</text>
+
+      <rect x="640" y="44" width="210" height="44" rx="8" fill="var(--ok-soft)" stroke="var(--ok)"></rect>
+      <text x="745" y="71" text-anchor="middle" font-size="10.5" font-weight="600" fill="var(--ok)">ship gate: both satisfied</text>
+
+      <path d="M85,88 L85,110 L505,110 M295,88 L295,110" fill="none" stroke="var(--ok)" stroke-width="1.3"></path>
+      <path d="M505,88 L505,110" fill="none" stroke="var(--ok)" stroke-width="1.3"></path>
+      <text x="295" y="126" text-anchor="middle" font-family="var(--mono)" font-size="8.5" fill="var(--muted)">pinned to harness_plans.version</text>
+
+      <path d="M440,138 L440,156" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#f4arrow)"></path>
+
+      <!-- EVENT -->
+      <rect x="30" y="158" width="820" height="54" rx="9" fill="var(--warn-soft)" stroke="var(--warn)" stroke-width="1.3"></rect>
+      <text x="48" y="181" font-family="var(--mono)" font-size="11.5" font-weight="500" fill="var(--warn)">rubrics:propose</text>
+      <text x="48" y="199" font-size="10" fill="var(--ink-2)">any edit bumps the version — a typo-only re-propose voids the attestation too</text>
+      <text x="832" y="190" text-anchor="end" font-family="var(--mono)" font-size="13" font-weight="500" fill="var(--warn)">v9 → v10</text>
+
+      <path d="M440,214 L440,232" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#f4arrow)"></path>
+
+      <!-- AFTER -->
+      <rect x="30" y="240" width="110" height="44" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="85" y="267" text-anchor="middle" font-family="var(--mono)" font-size="11.5" fill="var(--accent)">rubric v10</text>
+
+      <rect x="200" y="240" width="190" height="44" rx="8" fill="var(--surface)" stroke="var(--warn)" stroke-width="1.3" stroke-dasharray="5 4"></rect>
+      <text x="295" y="260" text-anchor="middle" font-size="10.5" fill="var(--muted)">vetting attestation</text>
+      <text x="295" y="275" text-anchor="middle" font-family="var(--mono)" font-size="8.5" fill="var(--warn)">still pinned at 9 — VOIDED</text>
+
+      <rect x="410" y="240" width="190" height="44" rx="8" fill="var(--surface)" stroke="var(--warn)" stroke-width="1.3" stroke-dasharray="5 4"></rect>
+      <text x="505" y="260" text-anchor="middle" font-size="10.5" fill="var(--muted)">independent grading</text>
+      <text x="505" y="275" text-anchor="middle" font-family="var(--mono)" font-size="8.5" fill="var(--warn)">still pinned at 9 — VOIDED</text>
+
+      <rect x="640" y="240" width="210" height="44" rx="8" fill="var(--bad-soft)" stroke="var(--bad)"></rect>
+      <text x="745" y="258" text-anchor="middle" font-family="var(--mono)" font-size="8.5" font-weight="500" fill="var(--bad)">acceptance_rubric_unvetted</text>
+      <text x="745" y="272" text-anchor="middle" font-family="var(--mono)" font-size="8.5" font-weight="500" fill="var(--bad)">acceptance_ungraded</text>
+
+      <path d="M85,284 L85,306 L250,306 M340,306 L505,306 M295,284 L295,306 M505,284 L505,306"
+            fill="none" stroke="var(--warn)" stroke-width="1.3" stroke-dasharray="5 4"></path>
+      <text x="295" y="324" text-anchor="middle" font-family="var(--mono)" font-size="8.5" fill="var(--warn)">pin ≠ current version</text>
+
+      <text x="30" y="352" font-size="10.5" fill="var(--ink-2)">The recovery loop: critique → improve (the version bumps) → re-emit the attestation citing the SAME consult, which escapes the unchanged-evidence dedupe.</text>
+      <text x="30" y="372" font-size="10.5" fill="var(--ink-2)">The independent grading, however, has to be run again by the grader. So batch every intended revision before you request it.</text>
+    </svg>
+    </div>
+    <figcaption><strong>This is the most expensive ordinary mistake in the system.</strong> Two degrade
+      rules keep it honest in both directions: if the current version is unreadable for infrastructure
+      reasons the check degrades <em>open</em>, so any linked vetting satisfies it; but a stamp missing
+      its <code>rubricRevision</code> while the current version <em>is</em> known counts as not
+      current — strict toward re-vetting rather than toward shipping.</figcaption>
+  </figure>
+</section>
+
+<!-- ═══════════════════ 6. REFUSALS ═══════════════════ -->
+<section id="refusals">
+  <div class="prose">
+    <p class="kicker">Refusals</p>
+    <h2>Every refusal names the repair it demands</h2>
+    <p>The two families are gated independently, and only the first is waivable. Step numbers refer to
+      the path above.</p>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Refusal</th><th>Step</th><th>What it means</th><th>The repair</th></tr>
+      </thead>
+      <tbody>
+        <tr class="famrow code"><td colspan="4">Code truth — <code>PLAN_ITEM_COMPLETION_GATE</code> · <code>PLAN_CODE_AUDIT_GATE</code>, both default on, both waivable by force</td></tr>
+        <tr>
+          <td><span class="rc">plan_items_unfinished</span></td>
+          <td><span class="step">1</span></td>
+          <td>An item is still <code>todo</code>, <code>blocked</code>, or <code>needs-human</code>.</td>
+          <td>Finish it, or drop it deliberately with a note. Departing from the plan is allowed; doing it silently is not.</td>
+        </tr>
+        <tr>
+          <td><span class="rc">acceptance_unaudited</span></td>
+          <td><span class="step">2</span></td>
+          <td>No code-truth audit has ever run for this plan.</td>
+          <td>Run the first <code>plans:audit</code> pass.</td>
+        </tr>
+        <tr>
+          <td><span class="rc">audit_coverage_stale</span></td>
+          <td><span class="step">2</span></td>
+          <td>Named items are missing, reopened, text-changed, or their cited blobs moved.</td>
+          <td>Re-audit <em>only</em> the named items. Do not copy unchanged entries into a new pass — unlisted items carry forward with their original provenance.</td>
+        </tr>
+        <tr>
+          <td><span class="rc">audit_citations_unresolved</span></td>
+          <td><span class="step">2</span></td>
+          <td>A cited path, line, or symbol no longer resolves.</td>
+          <td>Repair the citation, then re-audit only those items.</td>
+        </tr>
+        <tr class="famrow rubric"><td colspan="4">Acceptance rubric — gated separately, and <strong style="color:var(--bad)">not waivable by force</strong></td></tr>
+        <tr>
+          <td><span class="rc">acceptance_rubric_missing</span></td>
+          <td><span class="step">3</span></td>
+          <td>No post-implementation rubric exists.</td>
+          <td>Author one under the plan's class: <code>feature-ship</code>, <code>bugfix</code>, <code>migration</code>, or <code>investigation</code>.</td>
+        </tr>
+        <tr>
+          <td><span class="rc">acceptance_rubric_unvetted</span></td>
+          <td><span class="step">5</span></td>
+          <td>No attestation exists at the <em>current</em> revision.</td>
+          <td>Critique, improve, then emit the meta-scorecard against <code>meta-acceptance-rubric</code> citing the consult.</td>
+        </tr>
+        <tr>
+          <td><span class="rc">acceptance_ungraded</span></td>
+          <td><span class="step">6</span></td>
+          <td>No complete, non-synthesized grading exists.</td>
+          <td>Route the grading to a non-implementer — every criterion, with concrete evidence.</td>
+        </tr>
+        <tr>
+          <td><span class="rc">self_graded_only</span></td>
+          <td><span class="step">6</span></td>
+          <td>The only grading on record is the rubric author's.</td>
+          <td>Obtain one from somebody else.</td>
+        </tr>
+        <tr>
+          <td><span class="rc">grader_is_sole_vetting_critic</span></td>
+          <td><span class="step">6</span></td>
+          <td>Every recorded critic collapses to the grader's own party.</td>
+          <td>Add one critic outside your lineage, recorded on the <em>other</em> channel. Not a different ordering.</td>
+        </tr>
+        <tr>
+          <td><span class="rc">acceptance_not_recorded</span></td>
+          <td><span class="step">7</span></td>
+          <td>An independent grading exists; the author's verdict does not.</td>
+          <td>Re-emit the complete ratings with <code>acceptance:{ verdict, reasoning }</code>. Do <em>not</em> pass <code>supersedes</code> — the independent card must stay visible.</td>
+        </tr>
+        <tr>
+          <td><span class="rc">acceptance_rejected</span></td>
+          <td><span class="step">7</span></td>
+          <td>The latest author verdict is <code>reject</code>.</td>
+          <td>Address the rejection, then record a newer verdict. Reject is a real terminal judgment, not a placeholder.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="prose">
+    <p style="margin-top:26px">The vetting check has one more property worth knowing: if no meta-rubric
+      is registered in the workspace at all, the check <em>disables itself</em> rather than refusing.
+      A gate demanding a flow the workspace cannot run is a deadlock, not a guard. The meta-rubric only
+      needs to be registered, not ratified — ratification governs content authority, and demanding it
+      would park every plan ship behind the owner's approval wall. Two things are exempt by design:
+      empty-criteria investigation rubrics, and the meta-rubric itself. That exemption is one level
+      deep by construction — there is no meta-meta-rubric, because the meta-rubric's content is
+      owner-ratified instead.</p>
+  </div>
+</section>
+
+<!-- ═══════════════════ 7. TRAPS ═══════════════════ -->
+<section id="traps">
+  <div class="prose">
+    <p class="kicker">Six false readings</p>
+    <h2>Where the honest reading of what you see is the wrong one</h2>
+    <p>None of these is a defect. Each is a place where a correct run looks broken, or a broken one
+      looks fine — which is the more dangerous direction.</p>
+  </div>
+
+  <div class="traps">
+    <div class="trap">
+      <h4>The attestation reads as never having landed</h4>
+      <dl>
+        <dt>What you see</dt>
+        <dd><code>observation-&gt;&gt;'vettingConsult'</code> returns <code>NULL</code> on a perfectly good vetting.</dd>
+        <dt>What it means</dt>
+        <dd>The argument goes in flat and is stored as an object. Read <code>observation.vetting</code> — <code>{ consultId, rubricRevision }</code> — and compare that revision to the rubric's current one while you are there. Querying the argument's own name invites a pointless re-consult of a consult that is already closed and already cited.</dd>
+      </dl>
+    </div>
+
+    <div class="trap">
+      <h4>Your ratings are refused as off-scale</h4>
+      <dl>
+        <dt>What you see</dt>
+        <dd>A composed scorecard rejected after you wrote every rating and its evidence.</dd>
+        <dt>What it means</dt>
+        <dd>The scale is per-rubric and does not carry over. The meta-rubric grades <code>pass · weak · fail · not-applicable</code>; most acceptance rubrics grade <code>healthy · degraded · broken · unknown</code>. You will typically write both within an hour. Read the target's <code>ratingScale</code> first and map deliberately — <code>healthy→pass</code>, <code>degraded→weak</code>.</dd>
+      </dl>
+    </div>
+
+    <div class="trap">
+      <h4>A green check that proves nothing</h4>
+      <dl>
+        <dt>What you see</dt>
+        <dd>A <code>tests</code> check bound to a criterion, resolving and running green.</dd>
+        <dt>What it means</dt>
+        <dd>Propose-time validation checks that the path resolves; grading-time validation refuses a pass-rating over a red run. Neither can tell whether the file tests the criterion it is bound to. A green run on the wrong file reads downstream as machine-confirmed evidence for a claim nobody verified — strictly worse than prose-only, which at least declares itself as judgment. Open the file and read its test names before binding.</dd>
+      </dl>
+    </div>
+
+    <div class="trap">
+      <h4>A rubric that “does not exist”</h4>
+      <dl>
+        <dt>What you see</dt>
+        <dd>The deployed operator answers <code>rubric not found</code>, and the list endpoint silently skips the row.</dd>
+        <dt>What it means</dt>
+        <dd>Postgres held it active and unarchived; the deployed build's older schema rejected it, and the row-mapper returns null on a parse failure while every caller drops it. A schema rejection is byte-identical in effect to an absence. Three surfaces agreed the rubric was gone — they shared one upstream cause.</dd>
+      </dl>
+      <span class="ref">Observed 2026-09-07 · filed as EI-22391548157370980</span>
+    </div>
+
+    <div class="trap">
+      <h4>The consult that answers nobody</h4>
+      <dl>
+        <dt>What you see</dt>
+        <dd>A vetting consult opens and returns <code>no_qualified_responder</code>.</dd>
+        <dt>What it means</dt>
+        <dd>The eligible pool can be entirely dead — not below the relevance floor, but every candidate <code>ended</code>. Read the candidates' liveness rather than the verdict alone, then recruit a critic directly off <code>coord:presence</code> and record them via the work-item channel.</dd>
+      </dl>
+      <span class="ref">Observed 2026-09-07 · filed as EI-22642013373311117</span>
+    </div>
+
+    <div class="trap">
+      <h4>A transcribed critique is not third-party</h4>
+      <dl>
+        <dt>What you see</dt>
+        <dd>An attestation citing a <code>vettingWorkItem</code> is refused, though the critique plainly happened.</dd>
+        <dt>What it means</dt>
+        <dd>The critic's own comment has to be on that work-item. The author faithfully transcribing what the critic said does not satisfy it, and the emit succeeded on the next attempt with the payload otherwise unchanged once the critic posted in their own name.</dd>
+      </dl>
+      <span class="ref">Observed 2026-09-07 · WI-10000622, comment authored by the critic</span>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ 8. FORCE ═══════════════════ -->
+<section id="force">
+  <div class="prose">
+    <p class="kicker">The scoped escape</p>
+    <h2>Force is loud, narrow, and permanent</h2>
+    <p>Shipping with <code>force:{ reason }</code> waives exactly four checks and nothing else. Every
+      waived check, its reason, the actor and the time are appended to the plan's permanent
+      <code>forcedPast</code> marker and returned by every subsequent plan read. It exists to record a
+      deliberate exception, never to disguise one.</p>
+  </div>
+
+  <div class="split">
+    <div class="panel waives">
+      <h3>Force can waive</h3>
+      <ul>
+        <li><code>plan_items_unfinished</code></li>
+        <li><code>acceptance_unaudited</code></li>
+        <li><code>audit_coverage_stale</code></li>
+        <li><code>audit_citations_unresolved</code></li>
+      </ul>
+      <p style="margin:14px 0 0;font-size:.86rem;color:var(--muted)">The code-truth family only — the
+        evidence a machine can check.</p>
+    </div>
+    <div class="panel never">
+      <h3>Force can never waive</h3>
+      <ul>
+        <li><strong>Rubric existence</strong> — a bar must be written</li>
+        <li><strong>Vetting</strong> — its own gate, outside the force path entirely</li>
+        <li><strong>Independent grading</strong> — the honesty leg</li>
+        <li><strong>The author's acceptance verdict</strong> — someone has to say it in their own name</li>
+      </ul>
+      <p style="margin:14px 0 0;font-size:.86rem;color:var(--muted)">The judgment family — and generic
+        force cannot discharge an unrealized requirement.</p>
+    </div>
+  </div>
+
+  <dl class="meta">
+    <div><dt>Implementation</dt><dd><code>requirement-contract.ts</code> · <code>acceptance-bar-contract-snapshot.ts</code> · <code>grader-eligibility.ts</code> · <code>rubrics.integration.test.ts</code> · <code>requirement-fulfillment.test.ts</code></dd></div>
+    <div><dt>Acceptance plane</dt><dd>The current staging build is where implementation is accepted. Final promotion and deployment carry their own evidence — report them only after verifying them.</dd></div>
+    <div><dt>Not introduced</dt><dd>No new table, no parallel acceptance gate, no separate validation store. A requirement is a rubric criterion.</dd></div>
+  </dl>
+</section>
+
+</main>
+
+<footer class="wrap">
+  <p>Assembled from three canonical runbooks — <em>One requirement: Intent, Acceptance and
+    Verification</em>, <em>Plan completion: code-truth audit, acceptance grading, and ship verdict</em>,
+    and <em>Acceptance-rubric vetting: the meta-rubric method</em> — read on the engineering docs
+    surface on 2026-09-08. The six field readings carry their own observation dates and issue
+    references; treat those as observations from a single run, not as documented contract. Nothing
+    here supersedes the runbooks, and where this page and a gate's own teaching error disagree,
+    the gate is right.</p>
+</footer>

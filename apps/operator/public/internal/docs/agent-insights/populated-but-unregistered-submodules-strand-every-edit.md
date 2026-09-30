@@ -1,0 +1,175 @@
+# A submodule that was never `git submodule init`ed strands every edit inside it — and the tick that strands your work reports 'synced'
+URL: /internal/docs/agent-insights/populated-but-unregistered-submodules-strand-every-edit
+
+Symptom: your file is on disk, the local build is green, and a clean clone of the branch does not have it at all — with no error on any git-sync tick. Root cause: `git submodule status` prefixes '-' when `.git/config` carries no `submodule.<name>.url`, which says NOTHING about whether the worktree is populated; git-sync's discovery filtered those rows out, so it never visited repos full of real work. Covers the mechanism (absent from .git/config, NOT undeclared in .gitmodules), the `git submodule init` fix, the new git-sync-strand escalation, the null-vs-[] tri-state that keeps a self-clearing escalation honest, and two traps that bite during the rescue.
+
+## The symptom
+
+You edit a file inside a submodule. It is on disk. The local build is green. Tests
+pass. `git status` in the superproject says nothing is wrong, and git-sync's routine
+row reports a clean `synced` on every tick.
+
+And a clean clone of that branch does not contain your edit at all — not now, not
+after the next tick, not ever.
+
+This ran for hours on the sidestage tree before anyone noticed, because **the tick
+that strands your work is otherwise a perfectly clean pass**. Silence is the defect's
+entire signature. There is nothing to grep for.
+
+## The mechanism — and the part I got wrong twice
+
+`git submodule status` prefixes a row with `-` when **`.git/config` carries no
+`submodule.<name>.url` entry** for that path, i.e. `git submodule init` was never
+run for it.
+
+That is the whole meaning of the prefix. In particular it does **not** mean:
+
+* ❌ "the submodule is undeclared in `.gitmodules`" — it is usually declared there;
+  `.gitmodules` is the *committed* declaration, `.git/config` is the *local
+  registration*, and the `-` is about the second one.
+* ❌ "the worktree is empty / uninitialized on disk" — the worktree can be fully
+  populated, with a real `.git`, real history, and real uncommitted work in it.
+
+I stated the first of those twice on this investigation, in a checkpoint each time,
+and had to retract it twice. The distinction is not pedantry: it *is* the bug, and it
+is also the fix (`git submodule init` writes exactly the missing `.git/config` line).
+
+`discoverSubmodulesRecursive` (`run-git-sync.ts`) had two code paths with
+inconsistent initialization tests:
+
+| path     | when it runs                                     | test used                                         |
+| -------- | ------------------------------------------------ | ------------------------------------------------- |
+| primary  | `git submodule status` exits 0 — the normal case | drop every row prefixed `-`                       |
+| fallback | discovery **fails** (non-zero exit)              | `lstat(<path>/.git)` — is the worktree populated? |
+
+The fallback's test is strictly better, and it only ever ran when the primary had
+already failed. So in the normal case the weak test governed: a populated submodule
+full of real work was classified "uninitialized" and skipped. git-sync never visited
+the repo, so it could not commit its dirty files — no error, no warning, no
+escalation, every tick.
+
+**Measured on the sidestage tree, 2026-08-14:** `git submodule status --recursive`
+exited 0 with 7 of 8 rows `-`-prefixed; `.git/config` held exactly one
+`submodule.*.url` entry; the real exported discovery function returned **1 path of
+8**; and three tracked files sat uncommitted across two of the skipped submodules.
+The papercusp tree itself was clean (all 38 submodules space-prefixed) — the class
+is latent fleet-wide and was firing on exactly one hive.
+
+## Diagnose it in three commands
+
+```bash
+git submodule status --recursive | grep '^-'      # candidates: unregistered rows
+ls -d libs/*/.git 2>/dev/null                     # which of them are actually populated
+git -C <that path> status --porcelain -uno        # tracked work sitting in one
+```
+
+A path that appears in **all three** is stranding work right now. A `-` row with no
+`.git` on disk is genuinely uninitialized and harmless — there is nothing there to
+lose.
+
+Count **tracked** modifications only (`-uno`). Untracked scratch churn — a
+`.vitest-tmp/` from a test run in flight — would otherwise cry wolf on every tick.
+
+## The fix
+
+```bash
+git submodule init <path>     # idempotent; copies the .gitmodules URL into .git/config
+```
+
+Then commit and push the rescued work from inside the submodule, and only afterwards
+let the superproject gitlink move (see the ordering rule below).
+
+## What git-sync does about it now
+
+The discovery pass now takes a **census** of populated-but-unregistered submodules
+holding tracked modifications, and the action layer writes a
+`git-sync-strand` escalation naming the submodules *and the files* a human must
+rescue — not just a count they then have to go find.
+
+Two deliberate design choices worth knowing before you "improve" it:
+
+* **It rides its own phase row** (`git-sync-strand`), separate from the
+  conflict/error row (`git-sync`) — exactly like the content guard's quarantine
+  channel. A strand and a merge conflict can coexist and clear independently.
+* **It dispatches no fixer.** Unlike the content guard, git-sync must *not*
+  auto-resolve a strand. These worktrees are commonly parked on deliberate detached
+  pins; registering one would pull it into the normal path, which fetches, merges and
+  pushes it — **unpinning it**. Registering is the operator's call. Losing the work
+  silently is not. The escalation row is the whole deliverable: visible, queryable,
+  and self-clearing on the first pass that measures a clean tree.
+
+## The tri-state that keeps a self-clearing escalation honest
+
+This generalizes past git-sync, and it is the part most likely to be broken by a
+well-meaning later edit.
+
+An escalation that clears itself needs the measurement to distinguish **three**
+states, not two:
+
+| value     | meaning                                                                             | action                               |
+| --------- | ----------------------------------------------------------------------------------- | ------------------------------------ |
+| `null`    | this pass did **not measure** (discovery never ran, or an early return bypassed it) | do nothing — neither write nor clear |
+| `[]`      | measured, and nothing is stranded                                                   | **clear** any existing escalation    |
+| non-empty | measured, and this is what is stranded                                              | write/refresh the escalation         |
+
+Collapse `null` into `[]` — the tempting one-character `?? []` — and an *unmeasured*
+pass silently retires a live warning. The escalation vanishes on the first tick that
+took an early return, while the work is still stranded, and the operator now has
+positive evidence that everything is fine.
+
+This is enforced, not just intended: a mutation probe substituting
+`outcome.strandedSubmodules ?? []` at the call site returns **verdict=caught**
+(`baseline_exit=0`, `guard_exit=1`). Run it before trusting the guard again:
+
+```bash
+scripts/mutation-probe.sh --in-tree --sweep-lock-held \
+  --file packages/operator-core/lib/harness/git-sync/git-sync-action.ts \
+  --mutate 's/const stranded = outcome\.strandedSubmodules;/const stranded = outcome.strandedSubmodules ?? [];/' \
+  --test 'npm run test:file -- packages/operator-core/lib/harness/git-sync/git-sync-action.test.ts'
+```
+
+Symmetrically, the census callback fires **even when empty** — the caller needs the
+all-clear to retire a stale row — but only on the path that actually measured.
+
+## Two traps during the rescue
+
+### Pushing a submodule may need an SSH push URL
+
+On this box the sidestage **superproject** uses a split remote: HTTPS to fetch, SSH
+to push. The submodules carried only the HTTPS URL, and pushing one failed:
+
+```
+403 — You must verify your email address
+```
+
+That message reads like an account problem and is not one. Apply the superproject's
+own pattern:
+
+```bash
+git -C <submodule> remote set-url --push origin git@github.com:Org/repo.git
+git -C <submodule> remote -v      # expect an https fetch url and a git@ push url
+```
+
+### Never bump a superproject pin before the commit is on origin
+
+A superproject gitlink is a *pointer*. Bump it to a sha that exists only in your
+local submodule and a clean clone cannot fetch it — you have converted a silent
+strand into a loud clone failure, which is better but still broken.
+
+Order is: commit inside the submodule → **push it to origin** → confirm
+(`git -C <submodule> rev-parse origin/<branch>`) → only then let the superproject
+gitlink move. git-sync sweeps the bumped gitlink on its next tick; that part is its
+job, not yours.
+
+## Related
+
+* [git-sync quarantines a broken file instead of committing it](/internal/docs/agent-insights/git-sync-content-guard-quarantine)
+  — the sibling escalation channel, same "your file just sits there dirty" symptom,
+  different cause.
+* [A guard that reasons from ABSENCE reports a blind enumerator as 'fixed'](/internal/docs/agent-insights/a-guard-that-reasons-from-absence-reports-a-blind-enumerator-as-fixed)
+  — the release/checkpoint checkout's submodules have no `.git` at all, which is a
+  *different* invisibility with the same shape: an enumerator that sees nothing and
+  reports clean.
+* [Across a submodule boundary, git answers a question you did not ask](/internal/docs/agent-insights/verifying-a-change-across-a-submodule-boundary)
+  — why superproject-level git commands return confident empties about submodule
+  file content.

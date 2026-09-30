@@ -1,0 +1,33 @@
+{
+  "name": "@papercusp/cupboard-worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "predeploy": "wrangler d1 migrations apply papercusp-cupboard --remote",
+    "deploy": "wrangler deploy",
+    "db:types:generate": "node scripts/generate-db-row-types.mjs",
+    "db:types:check": "node scripts/generate-db-row-types.mjs --check",
+    "d1:apply:local": "wrangler d1 execute papercusp-cupboard --local --file migrations/001_init.sql",
+    "d1:apply:remote": "wrangler d1 execute papercusp-cupboard --remote --file migrations/001_init.sql",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "npm run db:types:check && bash ../../scripts/pc-heavy.sh tsc --noEmit"
+  },
+  "dependencies": {
+    "@papercusp/artifact-registry": "*",
+    "@papercusp/deployment-driver": "*",
+    "@papercusp/operator-core": "*",
+    "hono": "^4.13.7",
+    "viem": "^2.56.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "@papercusp/test-config": "*",
+    "@typescript/native": "npm:typescript@7.0.2",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "vitest": "^4.1.4",
+    "wrangler": "^4.0.0"
+  }
+}

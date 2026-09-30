@@ -1,0 +1,513 @@
+diff --git a/node_modules/verdict-cli/bin/browse.mjs b/node_modules/verdict-cli/bin/browse.mjs
+index a3392d2..c83809b 100755
+--- a/node_modules/verdict-cli/bin/browse.mjs
++++ b/node_modules/verdict-cli/bin/browse.mjs
+@@ -20,7 +20,9 @@ const SERVER_SCRIPT = resolve(__dirname, '..', 'src', 'server.mjs');
+ // Parse --session <name> and --json from argv early
+ const rawArgs = process.argv.slice(2);
+ const jsonFlag = rawArgs.includes('--json');
+-let sessionName = null;
++// Papercusp agents already have a stable per-session identity. Use it when
++// callers do not pass --session so concurrent agents do not share a daemon.
++let sessionName = process.env.VERDICT_SESSION || process.env.PAPERCUSP_SID || process.env.CODEX_SESSION_ID || null;
+ const filtered = [];
+ for (let i = 0; i < rawArgs.length; i++) {
+   if (rawArgs[i] === '--json') continue;
+@@ -31,6 +33,11 @@ const [command, ...args] = filtered;
+ 
+ const DATA_DIR = sessionName ? resolve(BASE_DATA_DIR, 'sessions', sessionName) : BASE_DATA_DIR;
+ const STATE_FILE = resolve(DATA_DIR, 'verdict.json');
++const configuredStartTimeoutMs = Number.parseInt(process.env.VERDICT_START_TIMEOUT_MS ?? '', 10);
++const START_TIMEOUT_MS = Number.isFinite(configuredStartTimeoutMs) && configuredStartTimeoutMs >= 250
++  ? configuredStartTimeoutMs
++  : 30_000;
++const START_POLL_MS = 250;
+ 
+ function readState() {
+   try { return existsSync(STATE_FILE) ? JSON.parse(readFileSync(STATE_FILE, 'utf8')) : null; } catch { return null; }
+@@ -43,10 +50,20 @@ function isAlive(pid) {
+ async function startServer() {
+   const env = { ...process.env };
+   if (sessionName) env.VERDICT_SESSION = sessionName;
+-  const child = spawn('node', [SERVER_SCRIPT], { detached: true, stdio: 'ignore', env });
++  const child = spawn('node', [SERVER_SCRIPT], { detached: true, stdio: ['ignore', 'ignore', 'pipe'], env });
++  let stderr = '';
++  child.stderr?.on('data', (chunk) => {
++    stderr += chunk.toString();
++    if (stderr.length > 8192) stderr = stderr.slice(-8192);
++  });
++  // The server is intentionally long-lived. Keeping its stderr pipe referenced
++  // pins the short-lived CLI client until the daemon exits, even after a
++  // successful command. The startup loop below remains referenced while it
++  // needs diagnostics; after it returns, this pipe must not keep Node alive.
++  child.stderr?.unref?.();
+   child.unref();
+-  for (let i = 0; i < 60; i++) {
+-    await new Promise(r => setTimeout(r, 250));
++  for (let elapsedMs = 0; elapsedMs < START_TIMEOUT_MS; elapsedMs += START_POLL_MS) {
++    await new Promise(r => setTimeout(r, Math.min(START_POLL_MS, START_TIMEOUT_MS - elapsedMs)));
+     const state = readState();
+     if (state && isAlive(state.pid)) {
+       // Verify the server actually responds before returning
+@@ -60,7 +77,10 @@ async function startServer() {
+       } catch {}
+     }
+   }
+-  throw new Error('Server failed to start within 15 seconds');
++  const diagnostic = stderr.trim();
++  throw new Error(
++    `Server failed to start within ${START_TIMEOUT_MS}ms${diagnostic ? `\n--- server stderr ---\n${diagnostic}` : ''}`,
++  );
+ }
+ 
+ async function send(state, command, args) {
+@@ -69,7 +89,19 @@ async function send(state, command, args) {
+     headers: { 'Authorization': `Bearer ${state.token}`, 'Content-Type': 'application/json' },
+     body: JSON.stringify({ command, args })
+   });
+-  return await res.text();
++  const text = await res.text();
++  // EI-22165824068092618: the status used to be discarded, so a command that
++  // FAILED server-side (500 from a thrown handler, 400 for an unknown command)
++  // printed its error text on stdout and still exited 0. A caller checking `$?`
++  // — or a `&&` chain — read that as success. Handler-returned "Error: ..."
++  // strings still come back 200 and are unchanged; only real HTTP failures exit
++  // non-zero here.
++  if (!res.ok) {
++    const err = new Error(text.replace(/^Error:\s*/, '') || `HTTP ${res.status}`);
++    err.httpStatus = res.status;
++    throw err;
++  }
++  return text;
+ }
+ 
+ function output(text) {
+@@ -81,6 +113,60 @@ function outputError(msg) {
+   else { console.error(`Error: ${msg}`); process.exit(1); }
+ }
+ 
++// Validate the command before starting the persistent daemon. The server's
++// command table lives in src/server.mjs, which cannot be imported here because
++// importing it launches Chromium and binds the daemon port. Keep this pinned
++// list alongside that table so a typo or unsupported command fails without
++// leaving a resident browser behind.
++const KNOWN_COMMANDS = new Set([
++  'goto', 'goto-auth', 'back', 'forward', 'reload', 'url', 'title',
++  'snapshot', 'click', 'fill', 'select', 'hover', 'type', 'press', 'scroll', 'wait',
++  'text', 'css', 'inspect', 'js', 'console', 'network', 'perf',
++  'screenshot', 'viewport', 'responsive', 'style',
++  'auth-save', 'auth-load', 'auth-list', 'auth-delete', 'handoff', 'resume',
++  'cookies', 'cookie-set', 'cookie-import',
++  'tabs', 'newtab', 'tab', 'closetab',
++  'frame', 'frame-exit', 'diff', 'chain', 'status', 'stop',
++]);
++if (command && command !== 'sessions' && !KNOWN_COMMANDS.has(command)) {
++  outputError(`Unknown command: ${command}. Use: verdict (with no command) for usage.`);
++}
++
++// EI-22200064677663549: the papercusp operator UI (:3055/:3070/:3170) is the
++// Tauri DESKTOP app's internal content source and never resolves in a plain
++// browser (no Tauri IPC bridge, so the SPA never reaches a settled state) —
++// navigating verdict there has wedged the shared daemon: `goto` never
++// returns, and every later command in the SAME session times out too, until
++// `stop`+restart. Papercusp's own PreToolUse guard (guard-operator-desktop.mjs)
++// cannot see this: verdict runs as a plain Bash CLI (SKILL.md declares
++// `allowed-tools: Bash(verdict*)`), not through a tool call that hook's
++// matcher covers. Refuse HERE, client-side, before ever contacting the
++// daemon — the only place that can stop the wedge regardless of how verdict
++// was invoked (goto / goto-auth / newtab / a chain entry).
++const OPERATOR_UI_PORT_RE = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(?:3055|3070|3170)\b/i;
++function refuseOperatorUiTarget(url) {
++  if (typeof url !== 'string' || !OPERATOR_UI_PORT_RE.test(url)) return;
++  outputError(
++    `refusing to navigate to "${url}" — :3055/:3070/:3170 are the Papercusp operator UI's own ` +
++    `dev ports (the Tauri DESKTOP app's internal content source), which never resolve in a plain ` +
++    `browser and have wedged this daemon before (no Tauri IPC bridge, so the SPA never settles). ` +
++    `Run/test the app via the desktop shell instead: cd papercusp-desktop && npm run dev. ` +
++    `See CLAUDE.md -> "Running / testing this app".`,
++  );
++}
++if (command === 'goto' || command === 'goto-auth' || command === 'newtab') refuseOperatorUiTarget(args[0]);
++if (command === 'chain') {
++  let steps;
++  try { steps = JSON.parse(args[0] ?? '[]'); } catch { steps = null; }
++  if (Array.isArray(steps)) {
++    for (const step of steps) {
++      if (!Array.isArray(step)) continue;
++      const [stepCmd, stepUrl] = step;
++      if (stepCmd === 'goto' || stepCmd === 'goto-auth' || stepCmd === 'newtab') refuseOperatorUiTarget(stepUrl);
++    }
++  }
++}
++
+ if (!command) {
+   console.log(`Verdict — Token-efficient browser verification for AI coding agents
+ 
+@@ -176,7 +262,11 @@ if (command === 'sessions') {
+         body: JSON.stringify({ command: 'stop', args: [] })
+       });
+       output(`Session "${target}" stopped.`);
+-    } catch { output(`Session "${target}" stopped (was not responding).`); }
++    } catch {
++      // A normal daemon shutdown can close the response socket before fetch
++      // receives it; the session has still been stopped.
++      output(`Session "${target}" stopped.`);
++    }
+     process.exit(0);
+   } else {
+     outputError(`Unknown sessions subcommand: ${sub}. Use: sessions list, sessions stop <name>`);
+@@ -193,9 +283,21 @@ if (!state || !isAlive(state.pid)) {
+ try {
+   output(await send(state, command, args));
+ } catch (e) {
+-  if (e.cause?.code === 'ECONNREFUSED' || e.cause?.code === 'UND_ERR_SOCKET' || e.message?.includes('fetch failed')) {
++  const isConnErr = e.cause?.code === 'ECONNREFUSED' || e.cause?.code === 'UND_ERR_SOCKET' || e.message?.includes('fetch failed');
++  if (command === "stop") {
++    // EI-13216: a `stop` request that fails — for ANY reason, including a
++    // connection error — means the server is already going/gone. A server
++    // closing its own socket mid-response as it shuts down IS the expected
++    // signal for a successful stop, not a crash to restart-and-retry: doing
++    // that raced the same shutdown-close on the fresh server and crashed with
++    // an uncaught fetch error (UND_ERR_SOCKET). Never restart just to stop.
++    output("Server stopped.");
++  } else if (isConnErr) {
+     process.stderr.write('Server down, restarting...\n');
+     state = await startServer();
+-    output(await send(state, command, args));
+-  } else if (command === "stop") { output("Server stopped."); } else { outputError(e.message); }
++    // The retry can itself fail server-side; send() now throws on a non-2xx, so
++    // without this catch that rejection would go unhandled instead of becoming
++    // a clean non-zero exit.
++    try { output(await send(state, command, args)); } catch (e2) { outputError(e2.message); }
++  } else { outputError(e.message); }
+ }
+diff --git a/node_modules/verdict-cli/src/server.mjs b/node_modules/verdict-cli/src/server.mjs
+index 249847c..97f0329 100644
+--- a/node_modules/verdict-cli/src/server.mjs
++++ b/node_modules/verdict-cli/src/server.mjs
+@@ -8,8 +8,15 @@ import { createServer } from 'node:http';
+ import { writeFileSync, readFileSync, unlinkSync, existsSync, copyFileSync } from 'node:fs';
+ import { resolve, dirname } from 'node:path';
+ import { fileURLToPath } from 'node:url';
+-import { execSync } from 'node:child_process';
+-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
++import { execFileSync, execSync } from 'node:child_process';
++import {
++  createCipheriv,
++  createDecipheriv,
++  createHash,
++  pbkdf2Sync,
++  randomBytes,
++  scryptSync,
++} from 'node:crypto';
+ import { mkdirSync } from 'node:fs';
+ import { hostname, userInfo } from 'node:os';
+ 
+@@ -54,6 +61,23 @@ function profilePath(name) {
+ const { chromium } = await import('playwright');
+ 
+ let browser, context, page;
++// EI-22165824068092618: the top-level Page we descended FROM, kept at module
++// scope. It used to be stashed as `page._mainPage`, but `frame` then reassigns
++// `page` to a Playwright *Frame*, which does not carry that property — so
++// `frame-exit` read undefined, answered "Already main." and was a permanent
++// no-op. You could never leave the first frame you entered.
++let mainPage = null;
++// Bounded, so a selector that matches nothing fails in seconds instead of
++// stalling on Playwright's 30s default (long enough that callers wrap the CLI
++// in a shorter `timeout`, which kills it before it can print its own error —
++// which is why this failure was reported as "prints nothing at all").
++const FRAME_TIMEOUT_MS = parseInt(process.env.VERDICT_FRAME_TIMEOUT_MS) || 5000;
++// Bound Playwright's optional network-idle drain; long-lived fetch/SSE requests
++// must not hold a chain response behind the 30s default per navigation.
++const NETWORK_IDLE_TIMEOUT_MS = Math.max(
++  1,
++  Number.parseInt(process.env.VERDICT_NETWORK_IDLE_TIMEOUT_MS ?? '', 10) || 5000,
++);
+ let idleTimer;
+ const refs = new Map();
+ const cursorRefs = new Map();
+@@ -62,6 +86,71 @@ let cursorRefCounter = 0;
+ let lastSnapshot = '';
+ let previousSnapshot = '';
+ const styleHistory = [];
++const consoleMessages = [];
++const networkRequests = [];
++
++const CHROMIUM_KEY_SCHEMA = 'chrome_libsecret_os_crypt_password_v2';
++const CHROMIUM_KEY_SALT = Buffer.from('saltysalt');
++const CHROMIUM_COOKIE_IV = Buffer.alloc(16, 0x20);
++let chromiumV11Key;
++
++function chromiumLinuxV11Key() {
++  if (chromiumV11Key) return chromiumV11Key;
++  const password = execFileSync(
++    'secret-tool',
++    ['lookup', 'xdg:schema', CHROMIUM_KEY_SCHEMA, 'application', 'chrome'],
++    { encoding: 'utf8', timeout: 5000 },
++  ).trimEnd();
++  if (!password) throw new Error('Chrome encryption key not found in the desktop secret store');
++  chromiumV11Key = pbkdf2Sync(Buffer.from(password, 'utf8'), CHROMIUM_KEY_SALT, 1, 16, 'sha1');
++  return chromiumV11Key;
++}
++
++function decryptChromiumCookieValue(value, encryptedValue, hostKey) {
++  if (value) return value;
++  if (!encryptedValue || !hostKey) return '';
++
++  const encrypted = Buffer.from(encryptedValue, 'hex');
++  const prefix = encrypted.subarray(0, 3).toString('ascii');
++  if (prefix !== 'v10' && prefix !== 'v11') return '';
++
++  // Linux Chromium uses PBKDF2(peanuts, saltysalt, 1) for legacy v10 and the
++  // libsecret password for v11. Both use AES-128-CBC with a space IV.
++  const password = prefix === 'v11' ? chromiumLinuxV11Key() : Buffer.from('peanuts', 'utf8');
++  const key = prefix === 'v11'
++    ? password
++    : pbkdf2Sync(password, CHROMIUM_KEY_SALT, 1, 16, 'sha1');
++  const decipher = createDecipheriv('aes-128-cbc', key, CHROMIUM_COOKIE_IV);
++  let decrypted = Buffer.concat([decipher.update(encrypted.subarray(3)), decipher.final()]);
++
++  // Chrome cookie DB version 24 prepends SHA-256(host_key) before encryption.
++  // Strip it only when it matches this row's host, retaining compatibility with
++  // older databases that do not carry the integrity prefix.
++  const domainHash = createHash('sha256').update(hostKey, 'utf8').digest();
++  if (decrypted.subarray(0, domainHash.length).equals(domainHash)) {
++    decrypted = decrypted.subarray(domainHash.length);
++  }
++  return decrypted.toString('utf8');
++}
++
++function clearNavigationEvidence() {
++  consoleMessages.length = 0;
++  networkRequests.length = 0;
++}
++
++function observePage(targetPage) {
++  targetPage.on('framenavigated', frame => {
++    if (frame === targetPage.mainFrame()) clearNavigationEvidence();
++  });
++  targetPage.on('console', msg => {
++    consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
++    if (consoleMessages.length > 50) consoleMessages.shift();
++  });
++  targetPage.on('response', response => {
++    networkRequests.push({ method: response.request().method(), status: response.status(), url: response.url().slice(0, 120) });
++    if (networkRequests.length > 50) networkRequests.shift();
++  });
++}
+ 
+ function resetIdle() {
+   clearTimeout(idleTimer);
+@@ -102,7 +191,7 @@ function parseAriaSnapshot(snapshot) {
+         refCounter++;
+         const ref = `@e${refCounter}`;
+         const locator = name
+-          ? page.getByRole(role, { name, exact: false })
++          ? page.getByRole(role, { name, exact: true })
+           : page.getByRole(role);
+         refs.set(ref, { locator, role, name });
+         output.push(`${ref} ${line.trim()}`);
+@@ -136,13 +225,14 @@ const commands = {
+   async goto(args) {
+     const url = args[0];
+     if (!url) return 'Error: URL required';
++    clearNavigationEvidence();
+     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+-    await page.waitForLoadState('networkidle').catch(() => {});
++    await page.waitForLoadState('networkidle', { timeout: NETWORK_IDLE_TIMEOUT_MS }).catch(() => {});
+     return `Navigated to ${page.url()}`;
+   },
+-  async back() { await page.goBack({ waitUntil: 'domcontentloaded' }); return `Back to ${page.url()}`; },
+-  async forward() { await page.goForward({ waitUntil: 'domcontentloaded' }); return `Forward to ${page.url()}`; },
+-  async reload() { await page.reload({ waitUntil: 'domcontentloaded' }); return `Reloaded ${page.url()}`; },
++  async back() { clearNavigationEvidence(); await page.goBack({ waitUntil: 'domcontentloaded' }); return `Back to ${page.url()}`; },
++  async forward() { clearNavigationEvidence(); await page.goForward({ waitUntil: 'domcontentloaded' }); return `Forward to ${page.url()}`; },
++  async reload() { clearNavigationEvidence(); await page.reload({ waitUntil: 'domcontentloaded' }); return `Reloaded ${page.url()}`; },
+   async url() { return page.url(); },
+   async title() { return await page.title(); },
+ 
+@@ -225,7 +315,7 @@ const commands = {
+   async click(args) {
+     const sel = args[0]; if (!sel) return 'Error: selector required';
+     await (await resolveRef(sel)).click({ timeout: 5000 });
+-    await page.waitForLoadState('networkidle').catch(() => {});
++    await page.waitForLoadState('networkidle', { timeout: NETWORK_IDLE_TIMEOUT_MS }).catch(() => {});
+     return `Clicked ${sel}`;
+   },
+   async fill(args) {
+@@ -405,6 +495,7 @@ const commands = {
+     browser = await chromium.launch({ headless: false });
+     context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+     page = await context.newPage();
++    observePage(page);
+     if (cookies.length) await context.addCookies(cookies);
+     if (currentUrl && currentUrl !== 'about:blank') await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+     return `Switched to headed mode. Browser visible.\nURL: ${page.url()}\nComplete manual work, then run: resume`;
+@@ -419,8 +510,6 @@ const commands = {
+     page = await context.newPage();
+     if (cookies.length) await context.addCookies(cookies);
+     if (currentUrl && currentUrl !== 'about:blank') { await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}); await page.evaluate((s) => { for (const [k, v] of Object.entries(s.localStorage || {})) localStorage.setItem(k, v); }, storage); }
+-    page.on('console', msg => { consoleMessages.push(`[${msg.type()}] ${msg.text()}`); if (consoleMessages.length > 50) consoleMessages.shift(); });
+-    page.on('response', r => { networkRequests.push({ method: r.request().method(), status: r.status(), url: r.url().slice(0, 120) }); if (networkRequests.length > 50) networkRequests.shift(); });
+     return `Resumed headless mode.\nURL: ${page.url()}\nCookies: ${cookies.length}\nUse auth-save <name> to persist.`;
+   },
+   async 'goto-auth'(args) {
+@@ -430,8 +519,9 @@ const commands = {
+     if (pi !== -1) { profileName = args[pi + 1]; clean.splice(pi, 2); }
+     const url = clean[0]; if (!url) return 'Error: URL required';
+     if (profileName) { const r = await commands['auth-load']([profileName]); if (r.startsWith('Error')) return r; }
++    clearNavigationEvidence();
+     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+-    await page.waitForLoadState('networkidle').catch(() => {});
++    await page.waitForLoadState('networkidle', { timeout: NETWORK_IDLE_TIMEOUT_MS }).catch(() => {});
+     const finalUrl = page.url();
+     if (finalUrl.includes('/login') || finalUrl.includes('/oauth') || finalUrl.includes('sso.'))
+       return `Redirected to login: ${finalUrl}\nSession expired. Run: handoff -> login manually -> resume -> auth-save ${profileName || 'default'}`;
+@@ -450,14 +540,24 @@ const commands = {
+   },
+   async 'cookie-import'(args) {
+     const domain = args[0]; if (!domain) return 'Error: domain required';
+-    const cookieDb = resolve(process.env.HOME, process.platform === 'darwin' ? 'Library/Application Support/Google/Chrome/Default/Cookies' : '.config/google-chrome/Default/Cookies');
++    const cookieDb = process.env.VERDICT_CHROME_COOKIE_DB
++      ? resolve(process.env.VERDICT_CHROME_COOKIE_DB)
++      : resolve(process.env.HOME, process.platform === 'darwin' ? 'Library/Application Support/Google/Chrome/Default/Cookies' : '.config/google-chrome/Default/Cookies');
+     if (!existsSync(cookieDb)) return `Chrome cookie DB not found at ${cookieDb}`;
+-    const tmp = '/tmp/verdict-cookies-copy';
++    const tmp = resolve('/tmp', `verdict-cookies-copy-${process.pid}`);
+     copyFileSync(cookieDb, tmp);
+     try {
+-      const raw = execSync(`sqlite3 -json "${tmp}" "SELECT name, value, host_key, path, is_secure, is_httponly FROM cookies WHERE host_key LIKE '%${domain}%'"`, { encoding: 'utf8', timeout: 5000 });
++      const escapedDomain = domain.replaceAll("'", "''");
++      const raw = execSync(`sqlite3 -json "${tmp}" "SELECT name, value, hex(encrypted_value) AS encrypted_value, host_key, path, is_secure, is_httponly FROM cookies WHERE host_key LIKE '%${escapedDomain}%'"`, { encoding: 'utf8', timeout: 5000 });
+       const rows = JSON.parse(raw || '[]');
+-      const cookies = rows.map(r => ({ name: r.name, value: r.value, domain: r.host_key, path: r.path || '/', secure: !!r.is_secure, httpOnly: !!r.is_httponly })).filter(c => c.value);
++      const cookies = rows.map(r => ({
++        name: r.name,
++        value: decryptChromiumCookieValue(r.value, r.encrypted_value, r.host_key),
++        domain: r.host_key,
++        path: r.path || '/',
++        secure: !!r.is_secure,
++        httpOnly: !!r.is_httponly,
++      })).filter(c => c.value);
+       if (!cookies.length) return `No unencrypted cookies for ${domain}. Chrome 80+ encrypts cookies.`;
+       await context.addCookies(cookies);
+       return `Imported ${cookies.length} cookies for ${domain}`;
+@@ -467,21 +567,48 @@ const commands = {
+ 
+   // Tabs
+   async tabs() { return context.pages().map((p, i) => `${i}: ${p.url()}${p === page ? ' (active)' : ''}`).join('\n'); },
+-  async newtab(args) { const np = await context.newPage(); await np.goto(args[0] || 'about:blank', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}); page = np; return `New tab: ${page.url()}`; },
++  async newtab(args) { const np = await context.newPage(); observePage(np); await np.goto(args[0] || 'about:blank', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}); page = np; return `New tab: ${page.url()}`; },
+   async tab(args) { const i = parseInt(args[0]), ps = context.pages(); if (isNaN(i) || i < 0 || i >= ps.length) return `Invalid tab. ${ps.length} open.`; page = ps[i]; return `Tab ${i}: ${page.url()}`; },
+   async closetab() { if (context.pages().length <= 1) return 'Cannot close last tab.'; await page.close(); page = context.pages()[0]; return `Closed. Active: ${page.url()}`; },
+ 
+   // Frames
+   async frame(args) {
+-    if (!args[0]) return page.frames().map((f, i) => `${i}: ${f.url()}`).join('\n');
+-    const el = await page.locator(args[0]).elementHandle();
+-    const fr = await el.contentFrame();
+-    if (!fr) return `No frame for ${args[0]}`;
+-    page._mainPage = page._mainPage || page;
++    // List from the top document: once `page` is a Frame it has no .frames(),
++    // so the old form threw here after any successful `frame`.
++    if (!args[0]) {
++      const top = mainPage || page;
++      // Identity, not URL: two panes of the same app legitimately share a URL,
++      // and marking both "current" would reintroduce exactly the ambiguity this
++      // command exists to resolve.
++      const here = typeof page.mainFrame === 'function' ? page.mainFrame() : page;
++      return top.frames().map((f, i) => `${i}: ${f.url()}${f === here ? '  <- current' : ''}`).join('\n');
++    }
++    const sel = args[0];
++    let fr = null;
++    try {
++      const el = await page.locator(sel).elementHandle({ timeout: FRAME_TIMEOUT_MS });
++      fr = el ? await el.contentFrame() : null;
++    } catch { fr = null; }
++    if (!fr) {
++      // Never retain the previous realm on failure. Silently staying put is what
++      // turns a failed selector into a confident WRONG measurement: the next
++      // probe re-measures the frame we were already in and reads as an
++      // independent confirmation of a different pane.
++      const wasIn = page.url();
++      if (mainPage) { page = mainPage; mainPage = null; }
++      throw new Error(
++        `frame: no match for ${sel} (searched in ${wasIn}); reset to top document ${page.url()} — ` +
++        `the previous frame was NOT retained, so re-enter the frame you want before probing.`,
++      );
++    }
++    if (!mainPage) mainPage = page;
+     page = fr;
+-    return `Frame: ${args[0]} (${fr.url()})`;
++    return `Frame: ${sel} (${fr.url()})`;
++  },
++  async 'frame-exit'() {
++    if (mainPage) { page = mainPage; mainPage = null; return `Main frame. (${page.url()})`; }
++    return `Already main. (${page.url()})`;
+   },
+-  async 'frame-exit'() { if (page._mainPage) { page = page._mainPage; return 'Main frame.'; } return 'Already main.'; },
+ 
+   // Advanced
+   async diff(args) {
+@@ -497,24 +624,40 @@ const commands = {
+   async chain(args) {
+     let cmds; try { cmds = JSON.parse(args.join(' ')); } catch { return 'Error: invalid JSON. Use: [["goto","url"],["snapshot","-i"]]'; }
+     const results = [];
++    let failed = false;
+     for (const [cmd, ...a] of cmds) {
+-      const h = commands[cmd]; if (!h) { results.push(`${cmd}: unknown`); continue; }
+-      try { results.push(`${cmd}: ${await h(a)}`); } catch (e) { results.push(`${cmd}: Error: ${e.message}`); }
++      const h = commands[cmd];
++      if (!h) { failed = true; results.push(`${cmd}: unknown`); continue; }
++      try {
++        const result = await h(a);
++        const rendered = `${cmd}: ${result}`;
++        // A command may report an actionable error as a return value rather than
++        // throwing (for example, a missing selector). Keep its diagnostic in the
++        // bounded transcript, but make the chain's HTTP/CLI status fail closed.
++        if (typeof result === 'string' && result.startsWith('Error:')) failed = true;
++        results.push(rendered);
++      } catch (e) {
++        failed = true;
++        results.push(`${cmd}: Error: ${e.message}`);
++      }
+     }
+-    return results.join('\n---\n');
++    const transcript = results.join('\n---\n');
++    if (failed) throw new Error(transcript);
++    return transcript;
+   },
+   async status() { return `URL: ${page.url()}\nTitle: ${await page.title()}\nRefs: ${refs.size}\nViewport: ${page.viewportSize().width}x${page.viewportSize().height}`; },
+   async stop() { await shutdown(); return 'Stopped'; }
+ };
+ 
+ // Console & network collectors
+-const consoleMessages = [];
+-const networkRequests = [];
+-page.on('console', msg => { consoleMessages.push(`[${msg.type()}] ${msg.text()}`); if (consoleMessages.length > 50) consoleMessages.shift(); });
+-page.on('response', r => { networkRequests.push({ method: r.request().method(), status: r.status(), url: r.url().slice(0, 120) }); if (networkRequests.length > 50) networkRequests.shift(); });
++observePage(page);
+ 
+ // HTTP server
+-const port = parseInt(process.env.VERDICT_PORT) || (10000 + Math.floor(Math.random() * 50000));
++// Let the OS choose an unused ephemeral port unless the caller explicitly
++// pins one. Randomly selecting from a shared range still races every other
++// concurrent verdict client and can make an otherwise healthy daemon fail
++// startup with EADDRINUSE.
++const port = parseInt(process.env.VERDICT_PORT) || 0;
+ const token = crypto.randomUUID();
+ const server = createServer(async (req, res) => {
+   resetIdle();
+@@ -532,7 +675,9 @@ const server = createServer(async (req, res) => {
+   }
+ });
+ server.listen(port, '127.0.0.1', () => {
+-  writeFileSync(STATE_FILE, JSON.stringify({ port, token, pid: process.pid, started: new Date().toISOString() }), { mode: 0o600 });
+-  console.log(`Verdict server on port ${port} (PID ${process.pid})`);
++  const address = server.address();
++  const boundPort = address && typeof address !== 'string' ? address.port : port;
++  writeFileSync(STATE_FILE, JSON.stringify({ port: boundPort, token, pid: process.pid, started: new Date().toISOString() }), { mode: 0o600 });
++  console.log(`Verdict server on port ${boundPort} (PID ${process.pid})`);
+   resetIdle();
+ });

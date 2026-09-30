@@ -1,0 +1,761 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f3ecdf" />
+    <title>SideStage Watch — Coming up next mockups</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --paper: #f3ecdf;
+        --paper-deep: #e8dccb;
+        --surface: #fffaf3;
+        --surface-soft: #f8f0e4;
+        --ink: #211b18;
+        --muted: #79675b;
+        --red: #d62d24;
+        --red-deep: #8f1c18;
+        --yellow: #f4bd25;
+        --yellow-soft: #fff1b9;
+        --green: #18794e;
+        --line: #decfbd;
+        --shadow: 0 22px 60px rgb(66 45 30 / 13%);
+      }
+
+      * { box-sizing: border-box; }
+
+      html { scroll-behavior: smooth; }
+
+      body {
+        min-width: 320px;
+        margin: 0;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 93% -10%, rgb(214 45 36 / 10%), transparent 34rem),
+          radial-gradient(circle at 6% 14%, rgb(244 189 37 / 16%), transparent 28rem),
+          var(--paper);
+      }
+
+      button { font: inherit; }
+
+      .page-shell {
+        width: min(1900px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 46px 0 64px;
+      }
+
+      .page-header {
+        display: grid;
+        grid-template-columns: minmax(0, 1.5fr) minmax(300px, .7fr);
+        gap: 36px;
+        align-items: end;
+        margin-bottom: 30px;
+      }
+
+      .kicker,
+      .eyebrow {
+        margin: 0 0 8px;
+        color: var(--red);
+        font-size: 11px;
+        font-weight: 850;
+        letter-spacing: .16em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        max-width: 930px;
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(38px, 5vw, 74px);
+        font-weight: 700;
+        line-height: .96;
+        letter-spacing: -.045em;
+      }
+
+      .intro {
+        max-width: 760px;
+        margin: 18px 0 0;
+        color: var(--muted);
+        font-size: 16px;
+        line-height: 1.6;
+      }
+
+      .review-note {
+        border: 1px solid color-mix(in srgb, var(--red) 22%, var(--line));
+        border-radius: 18px;
+        padding: 18px;
+        background: rgb(255 250 243 / 74%);
+        box-shadow: 0 12px 34px rgb(66 45 30 / 7%);
+      }
+
+      .review-note strong { display: block; margin-bottom: 6px; font-size: 14px; }
+      .review-note p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+
+      .view-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        margin-bottom: 18px;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgb(255 250 243 / 66%);
+      }
+
+      .view-toolbar p { margin: 0; color: var(--muted); font-size: 13px; }
+
+      .toolbar-copy { display: grid; gap: 4px; }
+
+      .view-toolbar .selection-summary {
+        color: var(--red-deep);
+        font-weight: 760;
+      }
+
+      .segmented {
+        display: inline-flex;
+        flex: 0 0 auto;
+        gap: 4px;
+        padding: 4px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-soft);
+      }
+
+      .segmented button {
+        border: 0;
+        border-radius: 999px;
+        padding: 8px 13px;
+        color: var(--muted);
+        background: transparent;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 780;
+      }
+
+      .segmented button[aria-pressed="true"] {
+        color: #fff;
+        background: var(--ink);
+        box-shadow: 0 5px 14px rgb(33 27 24 / 18%);
+      }
+
+      .comparison-wrap { overflow-x: auto; padding: 4px 2px 24px; scrollbar-color: var(--red) transparent; }
+
+      .comparison {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(410px, 1fr));
+        gap: 20px;
+        min-width: 1270px;
+        transition: grid-template-columns .22s ease;
+      }
+
+      .comparison.mobile-preview { grid-template-columns: repeat(3, 375px); width: max-content; }
+
+      .concept-card {
+        min-width: 0;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: rgb(255 250 243 / 88%);
+        box-shadow: var(--shadow);
+      }
+
+      .concept-card.is-selected {
+        border-color: var(--red);
+        background: color-mix(in srgb, var(--red) 3%, var(--surface));
+        box-shadow: 0 24px 64px rgb(143 28 24 / 18%);
+      }
+
+      .concept-card.is-selected .concept-head {
+        background:
+          linear-gradient(145deg, rgb(255 255 255 / 76%), transparent 58%),
+          color-mix(in srgb, var(--red) 7%, var(--surface-soft));
+      }
+
+      .concept-head {
+        min-height: 212px;
+        padding: 22px 22px 20px;
+        border-bottom: 1px solid var(--line);
+        background:
+          linear-gradient(145deg, rgb(255 255 255 / 76%), transparent 58%),
+          var(--surface-soft);
+      }
+
+      .concept-index {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--red);
+        font-size: 11px;
+        font-weight: 850;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+      }
+
+      .concept-index::before { width: 24px; height: 2px; background: currentColor; content: ""; }
+
+      .selection-pill {
+        display: inline-flex;
+        align-items: center;
+        margin-left: 8px;
+        border-radius: 999px;
+        padding: 5px 8px;
+        color: #fff;
+        background: var(--red);
+        font-size: 9px;
+        font-weight: 850;
+        letter-spacing: .05em;
+        text-transform: uppercase;
+      }
+
+      .concept-head h2 {
+        margin: 13px 0 8px;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 31px;
+        line-height: 1;
+        letter-spacing: -.035em;
+      }
+
+      .concept-head > p { min-height: 58px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+
+      .tradeoffs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+
+      .tradeoffs span {
+        display: grid;
+        gap: 3px;
+        padding: 9px 10px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        color: var(--muted);
+        background: rgb(255 255 255 / 48%);
+        font-size: 10px;
+        line-height: 1.35;
+      }
+
+      .tradeoffs strong { color: var(--ink); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+
+      .mockup {
+        min-height: 570px;
+        padding: 18px;
+        background:
+          linear-gradient(rgb(33 27 24 / 2%) 1px, transparent 1px),
+          linear-gradient(90deg, rgb(33 27 24 / 2%) 1px, transparent 1px),
+          var(--paper);
+        background-size: 20px 20px;
+      }
+
+      .watch-section {
+        min-height: 534px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 16px;
+        background: var(--surface);
+        box-shadow: 0 13px 34px rgb(66 45 30 / 9%);
+      }
+
+      .section-head {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .section-head h3 { margin: 0; font-size: 18px; letter-spacing: -.03em; }
+      .section-head .eyebrow { margin-bottom: 4px; font-size: 9px; }
+
+      .section-meta { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+
+      .outline-button,
+      .hold-button,
+      .primary-button {
+        border-radius: 9px;
+        cursor: pointer;
+        font-weight: 800;
+        transition: transform .16s ease, box-shadow .16s ease, background .16s ease;
+      }
+
+      .outline-button:hover,
+      .hold-button:hover,
+      .primary-button:hover { transform: translateY(-1px); }
+
+      .outline-button,
+      .hold-button {
+        border: 1px solid color-mix(in srgb, var(--red) 38%, var(--line));
+        color: var(--red-deep);
+        background: #fff;
+      }
+
+      .outline-button { padding: 7px 9px; font-size: 9px; }
+      .hold-button { min-height: 34px; padding: 8px 10px; font-size: 10px; }
+
+      .primary-button {
+        border: 1px solid var(--red-deep);
+        padding: 9px 12px;
+        color: #fff;
+        background: var(--red);
+        box-shadow: 0 8px 18px rgb(214 45 36 / 22%);
+        font-size: 10px;
+      }
+
+      .badge {
+        display: inline-flex;
+        width: fit-content;
+        align-items: center;
+        border-radius: 999px;
+        padding: 5px 7px;
+        color: var(--red-deep);
+        background: color-mix(in srgb, var(--red) 9%, #fff);
+        font-size: 8px;
+        font-weight: 850;
+        letter-spacing: .05em;
+        text-transform: uppercase;
+      }
+
+      .badge.yellow { color: #664700; background: var(--yellow-soft); }
+      .badge.green { color: var(--green); background: color-mix(in srgb, var(--green) 10%, #fff); }
+      .muted { color: var(--muted); }
+
+      .product-art {
+        position: relative;
+        display: grid;
+        overflow: hidden;
+        place-items: center;
+        border: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+        border-radius: 12px;
+        background:
+          radial-gradient(circle at 68% 22%, rgb(255 255 255 / 85%), transparent 28%),
+          linear-gradient(145deg, #dfc8ad, #f4e8d9);
+      }
+
+      .product-art svg { width: 76%; height: 76%; filter: drop-shadow(0 15px 18px rgb(66 45 30 / 19%)); }
+      .product-art.kettle { background: linear-gradient(145deg, #e9dfd5, #b9c5c3); }
+      .product-art.headphones { background: linear-gradient(145deg, #d6c9b6, #65706e); }
+      .product-art.denim { background: linear-gradient(145deg, #f0e3cf, #8fa3aa); }
+
+      /* Concept 1 — spotlight */
+      .spotlight-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(150px, .75fr); gap: 10px; }
+
+      .spotlight-main {
+        overflow: hidden;
+        border: 1px solid color-mix(in srgb, var(--yellow) 64%, var(--line));
+        border-radius: 15px;
+        background: linear-gradient(160deg, #fff8df, #fff);
+        box-shadow: 0 12px 26px rgb(108 75 22 / 11%);
+      }
+
+      .spotlight-main .product-art { min-height: 205px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
+      .spotlight-copy { display: grid; gap: 7px; padding: 13px; }
+      .spotlight-copy h4 { margin: 0; font-size: 17px; letter-spacing: -.03em; }
+      .spotlight-copy p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
+      .price-row { display: flex; align-items: end; justify-content: space-between; gap: 8px; }
+      .price-row strong { font-size: 16px; }
+
+      .mini-queue { display: grid; align-content: start; gap: 9px; }
+
+      .mini-card {
+        display: grid;
+        grid-template-columns: 72px minmax(0, 1fr);
+        min-height: 108px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: #fff;
+      }
+
+      .mini-card .product-art { border: 0; border-right: 1px solid var(--line); border-radius: 0; }
+      .mini-copy { display: flex; min-width: 0; flex-direction: column; gap: 4px; padding: 9px; }
+      .mini-copy h4 { overflow: hidden; margin: 0; font-size: 11px; line-height: 1.2; text-overflow: ellipsis; }
+      .mini-copy p { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.35; }
+      .mini-copy strong { margin-top: auto; font-size: 11px; }
+
+      .queue-tail {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 10px;
+        padding: 9px 10px;
+        border: 1px dashed var(--line);
+        border-radius: 10px;
+        color: var(--muted);
+        font-size: 9px;
+      }
+
+      /* Concept 2 — runway */
+      .drop-progress { display: grid; gap: 7px; margin-bottom: 13px; }
+      .progress-copy { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 9px; }
+      .progress-track { position: relative; height: 4px; border-radius: 999px; background: var(--paper-deep); }
+      .progress-track::before { position: absolute; inset: 0 auto 0 0; width: 29%; border-radius: inherit; background: var(--red); content: ""; }
+
+      .runway {
+        position: relative;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        padding-top: 18px;
+      }
+
+      .runway::before { position: absolute; top: 5px; right: 12%; left: 12%; height: 2px; background: var(--line); content: ""; }
+
+      .runway-card {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: #fff;
+      }
+
+      .runway-card::before {
+        position: absolute;
+        z-index: 2;
+        top: -18px;
+        left: calc(50% - 11px);
+        display: grid;
+        width: 22px;
+        height: 22px;
+        place-items: center;
+        border: 3px solid var(--surface);
+        border-radius: 50%;
+        color: var(--muted);
+        background: var(--paper-deep);
+        font-size: 8px;
+        font-weight: 900;
+        content: attr(data-step);
+      }
+
+      .runway-card.is-next { border-color: color-mix(in srgb, var(--red) 52%, var(--line)); box-shadow: 0 10px 24px rgb(214 45 36 / 10%); }
+      .runway-card.is-next::before { color: #fff; background: var(--red); }
+      .runway-card .product-art { min-height: 140px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
+      .runway-copy { display: grid; gap: 7px; padding: 10px; }
+      .runway-copy h4 { min-height: 29px; margin: 0; font-size: 11px; line-height: 1.25; }
+      .runway-copy .price-row strong { font-size: 13px; }
+      .runway-copy .hold-button { width: 100%; }
+
+      .runway-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
+      .runway-footer p { margin: 0; color: var(--muted); font-size: 9px; }
+
+      /* Concept 3 — queue board */
+      .queue-board { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
+
+      .queue-row {
+        position: relative;
+        display: grid;
+        grid-template-columns: 34px 66px minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        min-height: 96px;
+        padding: 10px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .queue-row:last-child { border-bottom: 0; }
+      .queue-row.is-next { background: linear-gradient(90deg, rgb(244 189 37 / 16%), transparent 74%); }
+      .queue-row.is-next::before { position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--red); content: ""; }
+
+      .sequence {
+        display: grid;
+        width: 30px;
+        height: 30px;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        color: var(--muted);
+        background: var(--surface-soft);
+        font-size: 10px;
+        font-weight: 900;
+      }
+
+      .queue-row.is-next .sequence { border-color: var(--red); color: #fff; background: var(--red); }
+      .queue-row .product-art { width: 66px; height: 70px; }
+      .queue-copy { min-width: 0; }
+      .queue-copy h4 { margin: 4px 0 3px; font-size: 12px; line-height: 1.2; }
+      .queue-copy p { overflow: hidden; margin: 0 0 7px; color: var(--muted); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+      .queue-facts { display: flex; align-items: center; gap: 8px; font-size: 10px; }
+      .queue-facts strong { font-size: 12px; }
+      .queue-action { display: grid; justify-items: end; gap: 8px; }
+      .queue-action .hold-button { min-height: 31px; }
+      .board-footer { display: flex; justify-content: flex-end; margin-top: 12px; }
+
+      .concept-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 15px 18px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        background: var(--surface-soft);
+        font-size: 10px;
+      }
+
+      .concept-foot strong { color: var(--ink); }
+      .concept-card.is-selected .concept-foot { color: var(--red-deep); background: color-mix(in srgb, var(--red) 8%, var(--surface-soft)); }
+
+      .mobile-preview .concept-head { min-height: 248px; }
+      .mobile-preview .mockup { min-height: 660px; padding: 11px; }
+      .mobile-preview .watch-section { min-height: 636px; padding: 12px; }
+      .mobile-preview .section-head { align-items: start; flex-direction: column; }
+      .mobile-preview .section-meta { width: 100%; justify-content: space-between; }
+      .mobile-preview .spotlight-layout { grid-template-columns: 1fr; }
+      .mobile-preview .mini-queue { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .mobile-preview .mini-card { grid-template-columns: 1fr; }
+      .mobile-preview .mini-card .product-art { min-height: 84px; border-right: 0; border-bottom: 1px solid var(--line); }
+      .mobile-preview .runway { grid-template-columns: repeat(3, 150px); overflow-x: auto; padding-bottom: 8px; }
+      .mobile-preview .runway::before { right: 0; left: 0; }
+      .mobile-preview .queue-row { grid-template-columns: 28px 54px minmax(0, 1fr) auto; gap: 7px; padding: 8px; }
+      .mobile-preview .queue-row .product-art { width: 54px; height: 60px; }
+      .mobile-preview .queue-copy p { display: none; }
+      .mobile-preview .queue-action .badge { display: none; }
+
+      @media (max-width: 900px) {
+        .page-shell { width: min(100% - 24px, 760px); padding-top: 28px; }
+        .page-header { grid-template-columns: 1fr; gap: 18px; }
+        .view-toolbar { align-items: flex-start; flex-direction: column; }
+        .comparison { grid-template-columns: repeat(3, 375px); width: max-content; min-width: 0; }
+        .concept-head { min-height: 248px; }
+        .mockup { min-height: 660px; padding: 11px; }
+        .watch-section { min-height: 636px; padding: 12px; }
+        .section-head { align-items: start; flex-direction: column; }
+        .section-meta { width: 100%; justify-content: space-between; }
+        .spotlight-layout { grid-template-columns: 1fr; }
+        .mini-queue { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .mini-card { grid-template-columns: 1fr; }
+        .mini-card .product-art { min-height: 84px; border-right: 0; border-bottom: 1px solid var(--line); }
+        .runway { grid-template-columns: repeat(3, 150px); overflow-x: auto; padding-bottom: 8px; }
+        .runway::before { right: 0; left: 0; }
+        .queue-row { grid-template-columns: 28px 54px minmax(0, 1fr) auto; gap: 7px; padding: 8px; }
+        .queue-row .product-art { width: 54px; height: 60px; }
+        .queue-copy p { display: none; }
+        .queue-action .badge { display: none; }
+      }
+
+      @media (max-width: 420px) {
+        .comparison,
+        .comparison.mobile-preview {
+          grid-template-columns: repeat(3, minmax(0, calc(100vw - 28px)));
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html { scroll-behavior: auto; }
+        *, *::before, *::after { transition: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="page-header">
+        <div>
+          <p class="kicker">SideStage Watch · Design review</p>
+          <h1>Coming up should feel like a drop, not a catalog.</h1>
+          <p class="intro">
+            Three ways to redesign <strong>Coming up / Next in the drop</strong> around the same products and actions.
+            Each direction makes sale order explicit while keeping SideStage’s warm cream, ticket red, and stage yellow language.
+          </p>
+        </div>
+        <aside class="review-note">
+          <strong>What to compare</strong>
+          <p>How quickly you understand what is next, how far ahead you can scan, and whether Hold item still feels useful without competing with the live offer.</p>
+        </aside>
+      </header>
+
+      <section class="view-toolbar" aria-label="Mockup viewport controls">
+        <div class="toolbar-copy">
+          <p>All three concepts use the same four products, prices, quantities, and sale order.</p>
+          <p class="selection-summary">Selected direction: Concept 02 — Drop Runway</p>
+        </div>
+        <div class="segmented" role="group" aria-label="Preview width">
+          <button type="button" data-preview="desktop" aria-pressed="true">Desktop</button>
+          <button type="button" data-preview="mobile" aria-pressed="false">Mobile frames</button>
+        </div>
+      </section>
+
+      <div class="comparison-wrap">
+        <section class="comparison" id="comparison" aria-label="Three SideStage Coming up next concepts">
+          <article class="concept-card">
+            <header class="concept-head">
+              <span class="concept-index">Concept 01</span>
+              <h2>Next Spotlight</h2>
+              <p>One editorial hero makes the immediate next item unmistakable; compact cards keep the rest of the queue visible.</p>
+              <div class="tradeoffs">
+                <span><strong>Best for</strong> anticipation + conversion</span>
+                <span><strong>Tradeoff</strong> more vertical space</span>
+              </div>
+            </header>
+            <div class="mockup">
+              <section class="watch-section" aria-labelledby="spotlight-title">
+                <header class="section-head">
+                  <div><p class="eyebrow">Coming up</p><h3 id="spotlight-title">Next in the drop</h3></div>
+                  <div class="section-meta"><span>4 available</span><button class="outline-button" type="button">View all 8</button></div>
+                </header>
+                <div class="spotlight-layout">
+                  <article class="spotlight-main">
+                    <div class="product-art" aria-label="Illustration of a red varsity jacket">
+                      <svg viewBox="0 0 180 160" role="img" aria-label="Red varsity jacket">
+                        <path d="M53 39 73 25h34l20 14 28 31-21 23-14-12v58H60V81L46 93 25 70Z" fill="#c92e27" stroke="#6f1714" stroke-width="5" stroke-linejoin="round"/>
+                        <path d="M73 25q17 18 34 0l10 11q-27 23-54 0Z" fill="#f4bd25"/>
+                        <path d="M88 47h6v92h-6zM60 116h60" stroke="#f8ead2" stroke-width="5"/>
+                        <path d="m72 67 12 4-7 10-13-4z" fill="#fff0bd"/>
+                      </svg>
+                    </div>
+                    <div class="spotlight-copy">
+                      <span class="badge yellow">Up next · #1</span>
+                      <h4>Stage Varsity Jacket</h4>
+                      <p>Chenille patch · heavyweight wool blend</p>
+                      <div class="price-row"><div><strong>$96.00</strong><br /><span class="muted">6 available</span></div><button class="hold-button" type="button">Hold item</button></div>
+                    </div>
+                  </article>
+                  <div class="mini-queue">
+                    <article class="mini-card">
+                      <div class="product-art kettle" aria-label="Illustration of a steel kettle">
+                        <svg viewBox="0 0 180 160" role="img" aria-label="Steel kettle"><path d="M58 61h65l-5 68H64Z" fill="#dfe7e5" stroke="#536563" stroke-width="6"/><path d="M68 61q4-26 23-26t23 26M121 75q35 3 29 30-5 23-31 15M57 81 30 67l8 34 22 5" fill="none" stroke="#536563" stroke-width="7" stroke-linecap="round"/></svg>
+                      </div>
+                      <div class="mini-copy"><span class="badge">After that</span><h4>Harbor Kettle</h4><p>Brushed steel · 1.7L</p><strong>$74.00</strong></div>
+                    </article>
+                    <article class="mini-card">
+                      <div class="product-art headphones" aria-label="Illustration of over-ear headphones">
+                        <svg viewBox="0 0 180 160" role="img" aria-label="Headphones"><path d="M46 93V75q0-47 44-47t44 47v18" fill="none" stroke="#222b2a" stroke-width="14" stroke-linecap="round"/><rect x="31" y="81" width="35" height="58" rx="15" fill="#394745"/><rect x="114" y="81" width="35" height="58" rx="15" fill="#394745"/></svg>
+                      </div>
+                      <div class="mini-copy"><span class="badge">Later</span><h4>Cloud ANC Headphones</h4><p>Midnight · 40-hour battery</p><strong>$199.00</strong></div>
+                    </article>
+                  </div>
+                </div>
+                <div class="queue-tail"><span>+5 more pieces in the drop</span><span>Sale order locked</span></div>
+              </section>
+            </div>
+            <footer class="concept-foot"><span><strong>Visual weight:</strong> next item first</span><span>Best default candidate</span></footer>
+          </article>
+
+          <article class="concept-card is-selected" aria-label="Concept 02 — Drop Runway, selected direction">
+            <header class="concept-head">
+              <span class="concept-index">Concept 02</span>
+              <span class="selection-pill" aria-label="Selected direction">Selected direction</span>
+              <h2>Drop Runway</h2>
+              <p>A numbered, image-led sequence makes the sale order legible at a glance and encourages browsing farther ahead.</p>
+              <div class="tradeoffs">
+                <span><strong>Best for</strong> scanning a long drop</span>
+                <span><strong>Tradeoff</strong> less product copy</span>
+              </div>
+            </header>
+            <div class="mockup">
+              <section class="watch-section" aria-labelledby="runway-title">
+                <header class="section-head">
+                  <div><p class="eyebrow">Coming up</p><h3 id="runway-title">The drop runway</h3></div>
+                  <div class="section-meta"><span>Item 2 of 8 live now</span></div>
+                </header>
+                <div class="drop-progress">
+                  <div class="progress-copy"><span>Drop progress</span><strong>2 / 8</strong></div>
+                  <div class="progress-track" role="progressbar" aria-label="Drop progress" aria-valuemin="0" aria-valuemax="8" aria-valuenow="2"></div>
+                </div>
+                <div class="runway" aria-label="Upcoming products in sale order">
+                  <article class="runway-card is-next" data-step="3">
+                    <div class="product-art" aria-label="Illustration of a red varsity jacket">
+                      <svg viewBox="0 0 180 160" role="img" aria-label="Red varsity jacket"><path d="M53 39 73 25h34l20 14 28 31-21 23-14-12v58H60V81L46 93 25 70Z" fill="#c92e27" stroke="#6f1714" stroke-width="5" stroke-linejoin="round"/><path d="M73 25q17 18 34 0l10 11q-27 23-54 0Z" fill="#f4bd25"/><path d="M88 47h6v92h-6zM60 116h60" stroke="#f8ead2" stroke-width="5"/></svg>
+                    </div>
+                    <div class="runway-copy"><span class="badge yellow">Up next</span><h4>Stage Varsity Jacket</h4><div class="price-row"><strong>$96</strong><span class="muted">6 left</span></div><button class="hold-button" type="button">Hold item</button></div>
+                  </article>
+                  <article class="runway-card" data-step="4">
+                    <div class="product-art kettle" aria-label="Illustration of a steel kettle">
+                      <svg viewBox="0 0 180 160" role="img" aria-label="Steel kettle"><path d="M58 61h65l-5 68H64Z" fill="#dfe7e5" stroke="#536563" stroke-width="6"/><path d="M68 61q4-26 23-26t23 26M121 75q35 3 29 30-5 23-31 15M57 81 30 67l8 34 22 5" fill="none" stroke="#536563" stroke-width="7" stroke-linecap="round"/></svg>
+                    </div>
+                    <div class="runway-copy"><span class="badge">After that</span><h4>Harbor Kettle</h4><div class="price-row"><strong>$74</strong><span class="muted">4 left</span></div><button class="hold-button" type="button">Hold item</button></div>
+                  </article>
+                  <article class="runway-card" data-step="5">
+                    <div class="product-art headphones" aria-label="Illustration of over-ear headphones">
+                      <svg viewBox="0 0 180 160" role="img" aria-label="Headphones"><path d="M46 93V75q0-47 44-47t44 47v18" fill="none" stroke="#222b2a" stroke-width="14" stroke-linecap="round"/><rect x="31" y="81" width="35" height="58" rx="15" fill="#394745"/><rect x="114" y="81" width="35" height="58" rx="15" fill="#394745"/></svg>
+                    </div>
+                    <div class="runway-copy"><span class="badge">Later</span><h4>Cloud ANC Headphones</h4><div class="price-row"><strong>$199</strong><span class="muted">2 left</span></div><button class="hold-button" type="button">Hold item</button></div>
+                  </article>
+                </div>
+                <div class="runway-footer"><p>+3 more upcoming · sale order locked</p><button class="outline-button" type="button">View all 8</button></div>
+              </section>
+            </div>
+            <footer class="concept-foot"><span><strong>Visual weight:</strong> sequence first</span><span>Selected direction</span></footer>
+          </article>
+
+          <article class="concept-card">
+            <header class="concept-head">
+              <span class="concept-index">Concept 03</span>
+              <h2>Queue Board</h2>
+              <p>A compact setlist-style queue puts sequence, price, quantity, and hold state into one fast comparison view.</p>
+              <div class="tradeoffs">
+                <span><strong>Best for</strong> density + comparison</span>
+                <span><strong>Tradeoff</strong> less merchandising</span>
+              </div>
+            </header>
+            <div class="mockup">
+              <section class="watch-section" aria-labelledby="board-title">
+                <header class="section-head">
+                  <div><p class="eyebrow">Coming up</p><h3 id="board-title">Next in the drop</h3></div>
+                  <div class="section-meta"><span>Sale order</span><span class="badge green">4 available</span></div>
+                </header>
+                <div class="queue-board" aria-label="Upcoming products in sale order">
+                  <article class="queue-row is-next">
+                    <span class="sequence">1</span>
+                    <div class="product-art" aria-label="Illustration of a red varsity jacket">
+                      <svg viewBox="0 0 180 160" role="img" aria-label="Red varsity jacket"><path d="M53 39 73 25h34l20 14 28 31-21 23-14-12v58H60V81L46 93 25 70Z" fill="#c92e27" stroke="#6f1714" stroke-width="5" stroke-linejoin="round"/><path d="M73 25q17 18 34 0l10 11q-27 23-54 0Z" fill="#f4bd25"/><path d="M88 47h6v92h-6z" stroke="#f8ead2" stroke-width="5"/></svg>
+                    </div>
+                    <div class="queue-copy"><span class="badge yellow">Up next</span><h4>Stage Varsity Jacket</h4><p>Chenille patch · heavyweight wool blend</p><div class="queue-facts"><strong>$96.00</strong><span class="muted">6 available</span></div></div>
+                    <div class="queue-action"><span class="badge green">Ready</span><button class="hold-button" type="button">Hold</button></div>
+                  </article>
+                  <article class="queue-row">
+                    <span class="sequence">2</span>
+                    <div class="product-art kettle" aria-label="Illustration of a steel kettle">
+                      <svg viewBox="0 0 180 160" role="img" aria-label="Steel kettle"><path d="M58 61h65l-5 68H64Z" fill="#dfe7e5" stroke="#536563" stroke-width="6"/><path d="M68 61q4-26 23-26t23 26M121 75q35 3 29 30-5 23-31 15M57 81 30 67l8 34 22 5" fill="none" stroke="#536563" stroke-width="7" stroke-linecap="round"/></svg>
+                    </div>
+                    <div class="queue-copy"><h4>Harbor Kettle</h4><p>Brushed steel · 1.7L</p><div class="queue-facts"><strong>$74.00</strong><span class="muted">4 available</span></div></div>
+                    <div class="queue-action"><span class="badge">Later</span><button class="hold-button" type="button">Hold</button></div>
+                  </article>
+                  <article class="queue-row">
+                    <span class="sequence">3</span>
+                    <div class="product-art headphones" aria-label="Illustration of over-ear headphones">
+                      <svg viewBox="0 0 180 160" role="img" aria-label="Headphones"><path d="M46 93V75q0-47 44-47t44 47v18" fill="none" stroke="#222b2a" stroke-width="14" stroke-linecap="round"/><rect x="31" y="81" width="35" height="58" rx="15" fill="#394745"/><rect x="114" y="81" width="35" height="58" rx="15" fill="#394745"/></svg>
+                    </div>
+                    <div class="queue-copy"><h4>Cloud ANC Headphones</h4><p>Midnight · 40-hour battery</p><div class="queue-facts"><strong>$199.00</strong><span class="muted">2 available</span></div></div>
+                    <div class="queue-action"><span class="badge">Later</span><button class="hold-button" type="button">Hold</button></div>
+                  </article>
+                  <article class="queue-row">
+                    <span class="sequence">4</span>
+                    <div class="product-art denim" aria-label="Illustration of a blue denim jacket">
+                      <svg viewBox="0 0 180 160" role="img" aria-label="Blue denim jacket"><path d="M53 39 73 25h34l20 14 28 31-21 23-14-12v58H60V81L46 93 25 70Z" fill="#5d7884" stroke="#33474f" stroke-width="5" stroke-linejoin="round"/><path d="M73 25q17 18 34 0M90 43v96M61 84h59" fill="none" stroke="#d7e2df" stroke-width="4"/></svg>
+                    </div>
+                    <div class="queue-copy"><h4>Washed Denim Jacket</h4><p>Indigo · relaxed fit</p><div class="queue-facts"><strong>$118.00</strong><span class="muted">5 available</span></div></div>
+                    <div class="queue-action"><span class="badge">Later</span><button class="hold-button" type="button">Hold</button></div>
+                  </article>
+                </div>
+                <div class="board-footer"><button class="primary-button" type="button">View full lineup</button></div>
+              </section>
+            </div>
+            <footer class="concept-foot"><span><strong>Visual weight:</strong> information first</span><span>Most compact direction</span></footer>
+          </article>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      const comparison = document.querySelector('#comparison');
+      const previewButtons = document.querySelectorAll('[data-preview]');
+
+      previewButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+          const mobile = button.dataset.preview === 'mobile';
+          comparison.classList.toggle('mobile-preview', mobile);
+          previewButtons.forEach((candidate) => {
+            candidate.setAttribute('aria-pressed', String(candidate === button));
+          });
+        });
+      });
+
+      document.querySelectorAll('.hold-button').forEach((button) => {
+        button.addEventListener('click', () => {
+          const held = button.textContent.trim() === 'Held for you';
+          button.textContent = held ? 'Hold item' : 'Held for you';
+          button.setAttribute('aria-pressed', String(!held));
+        });
+      });
+    </script>
+  </body>
+</html>

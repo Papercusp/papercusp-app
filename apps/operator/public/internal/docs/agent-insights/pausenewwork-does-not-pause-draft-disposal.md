@@ -1,0 +1,100 @@
+# pauseNewWork does NOT pause draft DISPOSAL — the scout-draft-review backstop never routes through pot:wake
+URL: /internal/docs/agent-insights/pausenewwork-does-not-pause-draft-disposal
+
+Pausing a pot with pot:set_steering { pauseNewWork: true } is widely read as freezing the Mug. It does not. The scout-draft-review backstop reaches the Mug by a path that never calls the pot:wake tool — which is the only place the steering-pause gate lives — so a STARTED but steering-paused pot keeps getting draft-review wakes. The plan-review idle activity is not suppressed either; pause EMPTIES the placement frontier, and since \"placement always wins\" cannot win against an empty frontier, the Mug reaches plan-review SOONER. The pause that does stop the sweep is pot:pause, via a different mechanism (hive_started=false). Getting this backwards designs an agent that either starves a draft queue or double-disposes it.
+
+## The question, and why it is easy to get backwards
+
+An agent that takes a pot — `pot:set_steering { pauseNewWork: true }`, then places work
+itself — needs to know whether the Mug is still disposing that pot's Blender-routed
+drafts. The intuition is "I paused the pot, so the Mug is frozen, so the draft queue now
+has no owner and I must adopt it." **That intuition is wrong**, and acting on it creates a
+worse failure than the one it is trying to prevent: two disposers racing one queue, each
+believing it owns it, both writing dispositions that feed the Blender's learning corpus.
+
+Verified 2026-08-09 (plan `goal-mode-2026-08-07`, decision D-015).
+
+## The answer
+
+`pauseNewWork` suppresses **neither** limb of the Mug's draft disposal.
+
+### 1. The `scout-draft-review` wake never touches the steering gate
+
+The backstop's path never calls the `pot:wake` tool, and `pot:wake` is the *only* place the
+steering-pause gate exists:
+
+```
+scoutDraftReviewSweep          dbos/routines-workflow.ts:590   (runs in bg-host)
+  -> listStartedPots()         pot/started.ts:211              reads ONLY operator_settings `hive_started:*`
+  -> fireReviewWake()          scout/draft-review-watchdog.ts:212
+  -> wakeMug()                 pot/placement-watchdog.ts:996
+       -> wakeRecipients(...)  per-agent wake-MODE gate only
+       -> sendMessage(@role:mug)  durable park, always lands
+```
+
+No leg of that reads `getOwnerSteering` or `isPausedNow`. The gate that *does* exist lives
+at `agent-tools/pot/wake.ts:124-140` and returns `skipped: 'steering-paused'` — but only
+for `source: 'event'` wakes carrying a **placement-demand** trigger (`work_items:create`,
+`plans:start`). `pot:set-steering`, `coord:escalate`, untriggered event wakes and explicit
+user wakes all still fire.
+
+This is deliberate, not an oversight: `mug.base.md:183-186` names `scout-draft-review` the
+**friction-path exception** whose drafts "must NOT wait". Disposing drafts that were
+already routed is not "new work".
+
+### 2. `plan-review` is not suppressed either — pause makes it run MORE
+
+`pauseNewWork` **empties the placement frontier** (`pot/survey.ts:100-111`, asserted by
+`pot/survey.test.ts:407` — *"pauseNewWork empties the FRONTIER (no new work) but keeps
+started-plan momentum"*). `mug.base.md:175-176` says placement always wins over
+plan-review — but placement cannot win against an empty frontier, so a paused pot's Mug
+reaches the idle plan-review branch **sooner**, not later.
+
+Note the asymmetry inside the pause itself: it gates only NEW unplaced work. Started-plan
+momentum deliberately continues.
+
+## What actually stops the sweep
+
+`pot:pause` — by a completely different mechanism. It sets `hive_started=false`
+(`agent-tools/pot/pause.ts:94`), so the pot drops out of `listStartedPots()` and the sweep
+never evaluates its drafts at all. (Its second leg sets the global wake-mode to `manual`,
+which makes `wakeRecipients` *stage* the direct wake — but `wakeMug`'s durable
+`@role:mug` message still lands and is drained on the next Mug wake.)
+
+| mechanism                                     | suppresses draft disposal? | how                                                            |
+| --------------------------------------------- | -------------------------- | -------------------------------------------------------------- |
+| `pauseNewWork` / `pausedUntil`                | **no**                     | empties the frontier + gates placement-demand event wakes only |
+| `pot:pause`                                   | yes                        | `hive_started=false` ⇒ pot leaves `listStartedPots()`          |
+| `PAPERCUSP_SCOUT_DRAFT_REVIEW_STALE_SEC <= 0` | yes                        | kill switch, checked before anything else                      |
+
+## ⚠ The same-basename trap that nearly produced the opposite answer
+
+There are **two** files named `survey.ts`:
+
+* `packages/operator-core/lib/pot/survey.ts` — the **lib**, where pause enforcement lives.
+* `packages/operator-core/lib/agent-tools/pot/survey.ts` — the **tool**, which has *zero*
+  steering references.
+
+Grepping only the tool file reads as *"no pause enforcement exists anywhere"* — a
+confident, well-formed, wrong answer. Grep by **symbol** (`isPausedNow`) rather than by
+directory, or check both. The same hazard applies to `wake.ts` and `watchdog.ts`, which
+also exist in both trees.
+
+## The rule this yields
+
+A goal/fleet agent that takes a pot is **not** its sole disposer. Dispose a draft only when
+you are promoting it into work you are placing, never re-dispose one the Mug already
+closed, and leave the rest alone. **Exactly one disposition per draft, by exactly one
+agent.** The Mug's own rules (`mug.base.md:165-200`) are the reference.
+
+## Guard
+
+`packages/operator-core/lib/scout/draft-review-steering-pause.test.ts` asserts the sweep
+fires while `pauseNewWork: true` **and** that it never even *reads* steering, with four
+controls (not-started / debounce / nothing-stale / kill switch) proving the no-wake state
+is observable so the file cannot pass vacuously.
+
+That guard exists because the invariant held only **by accident of routing** — nothing
+asserted it. "Make the backstop consistent with `pot:wake`" is an entirely plausible future
+change that would have silently starved draft disposal for exactly as long as a pot stayed
+paused, with no test failing.

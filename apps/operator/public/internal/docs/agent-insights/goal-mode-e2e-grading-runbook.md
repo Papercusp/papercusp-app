@@ -1,0 +1,123 @@
+# Runbook: grading a GOAL-mode run against the goal-mode-e2e rubric
+URL: /internal/docs/agent-insights/goal-mode-e2e-grading-runbook
+
+Runbook for the goal-mode-e2e rubric's methodRef: how to establish the subject and run window, which store answers which question (the two-store trap that silently zeroes half the criteria), when unknown beats fail, and how to file the scorecard so the trend stays honest.
+
+This is the long-form method behind the `goal-mode-e2e` rubric (`methodRef: goal-mode-e2e-grading-runbook`). The rubric itself carries a per-criterion `model` / `method` / `driftMarkers` / `replication` drill — **read those from `rubrics:get`, they are not duplicated here.** This runbook covers what a per-criterion field cannot: how to set up the grading pass, which of the traps below will silently produce a clean-looking wrong answer, and how to file so the trend means something.
+
+## What this rubric grades
+
+ONE RUN of ONE GOAL-mode agent, against the binding clauses of the GOAL contract (`packages/operator-core/lib/modes/registry.ts`, the `goal` entry in `MODES`).
+
+It does **not** grade whether the goal succeeded. A goal can be well-managed and still fail on the merits, and an agent can reach a good outcome while breaking most of the contract. Grading the outcome instead of the conduct is the single most common way this rubric gets misused — and it is tempting precisely because the outcome is the thing everyone cares about.
+
+## Step 0 — pin the SUBJECT and the RUN WINDOW before gathering anything
+
+Every drill in the rubric is parameterised by `:subject` (the graded agent's coord ownerId, `su-<uuid>`) and `:run_start` / `:run_end`. Establish all three before collecting evidence. File the identity and window through `scorecards:emit` as `subject: { kind: 'agent-run', ref: '<su-id>', windowStart: '<ISO start>', windowEnd: '<ISO end>' }`. The writer stores this in `observation.subject`; `scorecards:list { subjectRef: '<su-id>' }` filters the reference. Record the goal id, source/runtime generation, and exact checklist/brief exposure in the evidence body as well. `sourceHive` identifies the observation's origin and `targetHive` its pot; neither replaces the run subject.
+
+Older cards may have no structured subject, and multiple filings may be corrections of one run. Read their evidence before using them as independent samples. A corrected verdict for the same run uses `supersedes` (see Step 4); a genuinely new observation window is a new sample. Only claim an effect from matched workloads and explicit instruction exposure. A fixture or an instruction visible in source does not prove a live agent received it.
+
+Find the subject's mode rows and window:
+
+```sql
+SELECT owner_id, mode, subject, set_by, owner_directed, set_at
+FROM harness_shared.agent_modes
+WHERE workspace_id = 'papercusp-workspace' AND owner_id = :subject
+ORDER BY set_at;
+```
+
+A GOAL row with `subject IS NULL` is itself a finding (see `mode-and-subject-integrity`): `subject` is what downstream consumers join on, so an unset one does not fail loudly, it silently zeroes `work_items.goal_id` and the goal stop's session attribution.
+
+## Step 1 — the two-store rule, and the zero that lies
+
+**This is the trap that costs a whole criterion, and it fails toward a false PASS.**
+
+Two stores answer different parts of "what did this agent do". Read both and correlate nested/native wrappers before counting distinct actions:
+
+| you want to know                                                                              | read                                                                                                                              | scoped to                                                                             |
+| --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| which **MCP tools** the agent called (`goals:create`, `fleet:launch-on-plan`, `plans:new`, …) | `sessions:timeline` tool entries / `harness_shared.tool_invocations` (`coord_owner_id`, `tool_name`, `invoked_at`, `call_origin`) | exact subject owner + run window; workspace-global calls may carry `workspace_id='*'` |
+| which **native client tools** it used (`Edit`, `Write`, `Bash`, `Read`)                       | `harness_shared.session_turn_parts` (`owner`, `tool_name`, `part_kind`, `ts`)                                                     | `workspace_id = 'default'` ⚠                                                          |
+
+The current session-ingest.ts `partRowsFrom` writer assigns parts to workspace\_id='default'; verify that writer and source/client attribution before reusing this query on another generation. The example native tool names below are Claude names: inspect the stored names for Codex or other clients and classify shell writes by their actual inputs/results.
+
+Prefer `sessions:timeline { owner: '<su-id>', since: '<ISO start>', until: '<ISO end>', kinds: ['tool'], include_auto: false }` for the agent's MCP activity. Its canonical reader filters owner and time, not a guessed harness/workspace equality. Preserve the actual `call_origin` classification and keep automatic hook/system activity separate; a heartbeat is not proof that the agent took a turn. Check source-kind/session attribution in the native transcript leg as well. Do not turn a corpus namespace into an unrestricted cross-workspace query: retain the exact known subject and permitted observation window.
+
+Both halves bite:
+
+1. **`tool_invocations` never records native tools.** A zero for native editor names in this MCP ledger does not establish that the agent made no edits. An agent that edits code the ordinary way leaves no row here at all.
+2. **`session_turn_parts` is scoped `workspace_id='default'`, not `papercusp-workspace`.** Filtered to `papercusp-workspace` the ENTIRE TABLE returns zero rows. `dev:pg_query`'s tenant advisory will actively push you toward the wrong predicate here, because it is right about every other table.
+
+The two compose into a trap that feels like corroboration: you query `tool_invocations`, get a clean zero, correctly reason "I should use the transcript store instead", query `session_turn_parts` with the habitual workspace predicate, and get a *second* clean zero. Two independent sources agreeing is normally strong evidence. Here it is the same mistake twice. (Filed as `EI-20103748074297088`.)
+
+### Falsify every zero before you trust it
+
+**Rule: no criterion may be rated on a zero until the same query has returned a large non-zero against a known-positive control.** For anything code-edit-shaped, the control is any active builder agent:
+
+```sql
+SELECT owner, count(*) FILTER (WHERE tool_name IN ('Edit','Write','MultiEdit')) AS code_edits
+FROM harness_shared.session_turn_parts
+WHERE workspace_id = 'default' AND ts > now() - interval '24 hours' AND owner IS NOT NULL
+GROUP BY 1 ORDER BY 2 DESC LIMIT 5;
+```
+
+**If a known-positive control returns 0, the query or evidence collection is not established — do not grade the subject from it.** Only once the control lights up is a zero for `:subject` meaningful, and for `never-implements` a genuine zero is the whole point of the criterion.
+
+## Step 2 — `unknown` beats `fail`, and it beats `pass` too
+
+The rating scale is inherited from `su-agent-behavior`: `exemplary | pass | partial | fail | severe | unknown`.
+
+**Never score a platform gap as agent failure.** If a clause names a route the platform cannot express yet, the agent could not have complied, and a `fail` there is a lie about a person. Rate `unknown`, and **name the blocking work-item in the evidence** so the next grader can check whether the wall lifted instead of inheriting a bare instruction. Historical v2 findings are investigation leads, not standing exemptions. Re-read the linked work-item and current writer before carrying an old wall forward. In particular, verify the current goal-scoped claim-spec and actual goal-provenance opportunities; a lack of claims is not proof that provenance stamping is broken.
+
+The symmetric error matters as much: **a criterion you did not actually check is `unknown`, not `pass`.** A pass asserts you looked.
+
+This discipline has a shelf life by design. A defensive "rate this unknown" note is invisible once its wall lifts — nothing re-checks it, and it quietly decays from a safeguard into a permanent blind spot. v1 carried exactly such a note for two criteria whose tool had since shipped; v2 deleted it. **When you find a wall has lifted, delete the note in the same pass** rather than leaving it to protect against a problem that no longer exists.
+
+## Step 3 — complete the ratings map and mark unexercised criteria explicitly
+
+Fetch `scorecards:evaluate { rubricRef: 'goal-mode-e2e' }` first. Its `skeleton` is an ARRAY, with each criterion's `key`, `allowedRatings`, instrument/check and empty rating/evidence slots. Build a ratings object containing EVERY returned key; do not assume a remembered criterion count or rating scale. Validate the complete map with a second `scorecards:evaluate` call before filing.
+
+For a criterion whose opportunity did not occur, include `{ rating: 'unknown', evidence: 'idle: not exercised by this run; <specific missing opportunity>.' }` in that same map. Missing evidence about an opportunity that might have occurred is also `unknown`, with the collection gap explained; it is not an idle claim. Do not pass `notExercised` to `scorecards:evaluate` or `scorecards:emit`: those tools require explicit entries and do not accept that capture-only shortcut. `idle:`-prefixed unknowns are excluded from the rubric's staleness calculation.
+
+A short run may leave `reallocates-on-evidence`, `blender-kept-honest`, or `durability-across-cold-wake` unexercised. Inspect the actual opportunity window before deciding. An unobserved cold wake cannot establish either compliant or failed cold-wake behavior.
+
+## Step 4 — file the complete scorecard through the canonical verdict tools
+
+Use this sequence; `ratings` below means the COMPLETE map from Step 3, with evidence on every entry:
+
+```text
+scorecards:evaluate { rubricRef: 'goal-mode-e2e' }
+scorecards:evaluate { rubricRef: 'goal-mode-e2e', ratings: <complete map> }
+scorecards:emit {
+  rubricRef: 'goal-mode-e2e',
+  title: 'GOAL run — <su-id>, <start> to <end>',
+  body: '<goal, generations, instruction exposure, evidence sources and limitations>',
+  ratings: <validated canonicalRatings>,
+  subject: {
+    kind: 'agent-run',
+    ref: '<su-id>',
+    windowStart: '<ISO start>',
+    windowEnd: '<ISO end>'
+  },
+  terminal: true,
+  supersedes: '<prior scorecard EI-id>'
+}
+```
+
+`subject`, `terminal`, and `supersedes` belong ONLY on `scorecards:emit`, not on either evaluation call. Omit `supersedes` for the first card or a new sample. Use it when correcting the same run, including replacing an interim card after the run terminates. Set `terminal: true` only after verifying the SUBJECT has terminated; finishing your observation window or writing a report does not establish that. Until then, omit it or use false and retain the card's provisional status.
+
+* Evidence is mandatory on every rating. Cite the query or transcript observation, its result and the opportunity it establishes; a rating restatement is not evidence. Read-only evaluation validates the map and reports missing/invalid entries without creating a scorecard.
+* A correction is a supersession, not another independent sample. Use top-level `supersedes`, not `observation.linkTo` / `rel: 'revises'`. Read the returned EI-id back through the scorecard/work-item surface and confirm its subject, window, ratings and correction link before citing it.
+* A complete per-run or terminal verdict NEVER goes through `improvements:capture`. That tool's rubric observation path remains appropriate for recurring MUTABLE health observations intentionally coalesced over time; it cannot substitute for GRADE's complete immutable verdict.
+* Preserve independence. Inspect `graderEligibility` when evaluating an acceptance rubric and follow the current rubric/plan's reviewer rules. Independent acceptance graders omit `acceptance`; the rubric author's later acceptance is a separate verdict and must not supersede the independent card. Do not audit your own grading-integrity card.
+
+## Step 5 — read the trend as what it is
+
+`rubrics:trend { rubricRef: 'goal-mode-e2e' }` aggregates scorecards per criterion. Two readings to make deliberately:
+
+* **`staleness.stale`** means criteria are persistently `unknown` on non-idle ratings — the criterion's MODEL may no longer match the system. This is a signal about the RUBRIC, not the agents. v1 went stale because `child-execution-proven` asserted `adv_sessions.role='cup'`, a mechanism retired behind a default-OFF flag; the criterion could never resolve, and five graders dutifully rated it `unknown` rather than questioning the instrument. **A criterion that is unknown on every run is an instrument defect until proven otherwise.**
+* **`direction`** needs distinct, comparable run windows after superseded/interim cards are accounted for; a correction is not a fresh run. Check `scorecardCount` against the number of distinct runs you can actually name before quoting a trend at anyone.
+
+## Why `releaseGating` is false
+
+Gating requires a unique machine instrument on every criterion. Three are honest judgment calls with no deterministic binding available — `reallocates-on-evidence`, `blender-kept-honest`, `right-container-for-the-work` — and inventing bindings for them to make the rubric look gate-ready would be the exact dishonesty the rubric grades agents for. The gating decision is revisited after two real graded runs (plan `goal-mode-rubric-v2-2026-08-10`, P-014), on evidence rather than on the v1 default.

@@ -1,0 +1,193 @@
+{
+  "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+  "generatedAt": "2026-08-02T21:03:45.461Z",
+  "descriptors": [
+    {
+      "taskId": "real-operator-core-lib-startup-validate-active-routines",
+      "pool": "train",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/startup/validate-active-routines.ts",
+      "testPath": "packages/operator-core/lib/startup/validate-active-routines.test.ts",
+      "revertToCommit": "6210dde2e31e276d7fe9ce764aca4b72780f7cd6",
+      "spec": "Restore `packages/operator-core/lib/startup/validate-active-routines.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/startup/validate-active-routines.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/startup/validate-active-routines.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - enforceActiveRoutines REPORTS an unregistered handler but issues no UPDATE\n  - flags an active system: routine whose handler is NOT registered, and fails ok\n  - NEVER flags an inline loop fire — it bypasses the registry by dispatch precedence\n  - passes when the handler IS registered\n  - still flags a system: routine that has an interval but NO bound owner (not a loop fire)",
+      "intent": "Real shipped work on validateActiveRoutines / enforceActiveRoutines (EI-18678269428596559 recurrence guard P-3) / validateActiveRoutines — unregistered system-action handlers (EI-19367772473246483).",
+      "sourceRef": "papercusp commit 479d660f127b (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-console-spawn",
+      "pool": "dev-anchor",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/console-spawn.ts",
+      "testPath": "packages/operator-core/lib/console-spawn.test.ts",
+      "revertToCommit": "6805ee703244a741c9c6bc2da6503233fe20ca75",
+      "spec": "Restore `packages/operator-core/lib/console-spawn.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/console-spawn.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/console-spawn.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - emits a slice for the UN-ENROLLED fallback, not just the enrolled path\n  - STRUCTURAL: every input that produces a scope produces a slice",
+      "intent": "Real shipped work on spawnConsole Windows-desktop (WSL2) defer — WI-1882 / spawnConsole Windows desktop-bridge — WI-3289 / spawnConsole early-exit probe — WI-1886(b) / headlessLogPath — per-session log filename (headless-fleet-launch P-002) / spawnHeadless — no-window managed-pty launch (headless-fleet-launch P-002) / buildHeadlessSpawnCommand (EI-9748 Route A — cgroup escape) / buildHeadlessSpawnCommand — the scope is never created outside our slice (EI-19366263067183489) / wrapHeadlessSigtermDiagnostic (EI-9748) / buildConsoleOneliner / spawnConsole displayOverride (demo-stage) — WI-4272 / pickLinuxTerminal — preference is conditional on a detected desktop session (WI-4718) / resolveTerminalPreference — force process-per-window for resume launches (EI-11578) / findDisplayHonoringTerminal — WI-4272 / advSessionTitleTag / fleet color scheme (AppearanceOpts.scheme) / macConsoleInvocation (operator-direct macOS spawn — approach C) / spawnMacConsole verifies `open` — GUI-less mac ghost members (EI-19311623077693508) / spawnHeadless boot receipt — a member that dies AFTER the probe (EI-19311623077693508) / macHasGuiSession (EI-19311623077693508).",
+      "sourceRef": "papercusp commit 7a32c4fb496b (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-lib-release-green-checkpoint",
+      "pool": "real-anchor",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "apps/operator/lib/release/green-checkpoint.ts",
+      "testPath": "apps/operator/lib/release/green-checkpoint.test.ts",
+      "revertToCommit": "07a7539bf3ecf276012bb5173cd31a9f9be60897",
+      "spec": "Restore `apps/operator/lib/release/green-checkpoint.ts` so its real test passes.\n\nThe oracle is `apps/operator/lib/release/green-checkpoint.test.ts` — run it with `npm run test:file -- apps/operator/lib/release/green-checkpoint.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - a SLOW failing attempt on an UNSATURATED host is NOT blamed on ambient load\n  - a SLOW failing attempt on a SATURATED host is logged as consistent with ambient load\n  - EI-19370028836452003: a not-green verdict is APPENDED to the candidate log, so the file named for a candidate carries that candidate's OWN verdict",
+      "intent": "Real shipped work on acquireCheckpointRunLock / checkpointRunLockDir (per-root lock — cross-lineage starvation fix, 2026-07-02) / createTerminationSignalHandler (EI-10680: replaceStale relaunched into skipped-locked against the run it just stopped) / armSelfWatchdog (WI-1319 root fix (c) — orphaned OS process past DBOS cancellation) / runGreenCheckpoint / EI-18685041726970077: gate verdict lineage / EI-10615: stale-red re-triage precedes the partial-green prefix salvage / EI-18759362119598634: gate-only (lint/typecheck) stale-red re-triage / nonTestGateIdsFrom (EI-18759362119598634, pure) / agent-state-plane standing probes are GATED (P-020) / historicalFlakeAnnotations (WI-2997, pure) / extractFailingTests (P-012 failure signature) / extractFailingTestNames (human-facing case names) / extractFailingCasesByFile / describeFailingCases (EI-18673560248447615) / classifyRedAgainstTip (stale-candidate re-triage) / autoRefireCapFromEnv / refire charge accounting (EI-19343532231631821) / normaliseFailingKey / refireOverlap — the FAIL-OPEN hazard / the charge decision / the two required safety bounds / nextRefireOpts — the recursion state / summarizeSuiteOutput leads with the failure, not the tail / stripAnsi / evaluateDeployStaleness (silent-drought alarm) / buildGreenCheckpointEnv (the gate measures COMMITTED defaults) / sanitizeForkNodeOptions (the gate must not inherit the host 128 GiB heap) / checkpointFailureSignature (P-012 dedup, SPA-build folded in) / summarizeSuiteOutput (de-noised held-gate tail) / isNothingToGate (EI-8744: codeless pot ⇒ nothing to gate ⇒ green) / realCheckpointDeps.runGreen — nothing-to-gate short-circuit (EI-8744) / realCheckpointDeps.runGreen — SPA build retains dist chunks (EI-18694489428714850) / realCheckpointDeps.runGreen — the orchestrator transcript reaches the persisted log (EI-19346606967082413) / parseFailingFilesByWorkspace (load-flake isolation) / test quarantine filtering (v1 gate scope) / decideFlakeAbsorption (pure flake-vs-real decision — NEVER hides a real bug) / attemptFlakeAbsorption (orchestration — injected isolation runner) / names the failing CASES so triage never needs the separate full-suite log / isolation retry hardening (ambient-load resilience, never weakens fail-safe) / WI-6956 confirming co-execution pass (a concurrency-dependent class is never absorbed) / decideConcurrencyConfirmation (pure) / isWorkerPoolCrash + parseCrashedWorkspaces (WI-806) / attemptWorkerCrashAbsorption (WI-806 — absorb-or-retry the no-signature crash) / runGreenCheckpoint — longest-green-prefix (P-016) / quiet-cut — never judge a tip younger than the quiet window (2026-07-01) / pipelineName (EI-7646 — the pipeline-scoped verdict-key segment) / EI-15925 — the advance broadcast is attributable to its pipeline / P-004/D-002 — the gate-verdict WAKE BANNER is attributable to its pipeline.",
+      "sourceRef": "papercusp commit 4ef62d2c84d9 (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-lib-release-git-ops",
+      "pool": "train",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "apps/operator/lib/release/git-ops.ts",
+      "testPath": "apps/operator/lib/release/git-ops.test.ts",
+      "revertToCommit": "1e7b840c5eb80fadd162cf2d4d1032b1a926da0b",
+      "spec": "Restore `apps/operator/lib/release/git-ops.ts` so its real test passes.\n\nThe oracle is `apps/operator/lib/release/git-ops.test.ts` — run it with `npm run test:file -- apps/operator/lib/release/git-ops.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - treats a submodule ADDED in range as fully changed, not as absent",
+      "intent": "Real shipped work on advanceReady — the FF invariant / isAncestor / diff helpers / changedFilesRecursive — gitlink expansion.",
+      "sourceRef": "papercusp commit 935555fa4651 (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-endpoint-route-routes-misc-health-deep",
+      "pool": "dev-anchor",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/endpoint-route/routes/misc/health-deep.ts",
+      "testPath": "packages/operator-core/lib/endpoint-route/routes/misc/health-deep.test.ts",
+      "revertToCommit": "185a4267b5edceda9e89f2cdbd2f3265d66c58f7",
+      "spec": "Restore `packages/operator-core/lib/endpoint-route/routes/misc/health-deep.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/endpoint-route/routes/misc/health-deep.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/endpoint-route/routes/misc/health-deep.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - a running monitor is reflected live (finite figures, pressure derived from the SAME gauge the admission layer reads)\n  - no monitor running ⇒ pressure ok, every figure null (absence of signal is never a false-healthy OR false-unhealthy claim)",
+      "intent": "Real shipped work on computeDeepReadiness / probeSubsystem / readLoopLag.",
+      "sourceRef": "papercusp commit fd7206f049fd (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-memory-bench-push-floor-guard",
+      "pool": "real-anchor",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/memory/bench/push-floor-guard.ts",
+      "testPath": "packages/operator-core/lib/memory/bench/push-floor-guard.test.ts",
+      "revertToCommit": "2c97719b9b24d2b11a7dbe5b75380e5ec0c80a3f",
+      "spec": "Restore `packages/operator-core/lib/memory/bench/push-floor-guard.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/memory/bench/push-floor-guard.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/memory/bench/push-floor-guard.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - averages the two middle values for an even count\n  - computes min/median/max per class, ascending\n  - does not floor the ground-truth probe (it must be UNFLOORED)\n  - reports NOT SEPARABLE when the classes overlap — the criterion is then unsatisfiable\n  - reports SEPARABLE when the hard-negative ceiling sits below the on-topic floor",
+      "intent": "Real shipped work on evaluateFloorViolations — assertion (b) / cosineScoreMap / assertProbeScales — TRAP 1, structurally / positiveControlFailure — TRAP 2, the anti-vacuity rule / summarizeSpread / summarizeSeparation — D-056 separation reading / probePushFloor — wiring.",
+      "sourceRef": "papercusp commit d384a993f3a3 (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-harness-routines-autoloop-chronic-failure",
+      "pool": "train",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/harness/routines/autoloop-chronic-failure.ts",
+      "testPath": "packages/operator-core/lib/harness/routines/autoloop-chronic-failure.test.ts",
+      "revertToCommit": "8a5ccc805eb43b58b51416f3643a37b8c0109fdd",
+      "spec": "Restore `packages/operator-core/lib/harness/routines/autoloop-chronic-failure.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/harness/routines/autoloop-chronic-failure.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/harness/routines/autoloop-chronic-failure.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - a currently-chronic (over-threshold) row never double-escalates here — the chronic sweep's own scope\n  - a loop:arm owner loop is excluded\n  - an already explicitly-paused routine (routine_active:false) is excluded — that alarm is stale-paused-routines' job\n  - an explicitly-paused routine (routine_active:false) is left to the stale-paused-routines alarm\n  - a Red Queen drill row is excluded\n  - a row at/over the chronic threshold is EXCLUDED — that is the chronic sweep's own scope, never double-escalated here\n  - a row that fired recently is never caught, regardless of error count\n  - debounced (already fired within 24h): never re-files AND never re-wakes overwatch\n  - defaults to 24 hours\n  - is env-overridable\n  - null last_fired_at never matches (nothing to measure a silence from)\n  - PAPERCUSP_AUTOLOOP_SILENT_STOP_MS <= 0 disables the sweep entirely (independent kill switch)\n  - routine_active: null (no matching routines row — a fixed system role) is NOT excluded — fail-open\n  - silentStopMs <= 0 disables entirely\n  - sorts most-overdue (oldest last-fire) first\n  - the motivating case: 0 errors + 7d silent → caught, invisible to consecutive_errors alone\n  - the motivating case: kettle, 0 errors, last_status ok, 7d silent — files the observation AND wakes overwatch",
+      "intent": "Real shipped work on chronicErrorThreshold / selectChronicFailures / staleWindowMs / isStaleWatermark / isLoopArmOwnerLoop (EI-6727) / isLoopArmOwnerRole (EI-7220) / isRedQueenDrillRow (EI-12429) / silentStopThresholdMs / selectSilentlyStoppedRoles (EI-19281872822982156) / autoloopChronicFailureSweep — WI-4632: escalation ALSO wakes overwatch (GYM-2, generalized across roles) / autoloopSilentStopSweep (EI-19281872822982156) — the error-count-independent liveness sweep / shouldLogChronicOutcome — EI-12968 (rate-limit the skip-family LOG LINE, not the decision).",
+      "sourceRef": "papercusp commit c8aac9270379 (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-agent-tools-fleet-registry-launch-on-plan",
+      "pool": "dev-anchor",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/agent-tools/fleet_registry/launch-on-plan.ts",
+      "testPath": "packages/operator-core/lib/agent-tools/fleet_registry/launch-on-plan.test.ts",
+      "revertToCommit": "646979979a29520f21ce938083a6640168a3a28d",
+      "spec": "Restore `packages/operator-core/lib/agent-tools/fleet_registry/launch-on-plan.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/agent-tools/fleet_registry/launch-on-plan.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/agent-tools/fleet_registry/launch-on-plan.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - treats ANY multi-line value as inline TEXT (true), regardless of length\n  - treats a short, plausible single-line path as a PATH (false)\n  - treats a single-line value implausibly long for a filename as inline TEXT (true)",
+      "intent": "Real shipped work on memberLaunchCommand (WI-1408 — fleet:launch-on-plan threads --fleet into the member launch) / member baseline carry directive (P-004 — warm/cold auto-mode) / member baseline without a plan (P-003 — pure claim-spec fleet) / headless + carry args (P-003/P-004) / isOmpLocalModel (agent/model coupling — \"thought ornith, got claude\" guard, 2026-07-03) / cloudModelBackendHint (native cloud model-family/backend guard) / resolveFleetAgent (backend + model inheritance — fleet-launch-agent-inheritance-2026-07-03) / model arg — cloud model-spec validation at the tool boundary (WI-1993) / buildFleetKindClaimSpec (EI-7671 — fleet-level kind-filter claim spec) / isNonP2pDrainFleetSlug + buildFleetKindClaimSpec p2p-lane-fence composition (WI-6342) / isLeaderAuthoredClaimSpec (EI-10409 — distinguish a leader-set spec from a generated one) / mergeKindIntoClaimSpec (EI-10409 — merge, never discard, a leader-authored spec) / claimKinds arg (EI-7671) / plan arg is optional (P-003 — pure claim-spec fleet) / overrideCapacityClamp arg + clamp override (EI-8807) / distributeRemotePlacement (WI-5211 — cross-machine max-spread round-robin) / looksLikeInlineLaunchContextText (EI-19276371920501216) / isSelfPublishedSeatOffer (P-014/D-005 — local-seat leg: exclude self-delegated offers from remote placement) / placement arg + remotePlacementUnsupportedArgs (WI-5211) / resolveRemotePlacementHive (WI-5211 — multi-hive disambiguation) / extractKickoffWorkItemIds (EI-18862608742257943 — kickoff-vs-claim-spec launch check).",
+      "sourceRef": "papercusp commit b48f10fbdf94 (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-sync-resolver-resource-delta-config",
+      "pool": "real-anchor",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/sync-resolver/resource-delta-config.ts",
+      "testPath": "packages/operator-core/lib/sync-resolver/resource-delta-config.test.ts",
+      "revertToCommit": "646979979a29520f21ce938083a6640168a3a28d",
+      "spec": "Restore `packages/operator-core/lib/sync-resolver/resource-delta-config.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/sync-resolver/resource-delta-config.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/sync-resolver/resource-delta-config.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - plans.byHive keys on `slug`, like the plans.list read it reuses",
+      "intent": "Real shipped work on resourceDeltaConfig.",
+      "sourceRef": "papercusp commit b48f10fbdf94 (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-harness-routines-stalled-loops-guard",
+      "pool": "train",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/harness/routines/stalled-loops-guard.ts",
+      "testPath": "packages/operator-core/lib/harness/routines/stalled-loops-guard.test.ts",
+      "revertToCommit": "b49ce463dab3414d402a5eaae4a32d2b70c52601",
+      "spec": "Restore `packages/operator-core/lib/harness/routines/stalled-loops-guard.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/harness/routines/stalled-loops-guard.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/harness/routines/stalled-loops-guard.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - a MISSING lastRealTurnAt never engages the veto (liveness is never inferred from absent data)\n  - no active loop-% rows → zero reads beyond discovery, no auto-pause, no broadcast\n  - REFUSES to disarm a turnsStalled owner that produced a real turn inside the floor\n  - sizes the veto window from turnsStalledFloorMs — the SAME floor the verdict uses\n  - still disarms a comatose host — an ancient real turn must NOT engage the veto",
+      "intent": "Real shipped work on sweepStalledLoops (WI-6639 — act on turnsStalled instead of leaving it inert) / second-source veto on lastRealTurnAt (EI-19362678179163398).",
+      "sourceRef": "papercusp commit 646979979a29 (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-result-projection-apply",
+      "pool": "dev-anchor",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/result-projection/apply.ts",
+      "testPath": "packages/operator-core/lib/result-projection/apply.test.ts",
+      "revertToCommit": "6c8aacf8ef36a55cb7c529eb7c90d1f2f51ebe63",
+      "spec": "Restore `packages/operator-core/lib/result-projection/apply.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/result-projection/apply.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/result-projection/apply.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - a NON-empty projection over a truncated corpus still warns, but more weakly\n  - a ZERO-hit filter over a truncated corpus says it is NOT evidence of absence\n  - degrades gracefully when the marker omits its optional fields\n  - the warning fires for ANY projection, not just grep — head hides the tail the same way",
+      "intent": "Real shipped work on applyResultProjection — line operators / applyResultProjection — reporting / applyResultProjection — pick (structured, D-041 tier 3) / parsePickPath / applyPick / applyResultProjection — safety contracts / applyResultProjection — upstream truncation is disclosed (EI-19361771982678588).",
+      "sourceRef": "papercusp commit 42eecc1673f6 (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-agent-tools-code-run",
+      "pool": "real-anchor",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/agent-tools/code/run.ts",
+      "testPath": "packages/operator-core/lib/agent-tools/code/run.test.ts",
+      "revertToCommit": "cab114f0a57994871b79b21414dc2b8159127c3e",
+      "spec": "Restore `packages/operator-core/lib/agent-tools/code/run.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/agent-tools/code/run.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/agent-tools/code/run.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - does NOT duplicate a write failure okFalseWarning already names\n  - does not fire for a THROWN child (rejected/uncertain) — those have their own warnings\n  - is a no-op on a clean run, and on a fixture with no childFailures field at all\n  - ⭐ names a failed read-effect call even when the script made NO writes at all\n  - names ONLY the read failures when a script mixed a failed read with a failed write",
+      "intent": "Real shipped work on code:run registration (B-CX-2A) / code:run → recipe capture (P-003) / code:run → timeoutSec clamped below MCP transport cap (EI-9239) / code:run → inline facade help on unknown refs (P-007) / code:run → per-inner-call workspace/identity rebinding (WI-1411) / code:run → inner calls default to full payload tier (EI-18699443874201617) / code:run → inner calls are exempt from the transport hard ceiling (EI-18719561823587590) / code:run → mutation echo shaping (WI-1377) / annotateChildFailureWarning — a failed READ-effect child call is named too (WI-7061) / code:run → log shaping (WI-3127).",
+      "sourceRef": "papercusp commit 48e238a6f53b (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-agent-tools-events-await",
+      "pool": "train",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/agent-tools/events/await.ts",
+      "testPath": "packages/operator-core/lib/agent-tools/events/await.test.ts",
+      "revertToCommit": "ba80574d0a59aecaa5cc9df642c4f6ce701e665c",
+      "spec": "Restore `packages/operator-core/lib/agent-tools/events/await.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/agent-tools/events/await.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/agent-tools/events/await.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - ⭐ narrows a bare `green-checkpoint:red` await the same way\n  - ⭐ narrows a bare `release:green` await to { pipeline } derived from THIS integration root\n  - ⭐ WARNS instead of narrowing when this process's own pipeline cannot be resolved\n  - ⭐ warns that release:green also fires for a PARTIAL advance",
+      "intent": "Real shipped work on events:await wrapper defaults / EI-14225: supersede-on-registration / EI-19332682533219755 — a glob that spans multiple concrete keys / fromMsg (P-006) / P-004/D-002 — the ZERO-PARAM-FAMILY-WITH-A-SUFFIX guard / EI-10870 — the ORPHAN-AWAIT guard (a key nothing emits can only ever time out) / EI-18676056143796303 — fire-history evidence overrides the membership verdict / EI-18701276960172209 — a self-declared gate with no known emitter is not automatically legitimate / EI-13089 — the FAMILY-PREFIX-MISSING-REQUIRED-PARAM guard / the done-key registration LATCH (EI-13095 — the WI-5075 stranded-await incident) / the plan-item-done registration LATCH (EI-18734910825871393 — the 76s-late-registration race) / the SELF-AWAIT guard (EI-18731480441007330 — the WI-6095 unbreakable self-deadlock incident) / EI-383 — extend the caller's plan-item claim leases to survive the sleep / EI-13846 — default the `work-item:claimable` payload_filter to the caller's own claim spec / EI-19344528739076339 — auto-scope a bare multi-pipeline gate key to THIS pipeline.",
+      "sourceRef": "papercusp commit c481936fe6db (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-release-gate-verdict-freshness",
+      "pool": "dev-anchor",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/release/gate-verdict-freshness.ts",
+      "testPath": "packages/operator-core/lib/release/gate-verdict-freshness.test.ts",
+      "revertToCommit": "ba80574d0a59aecaa5cc9df642c4f6ce701e665c",
+      "spec": "Restore `packages/operator-core/lib/release/gate-verdict-freshness.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/release/gate-verdict-freshness.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/release/gate-verdict-freshness.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - does NOT fire on the healthy structural window (19 min)\n  - does NOT fire on the healthy structural window (25 min)\n  - does NOT fire on the healthy structural window (26 min)\n  - does NOT fire on the healthy structural window (28 min)\n  - does NOT fire on the healthy structural window (29 min)\n  - does NOT fire on the healthy structural window (30 min)\n  - does NOT fire on the healthy structural window (31 min)\n  - does NOT fire on the healthy structural window (32 min)\n  - does NOT fire on the healthy structural window (33 min)\n  - does NOT fire on the healthy structural window (34 min)\n  - does NOT fire on the healthy structural window (35 min)\n  - does NOT fire on the healthy structural window (39 min)\n  - does NOT fire on the healthy structural window (54 min)\n  - fires on the 121-min outlier (the same candidate judged twice, 2026-08-01 23:35Z)\n  - ⭐ flags the 2026-08-02 12:53Z incident: a verdict judging a 10.9h-old candidate\n  - honours an explicit fossilAgeMs override\n  - is UNAVAILABLE (never a false positive) on a blob predating candidateCommittedAt\n  - ⭐ outranks writer-starved: name the concrete defect, not the weakest inference\n  - treats clock skew (candidate committed AFTER the verdict) as unavailable, not as a fossil\n  - ⭐ yields to pin-advance: PROOF of a green outranks \"the candidate was old\"",
+      "intent": "Real shipped work on evaluateGateVerdictFreshness / Rule 3 — RETRIAGE-PROVEN (EI-13288) / Rule 4 — REFIRE-IN-FLIGHT (EI-18669342433807110) / rule 5 — candidate-fossil.",
+      "sourceRef": "papercusp commit c481936fe6db (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-agent-tools-coordination-tools-send",
+      "pool": "real-anchor",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/agent-tools/coordination/tools/send.ts",
+      "testPath": "packages/operator-core/lib/agent-tools/coordination/tools/send.test.ts",
+      "revertToCommit": "8b62b07f65cc5bf61d8839f1a632c233300948c8",
+      "spec": "Restore `packages/operator-core/lib/agent-tools/coordination/tools/send.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/agent-tools/coordination/tools/send.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/agent-tools/coordination/tools/send.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - EI-19343900550313022: a MIXED valid+unknown `to` list still refuses whole (all-or-nothing by design), but the message names the stranded valid recipients + the items[] escape hatch",
+      "intent": "Real shipped work on coord:send handler (bulk keyed-array) / coord:send wake-on-reply (coord-wake-on-reply) / coord:send body auto-refs opt-out (coord-authority-hardening P-008) / coord:send expectEffect — DELIVERED vs ACTED-ON (P-013) / coord:send zero-recipient audience (EI-6874) / coord:send federation scope (cross-machine-coord-parity P-001) / coord:send delivery receipts (P-008) / coord:send remote-homed wake misses (P-007) / coord:send — fleet-scoped broadcast default (queen-fleet-authority-boundary P-004) / coord:send args schema (EI-7838: missing-summary must not be masked by a sibling field error) / coord:send structured-body gate (owner directive 2026-07-28 — the string body is refused) / coord:send `expects` gate (P-017 b#1 — required-with-explicit-none, never defaulted) / report card payload (agent-report-cards-2026-07-17 P-001) / basedOn — the sender’s read trace, derived (never authored) / premiseStamps — the resolved half of `premises`, stamped at send.",
+      "sourceRef": "papercusp commit c57e0760ca7e (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-edit-attribution",
+      "pool": "train",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/edit-attribution.ts",
+      "testPath": "packages/operator-core/lib/edit-attribution.test.ts",
+      "revertToCommit": "8b62b07f65cc5bf61d8839f1a632c233300948c8",
+      "spec": "Restore `packages/operator-core/lib/edit-attribution.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/edit-attribution.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/edit-attribution.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - fills plan_slug from the agent's live presence row when declared\n  - still fills harnessSlug/workItemId from the claim alongside plan_slug from presence",
+      "intent": "Real shipped work on recordEditAttribution — plan_slug fill (WI-6584) / parsePapercuspTrailers (deterministic-commit-workitem-attribution P-004).",
+      "sourceRef": "papercusp commit c57e0760ca7e (impl + oracle changed together)"
+    },
+    {
+      "taskId": "real-operator-core-lib-events-await-pattern",
+      "pool": "dev-anchor",
+      "pinCommit": "f990615fe09cadd5147b09f556766f88e1b637c8",
+      "implPath": "packages/operator-core/lib/events/await/pattern.ts",
+      "testPath": "packages/operator-core/lib/events/await/pattern.test.ts",
+      "revertToCommit": "8b62b07f65cc5bf61d8839f1a632c233300948c8",
+      "spec": "Restore `packages/operator-core/lib/events/await/pattern.ts` so its real test passes.\n\nThe oracle is `packages/operator-core/lib/events/await/pattern.test.ts` — run it with `npm run test:file -- packages/operator-core/lib/events/await/pattern.test.ts`. These are the requirements it currently FAILS, in the words of the engineer who shipped them:\n  - anchors on the literal segment before the first wildcard\n  - is defensive about a non-string key, like its siblings on the emit path\n  - passes an exact (wildcard-free) key through whole\n  - returns no prefix when the glob leads with a wildcard, so a caller cannot turn it into an unbounded scan\n  - the incident glob really does cross pipelines — the regression this exists to disclose\n  - trims back to a whole segment rather than cutting mid-segment",
+      "intent": "Real shipped work on isPattern / expandPatternMacro / patternToOperatorTest / keyMatchesPattern (reuses the @papercusp/rules mingo matcher) / payloadMatchesFilter (EI-8998 — predicate/payload watches) / patternLiteralPrefix (EI-19332682533219755) / assertUsablePattern.",
+      "sourceRef": "papercusp commit c57e0760ca7e (impl + oracle changed together)"
+    }
+  ]
+}

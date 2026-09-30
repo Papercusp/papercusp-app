@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Papercusp</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; padding: 0; height: 100%; background: #0a0a0a; color: #e7e7e7;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { display: grid; place-items: center; height: 100vh; gap: 14px; padding: 32px; box-sizing: border-box; text-align: center; }
+  h1 { letter-spacing: 0.08em; font-size: 14px; margin: 0; color: #9a9a9a; text-transform: uppercase; }
+  .spinner { width: 24px; height: 24px; border: 2px solid #2a2a2a; border-top-color: #6ea8ff; border-radius: 50%; animation: spin 800ms linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .msg { color: #9a9a9a; font-size: 13px; max-width: 480px; line-height: 1.6; }
+  code, kbd { font-family: ui-monospace, "JetBrains Mono", "Menlo", monospace; font-size: 12px; color: #6ea8ff; }
+  .err { color: #fca5a5; }
+  .check-list { list-style: none; padding: 0; margin: 8px 0 0; max-width: 420px; width: 100%; text-align: left; }
+  .check-list li { padding: 6px 10px; border-radius: 6px; margin-bottom: 4px; background: #141414; display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; }
+  .check-list .name { width: 80px; color: #9a9a9a; }
+  .check-list .badge { font-size: 10.5px; padding: 1px 6px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .badge.ok { background: #064e3b; color: #6ee7b7; }
+  .badge.missing { background: #4c1d24; color: #fca5a5; }
+  .badge.error { background: #4b3b00; color: #fcd34d; }
+  .check-list .detail { color: #9a9a9a; flex: 1; word-break: break-word; }
+  .hint-block { margin-top: 12px; padding: 10px 14px; background: #1a1d22; border-radius: 6px; max-width: 480px; text-align: left; font-size: 12.5px; line-height: 1.5; }
+  .hint-block strong { color: #fcd34d; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>PAPERCUSP</h1>
+    <div class="spinner" id="spinner"></div>
+    <p class="msg" id="msg">starting harness sidecar…</p>
+    <ul class="check-list" id="checks" style="display:none"></ul>
+    <div class="hint-block" id="install-hint" style="display:none"></div>
+    <p class="msg" id="dev-hint" style="display:none">
+      Dev mode? Run <code>npm run dev:papercusp</code> in another terminal, then refresh.
+    </p>
+  </div>
+<script>
+  // Determine the sidecar base URL.
+  //   Production: Tauri's main.rs (finish_boot) sets window.__papercuspBase
+  //               to http://127.0.0.1:<picked-port> once the sidecar is up,
+  //               or window.__papercuspBootError when it never comes up.
+  //   Dev: the webview loads devUrl (:3070) directly — this page isn't used.
+  function sidecarBase() {
+    if (window.__papercuspBase) return window.__papercuspBase;
+    // Inside a Tauri prod webview the window starts at tauri://localhost
+    // BEFORE main.rs's init script has set window.__papercuspBase. Returning
+    // a fallback here would race the init script — and on a dev machine
+    // where :3055 happens to be running, we'd hijack the bootstrap and load
+    // the dev app inside the prod binary. Return null and let the caller
+    // wait for the `papercusp:base` event instead.
+    if (location.hostname === 'tauri.localhost' || location.protocol === 'tauri:') {
+      return null;
+    }
+    return location.origin;
+  }
+
+  function badge(status) {
+    return `<span class="badge ${status}">${status}</span>`;
+  }
+
+  function renderChecks(payload) {
+    const ul = document.getElementById('checks');
+    ul.style.display = '';
+    ul.innerHTML = payload.checks.map(c => `
+      <li>
+        <span class="name">${c.name}</span>
+        ${badge(c.status)}
+        <span class="detail">${(c.detail ?? '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</span>
+      </li>
+    `).join('');
+  }
+
+  function renderHint(payload) {
+    const failed = payload.checks.filter(c => c.status !== 'ok');
+    if (!failed.length) return;
+    const hint = document.getElementById('install-hint');
+    const lines = [];
+    if (failed.find(c => c.name === 'node')) {
+      lines.push('<strong>Node 20+</strong> — install from <code>https://nodejs.org/</code> or via <code>nvm</code>.');
+    }
+    if (failed.find(c => c.name === 'postgres')) {
+      lines.push('<strong>PostgreSQL on :5432</strong> — install from <code>https://postgresql.org/download/</code>, then <code>brew services start postgresql</code> (mac) or <code>sudo systemctl start postgresql</code> (Linux).');
+    }
+    if (failed.find(c => c.name === 'claude')) {
+      lines.push('<strong>claude CLI</strong> — install via <code>npm i -g @anthropic-ai/claude-code</code>.');
+    }
+    if (failed.find(c => c.name === 'bash')) {
+      lines.push('<strong>bash</strong> — needed to run the orchestrator. macOS/Linux already have it; Windows: install <a href="https://git-scm.com/download/win" target="_blank">Git for Windows</a>, which ships <code>bash.exe</code>.');
+    }
+    if (failed.find(c => c.name === 'harness')) {
+      lines.push('<strong>harness package</strong> — set <code>PAPERCUSP_HARNESS_DIR</code> or symlink <code>~/autonomous-harness</code> to your harness checkout.');
+    }
+    if (failed.find(c => c.name === 'pi')) {
+      lines.push('<strong>pi (oh-my-pi) — optional</strong> — required only for the in-app <code>pi</code> tab (interactive coding agent). Install via <code>brew install can1357/oh-my-pi/oh-my-pi</code> or see <a href="https://github.com/can1357/oh-my-pi" target="_blank">github.com/can1357/oh-my-pi</a>.');
+    }
+    hint.innerHTML = lines.join('<br><br>');
+    hint.style.display = '';
+  }
+
+  let attempt = 0;
+  let everReached = false;
+  let consecutiveOk = 0;
+  let bootErrorShown = false;
+
+  // P-053: main.rs's finish_boot thread injects window.__papercuspBootError
+  // (and fires `papercusp:boot-error`) when the operator never becomes ready
+  // (120s timeout, or serve exited with an error). Render it as a terminal
+  // failure state instead of spinning forever — but keep polling at a slow
+  // cadence: a glacial first boot (initdb + migrations on a slow disk) can
+  // still come up after the Rust-side deadline, and recovery should be
+  // automatic when it does.
+  function renderBootError() {
+    if (bootErrorShown) return;
+    bootErrorShown = true;
+    document.getElementById('spinner').style.display = 'none';
+    const msg = document.getElementById('msg');
+    msg.classList.add('err');
+    msg.textContent = window.__papercuspBootError || 'the operator failed to start';
+    const hint = document.getElementById('install-hint');
+    hint.innerHTML = '<strong>The operator backend did not start.</strong> ' +
+      'Quit and relaunch Papercusp; if it persists, check the launch logs ' +
+      '(run the app from a terminal to see them) — embedded-Postgres ' +
+      'initdb/migrations are the usual first-boot suspects.';
+    hint.style.display = '';
+  }
+  window.addEventListener('papercusp:boot-error', renderBootError);
+
+  async function tick() {
+    attempt += 1;
+    const msg = document.getElementById('msg');
+    // The boot-error var may have been set before our listener registered
+    // (the Rust side re-evals it for a while) — poll it here too.
+    if (window.__papercuspBootError) renderBootError();
+    const base = sidecarBase();
+    if (!base) {
+      // Still waiting for Tauri's init script to set window.__papercuspBase.
+      if (!bootErrorShown) {
+        msg.textContent = `waiting for sidecar port… (attempt ${attempt})`;
+      }
+      setTimeout(tick, bootErrorShown ? 5000 : 200);
+      return;
+    }
+    try {
+      const r = await fetch(`${base}/api/desktop/preflight`, { cache: 'no-store' });
+      if (!r.ok) throw new Error('preflight responded ' + r.status);
+      const data = await r.json();
+      everReached = true;
+      msg.classList.remove('err');
+      msg.textContent = data.ok
+        ? 'all checks passed — opening…'
+        : 'sidecar up; some prerequisites are missing:';
+      renderChecks(data);
+      renderHint(data);
+      if (data.ok) {
+        consecutiveOk += 1;
+        if (consecutiveOk >= 1) {
+          // Replace the bootstrap page so Back returns to the prior real app route,
+          // not the startup/preflight screen.
+          // Phase 4: navigate the real app to __papercuspAppBase when set
+          // (papercusp://localhost — off HTTP); falls back to the HTTP base.
+          const appBase = window.__papercuspAppBase || base;
+          location.replace(`${appBase}/harness`);
+          return;
+        }
+      } else {
+        consecutiveOk = 0;
+      }
+    } catch (err) {
+      if (!everReached) {
+        if (!bootErrorShown) {
+          msg.textContent = `starting harness sidecar… (attempt ${attempt})`;
+        }
+      } else {
+        msg.classList.add('err');
+        msg.textContent = `sidecar unreachable: ${err.message}`;
+      }
+    }
+    setTimeout(tick, bootErrorShown ? 5000 : 1000);
+  }
+
+  // After 8s with no sidecar contact, show the dev-mode hint.
+  setTimeout(() => {
+    if (!everReached) {
+      document.getElementById('dev-hint').style.display = '';
+    }
+  }, 8000);
+
+  tick();
+</script>
+</body>
+</html>

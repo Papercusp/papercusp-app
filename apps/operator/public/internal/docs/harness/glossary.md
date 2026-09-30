@@ -1,0 +1,221 @@
+# Glossary (harness runtime)
+URL: /internal/docs/harness/glossary
+
+The runtime terms you meet working with a live harness, each traceable to the defining code.
+
+Runtime terms, alphabetical, each pointing at its defining code. For
+spec-level/product vocabulary (Install, Goal, Plugin, marketplace `kind`, …)
+see [Vocabulary](/internal/docs/spec/vocabulary); for the user-facing brand
+lexicon (Pot/Mug/cup display strings) see the `papercusp-the-hive`
+[flag](/internal/docs/posthog/feature-flags) — those are presentation-layer
+names over the code terms below.
+
+**Cup** · The generic "do this task" agent of the pot blueprint — carries no
+pipeline spine and no chunk requirement, unlike `worker`. —
+`packages/agent-mcp/src/role-config.ts`
+
+**Blueprint** · A harness's declarative shape: roles, spine, triggers, gates,
+dispatch policy, `knobs`, and declared `params`. Built-ins extend `base`. —
+`libs/papercusp/packages/harness/blueprints/`, schema in
+`libs/papercusp/packages/orchestrator/src/blueprint/schema.ts`
+
+**Brain** · The RBAC *principal* role marking the operator's own
+orchestration intelligence — gates spawn-approval tools at the dispatch
+layer. Not an agent role. — `role-config.ts :: BRAIN_PRINCIPAL_ROLE`
+
+**Chunk** · A feature-family work-item kind: a feature sub-unit sized for one
+worker turn, executed by the worker chunk loop (per-chunk file locks + a
+typecheck gate). — `packages/operator-core/lib/work-items.ts`
+
+**Claim / lease** · Taking ownership of a work item (`work_items:claim`); a
+live lease with a dead holder is an *orphaned claim*, surfaced by
+`fleet:assignments`.
+
+**Coding blueprint** · The default *execution pipeline* (`kind:'harness'`,
+`id: coding-factory`): a per-feature `director` drives a deterministic
+**spine** — scoper → architect → worker → validator → documenter → curator
+(+ opt-in tester / security / crosscheck / ui-qa; reviewer = the PR gate) —
+over one `feature` (`F-NNN`). The 2026-06-18 rename moved this spine off the
+`coding` id (now the Pot) and onto `coding-factory`; it remains the active
+fallback pipeline and the `extends` base for repo-detected harnesses.
+Contrast the **Pot blueprint** (orchestration, *no* spine): different layers,
+not flavors. — `blueprints/coding-factory/blueprint.yaml`,
+[pot-vs-coding](/internal/docs/agent-insights/pot-vs-coding-blueprint)
+
+**Curator** · The memory-compaction pipeline role; the only role that deletes
+harness memory. Its persona, like every role's, resolves under the owning
+blueprint as `blueprints/<id>/prompts/curator.md` (base default in
+`blueprints/base/`) — the legacy global `prompts/` dir is retired. —
+[Why a curator](/internal/docs/harness/decisions/curator)
+
+**Decision verb** · The single verb a deciding agent emits per iteration
+(`NEXT_WORKER` / `NEXT_ARCHITECT` / `NEXT_VALIDATOR` / `DONE` / `ESCALATE`);
+interpreted by the blueprint spine. —
+[Decision telemetry](/internal/docs/harness/decisions-timeline)
+
+**Director** · The role that emits per-feature decision verbs in the durable
+pipeline; a real `AGENT_ROLES` id (registered by blueprint-role-bundling).
+Its persona resolves under the owning blueprint as
+`blueprints/<id>/prompts/director.md` (base default:
+`blueprints/base/prompts/director.md`) — the global `prompts/` dir is retired,
+and legacy ids resolve via `BLUEPRINT_ID_ALIASES`. —
+`role-config.ts :: AGENT_ROLES`, `blueprints/base/prompts/director.md`
+
+**Dispatch** · The blueprint-declared policy for when/what the engine runs
+next; concurrency knobs resolve via their own path (not the effective-config
+overlay). — `blueprints/*/blueprint.yaml`
+
+**Effective config** · Blueprint knobs overlaid *under* the per-harness
+instance config (instance wins). —
+[Configuration](/internal/docs/harness/config)
+
+**Escalation** · A pipeline finalizing with `ESCALATE`: the `on-escalate`
+hook fires and the `onEscalate` recipe (default: curator) runs; the harness
+surfaces the reason for a human. —
+`packages/operator-core/lib/dbos/orchestrator-finalize.ts`
+
+**Feature** · The classic feature-family work-item kind (`F-NNN`), routed
+through the coding blueprint's spine. — `work-items.ts`
+
+**Finalize recipe** · The blueprint's `gates.finalize` step list run on
+terminal outcomes (`onDone` / `onEscalate`). —
+`blueprints/coding-factory/blueprint.yaml`
+
+**Fire path** · The path from a scheduled/queued trigger to the work actually
+*firing* (running): the routines engine → the fire (a loop wake via
+`fireLoopWake`, or a `tier:durable` routine's action) → the enqueued action
+executes. *Enqueued ≠ fired*: "fire-path down" = routines/loops tick but nothing
+runs (e.g. a DBOS engine freeze — EI-1607/1622), detectable by absent
+completions; "fire-path recovered" = firing resumed, proven by live completions
+(which contradict a stale "fire-path down" alarm). Distinct from **Dispatch**
+(the *when/what* runs policy) — the fire path is whether that dispatch reaches
+execution; the green-stall / git-sync-stall watchdogs exist to alarm when it
+silently stops. —
+`dbos/routines-workflow.ts`, `harness/routines/loop-fire.ts`
+
+**Ghost** · A deciding-agent output that fails to parse as a known decision
+verb; tracked as a rate and a health signal (`low_ghost_rate`). —
+`packages/operator-core/lib/harness-readers.ts`
+
+**Harness** · One managed work pipeline (repo + work queue + runs),
+instantiated from a blueprint; slug-identified.
+
+**Pot home** · Which **Pot** (project) a harness belongs to — resolved by
+`potHomeSlugForHarness(ws, harnessSlug)` (a harness's own slug if it *is* the
+Pot's `kind:'hive'` home, else its registry `hive_slug` member pointer);
+shared by the topic re-key, admission, presence, and lock-authority seams.
+Code/DB still carry the pre-rename **`hive`** vocabulary in places
+(`hive_home_slug` / `hiveHomeSlugForHarness`, mig 185, partially renamed
+toward `pot_home_slug` by migs 557/565, `cup-lexicon-full-rename-2026-07-09`)
+— **"hive home" heard in fleet traffic is this same concept under its
+predecessor name, not a separate mechanism** (EI-1704: reviewed as a
+neologism-abstraction proposal and closed — the primitive already exists
+under this entry + the source below, so no new tool/table/routine was
+minted). —
+[pot-scoped-federation](/internal/docs/agent-insights/pot-scoped-federation)
+
+**Shared Pot** · A Pot the owner has published to the directory as
+`visibility: 'public'` or `'invite'` (`getOwnedHiveMeta(...).visibility`) —
+the gate that gives it a federated substrate (topic re-key, admission,
+presence) at all; a `private`/un-published Pot stays local-only and never
+announces on the DHT. Setup lives in `adoptSharedHiveIdentity()` /
+`goSharedHive()` (`SharedHiveState`,
+`packages/operator-core/lib/harness/papercusp-hive-share.ts`); exercised
+end-to-end by the `shared-hive-core` Tests-tab suite
+(`buildSharedHiveCoreChecks`). "Shared hive" in fleet
+traffic is this same primitive under its pre-rename name (EI-1705: reviewed
+as a neologism-abstraction proposal and closed — already named + covered by
+this entry, the `SharedHiveState` type, and the `shared-pot-*` insight-doc
+series, so no new tool/table/routine was minted). —
+[pot-scoped-federation](/internal/docs/agent-insights/pot-scoped-federation)
+
+**Pot blueprint** · The *orchestration* layer (`kind:'pot'`, `id: coding`,
+root-only, **never nested**): a **Mug** surveys the work frontier and *places*
+ranked `work_items` onto generic **cups** — **no spine**, self-declared wake
+(`pot:declare-wake`) — and can create coding/research harnesses. The 2026-06-18
+rename moved this blueprint from `pot` to `coding`; the legacy `pot` id
+survives only as a runtime alias (`BLUEPRINT_ID_ALIASES = { pot: 'coding' }`).
+Contrast the **Coding blueprint** (one pipeline it runs). —
+`blueprints/coding/blueprint.yaml`,
+[pot-vs-coding](/internal/docs/agent-insights/pot-vs-coding-blueprint)
+
+**Hook** · An out-of-band shell script at `.papercusp/hooks/<name>.sh` run at
+pipeline boundaries. — [Lifecycle hooks](/internal/docs/harness/hooks)
+
+**Identity file** · `identity/<role>.md` — cross-mission per-role lessons,
+PG-mirrored to `harness_shared.identity_files`. —
+[Memory](/internal/docs/harness/memory)
+
+**Instance config** · Per-harness overrides stored in workspace-PG and
+delivered via the `HARNESS_CONFIG_JSON` env transport; `.papercusp/config.json`
+is deprecated and not read. — `libs/papercusp/packages/orchestrator/src/effective-config.ts`
+
+**Knobs** · Shape-level defaults a blueprint declares (e.g.
+`debuggerThreshold: 3`). — `blueprints/coding-factory/blueprint.yaml`
+
+**Overwatch** · The autonomous system-health *supervisor* (a sibling to the
+Mug): runs a sense → decide → act loop over the whole running system, but
+nudges / observes / escalates *only* — it never re-places work and its role
+envelope denies `capability:fs-write` + `capability:bash`. A built-in
+`AGENT_ROLES` id, but it ships dark behind the `papercusp-overwatch` flag
+(default OFF). — `role-config.ts`, `blueprints/coding/prompts/overwatch.md`
+
+**Params** · A blueprint's *declared tunables*, keyed by instance-config
+dot-paths, unioned across `extends`; the schema-driven settings layer
+validates writes against them. — `blueprint/params.ts`
+
+**Phase** · One of up to three worktrees per project — `staging` (the main
+path), `testing`, `production` (sibling `<path>--<phase>` checkouts). —
+`packages/operator-core/lib/harness-phases.ts`
+
+**Planner** · An interactive plan-authoring session role (drafts one plan via
+`plans:*`); not the spec-level Planner pipeline role. — `role-config.ts`
+
+**Mug** · The steering intelligence of a pot/Pot — schedules, places, and
+prioritizes work (the role the lexicon surfaces as "Mug"); distinct from
+the watching `papercup`. — `role-config.ts :: AGENT_ROLES` (`mug` entry)
+
+**Redundancy / replica** · BOINC-style multi-dispatch of one work item to
+independent replicas with a judge step
+(`work_items:set_redundancy` / `claim_replica` / `record_replica_result` /
+`judge_redundancy`, plus the `work_items:redundancy_status` read view);
+feature-family only. Opt-in and **OFF by default** — a `set_redundancy`
+marker stays inert (the item still runs exactly-once) until the owner sets
+`PAPERCUSP_WORKITEM_REDUNDANCY=1`.
+
+**Role** · A named agent function with its own persona + tool surface. The
+runtime registry is `AGENT_ROLES`. —
+[Roles](/internal/docs/harness/roles)
+
+**Run / spawn** · One agent invocation: the spawn is the envelope (workspace
+
+* harness + role + work item + signed MCP URL), the run is the execution;
+  tracked in `harness_shared.spawned_agents`.
+
+**Papercup** · The read-mostly fleet watcher (stuck spawns, lock hogs, coord
+staleness); its only writes are alarms. — `role-config.ts`
+
+**Spine** · The blueprint's declared role-routing model; the `deriveNext`
+interpreter maps (state, decision verb) → next action. —
+`libs/papercusp/packages/orchestrator/src/blueprint/derive-next.ts`
+
+**Summary memory** · `.papercusp/memory/summary.md` — curator-maintained,
+40-line cap, auto-injected into every pipeline spawn. —
+[Memory](/internal/docs/harness/memory)
+
+**Task** · An issue-family work-item kind recording delegated work; excluded
+from the default `issues:*` listing. — `work-items.ts`
+
+**Work blueprint** · The non-coding work Pot (`kind:'pot'`, `id: work`,
+`extends: coding`): the same Mug + cups orchestration as the coding Pot but
+for non-code work. Renamed from `generic-pot` by the 2026-06-18 rename
+(`BLUEPRINT_ID_ALIASES = { 'generic-pot': 'work' }`). —
+`blueprints/work/blueprint.yaml`
+
+**Work item** · The unified unit of work, one type discriminated by `kind`:
+feature family (`feature` / `research-task` / `chunk`) + issue family
+(`bug` / `change` / `task`), served by the `work_items` UNION view over the
+per-kind tables (migration 159). — `packages/operator-core/lib/work-items.ts`
+
+**Workspace** · One Papercusp install: many harnesses, one PG database, one
+credential set.

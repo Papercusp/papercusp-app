@@ -1,0 +1,24 @@
+# Goal mode hardening acceptance grading
+URL: /internal/docs/agent-insights/goal-mode-hardening-acceptance-grading-runbook
+
+Plan-level procedure for verifying GOAL hardening on the current build, independently grading it, and checking final delivery.
+
+# Goal mode hardening: plan acceptance grading
+
+This is the plan-level acceptance procedure for `goal-mode-hardening-2026-08-10`. Reuse `goal-mode-e2e-grading-runbook` when judging one holder's behavior; this procedure joins the shipped source, a bounded holder run, independent verification, and delivery. The current acceptance rubric is `acceptance-goal-mode-hardening-2026-08-10`; read its current revision and all seven criteria before grading.
+
+## Pin the subject and build
+
+Read `plans:get` and its Decisions, especially D-018 through D-023. Read `rubrics:get` at the current revision and record `criteriaHash`. Read canonical `staging` HEAD and the serving `:3170` sidecar SHA. Test evidence must name the source SHA that ran. `:3170` is the current-build acceptance plane; `:3070` is the released green `main` plane and proves final shipment only. Do not call a staging result deployed.
+
+## Exercise the current-build GOAL contract
+
+Start a bounded non-standing canary on `:3170` with an explicit holder policy, kill criterion, ceiling, `mcpTarget:'spawn-host'`, and a named stop time. Read the holder's first-turn GOAL mode and goal subject. Compare its launch `GoalPortfolioBrief` with `coord:orient` using typed field presence and timestamps, not verbatim text equality. The holder calls `capability:launch-agent` with `goalVerifier:'test'` and `mcpTarget:'spawn-host'`; require a separate child's first-turn TEST mode, inherited goal id, holder coupling, and an independent verdict. After a checkpoint, request one cold carry respawn and verify the same GOAL subject and typed brief on the successor. Close the canary and record its terminal state.
+
+## Verify the seven outcomes
+
+Use each criterion's `replication` drill and bound `check.files`; a bound test must be run on the current tree and must contain an assertion that can fail for the criterion's drift marker. Inspect refusal and degraded branches as well as successes. Read the exact `AFFECTED_TESTS_RESULT`, failing-file list, and the operator-core typecheck result; a focused pass or a dirty-tree run alone is narrower than a final affected verdict. For plan status, read `plans:audit` completion coverage and each cited blob, not just the audit count.
+
+## Independent decision and shipment
+
+The grader must be outside the implementer's lineage. Before grading, a separate reviewer critiques the current acceptance rubric against `meta-acceptance-rubric`, records the critique on a review work-item, emits a complete linked meta attestation, and lets its grading audit settle. Then run `scorecards:evaluate` for the current acceptance revision, emit every rating with observed references, and use `unknown` for anything not exercised. A healthy final rating requires a current-build holder/verifier receipt, clean focused and affected tests, clean typecheck, complete code-truth audit, and final delivery evidence. Read the green pin and deployed build back before marking the plan `shipped`; if the gate is owned or held, preserve the current-build acceptance evidence and leave shipment open.

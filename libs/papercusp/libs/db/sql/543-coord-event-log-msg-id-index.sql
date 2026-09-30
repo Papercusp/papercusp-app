@@ -1,0 +1,38 @@
+-- 543-coord-event-log-msg-id-index.sql
+--
+-- WI-3817 (p2p-parity-closeout-lanes-2026-07-10): a general (workspace_id,
+-- msg_id) btree on harness_shared.coord_event_log. Today the ONLY indexed
+-- msg_id path is a partial unique index restricted to
+-- surface IN ('handoffs','escalations') (migration baseline
+-- coord_event_log_event_uq) — every OTHER msg_id-keyed lookup (the
+-- `messages` surface, which is the bulk of the table) seq-scans.
+--
+-- This is not just an ad-hoc-query concern (agents doing degraded-plane
+-- verify-then-retry checks via raw `body::text LIKE '%...%'` during the
+-- 2026-07-10 host-overload storm, one of the observed slow-query classes)
+-- — it is a HOT CODE PATH:
+--   * packages/operator-core/lib/sync/hyperbee/projections/coord-message.ts
+--     runs `WHERE workspace_id = $1 AND msg_id = $2` on EVERY applied reply
+--     message (the P-002 wake-on-reply original-lookup) and again on every
+--     federated retraction (deleteFromPg, `WHERE workspace_id = ... AND
+--     msg_id = ...`).
+--   * coord-thread-post.ts does the equivalent for `post_msg_id`.
+--   * message-log-gc.ts's retention sweep self-joins on msg_id via a
+--     recursive CTE over the whole `messages` surface.
+--
+-- Live-verified on the dev box (~104k rows in coord_event_log):
+--   EXPLAIN (before): Seq Scan, cost 0.00..19193.58, ~19s-class on a cold
+--     cache under load (Rows Removed by Filter: 98900+).
+--   Built CONCURRENTLY out-of-band (avoids locking the hot table under the
+--     live fleet's continuous read/write traffic) — a plain `IF NOT EXISTS`
+--     here is a no-op everywhere it's already present, matching the
+--     established pattern (see 315-tool-invocations-invoked-at-cov-idx.sql).
+--
+-- Idempotent (IF NOT EXISTS); no top-level BEGIN/COMMIT (runner wraps each
+-- file in its own transaction, per the lint-migrations enforced-era
+-- contract) — non-concurrent here is fine: migrations run at boot/provision
+-- before load, and IF NOT EXISTS skips it where the index was already
+-- built live.
+
+CREATE INDEX IF NOT EXISTS coord_event_log_msg_id_idx
+  ON harness_shared.coord_event_log (workspace_id, msg_id);

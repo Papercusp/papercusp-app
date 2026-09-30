@@ -1,0 +1,51 @@
+-- 751-drop-redundant-tool-usage-rollup-verb-idx.sql
+--
+-- Drop harness_shared.tool_usage_rollup_verb_idx.
+-- Plan: db-performance-remediation-2026-07-26 (WI-8945, Decision D-031).
+--
+-- This index is REDUNDANT AND MEASURABLY HARMFUL, not merely unused.
+--
+--   CREATE INDEX tool_usage_rollup_verb_idx ON harness_shared.tool_usage_rollup
+--     USING btree (workspace_id, day DESC, verb) WHERE (verb <> ''::text);
+--
+-- It looked like a textbook missing-predicate misalignment: 103,945 matching rows
+-- of 140,910, idx_scan = 0 across the database's entire lifetime
+-- (pg_stat_database.stats_reset IS NULL), and its only consumer -- USAGE_WINDOW_SQL
+-- in packages/operator-core/lib/bash-substitution/report.ts:85 -- filters
+-- `workspace_id = $1 AND day >= ...` (this index's first two key columns) while never
+-- stating `verb <> ''`, so the planner cannot use it.
+--
+-- Measuring the "fix" INVERTED it (force_generic_plan, real parameters, 140,910 rows):
+--
+--   as written        -> Bitmap Index Scan on tool_usage_rollup_window_idx
+--                        140,910 rows, 131.1 ms   (index-scan leg  4.5 ms)
+--   predicate stated  -> Bitmap Index Scan on tool_usage_rollup_verb_idx
+--                        103,945 rows, 166.8 ms   (index-scan leg 72.9 ms)
+--
+-- Aligning the query to this index is 27% SLOWER while reading 26% FEWER rows. The
+-- query was never suffering: tool_usage_rollup_window_idx (workspace_id, day), which
+-- is non-partial and narrower, already serves it exactly. This index is a wider,
+-- strictly-worse duplicate carrying a trailing `verb` column that nothing filters on.
+-- Stating the predicate would additionally DROP 36,965 rows -- every row with
+-- verb = '', which are the bash-command rows that report exists to count -- so the
+-- "alignment" is a silent result change, not an optimisation.
+--
+-- Unlike the empty indexes dropped in migration 750, this one carries real cost: it
+-- holds 103,945 live entries on a table taking 353,479 writes, so it pays genuine
+-- write amplification for zero reads. 3512 kB reclaimed.
+--
+-- The CONSUMING QUERY IS DELIBERATELY LEFT UNCHANGED. Per D-031: when a flagged
+-- partial index is redundant, drop the index and do not touch the query.
+--
+-- FORWARD-COMPAT: this is a plain non-UNIQUE btree (definition quoted above), so the
+-- still-running older release cannot be using it as an ON CONFLICT arbiter — ON CONFLICT
+-- requires a UNIQUE index or constraint, making the EI-18797473716313783 failure mode
+-- unreachable here by construction. It also cannot be serving any deployed query plan:
+-- idx_scan = 0 across the database's entire lifetime, and the measurement above shows the
+-- planner actively PREFERS tool_usage_rollup_window_idx for the sole consumer (131.1 ms vs
+-- 166.8 ms when forced onto this one). Dropping it removes a duplicate the deployed release
+-- was already declining to use.
+--
+-- REVERSIBILITY: recreate with the exact definition quoted above.
+
+DROP INDEX IF EXISTS harness_shared.tool_usage_rollup_verb_idx;

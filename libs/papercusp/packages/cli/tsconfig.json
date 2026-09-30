@@ -1,0 +1,21 @@
+{
+  "$comment": "EI-19305781578043773 — typecheck coverage for a libs/papercusp package that had none. Mirrors libs/papercusp/libs/db/tsconfig.json (the pattern established by EI-19302566985147894); see that file for why allowJs is on and why this key cannot live inside compilerOptions.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src/**/*.ts", "bin/**/*.ts", "*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

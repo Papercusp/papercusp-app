@@ -1,0 +1,17 @@
+{
+  "name": "harness-docs-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone Starlight viewer for docs written by the autonomous harness documenter role.",
+  "scripts": {
+    "dev": "astro dev --host 127.0.0.1 --port ${DOCS_PORT:-4325}",
+    "build": "astro build",
+    "preview": "astro preview --host 127.0.0.1 --port ${DOCS_PORT:-4325}",
+    "typecheck": "tsc --noEmit --incremental false -p tsconfig.json"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.32.0",
+    "astro": "^5.5.0",
+    "sharp": "^0.33.0"
+  }
+}

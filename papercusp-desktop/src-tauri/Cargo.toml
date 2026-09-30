@@ -1,0 +1,217 @@
+[package]
+name = "papercusp-desktop"
+version = "0.0.25"
+description = "Papercusp desktop shell — Tauri webview + Node sidecar"
+authors = ["Papercusp Team"]
+license = "Elastic-2.0"
+edition = "2021"
+rust-version = "1.77"
+
+[[bin]]
+name = "papercusp-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `tray-icon` powers the "Papercusp Server" menubar/tray app (Server role, no
+# main window); cross-platform (macOS status item, Windows notification-area,
+# Linux appindicator). See app_role.rs + the Server branch in setup().
+tauri = { version = "2", features = ["specta", "tray-icon", "devtools"] }
+tauri-plugin-shell = "2"
+# Cross-platform login auto-start for the Server role: macOS LaunchAgent,
+# Windows HKCU Run key, Linux XDG ~/.config/autostart. Registered only when
+# role=Server so the backend is up (and psu works) before any window opens.
+tauri-plugin-autostart = "2"
+# Single-instance guard (P-009): reject a duplicate launch of the SAME bundle.
+# The plugin keys its OS lock on the app identifier, which is DISTINCT per bundle
+# (com.papercusp.gui vs com.papercusp.server) → per-bundle-identity semantics:
+# two GUIs (or two Servers) collide, but a GUI and a Server coexist. Registered
+# release-only (dev keeps multi-instance for agent-e2e). See main.rs run() +
+# on_second_instance(). Cross-platform: Win named pipe, Linux DBus, macOS socket.
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-os = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+# Native OS notifications — raised from the webview via the
+# show_attention_notification command (planning-attention-importance D-007).
+tauri-plugin-notification = "2"
+# Invisible env-switch escape hatch: OS-level keyboard shortcuts (NO menu bar) so
+# you can switch envs even when a switched-to build white-screens / breaks its IPC.
+tauri-plugin-global-shortcut = "2"
+# url is re-used by tauri_plugin_updater's UpdaterBuilder::endpoints(Vec<Url>);
+# we depend on it directly so resolve_update_endpoint() can build the
+# operator-sidecar URL at runtime instead of baking it into tauri.conf.json.
+url = "2"
+# MCP bridge — registered only under #[cfg(debug_assertions)] in main.rs,
+# so it's a no-op at runtime in release builds. Lets coding agents
+# inspect a running dev build (IPC monitor, window state, JS eval).
+tauri-plugin-mcp-bridge = "0.2"
+
+# Typed IPC bridge: every #[tauri::command] gets a #[specta::specta]
+# annotation, and main.rs uses tauri_specta::Builder to emit a
+# `bindings.ts` for the frontend on each debug build. Frontend then
+# imports typed wrappers from `@/bindings` instead of raw `invoke()`.
+specta = { version = "=2.0.0-rc.24", features = ["derive", "serde_json"] }
+specta-typescript = "=0.0.11"
+tauri-specta = { version = "=2.0.0-rc.24", features = ["derive", "typescript"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Already pinned transitively; use the maintained implementation for complete
+# Windows runtime payload identity, not a hand-written or serve-only hash.
+sha2 = "=0.10.9"
+
+# Boot-time WebKitGTK localStorage WAL reclaim (EI-14135): the webview's
+# localStorage is a SQLite DB in WAL mode whose `-wal` never resets (a
+# persistent webview reader blocks the wrap, and a killed shell skips the
+# on-close checkpoint), so it grew to ~127 GiB. `localstorage_wal.rs` opens
+# each `*.localstorage` DB at boot and runs `PRAGMA wal_checkpoint(TRUNCATE)`.
+# `bundled` statically compiles SQLite into the binary → no new RUNTIME
+# dependency on libsqlite3 (same no-hard-dep discipline as the dlopen'd VTE/
+# SwiftTerm embeds) and it works on any shipped .deb/.rpm/AppImage.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Endpoint IPC client — async UnixStream / named-pipe transport for
+# dispatching projected tools without the localhost HTTP round-trip.
+# See apps/operator/lib/endpoint-ipc/PROTOCOL.md in the operator repo
+# for the wire spec; src-tauri/src/endpoint_ipc.rs mirrors it.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+dashmap = "6"
+bytes = "1"
+thiserror = "1"
+
+# Sidecar lifecycle
+portpicker = "0.1"
+
+# Phase 4 (custom_protocol.rs): forward `papercusp://` page/asset requests to
+# the operator's loopback HTTP base. http-only loopback → no TLS backend
+# needed (default-features off keeps the compile light).
+reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
+
+# E. Native pty for the desktop fast path. PiPanel detects window.__PAPERCUSP_TAURI__
+# and routes spawn/write/resize/kill through Tauri commands instead of the
+# operator's HTTP+WS bridge. Latency drops from ~5ms WS to ~1ms IPC because
+# data never crosses the network — the pty fork lives in this Rust process
+# and bytes flow over Tauri's in-process IPC.
+portable-pty = "0.9"
+uuid = { version = "1", features = ["v4"] }
+once_cell = "1"
+base64 = "0.22"
+
+# tauri-agent-tools dev bridge — debug-only HTTP server inside the app so
+# agents can drive DOM/IPC/eval via CSS selectors. See src/dev_bridge.rs.
+tiny_http = "0.12"
+rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+libc = "0.2"
+
+# WebKitGTK direct access — only used on Linux to auto-grant the
+# getUserMedia permission so the operator's voice paths work without
+# the webview surfacing a NotAllowedError on every load. See
+# `grant_media_permission` in src/main.rs.
+#
+# x11rb — pure-Rust X11 client. Drives the native-terminal "glue" on X11
+# (native-terminal-desktop-2026-06-06 / D-003): find the borderless Ghostty
+# sibling window by _NET_WM_PID and pin it adjacent to the Tauri GUI window
+# via EWMH _NET_MOVERESIZE_WINDOW on every move/resize. Pure-Rust so the
+# shipped .deb/.rpm/AppImage carries no runtime dependency on wmctrl/xdotool.
+#
+# gtk + glib + libloading — the D-009 embedded native terminal VIEW (the
+# Wayland-safe path): a real VTE widget packed beside the WebKitWebView in
+# the Tauri window's own GTK tree (one window, no foreign-window glue).
+# `gtk`/`glib` pin to the same 0.18 line tauri/wry already use (one GTK in
+# the process); libvte-2.91 itself is dlopen'd at RUNTIME (libloading), so
+# the shipped bundle takes NO hard dependency on VTE — when the library is
+# absent the strategy downgrades to NewWindow.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2"
+x11rb = "0.13"
+gtk = "0.18"
+glib = "0.18"
+libloading = "0.8"
+
+# libloading on macOS — the D-009 SwiftTerm embed dlopens the
+# macos-term-shim dylib at runtime (same no-link-time-dependency pattern as
+# the Linux VTE embed; absent shim → NewWindow downgrade).
+[target.'cfg(target_os = "macos")'.dependencies]
+libloading = "0.8"
+
+# windows — the D-009 Windows embedded terminal: Win32 allows SetParent on
+# foreign windows (unlike Wayland), so the strongest portable-path backend
+# here is a GLUED-CHILD-HWND — spawn a real console window hosting the chat
+# dock, reparent it INTO the Tauri window as a left-band child, and shrink
+# the WebView2 child to the right remainder.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+] }
+
+# ── Release build-speed profile (desktop-build-speed-2026-07-16 P-008) ────────
+# No [profile.release] override existed before → cargo defaults (incremental
+# OFF, strip OFF). Two build-speed knobs, both safe for an alpha desktop shell:
+#   incremental = true — recompile only changed crates on a re-cut. This is the
+#     lever that PAIRS with warm caches (release-local.sh / mac-vm-build.sh keep
+#     the role target dirs warm; WI-5027 grew the mac VM disk 120→180 GiB so the
+#     larger incremental target dir fits). Trade-off is a bigger target dir + a
+#     non-reproducible binary — acceptable in alpha, and the disk headroom is the
+#     whole reason this is now unlocked. Adding it busts the cargo cache ONCE
+#     (expected — same one-time cost as the RUSTFLAGS remap in release-local.sh).
+#   strip = "symbols" — drop the symbol table from the shipped binary: smaller
+#     artifact, a slightly faster final link, and it complements the WI-4781
+#     --remap-path-prefix hygiene (fewer embedded build-box paths). Signing runs
+#     on the assembled bundle AFTER the build, so stripping never breaks the
+#     updater .sig; the identity scan uses grep -rIlE (skips binaries) so it is
+#     unaffected. This is also tauri's own recommended release setting.
+# Runtime perf is unchanged: opt-level / lto / codegen-units stay at the release
+# defaults — this binary is a webview host, not a hot path. Measured build-time
+# before/after belongs on the plan per D-003 — captured at the next real cut.
+[profile.release]
+incremental = true
+strip = "symbols"
+
+# tauri-runtime-wry 2.11.0 + one local fix: its undecorated-resizing hit-test
+# does `webview.parent().parent()` and UNWRAPS a downcast to GtkWindow — any
+# embedder that reparents the webview (our native-terminal VTE embed nests it
+# in a GtkPaned) panics the main thread on the first click. The vendored copy
+# resolves the real toplevel instead (see the PAPERCUSP PATCH markers in
+# vendor/tauri-runtime-wry/src/undecorated_resizing.rs). Upstream dev branch
+# still carries the unwrap as of 2026-06-09 — drop this patch when a released
+# tauri-runtime-wry walks the ancestry safely.
+[patch.crates-io]
+# tao 0.35.3's Linux raw-device helper calls XDefaultRootWindow(NULL) when
+# XOpenDisplay fails, crashing the whole app. Keep this exact release vendored
+# with the null-display guard in vendor/tao/src/platform_impl/linux/device.rs.
+tao = { path = "vendor/tao" }
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
+# wry 0.55.1 + one local fix (WI-3139): url_from_webview() unwrapped a nil
+# WKWebView.URL() (nil until the first navigation commits). wry's navigation
+# delegate calls it via the on_page_load handler on PageLoadEvent::Started — from
+# WebKit's Obj-C delegate on the main thread while the URL is still nil — so the
+# `.unwrap()` panic-crashed the whole macOS GUI on EVERY fast relaunch (reproduced
+# 3/3 on the Mac VM). The caller's `.unwrap_or_default()` can't help: the panic is
+# inside url_from_webview, before it returns a Result. The vendored copy degrades a
+# nil URL / nil absoluteString to an empty string at that single chokepoint (see the
+# PAPERCUSP PATCH marker in vendor/wry/src/wkwebview/mod.rs). The patch is in the
+# macOS-only wkwebview module → the Linux/WebKitGTK build is unaffected. Drop when a
+# released wry stops unwrapping there.
+wry = { path = "vendor/wry" }
+# NOTE (ipc-cors-2026-06-24): a SEPARATE, earlier vendored-wry attempt (register custom
+# schemes CORS-enabled) for the "ipc:// access control checks" console flood could NOT be
+# verified on WebKitGTK; that fix is SPA-level instead — the desktop fetch wrapper rejects
+# the ipc:// custom-protocol fetch so Tauri uses postMessage (no WebKit CORS evaluation,
+# zero errors). See libs/generic/desktop-ipc/src/desktop-bootstrap.ts and
+# agent-insights/tauri-ipc-cors-remote-origin-webkitgtk. Unrelated to the WI-3139
+# vendoring above (that one IS load-bearing).
+
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+devtools = []

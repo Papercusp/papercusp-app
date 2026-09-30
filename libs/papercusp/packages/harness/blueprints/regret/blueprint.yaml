@@ -1,0 +1,61 @@
+# The `regret` blueprint — deterministic-blueprints-migration-2026-06-13 (P-111, pilot B).
+#
+# The regret miner: select bad historical sessions → locate the divergence turn →
+# counterfactually price candidate rule changes → file scored reports. The plan
+# framed this as the HYBRID pilot (det select → AGENT replay → det persist). In the
+# CODE the replay leg is a GOVERNED `llmCall` (runGovernedReplay preflights the
+# replay-harness flag + frontier:replay-harness loop and ledgers the spend), NOT a
+# fleet agent spawn via spawnInvokeOnce (D-009). So regret is structurally a
+# DETERMINISTIC pipeline — one step whose op internally runs the governed replay —
+# and this migration is BEHAVIOR-NEUTRAL (D-004), not a re-route of the replay onto
+# the fleet launch chokepoint. Whether to make that re-route (D-005/P-131) is an
+# open OWNER decision (D-009); it would be a behavior change, so it is NOT done here.
+#
+# Same flag (`papercusp-regret-mining`, default OFF) + governor (loop
+# `regret-mining`, per-cycle cap bounds replay spend) gates as the bespoke routine —
+# the op runs them; dark stays dark.
+id: regret
+extends: base
+version: 0.1.0
+description: >-
+  Regret miner: select bad historical sessions, price candidate rule changes via a
+  governed counterfactual replay, and file scored what-would-have-helped reports.
+
+workItem:
+  kind: mining-run
+  idPrefix: RGT
+
+# Program-mode spine: one deterministic step, NO gate ⇒ deterministic pipeline.
+# `payload.*` are the regret tunables the routine's payload_template carries
+# (absent ⇒ the op's defaults). The replay budget is additionally clamped by the
+# governor's per-cycle cap inside the op (payload may lower, never raise).
+spine:
+  steps:
+    - id: mine
+      op: regret:mine
+      args:
+        windowDays: "{{ payload.windowDays }}"
+        minScore: "{{ payload.minScore }}"
+        maxSessions: "{{ payload.maxSessions }}"
+        maxReplaysPerTick: "{{ payload.maxReplaysPerTick }}"
+        replayBudgetUsd: "{{ payload.replayBudgetUsd }}"
+        maxFilePerTick: "{{ payload.maxFilePerTick }}"
+        minFileScore: "{{ payload.minFileScore }}"
+      bind: regret
+
+knobs:
+  harnessKind: learning
+  requiresRepo: false
+
+# Scheduled trigger: byte-identical to the bespoke `system:regret-mine` routine
+# (every 6h at :35). The routine fires `system:blueprint-run { blueprintId: regret }`;
+# the handler detects program-mode and runs the step inline. SEEDED INACTIVE.
+triggers:
+  schedule:
+    - cron: "0 35 */6 * * *"
+      action: system:blueprint-run
+      singleton: true  # P-144/D-018: workspace-singleton cadence — one dark @singleton routine per workspace
+
+dependencies:
+  tools: []
+  plugins: []

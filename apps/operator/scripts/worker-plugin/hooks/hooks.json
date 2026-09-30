@@ -1,0 +1,40 @@
+{
+  "//": "Papercusp worker hooks as a Claude plugin (papercusp-worker-integration-2026-06-04, D-005). These reference the worker hook scripts at their stable installed location (~/.papercusp/hooks/cc/, populated by install-standalone-mcp.sh) — the plugin is a thin wiring convenience over the installed worker, NOT a standalone bundle (the scripts need a running operator + ~/.papercusp). All hooks self-gate on PAPERCUSP_SID + fail open. The activity-report hook is the cross-CLI activity bridge. The rtk PreToolUse rewrite hook SKIPS vitest commands (EI-9471): rtk's vitest output-parser can fail on a piped/compound `vitest ... | grep | head` form and then re-synthesize an UNSCOPED full-suite run (dropping the single-file filter), turning a 20s scoped diagnostic into a ~5min 10k-suite/11MB run on an already load-stressed box. Vitest already has structured reporters (--reporter=json), so we exclude it from rtk's output compression entirely — the guard is fail-OPEN (skip = run the command verbatim; it never denies), so at worst a vitest-mentioning command loses compression, never gets blocked or hijacked.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [{ "type": "command", "command": "${HOME}/.papercusp/hooks/cc/pretooluse-locks-acquire.sh" }]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "${HOME}/.papercusp/hooks/cc/pretooluse-bash-resource-gate.sh" },
+          { "type": "command", "command": "command -v rtk >/dev/null 2>&1 || exit 0; __in=$(cat); case \"$__in\" in *vitest*) exit 0;; esac; printf '%s' \"$__in\" | rtk hook claude || exit 0" }
+        ]
+      },
+      {
+        "//": "EI-21971958067151594 — `capability:bash` is the SAME shell reached over MCP, and a native-only `Bash` matcher left it exempt from every deny in pretooluse-bash-resource-gate.sh (measured 2026-08-31: `tauri-agent-tools dom` was DENIED as Bash and RAN as capability:bash against a foreign webview; the self-matching-pgrep wait-loop likewise ran to its timeout). Deliberately a SEPARATE entry rather than widening the `Bash` matcher above: rtk REWRITES the payload it is handed, and its behaviour on an MCP tool envelope is unknown — the safety gate must gain coverage without dragging a third-party rewriter along. Ordering is irrelevant here because this entry holds only the gate, and a deny wins regardless.",
+        "matcher": "mcp__.*__capability_bash",
+        "hooks": [
+          { "type": "command", "command": "${HOME}/.papercusp/hooks/cc/pretooluse-bash-resource-gate.sh" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [{ "type": "command", "command": "${HOME}/.papercusp/hooks/cc/posttooluse-locks-release.sh" }]
+      },
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "${HOME}/.papercusp/hooks/cc/posttooluse-activity-report.sh" }]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [{ "type": "command", "command": "${HOME}/.papercusp/hooks/cc/posttoolbatch-locks-release.sh" }]
+      }
+    ]
+  }
+}

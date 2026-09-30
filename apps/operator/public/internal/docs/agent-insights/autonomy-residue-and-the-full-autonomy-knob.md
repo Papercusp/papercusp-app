@@ -1,0 +1,96 @@
+# The autonomy gate has a RESIDUE the per-category ceilings can't reach — MUG_FULL_AUTONOMY is the only lift
+URL: /internal/docs/agent-insights/autonomy-residue-and-the-full-autonomy-knob
+
+Raising all 14 autonomy ceilings to critical does NOT make the Mug fully autonomous — a set of CATEGORICAL hard-gates (authority owner, irreversible, protected-lock, unmapped) plus graduation asks still force gated, independent of the ceiling. That is the residue. And it is TWO surfaces, not one — the DECISION gate (decider.ts, may she auto-decide?) and the IMPLEMENT TCB (improvements/policy.ts, may the loop auto-implement protected-path code?). The single reversible owner flag MUG_FULL_AUTONOMY (scope autonomy per-workspace, default OFF, fail-dark) lifts BOTH. Verify the live policy before assuming protected==locked; a new staging flag is not flippable via flags-set until the deploy carries it.
+
+When an agent is asked "make the Mug fully autonomous," the obvious move is to
+raise every per-category ceiling to `critical` (`autonomy:policy_set`). **That is
+not enough, and believing it is wastes an hour.** Two non-obvious things bite.
+
+## 1. The ceiling is only HALF the gate — the residue is categorical
+
+`decideAutonomy` (`packages/operator-core/lib/autonomy/decider.ts`) is the D-004
+gate. Its verdict is:
+
+```
+auto ⟺ risk ≤ min(ceiling, graduated) ∧ reversible ∧ ¬authority_owner ∧ category-mapped
+```
+
+The risk-vs-ceiling half is what `autonomy:policy_set` moves. But there are
+**categorical hard-gates that are independent of the ceiling** — raising a ceiling
+to `critical` does nothing to them:
+
+* `authority:'owner'` → always `gated` (decider.ts, the `owner-authority` gate).
+* `irreversible-action` → always `gated` (the B-02 hard floor).
+* a **protected/locked** category → `effectiveCeiling` is `never-auto` regardless
+  of the stored `ceiling` (`ceiling-never-auto`).
+* `unmapped-category` → fail-safe `never-auto`.
+* `graduation:*` ratification asks → routed to the owner by the mug.md persona
+  (the evidence tracker asking to widen automation).
+
+This set is **the residue**: the actions that stay owner-gated even with every
+ceiling maxed. The live `papercusp-workspace` policy already has all 14 categories
+(`categories.ts` — the two newest are `schedule-arm`
+(scheduled-recurring-plans-2026-06-16 D-017) and the protected `system-control`
+(now the 14th/last row), both added after this insight was first written) at
+their ceilings — yet `deploy:harness`, `accounts:register`, `flags:set`
+(authority:owner **and**, via the capability-category map, the protected
+`system-control` category), and `graduation:*` still gate, because of the
+residue, not the ceiling. **Always `autonomy:policy_get` first** — don't assume
+`protected == locked` (the owner may have unlocked them) and don't assume a maxed
+ceiling means full autonomy.
+
+## 2. It's TWO surfaces, not one — decide vs. implement
+
+Agents conflate these. They are different mechanisms:
+
+* **DECISION gate** — `lib/autonomy/decider.ts`. "May the Mug auto-DECIDE this
+  action (place an item, resolve a question, ratify) without asking the owner?"
+  Keyed by the 14-category taxonomy + risk/reversibility/authority.
+* **IMPLEMENT TCB** — `lib/harness/improvements/policy.ts` `classifyImprovement`.
+  "May the self-improvement loop auto-IMPLEMENT this captured improvement?" A
+  separate filter: `protectedPathPatterns` + `protectedKeywords` (the deploy gate,
+  flags, capability dispatch, migrations, the loop's own code) + the `autoKinds`
+  kind-gate + infra-environment. Gated *additionally* by the
+  `IMPROVEMENT_AUTO_IMPLEMENT` master flag (default OFF).
+
+The implement TCB is the bootstrapping safety rail — it stops the loop from
+auto-editing its own safety machinery. The decision gate never touches it.
+
+## 3. MUG\_FULL\_AUTONOMY lifts BOTH — one reversible flag
+
+`FLAGS.MUG_FULL_AUTONOMY` (`papercusp-queen-full-autonomy`, default OFF,
+fail-dark, scope `autonomy:<ws>` — the SAME key the arming flag uses, so one flip
+covers both surfaces) is the owner's reversible full-autonomy grant
+(mug-autonomy-and-selffeed-fix-2026-06-15 D-006). When ON:
+
+* the **decider** returns `auto` for the entire residue (owner-authority,
+  protected, irreversible, above-ceiling, unmapped + graduation:\* asks), recording
+  `owner-full-autonomy-grant` alongside the would-have-gated reasons (the audit
+  trail stays in `reasons` for the B-13 ledger);
+* the **implement loop** lifts the `protectedPathPatterns` + `protectedKeywords`
+  bars (via `readOwnerFullAutonomyGrant` →
+  `classifyImprovement(..., {ownerFullAutonomy})`).
+
+It does **not** lift the `autoKinds` kind-gate (a separate Phase-4 dial),
+infra-environment, or `needsHuman`. OFF restores today's gates verbatim — the
+reversibility is the safety net. This is the recursive-self-improvement boundary;
+the owner flips it deliberately at `/admin/features`.
+
+## Gotchas
+
+* **A brand-new flag isn't flippable until it deploys.** The `flags:get`/`flags:set`
+  tool enum is generated from the *deployed* flag set. A flag you just added in the
+  staging tree won't appear in the enum (so you can't flip it via the tool) until
+  the staging→green deploy carries it to the live operator. Go-live therefore waits
+  on the deploy, then the owner's flip.
+* **`armTripwire` refuses protected/irreversible auto.** A full-autonomy auto of a
+  protected or irreversible action does NOT get a per-action revert handle armed (by
+  design). The reversibility net for those is the grant flag itself (flip it off),
+  not a tripwire.
+* **Display digests need the grant too.** Several `buildDigest` callers (the
+  Learning-tab sync resolver, the human-queue digest routine, the system-health
+  rollup, the `improvements:digest`/`:triage` tools) classify auto-vs-human for
+  display. They must read the grant or they'll show a protected-surface bug in the
+  human queue while the loop auto-implements it. The live dispatch
+  (`planImplementRun` via `improvement-actions.ts`) is the load-bearing one.

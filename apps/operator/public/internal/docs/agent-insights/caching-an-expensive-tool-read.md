@@ -1,0 +1,96 @@
+# Caching an expensive read-mostly tool with cachedRead
+URL: /internal/docs/agent-insights/caching-an-expensive-tool-read
+
+How to wrap a defineTool read in the tag-based operator cache (cachedRead) so a plan/work-item write auto-invalidates it — incl. the non-obvious gotchas (tag the change-notify table name, fold EVERY output dim into the key, NEVER cache the readiness floor, append-heavy sources rely on SWR not tags).
+
+# Caching an expensive read-mostly tool with `cachedRead`
+
+The operator has a live, tag-based, workspace-scoped cache (`@papercusp/cache`, the
+`getOperatorCache()` singleton) wired to the change stream: a row write emits
+`<schema>.<table>.changed`, the **cache-ECA rule** maps it to `cache.bumpTags([<table>, <table>:<id>])`, and any cached entry tagged with that table (or row) goes stale on its
+next read. To make an expensive read-mostly tool consume it, wrap its read in **one
+helper** — `cachedRead` — never call `getOperatorCache().getOrSet` directly.
+
+```ts
+import { cachedRead, type CachedReadCtx } from '../../cache';
+
+async handler(args, ctx) {
+  const result = await cachedRead(
+    ctx as CachedReadCtx,
+    {
+      tool: 'plans:list',                                   // key namespace + telemetry bucket
+      key: { /* EVERY output-determining dim, RAW */ },     // stableKey serializes it (key-order stable)
+      tags: ['harness_plans', 'plan_revisions', 'plan_runs'],
+      softTtlMs: 45_000,                                    // SWR backstop for un-tagged deps
+    },
+    async () => { /* the expensive PG read + processing */ },
+  );
+  return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+}
+```
+
+`cachedRead` standardizes workspace-scope (resolved EXACTLY as the ECA bump does:
+`ctx.workspaceId ?? ctx.principal?.workspaceId ?? activeWorkspaceId()`), tool-name key
+namespacing, the `CACHE_LAYER` kill-switch (bypass → factory runs byte-identically),
+and per-tool hit/miss/stale/bypass telemetry (`snapshotCachedReadStats()`).
+
+## The gotchas (each cost real debugging time or would have)
+
+1. **Tag the table name the change stream EMITS, not the one you "think" you read.**
+   Invalidation only fires if your tag string equals the base table name in the
+   `<schema>.<table>.changed` event. The cache-ECA reacts only to tables that carry the
+   `emit_change_notify_trg` trigger. `work_items:list`/`get` read
+   `harness_features_consolidated` (the unified work-item table that HAS the trigger) — so
+   the tag is `harness_features_consolidated`, NOT `work_items`. Grep
+   `libs/papercusp/libs/db/sql/*.sql` for `emit_change_notify` to confirm a table emits
+   `.changed` before you tag it. A wrong tag = an entry that NEVER invalidates (only the
+   SWR TTL saves you).
+
+2. **Fold EVERY output-determining dimension into the key — and use RAW args, not resolved.**
+   The cache is workspace-scoped automatically; your `key` must capture everything else:
+   the serialized args AND any ctx-derived scope (e.g. the resolved harness set for
+   `plans:list`, the resolved harness scope for `plans:attention`). Miss one and you get a
+   cross-arg leak. **Critical:** key on the RAW arg (`createdSince: '4d'`), never the
+   `Date.now()`-resolved absolute timestamp — otherwise every call gets a unique key and
+   the hit-rate is \~0.
+
+3. **NEVER cache the readiness floor / dispatch frontier (D-004).** Readiness is a
+   MAINTAINED column kept exact by triggers on the scheduler claim hot path; a cache
+   miss/stampede/coherence gap there is unacceptable. `pot:survey` IS the dispatch
+   readiness (`filterReadyFrontier`), `fleet:assignments` IS the live liveness truth, and
+   `pot:status` is control-plane wake state — none was cached. Caching an overview read
+   that merely *includes* a `ready` column is fine ONLY if it's off the claim path
+   (`work_items:list` is — the scheduler claims via `claim_next`, not the list).
+
+4. **Append-heavy sources can't be tagged — rely on SWR.** `coord_event_log` fires
+   `.changed` on EVERY event, so tagging it = \~0 hit-rate (the coord:inbox problem).
+   `plans:attention` folds escalations/messages-to-human from it: tag ONLY the stable plan
+   tables and bound the append-heavy sources with a SHORT `softTtlMs` (20s) instead.
+
+5. **`ctx.metadata()` is "last write wins" — don't call it from the wrapper.** It REPLACES,
+   not merges. `cachedRead` records per-tool telemetry via the cache's `onOutcome` hook
+   (module-level counters), never via `ctx.metadata`, so it can't clobber the tool's own
+   metadata call. If you need cache outcome in telemetry, read `snapshotCachedReadStats()`.
+
+6. **Cache the FINAL deterministic value; keep the factory pure.** Fold any cheap
+   post-processing (e.g. `boundSummaries`) INTO the factory so the stored value is the
+   exact returned shape and a hit needs zero extra work. The factory must be side-effect
+   free — a hit skips it entirely and an SWR stale-serve runs it in the background.
+
+## Verifying live
+
+Restart the staging operator (`dev:restart { target: 'staging', confirm: true, authorize: true, reason: 'reload the staging operator with updated code' }` —
+never a raw `systemctl restart`, which bypasses the drain + WI-4221 debounce)
+to load your edit (no file-watch on the Hono host), then call the tool over its MCP
+endpoint with the superuser bearer (`~/.papercusp/superuser-token`):
+
+```
+POST http://127.0.0.1:3170/api/mcp?superuser=1&workspace=papercusp-workspace
+Authorization: Bearer $(cat ~/.papercusp/superuser-token)
+```
+
+A cold call vs warm repeats shows the hit (plans:attention measured 1.68s miss →
+\~0.15s L1 hits, \~10×). To prove end-to-end ECA invalidation, capture the cached output,
+make a real write through the SAME operator (e.g. `plans:set-now`), and confirm the next
+read reflects it — that exercises the `write → change-stream → ECA → bumpTags → rebuild`
+chain the unit tests stub with a direct `invalidateByTags`.

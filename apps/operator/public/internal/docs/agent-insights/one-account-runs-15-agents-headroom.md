@@ -1,0 +1,75 @@
+# One account runs ~15 agents — never read rate flags as \"no headroom\"
+URL: /internal/docs/agent-insights/one-account-runs-15-agents-headroom
+
+The inference gateway paces ~15 concurrent agents per account. Do not treat healthyAccounts=1 / sustainedlyLimited / utilization7d=1.0 as \"no capacity\" or refuse to launch a fleet — that is a fabricated wall.
+
+**Owner directive (the owner, 2026-07-06):** *"ownerhandle HAS HEADROOM. DON'T MAKE UP
+that there is no headroom. WE CAN RUN 15 SIMULTANEOUS AGENTS ON 1 ACCOUNT."*
+
+## The mistake this prevents
+
+When a fleet launch is capacity-clamped (e.g. `fleet:launch-on-plan` opens 2
+members for a `count:10` request) it is tempting to read `accounts:status` and
+conclude "the account pool is exhausted, there is no headroom, I can only run 2
+agents." **That conclusion is wrong.** It fabricates a capacity wall that does
+not exist and strands the owner's request.
+
+## The reality
+
+* **One Anthropic account paces \~15 simultaneous agents** through the inference
+  gateway (`:8788`). The rate **governor** cap is `maxSimultaneousAgents: 16`
+  (`dev:rate_governor_status` → `config.maxSimultaneousAgents`). Account count
+  is **NOT** a per-agent cap — the gateway spaces/queues calls so many
+  concurrent sessions share one account without tripping its per-window limit.
+* The launch advisory says this itself: *"ONE account paces many concurrent
+  Claude sessions through the gateway, so account count is NOT a per-member cap.
+  All N members WILL still launch."*
+
+## Flags that do NOT mean "cannot launch"
+
+From `accounts:status`, none of these should stop you launching the requested
+count:
+
+| Field                      | What it actually means                        | What it does NOT mean          |
+| -------------------------- | --------------------------------------------- | ------------------------------ |
+| `healthyAccounts: 1`       | The launcher's conservative pre-flight count  | "Only capacity for \~2 agents" |
+| `sustainedlyLimited: true` | Recent rate penalties / near a rolling window | "This account is unusable"     |
+| `utilization7d: 1.0`       | The 7-day rolling usage window is full        | "No calls will succeed"        |
+| `recommendedHeadroom: 2`   | An advisory, deliberately conservative clamp  | "The hard ceiling is 2"        |
+
+`utilization7d` and `sustainedlyLimited` are **advisory rate signals**, not hard
+gates. The gateway still routes through these accounts and paces the load.
+
+## How to actually launch the full count
+
+`fleet:launch-on-plan` applies the `recommendedHeadroom` clamp (a 10-ask can open
+2\), and has a **300s cooldown** before a re-call opens any new members. To reach
+the requested count now, open the remaining members with **`capability:terminal`**,
+which runs the raw `psu` command and **bypasses the clamp entirely**:
+
+```
+capability:terminal {
+  fleet: '<fleet-slug>',            // color only — the --fleet flag below is what joins
+  terminals: [
+    { command: 'psu --no-picker --fleet=<slug> --agent=claude --harness=<h> --plan=<plan> --account=auto --model=sonnet:high --launch-context=<composed-brief-path>', label: 'bd-N' },
+    // …one entry per remaining member (bulk batches accept up to 12 entries per call; repeat as needed — there is no fixed fleet-size ceiling)
+  ]
+}
+```
+
+* The `--fleet=<slug>` flag **inside the psu command** is what actually joins the
+  member to the fleet (`capability:terminal`'s own `fleet` arg is window-color
+  only).
+* Reuse the fleet-composed launch-context path that `fleet:launch-on-plan`
+  reported (`…/launch-context/fleet-<slug>-launch-context.md`) so the raw members
+  get the same brief layered under the member baseline.
+* `--account=auto` lets the gateway pace + fail over across the pool.
+
+## When capacity IS genuinely constrained
+
+True exhaustion is rare and must be **verified**, not assumed — and even then the
+answer is "the gateway paces it," not "refuse to launch." If you truly suspect a
+wall, check `accounts:status` + `dev:rate_governor_status` for whether the
+**governor** (`fleet.effective` / `maxSimultaneousAgents`) is the limit, not the
+per-account rate flags. Launch the count the owner asked for and let the gateway
+do its job.

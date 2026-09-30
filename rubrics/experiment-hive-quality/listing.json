@@ -1,0 +1,10 @@
+{
+  "ref": "experiment-hive-quality",
+  "id": "experiment-hive-quality",
+  "title": "Experiment hive quality",
+  "description": "Scorecard for whole-hive experiments across outcome, efficiency, and speed.",
+  "category": "experiment",
+  "scope": "rubric",
+  "version": "0.1.0",
+  "source": "first-party"
+}

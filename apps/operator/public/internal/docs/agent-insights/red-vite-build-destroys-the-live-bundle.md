@@ -1,0 +1,90 @@
+# A red operator-vite build can DESTROY the live bundle — and only some failures do
+URL: /internal/docs/agent-insights/red-vite-build-destroys-the-live-bundle
+
+Vite empties outDir in a renderStart hook, so a LINK-time failure (missing named export) kills the running desktop while a resolve/syntax error leaves it fine. Builds are now staged into dist.next/ and swapped only on success.
+
+## The symptom
+
+The desktop app dies. Every route returns:
+
+```
+503  operator-vite is not built.
+     Run `npm --workspace @papercusp/operator-vite run build`.
+```
+
+…and running that command **fails**, so the advice is a loop. The app was working
+minutes earlier and nobody deleted anything. This took the owner's desktop down
+**twice on 2026-07-12**.
+
+## The mechanism (the part that is not obvious)
+
+Vite empties `outDir` from a **`renderStart` (order: `'pre'`) hook** —
+`vite:prepare-out-dir`, i.e. *after* the module graph is built, *before* any chunk
+is written. So **whether a failed build destroys your bundle depends on which phase
+it dies in.** Measured on vite 8.0.16 (the version this app builds with), with a
+previous good bundle sitting in `dist/`:
+
+| failure mode                                | exit | previous `dist/`                     |
+| ------------------------------------------- | ---- | ------------------------------------ |
+| unresolvable import                         | 1    | **SURVIVES** — dies before the empty |
+| syntax error                                | 1    | **SURVIVES** — dies before the empty |
+| **missing named export** (`MISSING_EXPORT`) | 1    | **DESTROYED** — dies after the empty |
+| killed / OOM mid-write                      | ≠0   | **DESTROYED** — half-written         |
+
+This is why the bug survived so long: a casual repro (typo an import) shows `dist/`
+surviving and "proves" there is no bug. The destructive column is the **link-time**
+one — and that is exactly the class our browser shims produce.
+
+## What actually triggered it (both times)
+
+1. A stray `pnpm install` hijacked `node_modules`; `@assistant-ui/store` lost its
+   `tapClientResource` export → `MISSING_EXPORT` → dist eaten.
+2. `agent-tools/coordination/log.ts` began importing `PgCoordLog` from
+   `@papercusp/coordination/event-log`, which the SPA **aliases to a browser shim**
+   (`src/shims/coordination-event-log-browser.ts`) that only exported
+   `DEFAULT_COORD_WORKSPACE` → `MISSING_EXPORT` → dist eaten.
+
+Case 2 is a standing trap: **a shim is only ever linked by a real `vite build`.**
+Nothing type-checks an alias, so the entire unit suite stays green while the bundle
+is unbuildable. Add an import to a shimmed module and you can red the SPA build
+without a single failing test.
+
+## What is in place now
+
+* **Builds are staged.** `bin/vite-build-singleflight` (the one seam every build goes
+  through: the rebuild timer, `build-desktop-sidecar.sh`, `setup-release-checkout.sh`,
+  and any hand-run `npm run build`) points vite at `dist.next/` via
+  `PAPERCUSP_VITE_OUT_DIR` and **renames it over `dist/` only on exit 0** with an
+  `index.html` present. A red build cannot touch the bundle that is serving — and
+  `dist/` is never transiently empty *during* a build either, which also closes the
+  EI-9836 window (`ls dist/assets` going 1513 → 0 → 1513 mid-build).
+  * **Retain-regime builds are NOT staged** (`--watch`, or
+    `PAPERCUSP_RETAIN_DIST_CHUNKS=1` — the desktop rebuild timer). Those run with
+    `emptyOutDir:false`: they never empty `dist/`, so they are already crash-safe, and
+    staging them would throw away the very old chunks an open webview is pinned to.
+  * `dist-wipe-guard` is handed the **final** `dist/` (`PAPERCUSP_VITE_FINAL_OUT_DIR`),
+    not the staging dir — the *swap* would yank a live watcher's chunks just as an
+    in-place empty would, so it must still refuse that case.
+* **The 503 tells the truth.** `apps/operator/lib/spa-build-status.ts` reads
+  `.vite-build-failure.json` (dropped beside `dist/` by a failed build) and, if there
+  is no bundle *because the last build failed*, says so — with the exit code, the
+  timestamp, the log path and the error tail — instead of prescribing the command
+  that just failed.
+* **Shim drift is caught in milliseconds.** `src/__tests__/browser-shims.test.ts`
+  parses the shim aliases out of `vite.config.ts`, scans every SPA-reachable source
+  for value imports through them, and fails if a shim is missing one. It would have
+  caught case 2 before the build ever ran.
+
+## If you hit this anyway
+
+1. `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3270/` — 503 means no bundle.
+2. Read `apps/operator-vite/.vite-build-failure.json` and the `.vite-build.log` it points at.
+   The 503 body now contains both.
+3. Fix the error, then `npm --workspace @papercusp/operator-vite run build`. `dist/` is
+   restored by the swap; `:3270` goes green without restarting anything.
+
+## The lesson worth carrying
+
+"The build failed" and "the build destroyed the running app" are different events, and
+the second one is invisible in the exit code. Any tool that **empties a live directory
+before it knows it can refill it** has this bug — stage it and swap.

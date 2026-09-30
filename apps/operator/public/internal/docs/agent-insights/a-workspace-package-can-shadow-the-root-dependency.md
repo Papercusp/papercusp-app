@@ -1,0 +1,68 @@
+# A workspace package can shadow the root dependency — resolve the binary before you read its source
+URL: /internal/docs/agent-insights/a-workspace-package-can-shadow-the-root-dependency
+
+In an npm-workspaces monorepo the same dep can exist at two different MAJOR versions. Reading the wrong copy's source produces a confidently-wrong root cause. Resolve which binary actually runs, first.
+
+## The trap
+
+This is an **npm workspaces** monorepo, so a dependency can be installed **twice, at
+different major versions**: once at the root, and again inside a workspace package that
+pins its own. Node resolves the *nearest* `node_modules` walking up from the importer — so
+the copy a build actually runs is often **not** the copy you get from the repo root.
+
+Nothing warns you. Both copies are real, both are on disk, and `node_modules/<dep>` at the
+root looks exactly like "the" dependency.
+
+Measured, 2026-07-12:
+
+```bash
+node_modules/vite/package.json                    → 7.3.5
+apps/operator-vite/node_modules/vite/package.json → 8.0.16   ← what the SPA build runs
+```
+
+## Why it costs more than a wasted read
+
+Investigating EI-10539 ("a failing build destroys the live bundle") I needed to know
+**when** Vite empties `outDir`. I read the source of `node_modules/vite` — v7 — and reasoned
+from it. The app builds with **v8**, where that logic differs.
+
+The failure mode is nasty because *nothing errors*. You get a clean, plausible, internally
+consistent root cause — from the wrong source tree. Had I not double-checked the version
+before writing it down, that wrong conclusion would have been committed to a work-item body
+and an agent-insights doc, where the next agent would have inherited it **as fact**. A
+confidently-wrong root cause propagates; a missing one just gets re-investigated.
+
+This is the [derived-claims class](/internal/docs/agent-insights/derived-claims-carry-their-own-caveat):
+the read *succeeded*, so nothing signalled that the answer was about a different program
+than the one you're debugging.
+
+## The rule
+
+**Before you read a dependency's source to reason about runtime behaviour, resolve which
+copy actually runs.** One command:
+
+```bash
+# What version does THIS workspace package actually resolve?
+npm --workspace @papercusp/operator-vite ls vite
+
+# Or ask node, from the package that imports it (the authoritative answer —
+# this is the exact resolution the build performs):
+npm --workspace @papercusp/operator-vite exec -- \
+  node -p "require('vite/package.json').version"
+```
+
+If it disagrees with the root copy, read **that** one:
+
+```bash
+apps/operator-vite/node_modules/vite/...   # not node_modules/vite/...
+```
+
+## Smells that you are in this trap
+
+* The source you're reading doesn't have the code path the error message mentions.
+* A flag/option in the docs "doesn't exist" in the source you have open.
+* A behaviour you just proved from the source doesn't reproduce when you actually run it.
+* `npm ls <dep>` prints the dep more than once, at different versions.
+
+When any of those hit, **check the version before you check your reasoning** — the code is
+usually right and your copy is usually wrong.

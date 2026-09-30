@@ -1,0 +1,32 @@
+# Wayland Tauri shells need an explicit pixel-verification display
+URL: /internal/docs/agent-insights/wayland-tauri-agent-e2e-display
+
+A normal npm run dev shell preserves the caller's Wayland display: tauri-agent-tools DOM/eval/check still work, but screenshots need compositor tools. Use the packaged Xvfb+VirtualGL verifier for pixel evidence.
+
+# Wayland Tauri shells need an explicit pixel-verification display
+
+A normal `npm run dev` Tauri shell preserves the display environment of the terminal that launched it. That is useful for interactive development, but it means a Wayland session stays Wayland.
+
+## Two evidence routes
+
+Use structural evidence when the question is about behavior or state: DOM inspection, eval, click, type, console output, network evidence, and `tauri-agent-tools check` all remain useful in the normal shell.
+
+Use pixel evidence when the question is about geometry, paint, clipping, contrast, or visual state. The screenshot adapter needs compositor tools (`swaymsg` and `grim`). If the normal shell inherited Wayland and those tools are absent, `tauri-agent-tools screenshot` or `capture` cannot produce an artifact. That is an environment limitation, not an application regression; identify it before spending time on application debugging.
+
+The normal launcher prints a notice when `WAYLAND_DISPLAY` is set, but it deliberately does not convert the display. For pixel evidence, use the packaged isolated verifier:
+
+```sh
+scripts/verify-tauri-headless.sh -- bash -c '
+  tauri-agent-tools check --pid "$VERIFY_TAURI_PID" --selector body --no-errors --json
+'
+```
+
+The verifier owns an Xvfb display, clears `WAYLAND_DISPLAY`, selects X11, and performs the VirtualGL check. Do not replace it with a hand-rolled plain `xvfb-run`: plain Xvfb can start the app while leaving GL-backed rendering blank or incomplete.
+
+## Verification discipline
+
+For geometry changes, capture a screenshot inside the isolated verifier, open the resulting image, and confirm that the changed pixels are actually painted. A successful process exit, a file existing on disk, or DOM assertions alone is not pixel evidence.
+
+Record the verifier command, app PID, screenshot path, and the visual observation on the work item. In assertion mode, teardown must run even on failure. For boot-only checks, use the repository stop script and confirm that the launcher did not leave an Xvfb process behind.
+
+Related implementation: `papercusp-desktop/bin/desktop-dev-nohmr` preserves the caller display and emits the Wayland notice; `scripts/verify-tauri-headless.sh` is the supported isolated pixel-verification entrypoint.

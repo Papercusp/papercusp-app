@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  windows-macos-tutorial-shortcut-parity-2026-07-04 (WI-2197): a second
+  Start-Menu shortcut, alongside Tauri's own "Papercusp GUI" entry, that opens
+  the guided tutorial/setup shell. Parity with the Linux .deb's third
+  `.desktop` icon (../deb/postinstall.sh, agent-first-onboarding P-014) and
+  the macOS "Papercusp Tutorial.app" wrapper
+  (packages/operator-core/lib/desktop-install/papercusp-files.ts,
+  writeMacTutorialApp). This is the MSI/WiX leg; see ../hooks.nsh for the
+  NSIS-installer equivalent.
+
+  The desktop app's own operator/CLI runs INSIDE the bundled WSL distro
+  (papercup-runtime — src-tauri/src/wsl_setup.rs), so the shortcut target is
+  wsl.exe itself: invoked directly (no Windows Terminal dependency) it still
+  opens a fresh conhost window running the command, mirroring the bare-wsl.exe
+  fallback in native_console.rs's spawn_windows_wsl_new_window. Requires the
+  app to have been launched at least once already so the distro is
+  registered — the same precondition as using the app at all on Windows.
+
+  Referenced from tauri.conf.json via bundle.windows.wix.fragmentPaths +
+  componentRefs (see https://v2.tauri.app/distribute/windows-installer).
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="PapercuspTutorialShortcut" Guid="*">
+        <Shortcut
+          Id="PapercuspTutorialShortcutLnk"
+          Name="Papercusp Tutorial &amp; Setup"
+          Description="Open the guided Papercusp tutorial and setup"
+          Target="[System64Folder]wsl.exe"
+          Arguments="-d papercup-runtime --cd ~ -- bash -l -c &quot;papercusp tutorial&quot;"
+        />
+        <RemoveFolder Id="RemovePapercuspTutorialProgramMenuFolder" On="uninstall" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Papercusp\PapercuspGUI"
+          Name="TutorialShortcutInstalled"
+          Type="integer"
+          Value="1"
+          KeyPath="yes"
+        />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

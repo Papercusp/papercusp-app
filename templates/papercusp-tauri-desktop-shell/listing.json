@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-tauri-desktop-shell",
+  "id": "papercusp-tauri-desktop-shell",
+  "title": "Papercusp Official: Tauri Desktop Shell",
+  "description": "Aspect template: the deterministic desktop chassis — a thin Tauri shell spawning a Node/Hono sidecar with embedded Postgres, plus the release kit (signing, updater, installers). No agent orchestration required. Docs: /internal/docs on your install.",
+  "category": "shell",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

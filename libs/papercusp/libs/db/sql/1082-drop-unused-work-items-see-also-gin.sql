@@ -1,0 +1,45 @@
+-- 1082: retire the no-consumer work_items see_also GIN index.
+--
+-- WI-878951 was filed from the 2026-08-29 database audit after this index was
+-- measured at 0 scans on the fleet's hottest update table.  The audit proposed
+-- dropping both hfc_see_also_gin and hfc_audit_pending_idx.  Current call-site
+-- reading proves only the first drop is safe:
+--
+--   hfc_see_also_gin
+--     GIN (see_also), 5240 kB, idx_scan=0, idx_tup_read=0, idx_tup_fetch=0.
+--
+-- The statistics cover the database lifetime (pg_stat_database.stats_reset IS
+-- NULL), but zero scans alone is only corroboration.  The authority is the
+-- complete consumer read:
+--
+--   * feature-history.ts reads one source row by workspace/harness/feature id,
+--     then expands its see_also ids with `feature_id = ANY($ids)`.  That lookup
+--     rides the work-item identity index; it never searches a row's see_also
+--     array and cannot use this GIN index.
+--   * work-items-admission-promoter.ts appends explicit relations to see_also.
+--     It is a writer, not a reverse-array reader.
+--   * No live source query uses see_also with @>, &&, or <@.  A positive-control
+--     pg_stat_statements read likewise found zero such statements across the
+--     database lifetime.
+--
+-- The index is therefore pure write amplification.  The legacy resource-
+-- governor statement that exposed the table's cost updates payload, status,
+-- taken_by, taken_at, and updated_ts together, necessarily making it non-HOT.
+-- PostgreSQL must then publish the new tuple through every index, including
+-- this GIN, even though see_also did not change.  The dedicated admission-ledger
+-- rollout owns removal of that statement; this migration removes only the
+-- independent, already-proven index residue and does not duplicate that rollout.
+--
+-- DELIBERATELY RETAINED: hfc_audit_pending_idx.  Its current zero-scan count does
+-- not make it dead.  selectRemotePendingFeatures() in auditor-dispatch.ts is a
+-- live DBOS safety lane whose predicate exactly matches the partial index; an
+-- empty remote-audit queue is the healthy state in which the index is needed
+-- least, not evidence that the quarantine consumer has disappeared.
+--
+-- FORWARD-COMPAT: hfc_see_also_gin is a plain non-UNIQUE index, so no deployed ON CONFLICT path can use it as an arbiter; complete source and lifetime-plan reads prove the still-running release has no reverse see_also consumer whose plan could depend on it.
+--
+-- IF EXISTS makes the migration idempotent.  The index is small enough for the
+-- transactional migration runner; DROP INDEX CONCURRENTLY is intentionally not
+-- used because PostgreSQL forbids it inside a transaction.
+
+DROP INDEX IF EXISTS harness_shared.hfc_see_also_gin;

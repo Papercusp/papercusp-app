@@ -1,0 +1,410 @@
+<title>The Missing Hop</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  :root{
+    --ground:#F5F7F8; --panel:#FFFFFF; --sunken:#EBEFF1;
+    --ink:#16212B; --ink-2:#3A4A57; --muted:#6A7A85; --rule:#D3DBE0;
+    --accent:#0E7C86; --accent-soft:#DCEEF0;
+    --live:#2E7D5B; --live-soft:#DFEDE6;
+    --gap:#B4571C; --gap-soft:#F7E5D6;
+    --shadow:0 1px 2px rgba(22,33,43,.05),0 8px 24px -12px rgba(22,33,43,.15);
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --ground:#10171D; --panel:#182228; --sunken:#0B1116;
+      --ink:#E6EDF1; --ink-2:#B4C2CB; --muted:#8397A3; --rule:#2A3841;
+      --accent:#4FC3CE; --accent-soft:#12313A;
+      --live:#5FBE90; --live-soft:#122C21;
+      --gap:#E2924F; --gap-soft:#33220F;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#10171D; --panel:#182228; --sunken:#0B1116;
+    --ink:#E6EDF1; --ink-2:#B4C2CB; --muted:#8397A3; --rule:#2A3841;
+    --accent:#4FC3CE; --accent-soft:#12313A;
+    --live:#5FBE90; --live-soft:#122C21;
+    --gap:#E2924F; --gap-soft:#33220F;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.6);
+  }
+  *{box-sizing:border-box}
+  body{background:var(--ground);color:var(--ink);
+    font-family:"IBM Plex Serif",Georgia,serif;font-size:17px;line-height:1.65;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:1080px;margin:0 auto;padding:56px 28px 96px}
+  .col{max-width:68ch}
+  h1,h2,h3,.ui{font-family:Archivo,"Helvetica Neue",Arial,sans-serif}
+  h1{font-size:clamp(2.1rem,5vw,3.1rem);line-height:1.05;letter-spacing:-.022em;
+    font-weight:700;margin:0 0 .5rem;text-wrap:balance}
+  h2{font-size:1.5rem;letter-spacing:-.012em;font-weight:600;margin:0;text-wrap:balance}
+  h3{font-size:1.03rem;letter-spacing:-.005em;font-weight:600;margin:0}
+  p{margin:0}
+  code,.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.86em}
+  code{background:var(--sunken);padding:.12em .38em;border-radius:3px;
+    border:1px solid var(--rule);color:var(--ink-2)}
+  .eyebrow{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.13em;
+    text-transform:uppercase;color:var(--accent);font-weight:500}
+  .lede{font-size:1.2rem;line-height:1.55;color:var(--ink-2);margin-top:1rem}
+  .stack{display:flex;flex-direction:column}
+  .g6{gap:6px}.g8{gap:8px}.g12{gap:12px}.g16{gap:16px}.g24{gap:24px}.g32{gap:32px}.g48{gap:48px}
+  section{display:flex;flex-direction:column;gap:20px}
+  .sec-head{display:flex;flex-direction:column;gap:6px;
+    border-top:2px solid var(--ink);padding-top:12px}
+
+  /* pipeline */
+  .pipe{display:flex;gap:0;align-items:stretch;overflow-x:auto;padding:4px 0 12px}
+  .hop{flex:1 0 148px;background:var(--panel);border:1px solid var(--rule);
+    border-radius:5px;padding:13px 14px;display:flex;flex-direction:column;gap:7px;
+    box-shadow:var(--shadow)}
+  .hop .k{font-family:"IBM Plex Mono",monospace;font-size:.68rem;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--muted)}
+  .hop .n{font-family:Archivo,sans-serif;font-weight:600;font-size:.94rem;line-height:1.2}
+  .hop .m{font-family:"IBM Plex Mono",monospace;font-size:.72rem;color:var(--ink-2);
+    line-height:1.45}
+  .hop.ok{border-left:3px solid var(--live)}
+  .hop.broken{border-left:3px solid var(--gap);background:var(--gap-soft)}
+  .hop.broken .n{color:var(--gap)}
+  .arrow{flex:0 0 34px;display:grid;place-items:center;color:var(--muted);font-size:1.1rem}
+  .arrow.dead{color:var(--gap);font-weight:700}
+
+  /* sink fan */
+  .fan{display:flex;flex-direction:column;gap:10px;border-left:2px solid var(--rule);
+    padding-left:18px;margin-left:6px}
+  .sink{display:grid;grid-template-columns:minmax(140px,auto) 1fr minmax(96px,auto);
+    gap:8px 16px;align-items:center;background:var(--panel);border:1px solid var(--rule);
+    border-radius:5px;padding:11px 14px;position:relative}
+  .sink::before{content:"";position:absolute;left:-18px;top:50%;width:16px;height:2px;
+    background:var(--rule)}
+  .sink.live{border-left:3px solid var(--live)}
+  .sink.missing{border-left:3px solid var(--gap);background:var(--gap-soft)}
+  .sink .sn{font-family:"IBM Plex Mono",monospace;font-size:.8rem;color:var(--ink)}
+  .sink.missing .sn{color:var(--gap)}
+  .sink .sd{font-size:.88rem;color:var(--ink-2);line-height:1.45}
+  .sink .sc{font-family:"IBM Plex Mono",monospace;font-size:.76rem;color:var(--muted);
+    text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  @media (max-width:620px){
+    .sink{grid-template-columns:1fr}
+    .sink .sc{text-align:left}
+  }
+
+  .tag{display:inline-flex;align-items:center;gap:5px;font-family:Archivo,sans-serif;
+    font-size:.68rem;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+    padding:3px 8px;border-radius:3px;border:1px solid var(--rule);color:var(--muted)}
+  .tag.live{color:var(--live);background:var(--live-soft);border-color:var(--live)}
+  .tag.miss{color:var(--gap);background:var(--gap-soft);border-color:var(--gap)}
+
+  .card{background:var(--panel);border:1px solid var(--rule);border-radius:6px;
+    padding:18px 20px;display:flex;flex-direction:column;gap:10px;box-shadow:var(--shadow)}
+  .card p{font-size:.93rem;color:var(--ink-2);line-height:1.55}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+
+  .dec{background:var(--panel);border:1px solid var(--rule);border-radius:6px;
+    overflow:hidden;box-shadow:var(--shadow)}
+  .dec-h{display:flex;gap:12px;align-items:baseline;padding:16px 20px 12px;
+    border-bottom:1px solid var(--rule);flex-wrap:wrap}
+  .dec-id{font-family:"IBM Plex Mono",monospace;font-size:.78rem;color:var(--accent);
+    font-weight:500}
+  .dec-h .tag{margin-left:auto}
+  .dec-b{padding:16px 20px;display:flex;flex-direction:column;gap:11px}
+  .row{display:grid;grid-template-columns:78px 1fr;gap:14px;align-items:start}
+  .row .lab{font-family:"IBM Plex Mono",monospace;font-size:.7rem;letter-spacing:.08em;
+    text-transform:uppercase;padding-top:.28em}
+  .lab.chose{color:var(--live)} .lab.rej{color:var(--gap)} .lab.why{color:var(--muted)}
+  .lab.new{color:var(--accent)}
+  .row p{font-size:.94rem;line-height:1.55;color:var(--ink-2)}
+  .row p strong{color:var(--ink);font-weight:600}
+  @media (max-width:560px){ .row{grid-template-columns:1fr;gap:3px} }
+
+  table{border-collapse:collapse;width:100%;font-family:Archivo,sans-serif;font-size:.9rem}
+  .tw{overflow-x:auto;border:1px solid var(--rule);border-radius:6px;background:var(--panel)}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--rule);vertical-align:top}
+  th{font-size:.7rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);
+    font-weight:600;background:var(--sunken)}
+  tr:last-child td{border-bottom:none}
+  td.id{font-family:"IBM Plex Mono",monospace;color:var(--accent);white-space:nowrap;font-size:.82rem}
+  td.id.fresh{color:var(--live)}
+  .phase td{background:var(--sunken);font-weight:600;font-size:.78rem;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--ink-2)}
+
+  ul{margin:0;padding-left:1.1rem;display:flex;flex-direction:column;gap:9px}
+  li{padding-left:.2rem}
+  li::marker{color:var(--accent)}
+  .neg{counter-reset:n;list-style:none;padding:0}
+  .neg li{display:grid;grid-template-columns:26px 1fr;gap:12px;padding:0}
+  .neg li::before{counter-increment:n;content:counter(n);font-family:"IBM Plex Mono",monospace;
+    font-size:.74rem;color:var(--gap);border:1px solid var(--gap);border-radius:3px;
+    height:22px;display:grid;place-items:center;margin-top:.2em}
+
+  .ask{border-left:3px solid var(--accent);background:var(--accent-soft);
+    padding:16px 20px;border-radius:0 6px 6px 0;display:flex;flex-direction:column;gap:8px}
+  .ask h3{color:var(--accent)}
+  .ans{border-left:3px solid var(--live);background:var(--live-soft);
+    padding:16px 20px;border-radius:0 6px 6px 0;display:flex;flex-direction:column;gap:9px}
+  .ans h3{color:var(--live)}
+  .ans .said{font-style:italic;font-size:1.02rem;color:var(--ink)}
+  .ans .eff{font-size:.93rem;color:var(--ink-2);line-height:1.55}
+  .ans .eff strong{color:var(--ink);font-weight:600}
+  .corr{border-left:3px solid var(--gap);background:var(--gap-soft);
+    padding:16px 20px;border-radius:0 6px 6px 0;display:flex;flex-direction:column;gap:8px}
+  .corr h3{color:var(--gap)}
+  .corr p{font-size:.93rem;color:var(--ink-2);line-height:1.55}
+  .corr p strong{color:var(--ink);font-weight:600}
+  .foot{border-top:1px solid var(--rule);padding-top:18px;color:var(--muted);font-size:.86rem}
+  .foot p + p{margin-top:.5rem}
+  a{color:var(--accent)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  @media (prefers-reduced-motion:no-preference){
+    .hop{transition:transform .15s ease}
+    .hop:hover{transform:translateY(-1px)}
+  }
+</style>
+
+<div class="wrap stack g48">
+
+  <header class="col stack g8">
+    <span class="eyebrow">Design · revised after review · 2026-08-30</span>
+    <h1>The Missing Hop</h1>
+    <p class="lede">The Email and Calendar apps are correctly generalized — neither touches Google. The platform normalizes Gmail and Calendar into canonical types and holds 711 real rows. Nothing carries those rows the last step into the apps.</p>
+    <p class="lede" style="font-size:1.02rem;margin-top:.5rem">Your four answers landed. Two of them changed the design rather than annotating it, and your question about the rules engine turned out to make one decision <em>better</em> — it deletes a problem the first draft only routed around.</p>
+  </header>
+
+  <section>
+    <div class="sec-head col">
+      <span class="eyebrow">What the review changed</span>
+      <h2>Four answers, and what each one moved</h2>
+    </div>
+    <div class="col stack g12">
+
+      <div class="ans">
+        <h3>Freshness — “The data should be instantly fresh.”</h3>
+        <p class="eff"><strong>D-001 is revised, not annotated.</strong> The first draft chose a scheduled routine and explicitly accepted “latency is one interval, not real-time,” deferring push to “later, as an optimization.” Instantly-fresh removes that trade, so the design is now <strong>both paths</strong>, each doing the job it is actually good at: push delivers on the event; the cursor-driven batch backfills and reconciles. Push alone could never notice it had dropped something.</p>
+      </div>
+
+      <div class="ans">
+        <h3>Scope — “Multi-tenant now.”</h3>
+        <p class="eff">The owner mapping (<code>P-003</code>) becomes <strong>required from day one</strong> and its risk goes to primary. The apps scope every store read by <code>ownerId</code> via <code>runtime.serviceFor(ownerId)</code>, so a wrong mapping doesn’t fail loudly — it delivers one person’s mail into another person’s app.</p>
+      </div>
+
+      <div class="ans">
+        <h3>Backfill — “Backfill everything.”</h3>
+        <p class="eff">The whole corpus, not a recent window. With one caveat that the measurement itself forced: <strong>the corpus is live.</strong> The newest message landed minutes before this was written, so backfill is sized as <em>“everything before the cursor,”</em> never as a frozen row count — and no acceptance evidence may cite a hardcoded total.</p>
+      </div>
+
+      <div class="ans">
+        <h3>Judgment — “What if we set up a rule in our rules system?”</h3>
+        <p class="eff"><strong>That rule already exists, which makes your framing better than my design.</strong> Binding <code>b7976842</code> is exactly it. So Email’s trigger endpoint firing judgment isn’t <em>the</em> judgment path — it’s a second, duplicate one living inside the app. D-003 routed <em>around</em> that conflation; the answer is to <strong>delete it</strong>. Full reasoning two sections down.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head col">
+      <span class="eyebrow">The finding</span>
+      <h2>The spine is intact. One branch was never built.</h2>
+    </div>
+    <div class="pipe">
+      <div class="hop ok"><span class="k">Source</span><span class="n">Google</span><span class="m">gmail + gcal<br>connected</span></div>
+      <div class="arrow">→</div>
+      <div class="hop ok"><span class="k">Normalize</span><span class="n">Trigger ingestion</span><span class="m">datatype_id stamped<br>dedupe_key set</span></div>
+      <div class="arrow">→</div>
+      <div class="hop ok"><span class="k">Fan out</span><span class="n">Sinks</span><span class="m">three live<br>one missing</span></div>
+      <div class="arrow dead">╳</div>
+      <div class="hop broken"><span class="k">Never built</span><span class="n">App delivery</span><span class="m">no sink exists</span></div>
+      <div class="arrow dead">╳</div>
+      <div class="hop ok"><span class="k">Ingress (idle)</span><span class="n">App stores</span><span class="m">POST /api/sync<br>awaiting a caller</span></div>
+    </div>
+
+    <p class="col" style="color:var(--ink-2);font-size:.96rem">Every normalized event is already fanned to a <em>list</em> of sinks, and that list is open — <code>ingestion.ts:255</code> reads <code>[eventBusSink, createTriggerBindingSink(sql), ...additionalSinks]</code>. So the gap is not a missing hop in a line. It is a missing <strong>branch of a live fan-out</strong>, and one of the three that exist got there through exactly the door the fourth would use.</p>
+
+    <div class="fan">
+      <div class="sink live">
+        <span class="sn">personal-vault</span>
+        <span class="sd">Writes the canonical document. Registered through <code>additionalSinks</code> — the precedent for a third-party sink.</span>
+        <span class="sc">993 · 45</span>
+      </div>
+      <div class="sink live">
+        <span class="sn">trigger-bindings</span>
+        <span class="sd">Evaluates rules and takes actions. This is where judgment happens, and where <code>b7976842</code> fires.</span>
+        <span class="sc">683 · 45</span>
+      </div>
+      <div class="sink live">
+        <span class="sn">event-bus</span>
+        <span class="sd">Publishes the event for awaits and watchers.</span>
+        <span class="sc">683 · 45</span>
+      </div>
+      <div class="sink missing">
+        <span class="sn">app-delivery</span>
+        <span class="sd">Would carry the row into the Email and Calendar stores. <strong>Does not exist.</strong> This is the whole plan.</span>
+        <span class="sc">— · —</span>
+      </div>
+    </div>
+    <p class="col" style="color:var(--muted);font-size:.86rem">Delivery-log rows per sink, <span class="mono">email-message · calendar-event</span>, measured 2026-08-30T02:3xZ. Counts move; the shape doesn’t.</p>
+  </section>
+
+  <section>
+    <div class="sec-head col">
+      <span class="eyebrow">Your architectural question</span>
+      <h2>Did we build the trigger system on the rules engine?</h2>
+    </div>
+
+    <div class="col stack g16">
+      <p style="color:var(--ink-2)"><strong style="color:var(--ink)">Substantially yes — verified in code, not from memory.</strong> <code>@papercusp/rules</code> is a real, tested engine: engine, matcher, operators, path, schema, compile, validate, each with its own test file. The binding engine evaluates every binding through it — <code>binding-engine.ts:508</code> calls <code>payloadMatchesFilter(binding.eventFilter, event.payload)</code>, and that module’s own header states it <em>“REUSES @papercusp/rules’ mingo-backed <code>matches</code> operator — the SAME leaf evaluator the ECA reaction engine’s <code>when</code> uses… We do NOT hand-roll a second regex/glob matcher.”</em> The same engine backs <code>events:await</code>, <code>events:watch</code>, <code>events:emit</code>, the events graph, and the coord inbox bus.</p>
+
+      <p style="color:var(--ink-2)">And your proposed rule is not hypothetical. Binding <code>b7976842</code> is armed on a connected source, and its filter is a genuine rules condition, not a string match:</p>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <div class="stack g8"><span class="tag live">Armed</span><h3>b7976842 — the rule you described</h3></div>
+        <p><code>ext:gmail:message.received</code> → create work item <code>email-draft-proposal</code>, when <code>all:&nbsp;[direction=inbound, threadId exists, from exists, subject exists, messageId exists]</code>.</p>
+        <p><strong>The layering is right:</strong> rules decide <em>whether</em>; the action layer owns <em>what</em>. A rules engine should not own what.</p>
+      </div>
+      <div class="card">
+        <div class="stack g8"><span class="tag miss">The real limit</span><h3>Two actions, one of them hardcoded</h3></div>
+        <p><code>actionType()</code> resolves exactly two: <code>launch-plan</code> and <code>create-work-item</code>. And <code>directEmailWorkItem</code> throws <code>external_trigger_unsupported_direct_target</code> unless the target is precisely Email’s draft-proposal kind.</p>
+        <p>So a rule can decide <em>whether</em> generically but can only <em>do</em> two things, one of which knows one app by name. <strong>That is why content delivery is a sink, not a rule.</strong></p>
+      </div>
+    </div>
+
+    <div class="col ask">
+      <h3>“Should we have?”</h3>
+      <p style="font-size:.95rem">The parts that exist are right — don’t redo them. The one real gap: rules are adopted for <em>conditions</em>, but there is no single surface where you can see <em>every</em> rule at once. Trigger bindings, event awaits, and ECA reactions each carry their own. That’s a genuine opportunity, and a separate concern I’m deliberately not smuggling into this plan.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head col">
+      <span class="eyebrow">Corrections I owe</span>
+      <h2>Two things in the first draft were wrong</h2>
+    </div>
+    <div class="col stack g12">
+      <div class="corr">
+        <h3>D-001’s third reason for rejecting a sink was invalid</h3>
+        <p>I argued that a new sink kind “would be closer to a third” recurring-work mechanism, which repo convention forbids. That conflates two unrelated things. The two-mechanism rule governs <strong>recurring work</strong>. A delivery sink is not recurring work — it is a fan-out consumer of an event that already fired, and its extension point is deliberately open with a shipped precedent. <strong>Reason 3 is withdrawn</strong> and should not be cited again. D-001’s surviving reasons — a sink cannot backfill, and the apps’ contract is batch+cursor — are correct, and are exactly why the batch path is <em>kept</em> rather than replaced.</p>
+      </div>
+      <div class="corr">
+        <h3>The item numbering in the first draft did not exist</h3>
+        <p>The phase table listed <code>P-001…P-009</code>. The plan’s actual items are <code>P-002…P-010</code> — there is no <code>P-001</code>. Two of D-006’s “effect on” pointers were off by one as a result. Corrected below and recorded as <code>D-009</code>; the reasoning was unaffected, only the pointers.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head col">
+      <span class="eyebrow">Design decisions</span>
+      <h2>Where each call now stands</h2>
+    </div>
+    <div class="stack g16">
+
+      <div class="dec">
+        <div class="dec-h"><span class="dec-id">D-001 + D-006</span><h3>Push for freshness, batch for completeness — both</h3><span class="tag miss">Revised</span></div>
+        <div class="dec-b">
+          <div class="row"><span class="lab chose">Chose</span><p>A push sink on the event <em>and</em> a cursor-driven batch path. Steady-state freshness is ingestion latency; the batch path backfills and reconciles.</p></div>
+          <div class="row"><span class="lab rej">Was</span><p>A scheduled routine alone, accepting one interval of latency, with push deferred as a later optimization.</p></div>
+          <div class="row"><span class="lab why">Why</span><p>“Instantly fresh” removes the latency trade, but a push sink still <strong>cannot backfill</strong> — it only ever sees future events — and cannot self-heal a delivery it dropped. Neither mechanism is correct alone.</p></div>
+        </div>
+      </div>
+
+      <div class="dec">
+        <div class="dec-h"><span class="dec-id">D-008</span><h3>The push half is an additional sink, not a new mechanism</h3><span class="tag live">New</span></div>
+        <div class="dec-b">
+          <div class="row"><span class="lab chose">Chose</span><p>An <code>app-delivery</code> sink registered through the existing <code>additionalSinks</code> extension point, modelled on <code>personal-vault/live-sink.ts</code>.</p></div>
+          <div class="row"><span class="lab rej">Rejected</span><p>A binding action that posts to an app.</p></div>
+          <div class="row"><span class="lab why">Why</span><p>Extending an open extension point with a shipped precedent is reuse, not invention. A binding <em>cannot</em> do this: the action vocabulary is two types and one of them is hardcoded to a single app’s work-item kind. It must send a single-row batch through the <strong>same schema and endpoint</strong> the reconcile path uses — a push-only payload shape is how the two silently diverge.</p></div>
+        </div>
+      </div>
+
+      <div class="dec">
+        <div class="dec-h"><span class="dec-id">D-002</span><h3>The app owns its watermark; the producer asks</h3><span class="tag live">Load-bearing</span></div>
+        <div class="dec-b">
+          <div class="row"><span class="lab chose">Chose</span><p>Each run calls the app’s <code>GET /api/sync/cursor</code> and sends from there.</p></div>
+          <div class="row"><span class="lab rej">Rejected</span><p>A producer-side watermark table.</p></div>
+          <div class="row"><span class="lab why">Why</span><p>A producer-side watermark <strong>silently desyncs</strong> whenever an app’s store is reset: the producer believes it delivered rows the app no longer has, and the app stays short with nothing failing loudly. Asking the receiver is self-healing.</p></div>
+          <div class="row"><span class="lab new">Now also</span><p><strong>This is what makes push and batch composable.</strong> Because the app owns the watermark and both apps upsert by id, the two paths deliver without coordinating: an overlap is an idempotent upsert, and a dropped push is caught by the next reconcile.</p></div>
+        </div>
+      </div>
+
+      <div class="dec">
+        <div class="dec-h"><span class="dec-id">D-003 + D-007</span><h3>Delete the app’s duplicate judgment door</h3><span class="tag miss">Revised</span></div>
+        <div class="dec-b">
+          <div class="row"><span class="lab chose">Chose</span><p>Remove work-item minting from Email’s <code>POST /api/triggers/gmail</code>. The platform binding stays the single judgment path.</p></div>
+          <div class="row"><span class="lab rej">Was</span><p>Leave it alone and route content sync around it.</p></div>
+          <div class="row"><span class="lab why">Why</span><p>Verified safe, and cheap. <strong>No platform caller of that route exists</strong> — the live judgment path is <code>gmail-flagship</code> → <code>b7976842</code> → the binding engine, so the app’s endpoint is reachable only by hand. And the two halves are already separate calls: <code>service.ts:135</code> runs <code>ingestCanonicalMessage()</code> and <em>then</em> <code>seam.enqueueWorkItems()</code>. Keep the first, drop the second.</p></div>
+          <div class="row"><span class="lab why">Rule</span><p>An endpoint that both stores content and triggers judgment is not a sync endpoint. This now <em>deletes</em> the conflation instead of avoiding it, and restores the app to consuming a generic system rather than hosting its own trigger.</p></div>
+        </div>
+      </div>
+
+      <div class="dec">
+        <div class="dec-h"><span class="dec-id">D-004</span><h3>Read the canonical store, not the delivery log</h3><span class="tag live">Stands</span></div>
+        <div class="dec-b">
+          <div class="row"><span class="lab chose">Chose</span><p><code>personal_documents</code> — canonical and deduped.</p></div>
+          <div class="row"><span class="lab rej">Rejected</span><p><code>trigger_deliveries</code>.</p></div>
+          <div class="row"><span class="lab why">Why</span><p>The delivery log holds one row per sink per event. It currently carries <strong>2,359 email rows against 683 actual messages</strong> — and the vault sink alone holds 993, more rows than there are documents. Consuming it would deliver each message several times and make correctness depend on sink fan-out. <em>For auditors:</em> the “135 calendar-event rows” a prior grading cited as real-data evidence is a delivery-log count, not anything either app received.</p></div>
+        </div>
+      </div>
+
+      <div class="dec">
+        <div class="dec-h"><span class="dec-id">D-005</span><h3>Email gains a batch ingress mirroring Calendar’s</h3><span class="tag live">Stands</span></div>
+        <div class="dec-b">
+          <div class="row"><span class="lab chose">Chose</span><p><code>POST /api/sync</code> on Email taking <code>{ messages[], contacts[], cursor?, sourceRef? }</code>.</p></div>
+          <div class="row"><span class="lab rej">Rejected</span><p>Looping the singular endpoint once per message.</p></div>
+          <div class="row"><span class="lab why">Why</span><p>No cursor means no watermark to resume from (breaking D-002) and no status to record. Two apps consuming one generic system should present <strong>the same ingress contract</strong>, or every future consumer special-cases them. It wraps the existing idempotent ingest rather than reimplementing it — which is also what makes the D-003 split cheap.</p></div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head col">
+      <span class="eyebrow">Plan · platform-to-app-data-producer-2026-08-30</span>
+      <h2>Eleven items, three phases</h2>
+    </div>
+    <p class="col" style="color:var(--ink-2);font-size:.96rem">Phases are a real sequence, not decoration: the producer in Phase 2 cannot be written until Phase 1 settles the contract it posts into. Two items are new since the review — marked in green.</p>
+    <div class="tw"><table>
+      <thead><tr><th style="width:74px">Item</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr class="phase"><td colspan="2">Phase 1 — Close the contract asymmetry</td></tr>
+        <tr><td class="id">P-002</td><td>Batch + cursor ingress on Email: <code>EmailSyncBatchSchema</code>, <code>POST /api/sync</code>, <code>GET /api/sync/cursor</code>, <code>/status</code>. Wraps the existing idempotent ingest. Must not mint work items.</td></tr>
+        <tr><td class="id fresh">P-012</td><td><strong>New.</strong> Remove work-item minting from Email’s <code>/api/triggers/gmail</code>, leaving the platform binding as the single judgment path. Ships with a regression test asserting a canonical message POSTed to the app mints <em>zero</em> work items.</td></tr>
+        <tr><td class="id">P-003</td><td>Owner mapping: platform <code>user_id</code> → each app’s <code>ownerId</code>. Multi-tenant from day one, explicit and configured, never inferred. <strong>Primary risk of the plan.</strong></td></tr>
+        <tr><td class="id">P-004</td><td>Service auth: short-lived JWTs per app audience, signed with the app’s existing secret. The apps already verify exactly this — no new auth scheme.</td></tr>
+        <tr class="phase"><td colspan="2">Phase 2 — The producer</td></tr>
+        <tr><td class="id fresh">P-011</td><td><strong>New.</strong> The push sink: register app delivery through <code>additionalSinks</code> so each event reaches the mapped app as it lands. Single-row batch, same schema as reconcile. A failing app must never block the vault or event-bus sinks.</td></tr>
+        <tr><td class="id">P-005</td><td>The reconcile path: per (owner, app), read the app’s cursor, select rows after it, map, POST, record outcome. Idempotent by construction — both apps upsert by id.</td></tr>
+        <tr><td class="id">P-006</td><td>Backfill the entire corpus through the <em>same</em> path as steady-state, in bounded pages, sized as “everything before the cursor.” A separate importer is how the two silently diverge.</td></tr>
+        <tr><td class="id">P-007</td><td>Loud failure: per-app cursor, row counts, last error. A silently-idle producer is indistinguishable from today’s broken state — which is the failure this plan exists to end.</td></tr>
+        <tr class="phase"><td colspan="2">Phase 3 — Prove it and re-ship</td></tr>
+        <tr><td class="id">P-008</td><td>The test <code>WI-933686</code> asks for: real data through each app’s own run path, asserted on the <strong>receiving</strong> end — a row in the app’s store traced to a provider id — never on the sending abstraction.</td></tr>
+        <tr><td class="id">P-009</td><td>Correct <code>calendar/TESTING.md</code> §4, which describes this producer as already existing.</td></tr>
+        <tr><td class="id">P-010</td><td>Re-open acceptance: re-activate the retired rubric, non-implementer re-grades <code>web-apps-real-data</code>, fresh verdict, then re-ship.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <div class="sec-head col">
+      <span class="eyebrow">Status</span>
+      <h2>Nothing is blocking. Two things worth knowing.</h2>
+    </div>
+    <div class="col stack g12">
+      <div class="ask">
+        <h3>The corpus is live, so “done” is a moving target</h3>
+        <p style="font-size:.95rem">Mail arrives continuously — the newest canonical row landed minutes before this page was written, while calendar has been quiet since 2026-08-28. Any acceptance evidence that cites a fixed row total will be stale before it is graded. The receiving-end assertion has to be “this provider id is in the app’s store,” never “the app holds N rows.”</p>
+      </div>
+      <div class="corr">
+        <h3>Retracted: the “no single surface for every rule” opportunity</h3>
+        <p>I claimed this page’s own “genuine opportunity” — that no surface lists every rule — and then measured it. <strong>It does not hold, and I withdraw it</strong> (<code>D-010</code>).</p>
+        <p>I said three stores; there are five, and one of them (<code>event_reactions</code>) is a <em>fire log</em>, not rules at all. Worse, the idea conflated two unlike things: trigger bindings (7) and ECA rules (26) are <strong>curated policy</strong>, while event awaits (790 live of 81,058) and predicate watches (387) are <strong>ephemeral runtime waits</strong>. A unified view would bury 33 rows of policy under ~1,177 rows of ephemera — worse than any surface it replaced. And each family already has a good one: <code>events:graph</code> gives on→fire edges plus a cause-chain for “why did this fire?”, <code>/admin/triggers</code> covers bindings, <code>events:status</code> covers live awaits. The code/data split is deliberate, not drift.</p>
+        <p><strong>What survives is one missing edge, and it is premature.</strong> <code>events:graph</code> can’t see bindings; <code>/admin/triggers</code> can’t see what happens after an action fires. So “a Gmail message arrives — what happens?” spans four surfaces. Real, but not worth building against 2 armed bindings. Revisit when the binding population grows or a cross-plane misfire actually costs debugging time.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="col foot">
+    <p>Plan <code>platform-to-app-data-producer-2026-08-30</code> · 11 items, 9 decisions · status <strong>draft</strong> pending this review. Blocks <code>email-calendar-web-desktop-ship-2026-08-27</code> (retracted to <code>ready</code>). Related: <code>WI-985265</code>, <code>WI-933686</code>, <code>WI-933623</code>.</p>
+    <p>Every code claim on this page was read from the tree before it was written here, and every count measured against the live database at 2026-08-30T02:3xZ. Source of this document: <code>docs/design/platform-to-app-data-producer-2026-08-30.design.html</code>.</p>
+  </footer>
+
+</div>

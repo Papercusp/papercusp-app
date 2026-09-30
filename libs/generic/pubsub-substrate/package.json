@@ -1,0 +1,71 @@
+{
+  "name": "@papercusp/pubsub-substrate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A host-agnostic agent-coordination / pub-sub substrate: the pure protocol core (envelope types + identity-free fold/merge/glob logic), a swappable append-only CoordEventLog (the outbox/CDC channel-log seam — fs default + in-memory double, covering messages/handoffs/escalations/plan-events), PresenceStore (live presence), and WatermarkStore (per-agent read cursors). Every store is an interface with an in-memory + portable-fs double, all passing one conformance suite; the PG backends are injected by the host adapter (@papercusp/coordination). Zero domain coupling, zero postgres dep.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./core": {
+      "types": "./src/core/index.ts",
+      "import": "./src/core/index.ts",
+      "default": "./src/core/index.ts"
+    },
+    "./event-log": {
+      "types": "./src/event-log/index.ts",
+      "import": "./src/event-log/index.ts",
+      "default": "./src/event-log/index.ts"
+    },
+    "./event-log/conformance": {
+      "types": "./src/event-log/conformance.ts",
+      "import": "./src/event-log/conformance.ts",
+      "default": "./src/event-log/conformance.ts"
+    },
+    "./presence": {
+      "types": "./src/presence/index.ts",
+      "import": "./src/presence/index.ts",
+      "default": "./src/presence/index.ts"
+    },
+    "./presence/conformance": {
+      "types": "./src/presence/conformance.ts",
+      "import": "./src/presence/conformance.ts",
+      "default": "./src/presence/conformance.ts"
+    },
+    "./watermark-store": {
+      "types": "./src/watermark-store/index.ts",
+      "import": "./src/watermark-store/index.ts",
+      "default": "./src/watermark-store/index.ts"
+    },
+    "./watermark-store/conformance": {
+      "types": "./src/watermark-store/conformance.ts",
+      "import": "./src/watermark-store/conformance.ts",
+      "default": "./src/watermark-store/conformance.ts"
+    },
+    "./capabilities": {
+      "types": "./src/capabilities/index.ts",
+      "import": "./src/capabilities/index.ts",
+      "default": "./src/capabilities/index.ts"
+    },
+    "./capabilities/conformance": {
+      "types": "./src/capabilities/conformance.ts",
+      "import": "./src/capabilities/conformance.ts",
+      "default": "./src/capabilities/conformance.ts"
+    }
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@papercusp/linkable-edges": "*"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

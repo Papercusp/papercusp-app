@@ -1,0 +1,40 @@
+/**
+ * Do not edit directly, this file was auto-generated.
+ */
+
+[data-theme="frost"], [data-theme-base="frost"] {
+  --bg-deepest: #02060c; /** Surface depth scale — deepest (gradient bottoms, deep shadows). Darker than --bg. */
+  --bg-deeper: #030a14; /** Surface depth scale — deep surfaces. Darker than --bg. */
+  --bg-deep: #050d18; /** Surface depth scale — sub-base. Just below --bg. */
+  --bg: #07101d; /** Page background — slate-deeper than sky-950 */
+  --bg-1: #0b1220;
+  --bg-2: rgba(255, 255, 255, 0.045); /** Translucent surface tier 2 */
+  --bg-3: rgba(255, 255, 255, 0.075); /** Translucent surface tier 3 */
+  --bg-4: rgba(255, 255, 255, 0.12); /** Translucent surface tier 4 */
+  --bg-popover: #0d1829; /** Solid elevated surface for HoverCard/Popover/floating menus */
+  --bg-raised: #112235; /** Surface depth scale — solid raised panel (above the page/popover band). Frost: the bespoke panel navy (mode rgb(17,34,53)). */
+  --bg-raised-high: #143049; /** Surface depth scale — solid raised emphasis/hover panel (lighter than --bg-raised). */
+  --fg: #e7f7ff;
+  --fg-dim: #b9d4e8;
+  --fg-mute: #7f9bb4;
+  --border-muted: rgba(125, 211, 252, 0.08); /** #7dd3fc @ 0.08 — faintest step (table row dividers) */
+  --border: rgba(125, 211, 252, 0.15); /** #7dd3fc @ 0.15 */
+  --border-strong: rgba(125, 211, 252, 0.32); /** #7dd3fc @ 0.32 */
+  --accent: #38bdf8;
+  --accent-rgb: 56, 189, 248; /** RGB triplet of --accent (sky-400 #38bdf8) for rgba()/color-mix alpha composition, e.g. var(--accent-rgb) in rgb(var(--accent-rgb) / 0.5) */
+  --accent-strong: #7dd3fc;
+  --accent-strong-rgb: 125, 211, 252; /** RGB triplet of --accent-strong (sky-300 #7dd3fc) for rgba() alpha composition, e.g. rgba(var(--accent-strong-rgb), 0.5) */
+  --accent-cool: #d7f3ff;
+  --accent-soft: #bae6fd; /** Light accent tint — glows/highlights (frost: sky-200) */
+  --accent-soft-rgb: 186, 230, 253; /** RGB triplet of --accent-soft (sky-200 #bae6fd) for rgba() alpha composition (same leak rule as accent-rgb — every theme overriding accent-soft must override this too) */
+  --accent-deep: #0ea5e9; /** Deeper accent tint (frost: sky-500) */
+  --accent-deeper: #0369a1; /** Deepest accent tint (frost: sky-700) */
+  --accent-ink: #051827; /** Text color on accent backgrounds */
+  --good: #34d399;
+  --warn: #fbbf24;
+  --bad: #fb7185;
+  --warn-bg: rgba(251, 191, 36, 0.1); /** #fbbf24 @ 0.1 */
+  --warn-border: rgba(251, 191, 36, 0.35); /** #fbbf24 @ 0.35 */
+  --good-bg: rgba(52, 211, 153, 0.1); /** #34d399 @ 0.1 — success tint bg, symmetric with warn-bg */
+  --bad-bg: rgba(251, 113, 133, 0.1); /** #fb7185 @ 0.1 — danger tint bg, symmetric with warn-bg */
+}

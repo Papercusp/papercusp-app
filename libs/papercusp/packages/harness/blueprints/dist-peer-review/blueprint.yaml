@@ -1,0 +1,45 @@
+# dist-peer-review — flat-DISTRIBUTED coordination WITH peer review (benchmark-coordination-topologies).
+#
+# Like dist-broadcast (N peer workers self-claim from a shared queue, no Queen), but adds a PEER-REVIEW
+# gate: before a worker finalizes its result, a nominated PEER reviews/critiques it (the "correct each
+# other" mechanism, made explicit). Tests whether distributed peer-review beats both flat-broadcast and
+# central-Queen review. A coordination-topology arm for the fairness benchmark.
+id: dist-peer-review
+extends: base
+version: 0.1.0
+description: >-
+  Flat-distributed coordination with a peer-review gate: N peer workers self-claim from a shared
+  queue (no Queen); each result is reviewed by a nominated peer before submit.
+
+workItem:
+  kind: feature
+  idPrefix: W
+
+dispatch:
+  concurrency: 4
+
+spine:
+  claimModel: self-claim-fifo
+  maxTurns: 200
+
+dependencies:
+  tools: []
+  packs: []
+  plugins: []
+  blueprints: []
+
+coordination:
+  broadcast: topic
+  review: peer          # a nominated peer reviews/critiques each result BEFORE it is finalized
+  sharedState: both
+  team: per-backlog
+
+roles:
+  - id: worker
+    description: >-
+      A peer worker: self-claims the next ready task, solves it, broadcasts findings, and submits its
+      result for a peer's review before finalizing.
+  - id: reviewer
+    description: >-
+      A peer (nominated per result) that adversarially reviews/critiques another worker's diff before
+      submit — catches errors the author missed. Any worker can act as a reviewer for a peer.

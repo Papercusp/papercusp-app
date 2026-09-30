@@ -1,0 +1,34 @@
+[package]
+name = "pui-companion"
+version = "0.1.0"
+edition = "2021"
+description = "Thin companion zellij plugin for pui — its eyes + hands inside zellij (SP-TUI P-004 / D-008)"
+license = "Apache-2.0"
+publish = false
+
+# A wasm32-wasip1 zellij plugin. Built with
+#   cargo build --release --target wasm32-wasip1
+# → target/wasm32-wasip1/release/pui_companion.wasm
+# which `pui` loads via `zellij pipe --plugin file:<path>` (see apps/tui/src/companion.rs).
+#
+# IMPORTANT — it is a `bin`, NOT a `cdylib`. zellij's loader requires a callable
+# `_start` export (it runs the module's `fn main` once for ctors + panic hook,
+# then calls the `#[no_mangle]` load/update/pipe/render exports). On modern Rust,
+# a `wasm32-wasip1` *cdylib* is a "reactor" (exports `_initialize`, drops
+# `_start`/main) → zellij fails with "could not find exported function". A `bin`
+# is a "command" module: `register_plugin!`'s generated `fn main` becomes
+# `_start`, and the `#[no_mangle]` plugin exports are still emitted. (Verified by
+# inspecting the wasm export section.) Native `cargo test` builds the same crate
+# with an empty `fn main` (the macro is wasm-gated) and runs the pure unit tests.
+#
+# Standalone crate (no Cargo workspace under papercup/, by design); it shares ONE
+# wire protocol with `pui` through the pure-serde `pui-companion-proto` path dep.
+
+[[bin]]
+name = "pui_companion"
+path = "src/main.rs"
+
+[dependencies]
+# Matches the installed zellij (0.44.3) exactly — the plugin API is version-coupled.
+zellij-tile = "0.44.3"
+pui-companion-proto = { path = "../pui-companion-proto" }

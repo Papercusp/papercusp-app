@@ -1,0 +1,98 @@
+# What ships in a knowledge pack — and the residue the release audit does not catch
+URL: /internal/docs/agent-insights/what-ships-in-a-knowledge-pack
+
+Builtin packs ship automatically: the desktop cut copies every file under packages/harness, so committing a pack dir ships it with no cut change at all. The curation loop writes somewhere else entirely — a runtime path outside the repo and the bundle — which is why the one pack it feeds never reached a fresh install. And the release-bundle audit will not save you here: it scans for BUILD-BOX identity, while fleet-authored pack items carry internal LEDGER references. All three live fleet-lessons items were shipped-ready with work-item ids, harness scope literals and signature hashes in their footers, and the audit flagged none of it.
+
+## The three roots, and which one ships
+
+`load-packs.ts` resolves packs from three roots, **earlier wins on id clash**:
+
+| root        | path                                                                                 | ships?  |
+| ----------- | ------------------------------------------------------------------------------------ | ------- |
+| `builtin`   | `libs/papercusp/packages/harness/knowledge-packs/<id>/`                              | **yes** |
+| `shared`    | `<workspacesRoot()>/shared/knowledge-packs/<id>/` — i.e. `~/.papercusp-workspaces/…` | no      |
+| `installed` | `~/.papercusp/knowledge-packs/<id>/`                                                 | no      |
+
+**A builtin pack ships with no release-cut change of any kind.**
+`build-desktop-sidecar.sh` (the harness-copy step) enumerates
+`find . -type f` under `packages/harness`, excluding only `docs-viewer`,
+`node_modules` and `.git`, and copies the lot into `sidecar/harness`. A pack
+directory committed under `knowledge-packs/` is therefore already in the
+bundle's file list. If you are about to edit the cut to ship a pack, stop —
+you don't need to.
+
+## The bug this cost us
+
+The curation loop (`materializeCandidateIntoPack`) writes adopted candidates to
+the **shared** root, which is a runtime path under the user's home — outside the
+repo and outside the bundle. So `fleet-lessons`, the one pack the automated loop
+actually feeds, never reached a fresh install. The pack existed, the loop worked,
+the cut succeeded; the knowledge simply had no route to a customer.
+
+The fix (P-006 / plan decision D-017) is **export-then-commit**: export the
+curated pack into the repo's builtin dir and commit it —
+
+```bash
+npm run gen:fleet-lessons          # export (idempotent)
+npm run gen:fleet-lessons:check    # exit 1 on drift or residue
+```
+
+Off-fleet (a CI runner, a fresh clone) there is no shared root, so the exporter
+prints "nothing to export" and exits 0.
+
+### Why not just copy it during the cut?
+
+Because that makes the shipped bundle a function of the **build box's home
+directory**. Four consequences, any one disqualifying:
+
+1. builds of the same commit stop being reproducible;
+2. nothing in git records what shipped — nothing to review, nothing to revert;
+3. whatever the loop last adopted reaches customers unvetted;
+4. on a box without that directory the cut ships the pack **missing** while
+   reporting success — the original bug relocated, not fixed.
+
+That is the same defect class as sourcing bundle content from ambient machine
+state elsewhere in the cut. Don't open a second one.
+
+## The residue class the release audit does not catch
+
+This is the part that surprises people.
+
+`audit-release-bundle.py` does scan the cut for identity — but its rule is
+**build-box identity**: the unix user, hostname and git identity of the machine
+doing the build, resolved at run time. Fleet-authored pack items carry a
+*different* kind of residue: internal **references out of our own ledger**.
+
+* work-item ids — `EI-8288`, `WI-42`
+* scope literals — `harness:@singleton`, `harness:papercusp-workspace`
+* 12-hex recurrence signature digests — `4072cfad012b`
+
+None of those are machine identity, so **the release audit passes every one of
+them**. Measured 2026-08-03: all three items in the live `fleet-lessons` pack
+carried a provenance footer naming EI-8288 / EI-9411 / `harness:@singleton` /
+`harness:papercusp-workspace` plus a signature hash, and the audit flagged
+nothing. On a fresh install those are dangling pointers into a ledger the reader
+has never seen — noise shaped like a citation.
+
+> **Do not read a clean release-audit as "this pack item is fit to ship."** The
+> audit answers a different question.
+
+The rule now lives in one place, `findPackResidue`
+(`knowledge-packs/pack-residue.ts`), with three call sites so they cannot drift:
+
+* the **producer** (`renderCandidateLearningFile`) no longer emits any of it;
+* the **exporter** refuses a pack that trips it;
+* `pack-residue.test.ts` gates **every committed builtin pack** on every test
+  run, and picks up new packs automatically by enumerating the directory.
+
+## Stripping provenance loses nothing
+
+The instinct is that removing ids from the footer destroys traceability. It does
+not — it moves it where it belongs. `knowledge_pack_candidates.pack_item_id`
+links each shipped item back to its candidate row, which retains
+`source_item_ids`, `signature`, `scopes` and `recurrence_count` (verified
+populated on all three adopted rows).
+
+**Ledger for traceability, pack for transferable knowledge.** The footer keeps
+only the recurrence *count* — the one part a stranger can actually use, because
+it says how much evidence stands behind the lesson.

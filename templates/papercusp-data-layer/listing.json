@@ -1,0 +1,10 @@
+{
+  "ref": "papercusp-data-layer",
+  "id": "papercusp-data-layer",
+  "title": "Papercusp Official: Data Layer (Embedded Postgres)",
+  "description": "Aspect template: the app-owned data plane — embedded Postgres per install, connection discovery, and typed-contract write gates so agents and UI share one safe write path. Docs: /internal/docs on your install.",
+  "category": "data",
+  "scope": "aspect",
+  "version": "0.1.0",
+  "source": "first-party"
+}

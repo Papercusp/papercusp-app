@@ -1,0 +1,136 @@
+# The `cup` launch blueprint — local-pot-orchestration-2026-06-06 (P-010 / P-011, D-001/D-003/D-009).
+#
+# A SINGLE-ROLE LAUNCH BLUEPRINT (D-007): the Mug's "place a fresh generic worker"
+# primitive (placement option 1 — free slot). Firing it is `fleet:spawn { role:'cup',
+# harness:<slug>, extras:[...] }` (or fireLaunchBlueprint('cup') with a parent) — it
+# launches ONE generic implementation agent (the `cup` role) into a registered
+# project, with the Mug's brief riding `extras` and the cup's persona resolved from
+# the global prompts/cup.md.
+#
+# kind:'harness' (the DEFAULT, stated here for clarity): a cup is NOT a pot. The
+# privileged kind:'pot' is the Mug (`pot`) alone — it is launchable only as a root,
+# and the no-nest guard (assertNotNestedHive) would reject it under a parent. A cup,
+# being kind:'harness', is freely launchable by the Mug and may itself spin up a
+# kind:'harness' subharness for structured work (D-017) — but never another pot.
+#
+# Extends `single-agent`: it inherits the run-to-done single-role spine (one decider
+# + DONE/ESCALATE/IDLE edges + inline planner) + the governed + durable launch
+# contract (spawnInvokeOnce chokepoint → brain-decided admission + the safety floor).
+# It overrides ONLY the decider role (`cup`) and the turn budget.
+id: cup
+visibility: public
+extends: single-agent
+kind: harness
+version: 0.1.0
+description: >-
+  Launch one generic Pot worker (the `cup` role) — a plain implementation agent the
+  Mug places ranked work + a brief onto. Decoupled from the pipeline guards (no
+  chunk, no spine); the brief rides `extras`, the persona is prompts/cup.md. A cup is
+  kind:'harness' (NOT a pot).
+
+# Structured retirement (WI-5645 no-retirement-launch-guard, applied by
+# retire-mug-kettle-su-only-2026-08-09 P-062). Before this field existed
+# "retired" was ONLY human-readable prose, so nothing checked it before spending
+# (EI-18177667809538623: an autoloop spent $14.51+ against the retired
+# `coding-factory` via a descendant that inherited it). `blueprintRetirement()`
+# reads this at the LAUNCH/SPEND chokepoints; the pure loader still resolves it
+# so the catalog can SHOW it as retired rather than erroring.
+#
+# This is the second, independent lock on the same door: `cup` is already
+# unspawnable at all three role-admission doors (RETIRED_TIER_ROLES via
+# `isRetiredTierRole`, D-018/D-022). That guard refuses a role NAME; this one
+# refuses the BLUEPRINT. Either alone would leave the other path arguable.
+#
+# To revive (the flag is `case:'cutover'` — reversibility is the point): delete
+# this block AND flip `FLAGS.MUG_KETTLE_SYSTEM` ON.
+retired:
+  at: "2026-08-09"
+  reason: >-
+    The Mug/Kettle/Cup tier is retired — su + GOAL mode are the only way to drive
+    the app (retire-mug-kettle-su-only-2026-08-09, D-020, owner-directed). This
+    blueprint exists solely to launch the `cup` role, which no longer admits at
+    any spawn door. Do not wire new work to it or to any blueprint extending it.
+
+# The work the cup is placed onto. Generic: a cup is given tasks, not a typed
+# pipeline feature — `kind:'task'` is the plain "do this" work unit.
+workItem:
+  kind: task
+  idPrefix: BEE
+
+# Spine edges + planner inherited from `single-agent`; override the decider role +
+# the cup's turn budget only. The cup runs its placed work to done/escalate/idle and
+# (when idle) registers a coord:await-inbox wake before sleeping (persona-driven).
+spine:
+  decider: cup
+  maxTurns: 80
+
+roles:
+  - id: cup
+    description: >-
+      The generic Pot worker: read your brief (rides extras) + your ranked
+      work-list (work_items), do the work owning your own sequencing (propose/
+      dispose), publish your ordered list on the blackboard so the Mug can
+      supervise, coordinate via coord, and register coord:await-inbox when you end a
+      turn idle. Persona: prompts/cup.md (global — no blueprint-scoped override).
+
+knobs:
+  harnessKind: bee
+  # A cup implements against a project cwd, so it needs a registered repo (the
+  # generic-worker launch path — local-pot P-002 leans "register"). It does NOT
+  # need the coding pipeline; requiresRepo just gates the cwd resolution.
+  requiresRepo: true
+
+# NO `triggers` — a cup is PLACED by the Mug on demand (fleet:spawn /
+# fireLaunchBlueprint), not fired on a cadence or an event. The Mug's placement
+# loop IS its trigger.
+
+# Dependencies — the generic worker surface a cup uses regardless of task: its
+# ordered work-list (work_items), coordination + the idle-wake scaffold (coord),
+# grounding reads (plans/docs/search), the blueprint catalog for spinning up a
+# structured subharness, and the friction-capture intake (self-learning loop).
+dependencies:
+  tools:
+    - agent_tools:list
+    - blueprint:catalog
+    - blueprint:validate
+    # Reversible mid-task fork the cup MAY open (and self-decide on `{ self_decide: true }`),
+    # per the cup prompt's "decide reversibly, don't freeze on the owner" section.
+    - chat:ask_choice
+    - coord:await-inbox
+    - coord:declare-intent
+    - coord:inbox
+    - coord:send
+    - docs:get
+    - docs:search
+    # Durable-facts fold (the cup prompt's "assert what you proved" section): the
+    # cup CALLS facts:assert for reusable findings and facts:retract on disproof —
+    # blueprint-prompt-dark-tools guard.
+    - facts:assert
+    - facts:retract
+    - harness:create
+    - harness:get
+    - harness:list
+    - improvements:capture
+    - memory:remember
+    - memory:search
+    - plans:get
+    # The cup auto-claims its plan lane by flipping items wip via plans:set-status
+    # (the prompt's coordinate-via-coord section).
+    - plans:set-status
+    # Hybrid cup-scheduler (hybrid-cup-scheduler-work-stealing-2026-06-22): pull
+    # the next item through the spec-driven claim path the cup prompt mandates
+    # (scheduler:get_next, not a work_items:list self-scan).
+    - scheduler:get_next
+    - search:fulltext
+    - search:semantic
+    - work_items:claim
+    # Carry-note continuity (the cup prompt's end-of-turn checkpoint) + structured
+    # deferral/progress state (set_state → blocked) the completion reconciler reads.
+    - work_items:checkpoint
+    - work_items:complete
+    - work_items:create
+    - work_items:get
+    - work_items:list
+    - work_items:reorder
+    - work_items:set_state
+  plugins: []

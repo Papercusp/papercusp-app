@@ -1,0 +1,77 @@
+# papercusp-data-layer — 'Papercusp Official: Embedded Data Layer' (scope:
+# aspect, category: data; owner directive 2026-07-04 / P-019). The app-owned
+# data plane: an embedded Postgres that boots WITH the app (no external DB),
+# generic connection discovery, and the typed-contract write discipline for
+# anything crossing a trust boundary into app tables. Machine twin:
+# @papercusp/template-kit src/reference-templates.ts
+# PAPERCUSP_DATA_LAYER_TEMPLATE — the kit's suite pins this file to it.
+id: papercusp-data-layer
+version: "0.1.0"
+scope: aspect
+category: data
+summary: >-
+  The embedded data layer for a papercusp-composed app: the
+  embedded-postgres-server pattern (an app-owned Postgres booted with the
+  app — lifecycle, migrations on boot, per-boot port, discovery file),
+  @papercusp/embedded-pg-discovery for connection resolution (env vars →
+  discovery file → fallback), and the typed-contracts pattern — a single
+  parse gate for every write that crosses a trust boundary into app tables.
+  Compose into any app that owns its data instead of depending on external
+  infrastructure.
+components:
+  - { id: embedded-postgres-server, version: 0.0.1 }
+  - { id: embedded-pg-discovery, version: 0.1.0 }
+  - { id: typed-contracts, version: 0.0.1 }
+contracts: []
+decisionPoints:
+  - id: app-schema
+    prompt: >-
+      Which tables does the app own, and what is the migration story?
+      Migrations run forward-only on boot (the embedded-postgres-server
+      pattern) — there is no ops window in a desktop app.
+  - id: connection-resolution
+    prompt: >-
+      Parameterize @papercusp/embedded-pg-discovery for THIS app: which env
+      vars (in priority order), which discovery-file path under the app
+      home, which fallback URL? Never hardcode the port — it rotates per
+      boot.
+  - id: contract-gates
+    prompt: >-
+      Which writes cross a trust boundary (agent output, imported files,
+      network payloads)? Each gets the typed-contracts discipline — a
+      dedicated contracts package + ONE parse gate, rejects surfaced as
+      events. If the app composes papercusp-ops-pots this is MANDATORY for
+      the seam; if nothing untrusted writes, drop the pattern.
+composesWith:
+  - papercusp-tauri-desktop-shell
+  - papercusp-data-sync
+  - papercusp-search
+docs:
+  - agent-insights/templates-system-design
+  - agent-insights/templates-template-yaml
+  - agent-insights/templates-component-catalog
+checks:
+  - id: components-integrated
+    run: checks/components-integrated.test.ts
+    summary: >-
+      every pinned component package is a declared dependency of the composed
+      app (config section: components)
+musts:
+  - id: app-owns-postgres
+    rule: "The app owns its embedded Postgres under the app home — never a system or external database"
+    enforcedBy: prose-only
+  - id: no-hardcoded-pg
+    rule: "Never hardcode the PG port or URL — the port rotates per boot; always resolve through resolvePgUrl"
+    enforcedBy: prose-only
+  - id: postgres-js-client
+    rule: "postgres-js is the app PG client, not node-postgres — the search aspect SearchSource types its handle as a postgres-js Sql function (WI-2872)"
+    enforcedBy: prose-only
+  - id: forward-only-migrations
+    rule: "Migrations run on boot and are forward-only — a desktop app has no ops window"
+    enforcedBy: prose-only
+  - id: single-parse-gate
+    rule: "Every trust-boundary write goes through a single typed-contract parse gate — mandatory for the seam down-leg when composing papercusp-ops-pots"
+    enforcedBy: prose-only
+  - id: deps-declared
+    rule: "Every kept component is a real package dependency — not wired on paper"
+    enforcedBy: components-integrated

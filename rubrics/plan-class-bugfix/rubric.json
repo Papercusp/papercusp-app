@@ -1,0 +1,47 @@
+{
+  "rubricId": "plan-class-bugfix",
+  "title": "Plan class: bugfix (shared acceptance invariants)",
+  "characteristic": "plan-acceptance",
+  "description": "The CLASS rubric bugfix plans' acceptance rubrics reference (acceptance-rubrics-on-every-plan-2026-08-11 D-006): a fix is done when the ROOT CAUSE is removed and guarded, not when the symptom stops. Graded at plan completion by a NON-implementer.",
+  "methodRef": null,
+  "ratingScale": ["pass", "partial", "fail", "unknown"],
+  "version": "0.2.0",
+  "source": "first-party",
+  "criteria": [
+    {
+      "key": "root-cause-named",
+      "title": "Root cause identified where it ORIGINATES",
+      "model": "The defect's cause is named at its origin, not where it surfaced — 'resolved' without a named root cause is a mitigation wearing a fix's label.",
+      "method": "Read the plan/work-item record: does it name the originating mechanism, with the evidence that pinned it (not a plausible narrative)?",
+      "driftMarkers": "Fix described only at the symptom site; 'high load' or 'transient' offered as the cause without a mechanism."
+    },
+    {
+      "key": "recurrence-guard",
+      "title": "A guard fails if the CLASS returns",
+      "model": "A test/assert/health-check exists that goes red if this class of defect recurs — every fix leaves the system harder to break the same way.",
+      "method": "Name the guard (test file / lint / invariant); confirm it FAILS against the pre-fix behavior (falsifiability — a control mutant or the recorded red run).",
+      "driftMarkers": "Fix with no guard; a guard that has never been shown able to fail; the detector that missed the bug left unexamined."
+    },
+    {
+      "key": "fix-verified-live",
+      "title": "The failing case now passes, verified for real",
+      "model": "The original failing scenario was re-run against the fixed system and passes — verification is observed, not inferred from the diff.",
+      "method": "Reproduce the original failure input/state; run it post-fix (test run, live probe); the record shows the output.",
+      "driftMarkers": "'Fixed' claimed from code reading; verification deferred to 'see how it fares'."
+    },
+    {
+      "key": "no-mitigation-as-fix",
+      "title": "Stopgaps labeled; durable fix landed or tracked",
+      "model": "Restart-to-clear, retry-around, widen-a-timeout, catch-and-swallow, and disable-the-feature are mitigations; any shipped stopgap is labeled TEMPORARY MITIGATION with a filed+owned durable fix.",
+      "method": "Read the change: is anything in it a mitigation presented as the fix? If a stopgap shipped, find its tracking item and owner.",
+      "driftMarkers": "A band-aid closing the item; the durable fix living only in prose that scrolls away."
+    },
+    {
+      "key": "audit-citations-spot-checked",
+      "title": "The independent grader audits the audit",
+      "model": "The independent grader opens a sample of the implementer's plan-audit citations and confirms each sampled code/test reference resolves against the current tree and actually supports the audited item — the audit verdict itself is never accepted as proof.",
+      "method": "Read the subject plan's effective per-item audit. Spot-check at least one resolving code/test citation (and expand the sample after any mismatch): open the cited current blob, compare it with the item requirement and audit claim, and record what was checked. Treat doc, workitem, and none citations as declarations of non-verification, never substitutes for code truth.",
+      "driftMarkers": "A grade copied from the audit's PASS label; no cited blob opened; a stale blob hash ignored; doc/work-item prose treated as proof that code exists."
+    }
+  ]
+}

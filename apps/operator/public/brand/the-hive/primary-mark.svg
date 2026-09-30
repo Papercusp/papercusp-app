@@ -1,0 +1,59 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">The Swarm primary mark</title>
+  <desc id="desc">A charcoal hexagon containing a coordinated swarm of honey-amber bees.</desc>
+  <defs>
+    <radialGradient id="swarm-bg" cx="50%" cy="34%" r="70%">
+      <stop offset="0%" stop-color="#25210F"/>
+      <stop offset="56%" stop-color="#0F1411"/>
+      <stop offset="100%" stop-color="#080A08"/>
+    </radialGradient>
+    <linearGradient id="swarm-honey" x1="24%" y1="8%" x2="84%" y2="92%">
+      <stop offset="0%" stop-color="#FFD166"/>
+      <stop offset="52%" stop-color="#F6B72F"/>
+      <stop offset="100%" stop-color="#B97812"/>
+    </linearGradient>
+    <linearGradient id="swarm-wing" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFF8D6" stop-opacity=".92"/>
+      <stop offset="100%" stop-color="#F6B72F" stop-opacity=".30"/>
+    </linearGradient>
+    <filter id="swarm-glow" x="-35%" y="-35%" width="170%" height="170%">
+      <feGaussianBlur stdDeviation="3.4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <path d="M64 8 113 36v56l-49 28-49-28V36z" fill="url(#swarm-bg)" stroke="#FFD166" stroke-width="3.2" stroke-linejoin="round"/>
+  <path d="M64 20 101 41v43l-37 22-37-22V41z" stroke="#FFD166" stroke-opacity=".34" stroke-width="1.6"/>
+  <path d="M25 78c21-26 52-37 80-30M25 52c27 13 50 33 68 57M44 103c17-36 31-54 60-67" stroke="#FFD166" stroke-opacity=".24" stroke-width="1.6" stroke-linecap="round"/>
+  <g filter="url(#swarm-glow)">
+    <g transform="translate(57 48) rotate(-8) scale(1.25)">
+      <path d="M-7-3c-7-7-15-6-20 1 6 3 14 2 20-1Z" fill="url(#swarm-wing)" stroke="#FFF2C2" stroke-opacity=".48" stroke-width="1.3"/>
+      <path d="M7-3c7-7 15-6 20 1-6 3-14 2-20-1Z" fill="url(#swarm-wing)" stroke="#FFF2C2" stroke-opacity=".48" stroke-width="1.3"/>
+      <path d="M0-12c6 5 9 11 9 19 0 10-4 18-9 18S-9 17-9 7c0-8 3-14 9-19Z" fill="url(#swarm-honey)" stroke="#FFD166" stroke-width="1.5"/>
+      <path d="M-7 3H7M-7 12H7" stroke="#0F1411" stroke-opacity=".64" stroke-width="2" stroke-linecap="round"/>
+    </g>
+    <g transform="translate(87 31) rotate(24) scale(.74)">
+      <path d="M-7-2c-6-5-12-4-16 1 5 2 11 2 16-1Z" fill="url(#swarm-wing)" stroke="#FFF2C2" stroke-opacity=".42" stroke-width="1.4"/>
+      <path d="M7-2c6-5 12-4 16 1-5 2-11 2-16-1Z" fill="url(#swarm-wing)" stroke="#FFF2C2" stroke-opacity=".42" stroke-width="1.4"/>
+      <path d="M0-10c5 4 8 9 8 16 0 9-3 16-8 16S-8 15-8 6c0-7 3-12 8-16Z" fill="url(#swarm-honey)" stroke="#FFD166" stroke-width="1.8"/>
+      <path d="M-6 2H6M-6 10H6" stroke="#0F1411" stroke-opacity=".62" stroke-width="2.1" stroke-linecap="round"/>
+    </g>
+    <g transform="translate(34 72) rotate(-38) scale(.68)">
+      <path d="M-7-2c-6-5-12-4-16 1 5 2 11 2 16-1Z" fill="url(#swarm-wing)" stroke="#FFF2C2" stroke-opacity=".42" stroke-width="1.4"/>
+      <path d="M7-2c6-5 12-4 16 1-5 2-11 2-16-1Z" fill="url(#swarm-wing)" stroke="#FFF2C2" stroke-opacity=".42" stroke-width="1.4"/>
+      <path d="M0-10c5 4 8 9 8 16 0 9-3 16-8 16S-8 15-8 6c0-7 3-12 8-16Z" fill="url(#swarm-honey)" stroke="#FFD166" stroke-width="1.8"/>
+      <path d="M-6 2H6M-6 10H6" stroke="#0F1411" stroke-opacity=".62" stroke-width="2.1" stroke-linecap="round"/>
+    </g>
+    <g transform="translate(82 88) rotate(31) scale(.82)">
+      <path d="M-7-2c-6-5-12-4-16 1 5 2 11 2 16-1Z" fill="url(#swarm-wing)" stroke="#FFF2C2" stroke-opacity=".42" stroke-width="1.4"/>
+      <path d="M7-2c6-5 12-4 16 1-5 2-11 2-16-1Z" fill="url(#swarm-wing)" stroke="#FFF2C2" stroke-opacity=".42" stroke-width="1.4"/>
+      <path d="M0-10c5 4 8 9 8 16 0 9-3 16-8 16S-8 15-8 6c0-7 3-12 8-16Z" fill="url(#swarm-honey)" stroke="#FFD166" stroke-width="1.8"/>
+      <path d="M-6 2H6M-6 10H6" stroke="#0F1411" stroke-opacity=".62" stroke-width="2.1" stroke-linecap="round"/>
+    </g>
+    <g transform="translate(39 35) rotate(49) scale(.58)">
+      <path d="M-7-2c-6-5-12-4-16 1 5 2 11 2 16-1Z" fill="url(#swarm-wing)" stroke="#FFF2C2" stroke-opacity=".40" stroke-width="1.4"/>
+      <path d="M7-2c6-5 12-4 16 1-5 2-11 2-16-1Z" fill="url(#swarm-wing)" stroke="#FFF2C2" stroke-opacity=".40" stroke-width="1.4"/>
+      <path d="M0-10c5 4 8 9 8 16 0 9-3 16-8 16S-8 15-8 6c0-7 3-12 8-16Z" fill="url(#swarm-honey)" stroke="#FFD166" stroke-width="1.8"/>
+      <path d="M-6 2H6M-6 10H6" stroke="#0F1411" stroke-opacity=".62" stroke-width="2.1" stroke-linecap="round"/>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,68 @@
+/**
+ * Disclosures — the quiet line under a section saying what its read left OUT
+ * (popup-agent-state-coverage-2026-08-18 P-005).
+ *
+ * ## The visual brief, and why it is this quiet
+ *
+ * A disclosure QUALIFIES a reading; it does not demand action. So it must not
+ * wear the warn tone that `pc-orders__sec[data-attn]` and the walls card use —
+ * those mean "this wants you". Borrowing that tone would make six markers that
+ * fire routinely (a monitor tick narrows the facts fold on EVERY wake) read as
+ * six alarms, and a reader who learns to dismiss them has lost the one signal
+ * that stops them trusting a bounded list as a total.
+ *
+ * Equally it must not be invisible. It sits BELOW its section, indented to the
+ * section's own text column, dim but not muted-to-nothing, with a ⊘ glyph that
+ * is deliberately not a ⚠. Read as: "this list has a known hole", not "act".
+ *
+ * Colours come from the orders rail's own tokens rather than new ones, so the
+ * line inherits every future palette change to the panel it lives in.
+ */
+
+.pc-disclosures {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  /* Aligned to the section body's text column, not the card edge: the line is a
+     footnote to what is above it, and starting it at the frame would read as a
+     new section. */
+  padding: 2px 8px 6px 10px;
+}
+
+.pc-disclosures__line {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  /* Base: global mute. Inside the orders board this is overridden to the
+     lightened orders tint by AgentOrders.css (.pc-orders .pc-disclosures__line)
+     — the css-tokens lint scopes component tokens to their defining file, so
+     the cross-file var(--pc-orders-mute, …) fallback form is not allowed here. */
+  color: var(--fg-mute);
+}
+
+/** ⊘ — "something was excluded here". Deliberately NOT ⚠: this qualifies a
+ *  reading rather than asking for action, and the two must stay tellable apart
+ *  at a glance. aria-hidden in the markup; the sentence carries the meaning. */
+.pc-disclosures__glyph {
+  flex: none;
+  opacity: 0.75;
+  transform: translateY(0.5px);
+}
+
+.pc-disclosures__txt {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/** The verb that returns the rest. A marker without one is half a disclosure,
+ *  so when the producer named it we show it — monospaced, because it is
+ *  something the reader can run. */
+.pc-disclosures__more {
+  margin-left: 6px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  opacity: 0.85;
+}

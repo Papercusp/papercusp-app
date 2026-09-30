@@ -1,0 +1,108 @@
+.inbox-bulk-report__subtitle {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.inbox-bulk-report__error,
+.inbox-bulk-report__row-error {
+  color: var(--bad);
+}
+
+.inbox-bulk-report__hover-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid color-mix(in oklab, var(--accent), transparent 48%);
+  border-radius: 10px;
+  color: var(--fg);
+  background: linear-gradient(
+    145deg,
+    color-mix(in oklab, var(--accent) 9%, var(--bg-2)),
+    color-mix(in oklab, var(--bg) 92%, var(--bg-2))
+  );
+  box-shadow: 0 10px 28px rgb(0 0 0 / 14%);
+}
+
+.inbox-bulk-report__detail-head {
+  display: grid;
+  gap: 2px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--border);
+}
+
+.inbox-bulk-report__detail-head > strong {
+  font-size: 13px;
+}
+
+.inbox-bulk-report__detail-head > span:last-child {
+  color: var(--fg-mute);
+  line-height: 1.4;
+}
+
+.inbox-bulk-report__detail-loading {
+  color: var(--fg-mute);
+}
+
+.inbox-bulk-report__recovery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.inbox-bulk-report__recovery button {
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 10px;
+  color: var(--fg);
+  background: var(--bg-2);
+  cursor: pointer;
+}
+
+.inbox-bulk-report__recovery button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.inbox-bulk-report__recovery button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.inbox-bulk-report__loading {
+  display: flex;
+  min-height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-mute);
+  background: var(--bg);
+}
+
+@container (max-width: 420px) {
+  .inbox-bulk-report__hover-detail {
+    padding: 8px;
+  }
+
+  .inbox-bulk-report__detail-head,
+  .inbox-bulk-report__hover-detail .op-inbox__rec-why {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .inbox-bulk-report__hover-detail .op-inbox__rec {
+    min-width: 0;
+    margin-inline: 0;
+  }
+
+  .inbox-bulk-report__hover-detail .op-inbox__rec-actions {
+    flex-wrap: wrap;
+  }
+
+  .inbox-bulk-report__hover-detail .op-inbox__rec-spacer {
+    display: none;
+  }
+}

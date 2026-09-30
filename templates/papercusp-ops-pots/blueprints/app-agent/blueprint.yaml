@@ -1,0 +1,119 @@
+# {{APP_AGENT_NAME}} — STARTER stable app-agent blueprint
+# (papercusp-ops-pots template).
+#
+# This blueprint describes the ONE live session targeted by the app's agentic
+# plan runs. It does not survey an unassigned backlog, place per-item harnesses,
+# or schedule work. The app's binding/schedule starts {{PLAN_TEMPLATE_SLUG}};
+# canonical promotion persists its blocked-by DAG and assigns only actionable
+# work to {{APP_AGENT_NAME}} before issuing a required wake.
+#
+# Building agent: replace every {{…}} token while walking GUIDE.md's decision
+# points. Keep the single-agent shape and capability confinement. Execution
+# topology belongs in the plan template, never in hidden prompt fan-out.
+id: "{{APP_AGENT_NAME}}"
+extends: single-agent
+kind: harness
+version: 0.1.0
+description: >-
+  Stable app agent for {{APP_NAME}}. Its live session adopts
+  {{APP_AGENT_NAME}}, reads only work assigned to that durable name in
+  {{APP_HARNESS_SLUG}}, processes one actionable {{SEAM_WORK_ITEM_KIND}} item
+  to a schema-valid {{CONTRACT_NAME}}, and completes the item so canonical DAG
+  release can dispatch its successors. Repo-less and confined to
+  {{SAFE_CAPABILITY_CLASS}}.
+
+workItem:
+  kind: "{{SEAM_WORK_ITEM_KIND}}"
+  idPrefix: "{{WORK_ITEM_ID_PREFIX}}"
+
+# The inherited single-agent spine owns DONE/ESCALATE/IDLE. This role is the
+# decider for one assigned work item; no placement or generic-pool loop exists.
+spine:
+  decider: "{{APP_AGENT_ROLE}}"
+  maxTurns: 80
+
+roles:
+  - id: "{{APP_AGENT_ROLE}}"
+    description: >-
+      On session start, adopt the durable identity with plan_items:adopt_name
+      { name: "{{APP_AGENT_NAME}}" }. On a required wake, read the assigned
+      work item and its payload.plan_run inputs/provenance; honor every
+      prerequisite and declared constraint; produce a {{CONTRACT_NAME}} with
+      live evidence; checkpoint meaningful progress; complete only with a
+      schema-valid payload. Never pull unrelated work, create replacement work
+      items, bypass blocked-by edges, write {{APP_TABLE}} directly, or perform
+      {{DANGEROUS_ACTIONS}}.
+    capabilities:
+      - "{{SAFE_CAPABILITY_CLASS}}"
+      - work_items:read-assigned
+      - work_items:complete-assigned
+    tools:
+      - plan_items:adopt_name
+      - plan_items:my_items
+      - work_items:get
+      - work_items:checkpoint
+      - work_items:complete
+      - coord:send
+      - "{{SAFE_DOMAIN_TOOL}}"
+
+# The deterministic app submits this reusable operation through blueprint:submit.
+# It targets the existing plan template rather than copying its DAG. The pinned
+# ref makes a receipt replay resolve the same definition even after later edits.
+operations:
+  - id: "{{OPERATION_ID}}"
+    version: "{{OPERATION_VERSION}}"
+    description: >-
+      Run {{PLAN_TEMPLATE_SLUG}} for one typed {{WORK_UNIT_NOUN}} request and
+      return its validated {{CONTRACT_NAME}} output.
+    target:
+      kind: plan
+      template:
+        kind: plan-template
+        ref: "{{PLAN_TEMPLATE_SLUG}}"
+        revision: "{{PLAN_TEMPLATE_REVISION}}"
+        contentHash: "{{PLAN_TEMPLATE_CONTENT_HASH_SHA256}}"
+    inputSchema:
+      type: object
+      properties:
+        "{{OPERATION_INPUT_FIELD}}":
+          type: string
+        provenance:
+          type: object
+        trigger:
+          type: object
+      required:
+        - "{{OPERATION_INPUT_FIELD}}"
+      additionalProperties: false
+    acceptance:
+      resultSchema:
+        type: object
+        properties:
+          "{{OPERATION_RESULT_FIELD}}": {}
+        required:
+          - "{{OPERATION_RESULT_FIELD}}"
+        additionalProperties: false
+
+gym:
+  collectTrace: work-item-output
+  signals:
+    - "no-{{DANGER}}-reach"
+    - "{{WORK_UNIT_NOUN}}-has-evidence"
+    - "{{CONSTRAINT_SIGNAL e.g. price-ceiling-honored}}"
+    - schema-clean-output
+
+knobs:
+  harnessKind: "{{APP_HARNESS_SLUG}}"
+  requiresRepo: false
+
+# No blueprint triggers: external bindings and plan schedules invoke the
+# declared operation. The referenced plan template retains
+# schedule.execution { appHarnessSlug, agentName } and direct-dispatches this adopter.
+dependencies:
+  tools:
+    - plan_items:adopt_name
+    - plan_items:my_items
+    - work_items:get
+    - work_items:checkpoint
+    - work_items:complete
+    - coord:send
+  plugins: []

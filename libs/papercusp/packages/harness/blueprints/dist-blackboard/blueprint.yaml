@@ -1,0 +1,44 @@
+# dist-blackboard — STIGMERGIC distributed coordination (benchmark-coordination-topologies).
+#
+# N peer workers self-claim from a shared queue (no Queen), but coordinate ONLY INDIRECTLY via a shared
+# scratchpad / work-item state (the "blackboard") — NO direct messaging. An agent writes its findings to
+# the shared board; peers read it. Tests stigmergic (indirect) coordination vs message-passing
+# (dist-broadcast). The `discipline` forbids coord:send so the topology is enforced, not just hoped for.
+id: dist-blackboard
+extends: base
+version: 0.1.0
+description: >-
+  Stigmergic distributed coordination: N peer workers self-claim from a shared queue (no Queen) and
+  coordinate ONLY via a shared blackboard (work-item/scratchpad state) — no direct messaging.
+
+workItem:
+  kind: feature
+  idPrefix: W
+
+dispatch:
+  concurrency: 4
+
+spine:
+  claimModel: self-claim-fifo
+  maxTurns: 200
+
+dependencies:
+  tools: []
+  packs: []
+  plugins: []
+  blueprints: []
+
+coordination:
+  broadcast: none           # no topic broadcast — findings go to the shared board only
+  review: none
+  sharedState: blackboard   # coordinate ONLY via shared work-item/scratchpad state (stigmergic)
+  team: per-backlog
+  discipline:
+    forbid: ["coord:send"]  # ENFORCE blackboard-only: no direct peer messaging
+
+roles:
+  - id: worker
+    description: >-
+      A peer worker: self-claims the next ready task, reads the shared blackboard for peers' findings,
+      solves it, and writes its own findings back to the board. Coordinates ONLY through the board —
+      no direct messages.

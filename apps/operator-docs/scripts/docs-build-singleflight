@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# docs-build-singleflight — the ONE seam every operator-docs build goes through
+# (`npm --workspace @papercupai/operator-docs run build`, i.e. every agent
+# refreshing the served docs mirror after an .mdx edit). EI-11539.
+#
+# WHY: `astro build` writes dist/ + dist/.prerender IN THE SHARED CHECKOUT. Two
+# concurrent builds interleave create/delete on the SAME .prerender chunks, and
+# BOTH die with `ERR_MODULE_NOT_FOUND: …/dist/.prerender/chunks/<random>.mjs` —
+# a different chunk each attempt, which masquerades as a flaky/corrupt build
+# rather than a collision (observed live 2026-07-13: two agents' post-MDX-edit
+# builds collided repeatedly; both failed). On a fleet where every agent is told
+# "docs don't hot-reload — run npm run build after an MDX edit", concurrent
+# builds are ROUTINE, so the BUILD SCRIPT must serialize — agent discipline
+# won't (agents don't remember, and two agents can't see each other's shells).
+#
+# WHAT: take the docs-build lock (blocking, bounded), then run the full inner
+# pipeline (clean → astro build → md twins → postbuild publish). A queued
+# second build is CORRECT, not wasteful: it re-reads the tree when it finally
+# runs, so it picks up the second agent's edits too.
+#
+# NOT staged: no dist.next→swap leg here, deliberately — the SERVED mirror is
+# already published atomically by postbuild-copy.sh (WI-1998: isolated staging
+# dir + two-rename swap + grace-period reap), and dist/ itself is a pure build
+# workspace nothing serves from; astro rebuilds it from scratch each run, so a
+# failed build leaves nothing worth protecting. Serialization is the whole fix.
+#
+# Mirrors apps/operator-vite/bin/vite-build-singleflight (EI-9836): flock(1)
+# where present; a mkdir spinlock with stale-PID reclaim on platforms without
+# flock(1) (macOS — WI-3307/EI-160), BOTH bounded by WAIT_SECS so a wedged
+# holder can never block a build forever.
+#
+# Test seams (apps/operator/scripts/__tests__/docs-build-singleflight.test.ts):
+#   DOCS_BUILD_CMD        stand in for the real build pipeline
+#   DOCS_BUILD_LOCK       put the lock in a tmp dir
+#   DOCS_BUILD_WAIT_SECS  shrink the timeout
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+LOCK="${DOCS_BUILD_LOCK:-/tmp/papercup-operator-docs-build.lock}"
+CMD="${DOCS_BUILD_CMD:-npm run build:inner}"
+WAIT_SECS="${DOCS_BUILD_WAIT_SECS:-900}"
+
+# Append-open: never truncate a live holder's pid record while waiting.
+exec 9>>"$LOCK"
+LOCKDIR="$LOCK.lockdir"
+MKDIR_LOCK=""   # set to LOCKDIR only when WE created it, so the trap removes only our own
+trap 'rm -rf ${MKDIR_LOCK:+"$MKDIR_LOCK"} 2>/dev/null || true' EXIT
+took_lock=0
+if command -v flock >/dev/null 2>&1; then
+  if flock -w "$WAIT_SECS" 9; then took_lock=1; fi
+else
+  deadline=$(( $(date +%s) + WAIT_SECS ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+      echo "$$" > "$LOCKDIR/pid"
+      MKDIR_LOCK="$LOCKDIR"
+      took_lock=1
+      break
+    fi
+    holder="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$LOCKDIR"   # stale holder — reclaim and retry immediately
+      continue
+    fi
+    sleep 2
+  done
+fi
+if [ "$took_lock" -ne 1 ]; then
+  HOLDER="$(head -n 1 "$LOCK" 2>/dev/null || true)"
+  echo "[docs-build-singleflight] TIMED OUT after ${WAIT_SECS}s waiting for a concurrent docs build (pid ${HOLDER:-unknown}) to finish." >&2
+  echo "[docs-build-singleflight] Concurrent astro builds corrupting each other's dist/.prerender is EI-11539 — this lock queues them instead of racing. If pid ${HOLDER:-unknown} is actually dead/wedged, remove $LOCK and retry." >&2
+  exit 1
+fi
+
+# Record the holder pid — diagnostic only (the flock wait is what serializes;
+# this is so a timed-out waiter can name who it was waiting on).
+echo "$$" > "$LOCK"
+
+set +e
+bash -c "$CMD"
+status=$?
+set -e
+
+# Cosmetic: blank the pid record. flock releases on fd close at exit.
+: > "$LOCK" 2>/dev/null || true
+
+exit "$status"

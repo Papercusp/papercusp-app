@@ -1,0 +1,128 @@
+{
+  "evidenceRef": "plan bash-to-tool-substitution-2026-07-26 / pair tests.raw-vitest (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
+  "extractedAt": "2026-07-26T13:34:00Z",
+  "totalAtoms": 74,
+  "totalSessions": 5,
+  "sample": [
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T21:02:13.633Z",
+      "atom": "npx vitest run apps/desktop/src/dashboard/data/shadow-analytics.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T21:20:42.905Z",
+      "atom": "npx vitest run apps/desktop/src/dashboard/data/shadow-analytics.test.ts apps/desktop/src/dashboard/shadow-analytics-panels.test.tsx 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T21:01:38.719Z",
+      "atom": "npx vitest run apps/desktop/src/dashboard/shadow-analytics-panels.test.tsx apps/desktop/src/dashboard/data/shadow-analytics.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T20:55:48.967Z",
+      "atom": "npx vitest run apps/desktop/src/lib/analyst-failure-class.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T21:15:54.598Z",
+      "atom": "npx vitest run apps/desktop/src/lib/analyst-failure-class.test.ts apps/desktop/src/lib/forward-recorder.test.ts apps/desktop/src/lib/evidence-loop-wiring.test.ts apps/desktop/src/lib/analyst-health.test.ts packages/db/src/migrate.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T20:51:31.273Z",
+      "atom": "npx vitest run apps/desktop/src/lib/analyst-health.test.ts apps/desktop/src/_hono/app.test.ts packages/integration/src/llm-analyst.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T22:00:03.999Z",
+      "atom": "npx vitest run apps/desktop/src/lib/crypto-forecast-wiring.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T05:26:56.773Z",
+      "atom": "npx vitest run apps/desktop/src/lib/kalshi-cash-sign-invariant.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T05:46:37.607Z",
+      "atom": "npx vitest run apps/desktop/src/lib/local-dbos-wiring.test.ts 2>&1"
+    },
+    {
+      "sid": "su-92783ced-cee1-4c2b-856c-c7b253016962",
+      "ts": "2026-07-20T07:12:48.041Z",
+      "atom": "npx vitest run libs/flags/src/production-defaults.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T21:55:32.897Z",
+      "atom": "npx vitest run packages/adverse-selection/src/marketprob.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T05:02:28.737Z",
+      "atom": "npx vitest run packages/connector-kalshi/src/connector.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T00:44:51.345Z",
+      "atom": "npx vitest run packages/db/src/error-events.unit.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T23:52:13.766Z",
+      "atom": "npx vitest run packages/engine/src/engine.test.ts -t \"WI-5805\" 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T00:19:31.983Z",
+      "atom": "npx vitest run packages/engine/src/engine.test.ts -t \"WI-5819\" 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T23:47:37.955Z",
+      "atom": "npx vitest run packages/engine/src/engine.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T01:54:38.909Z",
+      "atom": "npx vitest run packages/engine/src/events-steering-bridge.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T21:32:52.273Z",
+      "atom": "npx vitest run packages/forecast-crypto/src/forecast.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T21:59:00.377Z",
+      "atom": "npx vitest run packages/integration/src/baseline-analyst.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-25T21:14:48.202Z",
+      "atom": "npx vitest run packages/integration/src/llm-analyst.test.ts apps/desktop/src/lib/llm-spend.test.ts packages/db/src/llm-usage.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T01:03:51.129Z",
+      "atom": "npx vitest run packages/integration/src/slice.test.ts 2>&1"
+    },
+    {
+      "sid": "su-e80ad977-8155-413d-ba06-36494ee85032",
+      "ts": "2026-07-26T04:19:27.212Z",
+      "atom": "npx vitest run packages/oms/src/oms.test.ts 2>&1"
+    },
+    {
+      "sid": "su-bce40c51-b86c-40dc-9ab6-f5bf6f579cd0",
+      "ts": "2026-07-21T16:41:39.396Z",
+      "atom": "npx vitest run packages/operator-core/lib/endpoint-route/routes/discovery/join-pot.test.ts 2>&1"
+    },
+    {
+      "sid": "su-ccb43bf4-89a3-4222-88e8-0c345cea2749",
+      "ts": "2026-07-20T17:22:52.481Z",
+      "atom": "npx vitest run packages/operator-core/lib/overwatch/brief-types.test.ts packages/operator-core/lib/overwatch/compute-brief.test.ts 2>&1"
+    }
+  ]
+}

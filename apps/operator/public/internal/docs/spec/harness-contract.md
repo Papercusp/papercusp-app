@@ -1,0 +1,105 @@
+# 3. The harness contract
+URL: /internal/docs/spec/harness-contract
+
+
+
+Every Papercusp harness, at minimum, satisfies these contracts:
+
+### 3.1 Structured-state-only
+
+All state lives in Postgres. Any role, invoked from a fresh process, can read the full state and produce the same decisions. The schema is part of the spec.
+
+Implemented. Feature/work-item state now lives in the single shared table
+`harness_shared.harness_features_consolidated`, scoped by `harness_slug` + `workspace_id` rather
+than separate per-harness schemas. The legacy per-harness
+`harness_features.&lt;schema&gt;.harness_features` tables remain temporarily as trigger sources and
+are being phased out (dropped in a later migration once unread).
+
+### 3.2 Fresh context per role
+
+Every role invocation is a fresh LLM call with no prior conversation. The system prompt is the role's prompt file. The user prompt is generated from the current state. This is non-negotiable for the substrate; drift across iterations is what kills long-running agents.
+
+### 3.3 Named decisions, named roles
+
+Each role's output is one of a small set of structured decisions. The per-harness decider role
+(the director in the coding-factory blueprint) chooses between `NEXT_WORKER`, `NEXT_VALIDATOR`,
+blueprint-declared verbs (`NEXT_ARCHITECT`, `NEXT_SCOPER`, …),
+`DONE`, `ESCALATE`, `IDLE`. The validator sets each task's status to{' '}
+`passed` or `failing`. No free-form "what should I do next?" — every iteration ends with a decision verb.
+
+Implemented. The built-in coding vocabulary is the fixed 20-verb `DECISION_VERBS` set in
+`libs/papercusp/packages/orchestrator/src/decision-parse.ts` — beyond the verbs above it includes
+`NEXT_WORKER_CEO_MODE`, `NEXT_TESTER`, `NEXT_SECURITY`, `GENERATE_TESTS`, `RUN_TESTS`, `NEXT_MONITOR`,
+`READY_FOR_PROD`, `FEATURE_FREEZE`, `NEXT_HARNESS`, `CONVERTED`, the opt-in quality gates
+`NEXT_CROSSCHECK` / `NEXT_UI_QA` (dormant by default — recognized but only emitted when the
+director opts in, "wiring ≠ forcing cost"), and the deprecated `CHECKPOINT` (routed to the deprecation
+handler). Non-coding harnesses (research, …) define their own vocabulary via their
+`spine.edges` keys, parsed by `parseDecisionFor` (D-002, pipeline-as-data); `parseDecision` is that
+function specialized to the built-in coding verbs.
+
+Each blueprint maps its verbs to actions in its `spine.edges`
+(`libs/papercusp/packages/harness/blueprints/<id>/blueprint.yaml`), interpreted by the pure `deriveNext`
+(`.../src/blueprint/derive-next.ts`). The per-feature `director` spine — with the
+`NEXT_WORKER` / `NEXT_VALIDATOR` / `NEXT_ARCHITECT` / `NEXT_SCOPER` role edges — lives in the
+`coding-factory` blueprint. The `coding` blueprint is now the `kind: pot` Mug (the
+pot→coding / coding→coding-factory rename, domain-generic-pot-architecture-2026-06-18 D-011): its
+`spine.decider` is `mug` (alternative `operator`) and its edges are only `DONE` / `ESCALATE` / `IDLE`.
+The global orchestrator (`packages/operator-core/lib/dbos/orchestrator-loop.ts`) is the
+deterministic code selector that starts a durable per-feature pipeline; the LLM decider that emits the
+per-feature verbs is the `director` role in `coding-factory`.
+
+The "one decision per iteration" rule is relaxed for batchable `NEXT_WORKER`: the director may dispatch
+several independent features in one turn via a `DECISIONS … END` envelope (`parseDecisions`). Every other
+verb is solo (`SOLO_VERBS`) and may not appear in a multi-decision batch, and a batch with
+duplicate feature ids is rejected wholesale.
+
+### 3.4 Append-only audit
+
+Every iteration writes to an audit table. The audit is the durable record;
+UIs reconstruct state from it. Curator roles may compact older entries but never silently delete them.
+
+### 3.5 Goal-traceable tasks
+
+Every task has a parent — either another task or the install's top-level goal. Recursive lineage queries
+let any role ask "why am I doing this?" and get an answer that goes all the way to the mission. Adopted from
+Paperclip; structurally enforced rather than prompt-injected.
+
+### 3.6 Atomic task checkout
+
+Workers acquire tasks via Postgres `FOR UPDATE SKIP LOCKED`. Multiple workers running in parallel each get
+a different task atomically. Orphan recovery is heartbeat/liveness-based, not a checkout lease.
+
+Implemented. Atomic checkout lives in `packages/operator-core/lib/work-items.ts`
+(`claimWorkItem` / `claimNextWorkItem`, the latter using `FOR UPDATE SKIP LOCKED`). A claim sets only
+`taken_by` / `taken_at` on `harness_shared.harness_features_consolidated`; it does not set
+`expires_at` (that column exists on the table but was added for SCHEDULE fields, migration 306, not for
+checkout leases). The table also carries the `parent_id` / `goal_id` lineage columns (§3.5).
+
+Orphan recovery is the stale-claims reaper (`packages/operator-core/lib/work-items-stale-claims.ts`): a
+claim's holder is presumed dead after a 10-minute grace window measured against `coord_presence` /
+`spawned_agents` heartbeats. The reaper then clears `taken_by` / `taken_at` and resets a freed mid-flight
+row's status back to `todo` so it re-enters the claimable pool (bounded by `requeue_count` — past the cap
+it is dead-lettered to `blocked` rather than looping a poison item). No `expires_at` is consulted.
+
+### 3.7 Hard-stop budget enforcement
+
+Cost is bounded at the orchestrator dispatch layer by a per-harness cost cap, not by a pre-call
+accept-proposal gate. The dispatch gate
+(`packages/operator-core/lib/dbos/orchestrator-loop.ts`) reads each harness's effective cost cap
+(config `maxCostUsd`, else the blueprint's `dispatch.costCapUsd`); when the harness is over its cap,
+the orchestrator allocates zero dispatch slots and skips starting new pipelines (warn / pause)
+rather than rejecting a proposal mid-flight. The per-harness concurrency cap is always clamped by an
+imperative `SAFETY_CEILING` that a blueprint can tighten but never raise (D-007 — safety stays
+deterministic code).
+
+Implemented. Two cost layers sit alongside this and are deliberately independent of it:
+`operator-budget.ts` is a per-day operator-app UX cap
+(`TIER_CAPS` light = $5 / active = $20 / heavy = $50, auto-pause on overrun); and the
+`opus-budget-governor` paces fleet opus under the shared Claude-Max budget by graduated shedding
+(opus → sonnet for non-critical demand as aggregate utilization climbs), not a pre-call reject. A
+single-tier PER-PROJECT pre-add budget gate IS live, though: the feature-creation route
+(`packages/operator-core/lib/endpoint-route/routes/harness/features.ts`) reads `projects.budget_cents`,
+sums `committed` over non-terminal features, and if `committed + proposed &gt; budget_cents` inserts the
+feature as `out_of_budget` and returns HTTP 409 BEFORE any pipeline/LLM dispatch. What does NOT exist
+is an INSTALL-level second tier or a serializable-transaction concurrency guard around that check — no
+two-tier "committed + proposed > remaining" gate enforced inside one Postgres transaction.

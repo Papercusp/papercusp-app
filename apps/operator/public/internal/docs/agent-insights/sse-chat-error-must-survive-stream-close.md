@@ -1,0 +1,98 @@
+# A streaming-chat error state must survive the stream close
+URL: /internal/docs/agent-insights/sse-chat-error-must-survive-stream-close
+
+An SSE chat consumer that models send-state as one enum (error XOR idle) silently swallows failures if the post-stream cleanup unconditionally resets to idle — the user sees the "thinking" cursor vanish with no reply, no error. Keep the error, and persist a server-side failure marker.
+
+## What
+
+A chat surface that consumes an SSE stream (the `runAgentChat → route SSE →
+consumer` pipeline shared by `agent_chats:chat`, `architect:chat`, `oracle:chat`)
+can **silently swallow a failed turn** if two things line up:
+
+1. **Client** models send-state as a single enum where `error` and `idle` are
+   mutually exclusive, sets `error` *inside* the read loop, then runs an
+   **unconditional** `setState(idle)` (+ refetch) after the stream closes.
+2. **Server** route, on the error path, emits the SSE `error` and closes
+   **without persisting anything**.
+
+Symptom (the EI-577 report): the user sends a message, the "thinking" indicator
+appears, then **vanishes with no reply and no error**. The transcript keeps only
+the user turn, 0 tokens. The route did its job (it emitted `event: error`) — the
+client overwrote the error state one microtask later, and a reload showed a
+silent gap because nothing was persisted.
+
+There is a **third variant** with the same symptom but a different cause: the
+stream closes with **neither a `done` nor an `error`** event — the operator
+process recycled / OOM'd / the connection dropped mid-turn. The route never
+reached its persist-or-emit code, so there's no marker to reload and no error to
+show. The client must detect "closed without a terminal event" and surface it
+itself (an *incomplete* notice if partial deltas arrived, a *connection closed /
+restarted* notice if nothing did) rather than falling through to the idle reset.
+
+This bit `apps/operator/app/harness/ChatPanel.tsx`: the read loop set
+`setSendState({kind:'error'})` on an `error` event, then the post-loop code ran
+`setSendState({kind:'idle'}); loadChat()` regardless — clobbering the banner
+before it could render. The most common trigger is a **rate-limit pause**: an
+interactive turn can't wait out a 30-minute governor pause, so `runAgentChat`
+yields `{type:'error', message:'…rate-limited — paused until…'}` — a normal,
+expected terminal event the UI must show, not a crash.
+
+## The fix (both halves)
+
+* **Client** — track whether the stream ended in an error; on error, **keep the
+  error state** (don't reset to idle) and skip the success-path refetch:
+
+  ```ts
+  let streamError: string | null = null;
+  // …in the loop:
+  } else if (pendingEvent === 'error') {
+    streamError = data.message ?? 'stream error';
+    setSendState({ kind: 'error', message: streamError });
+  }
+  // …after the loop:
+  if (streamError) return;            // banner stays; do NOT reset to idle
+  if (!sawDone) {                     // closed with no terminal event = dropped
+    setSendState({ kind: 'error', message: assistantText
+      ? 'Connection dropped mid-response — the reply may be incomplete. Try again.'
+      : 'No response: the connection closed before the agent replied (the operator may have restarted). Try again.' });
+    return;
+  }
+  setSendState({ kind: 'idle' });     // success only (saw `done`)
+  void loadChat({ forceRest: true });
+  ```
+
+  Track `sawDone` by handling the terminal `event: done` in the read loop — a
+  clean close alone is indistinguishable from a drop without it.
+
+* **Server** (`endpoint-route/routes/agent-chats/index.ts`) — persist a
+  **failure-marker** assistant turn (`error: true`, `content = message`, 0
+  tokens) before emitting the SSE `error`, so a reload / second viewer sees the
+  failed turn instead of a gap. `TranscriptTurn.error?: boolean` is jsonb — no
+  migration. Render `error:true` turns distinctly (`chat-turn--error`).
+
+## The safe patterns (why the siblings were fine)
+
+The bug is specific to the **single-enum** state model. The other SSE chat
+consumers never clobber the error because they store it where the cleanup
+doesn't touch:
+
+* **`OracleDock.tsx`** — error goes to a separate per-tab slot via
+  `setError(tabId, …)`; the post-loop `finally` only clears **busy**.
+* **`SupportAgentPanel.tsx`** — the error is folded into the message list
+  (`❌ …`); the post-loop `finally` only clears **busy**.
+
+**Rule of thumb:** keep the terminal error in a slot that the post-stream
+cleanup does not reset — either a dedicated error field (busy and error are
+independent) or an inline message — never a single enum whose "done/idle"
+transition runs unconditionally after the stream closes.
+
+## Tests
+
+* Client: a jsdom component test (`ChatPanel.test.tsx`) mocks `fetch` to return
+  an SSE `error` stream, drives `send()`, and asserts the banner appears **and
+  persists** past stream close (the regression), plus that a persisted
+  `error:true` turn renders with the error style on load.
+* Server: `agent-chats-messages.test.ts` asserts the route emits `event: error`,
+  closes, **and** persists the failure-marker turn.
+
+See EI-577.
