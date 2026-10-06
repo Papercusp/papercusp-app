@@ -5,8 +5,8 @@
   "year": 2026,
   "source": {
     "repo": "Papercusp/papercup",
-    "ref": "6e5179874104e97720c7e781d80b247f53eae6e1",
-    "commit": "6e5179874104e97720c7e781d80b247f53eae6e1"
+    "ref": "8cb8de85071d7c131e9c8dddb27742216cab5c39",
+    "commit": "8cb8de85071d7c131e9c8dddb27742216cab5c39"
   },
   "submodules": [
     {
@@ -23,7 +23,7 @@
     },
     {
       "path": "libs/generic/chat-protocol",
-      "sha": "70dc432e361b7748043590e6c156af569f2f4548"
+      "sha": "8b563970d24b39bee686daeeb35fb69f04501338"
     },
     {
       "path": "libs/generic/control-mutation",
@@ -63,7 +63,7 @@
     },
     {
       "path": "libs/generic/memory",
-      "sha": "b67e0cadd75caa9edc5cdd84f67a2a4b1cbcf84a"
+      "sha": "cfdee47363d2aaba94b848c949b29e05cbe8d230"
     },
     {
       "path": "libs/generic/model-pricing",
@@ -135,7 +135,7 @@
     },
     {
       "path": "libs/papercusp",
-      "sha": "2ead15ee6b1eda468c9ec888ddb7fbc2593f1adf"
+      "sha": "3ebea32172cf455de1386446e9e0bc891e40db5b"
     },
     {
       "path": "libs/papercusp-db",
@@ -147,7 +147,7 @@
     },
     {
       "path": "libs/test-config",
-      "sha": "74d8095e5f4022b4348df3c06de264a2bc04f079"
+      "sha": "8faa26961a360b474ceb7faefc73c2fe1d8e7b7e"
     },
     {
       "path": "libs/testing-shell",
@@ -155,12 +155,12 @@
     },
     {
       "path": "papercusp-desktop",
-      "sha": "2d3cd3c871f6c001d3861783af4857ded973ea32"
+      "sha": "c4912717cfb2221042cb99641900661dcd07433b"
     }
   ],
   "notShipped": [
     "libs/generic/prospect-contract"
   ],
-  "fileCount": 17195,
+  "fileCount": 17219,
   "generatedBy": "scripts/source-preview.mjs"
 }

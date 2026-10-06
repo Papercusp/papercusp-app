@@ -536,21 +536,10 @@ function cleanProof(value: unknown, input: GcpImageFamilyCleanRoomRunInput): Gcp
   if (!proof.attestation || typeof proof.attestation !== 'object' || proof.attestation.status !== 'healthy') {
     fail('clean-room runner did not return a healthy bootstrap attestation');
   }
-  const validation = validateWorkspaceHostBootstrapAttestation(proof.attestation, {
-    contractVersion: input.fixture.bootstrapInput.contractVersion,
-    action: input.fixture.bootstrapInput.action,
-    hostId: input.fixture.bootstrapInput.hostId,
-    release: input.fixture.bootstrapInput.release,
-    migrationId: input.fixture.bootstrapInput.migrationId,
-    minimumNodeMajor: input.fixture.bootstrapInput.minimumNodeMajor,
-    service: input.fixture.bootstrapInput.service,
-    workspaceAuthorizedKeys: input.fixture.bootstrapInput.workspaceAuthorizedKeys,
-    ...(input.fixture.bootstrapInput.isolation ? { isolation: input.fixture.bootstrapInput.isolation } : {}),
-    ...(input.fixture.bootstrapInput.entrypoints ? { entrypoints: input.fixture.bootstrapInput.entrypoints } : {}),
-    ...(input.fixture.bootstrapInput.publicMetadata
-      ? { publicMetadata: input.fixture.bootstrapInput.publicMetadata }
-      : {}),
-  });
+  // Validate against the WHOLE input the fixture rendered, never a field-by-field copy: a copy
+  // here once omitted hostModel/bootc (added later, P-306), so every bootc canary was judged
+  // against the ubuntu-release-bundle default and refused after a healthy boot (WI-10006586).
+  const validation = validateWorkspaceHostBootstrapAttestation(proof.attestation, input.fixture.bootstrapInput);
   if (!validation.ok) fail(`clean-room bootstrap attestation failed validation: ${validation.errors.join('; ')}`);
   return proof;
 }

@@ -30,7 +30,8 @@
 # S8_POLL_SEC (60) · WS (papercusp-workspace, the pot's workspace id) ·
 # AGENT_CAPACITY_OUT (~/.cache/agent-capacity/$RUN). GitHub identity: the tower's gh login, sent
 # over ssh STDIN (owner #1174). Always tears the VM down, including on failure and SIGTERM.
-# Exit: 0 observed · 2 usage · 3 create failed · 4 ssh/scp failed · 5 install failed · 143 SIGTERM
+# Exit: 0 observed · 2 usage · 3 create failed · 4 ssh/scp failed · 5 install failed (server .deb or
+# gh) · 6 gh login or join-link refused (nothing to observe) · 143 SIGTERM
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd) || exit 2
 cd "$ROOT" || exit 2
@@ -145,21 +146,32 @@ log "SSH_UP"
 gcloud compute scp scripts/agent-capacity/vm/install-server.sh scripts/agent-capacity/vm/sample-footprint.py \
   scripts/agent-capacity/vm/read-routine-metadata.mjs "$JOIN_BODY" "$VM":/tmp/ --project="$P" --zone="$Z" --quiet \
   || { log "SCP_FAILED"; exit 4; }
-ssh_vm "sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y -q gh git >/dev/null 2>&1; gh --version | head -1" | sed 's/^/GH /'
 ssh_vm "bash /tmp/install-server.sh '$DEB' $SHA PAPERCUSP_DISABLE_DOGFOOD_HIVE=1" > "$OUT/install.out" 2>&1
 rc=$?; log "INSTALL_RC=$rc $(grep -E '^(T_APT|T_BOOT_TO_HEALTH|SERVER_HEALTH)=' "$OUT/install.out" | tr '\n' ' ')"
 [ $rc -eq 0 ] || exit 5
+# gh AFTER install-server.sh: by then it has run apt-get update and waited for apt/dpkg to go idle.
+# c1006j (2026-10-06) installed gh first, the install failed with its output in /dev/null, and the
+# join answered HTTP 401 gh_auth_required; the soak then observed a VM with no clone for 2.5 h.
+# So retry, refresh the lists between attempts, and refuse to continue without a working gh.
+GHV=$(ssh_vm "for i in \$(seq 1 ${GH_INSTALL_TRIES:-12}); do sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y -q gh git >/tmp/gh-install.log 2>&1 && break; sleep ${GH_INSTALL_SLEEP:-10}; sudo apt-get update -qq >/dev/null 2>&1; done; if command -v gh >/dev/null; then gh --version | head -1; else echo GH_ABSENT; tail -3 /tmp/gh-install.log; fi" 2>&1)
+log "GH $(printf '%s' "$GHV" | head -1)"
+case "$GHV" in "gh version"*) ;; *) log "GH_INSTALL_FAILED [$(printf '%s' "$GHV" | tr '\n' ' ' | head -c 400)]"; exit 5 ;; esac
 PORT=$(sed -n 's/^SERVER_PORT=//p' "$OUT/install.out" | tail -1)
 [ -n "$PORT" ] || { log "NO_PORT"; exit 5; }
 CG=$(sed -n 's/^SERVER_CGROUP=//p' "$OUT/install.out" | tail -1)
 ssh_vm "nohup python3 /tmp/sample-footprint.py --cgroup '$CG' --interval 30 --duration $((OBSERVE_SEC + 1200)) --out /tmp/fp-$RUN.jsonl --label $RUN >/tmp/sampler-$RUN.log 2>&1 &"
 log "SAMPLER_STARTED cg=$CG"
-gh auth token 2>/dev/null | ssh_vm "sudo -u pcsrv -H gh auth login --with-token && sudo -u pcsrv -H gh api user --jq .login" | sed 's/^/GH_LOGIN /'
+GHL=$(gh auth token 2>/dev/null | ssh_vm "sudo -u pcsrv -H gh auth login --with-token && sudo -u pcsrv -H gh api user --jq .login" 2>&1 | tail -1)
+log "GH_LOGIN $GHL"
+case "$GHL" in '' | *[!A-Za-z0-9-]*) log "GH_LOGIN_FAILED [$(printf '%s' "$GHL" | head -c 300)]"; exit 6 ;; esac
 log "JOIN_START port=$PORT"
 J0=$(date +%s.%N)
 ssh_vm "curl -s -m 600 -w '\nHTTP=%{http_code}\n' -X POST http://127.0.0.1:$PORT/api/harness/join-link -H 'content-type: application/json' --data @$JB" > "$OUT/join.out" 2>&1
 J1=$(date +%s.%N)
-log "JOIN_END T_JOIN=$(awk -v a="$J0" -v b="$J1" 'BEGIN { printf "%.1f", b - a }') $(grep -oE 'HTTP=[0-9]+' "$OUT/join.out") admission=$(grep -oE '"await_admission_merge":\{[^}]*\}' "$OUT/join.out" | head -1)"
+JHTTP=$(grep -oE 'HTTP=[0-9]+' "$OUT/join.out" | tail -1)
+log "JOIN_END T_JOIN=$(awk -v a="$J0" -v b="$J1" 'BEGIN { printf "%.1f", b - a }') $JHTTP admission=$(grep -oE '"await_admission_merge":\{[^}]*\}' "$OUT/join.out" | head -1)"
+# A refused join leaves nothing to observe: stop now (teardown runs) instead of soaking an empty VM.
+[ "$JHTTP" = HTTP=200 ] || { log "JOIN_FAILED ${JHTTP:-HTTP=none} body=[$(grep -v '^HTTP=' "$OUT/join.out" | tr '\n' ' ' | head -c 300)]"; exit 6; }
 DEV=$(grep -oE '"pubkeyBase64":"[^"]+"' "$OUT/join.out" | cut -d'"' -f4 | cut -c1-8)
 log "JOINER_DEVICE prefix=${DEV:-unknown}"
 

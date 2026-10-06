@@ -179,6 +179,8 @@ interface RecordTarget {
   externalId: string;
   provider: RegisteredProvider;
   capability: string;
+  /** The source's config, handed to the provider as `syncPage` gets it (a write may need its mapping). */
+  config: Record<string, unknown>;
 }
 
 /**
@@ -210,7 +212,7 @@ async function resolveRecordTarget(
   }
   const harness = str(source.config?.harnessSlug);
   if (!harness) throw new Error(`write_back_source_harness_missing:${sourceId}`);
-  return { sql, workspaceId: admission.workspaceId, sourceId, harness, externalId, provider, capability };
+  return { sql, workspaceId: admission.workspaceId, sourceId, harness, externalId, provider, capability, config: source.config ?? {} };
 }
 
 async function invokeRecordTarget(
@@ -225,7 +227,7 @@ async function invokeRecordTarget(
     harness: target.harness,
   });
   const result = await target.provider.adapter.invoke(
-    { source: target.sourceId, capability: target.capability, args },
+    { source: target.sourceId, capability: target.capability, args, config: target.config },
     { fetch },
   );
   return result && typeof result === 'object' ? (result as Record<string, unknown>) : {};

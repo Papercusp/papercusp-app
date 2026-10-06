@@ -3628,16 +3628,21 @@ export default defineTool({
     // ordinary AUTO/fleet/plan agents therefore pay no portfolio projection.
     // Start before composeOrient so the DB work overlaps its sequential folds.
     const goalSubject = goalIdFromModes(runtimeModeRows);
-    const goalPortfolioReadPromise = goalSubject
-      ? (async () => {
-          const { readGoalPortfolioBrief } = await import('../../../goal-launch-settings');
-          return readGoalPortfolioBrief({
+    // ONE snapshot, two stages (EI-25191349922959563): the obligation fold gets the
+    // snapshot BEFORE the per-id claim-floor count, which it never reads and which
+    // alone pushed the shared read past AGENT_OBLIGATION_OPTIONAL_READ_TIMEOUT_MS on
+    // every holder wake; the display fold gets the same snapshot with the count.
+    const goalPortfolioStagedPromise = goalSubject
+      ? import('../../../goal-launch-settings').then(({ readGoalPortfolioBriefStaged }) =>
+          readGoalPortfolioBriefStaged({
             workspaceId: orientWorkspaceId,
             goalId: goalSubject,
             attestOwnerId: ownerId,
-          });
-        })()
+          }))
       : undefined;
+    const goalPortfolioReadPromise = goalPortfolioStagedPromise?.then((staged) => staged.counted);
+    const goalPortfolioSnapshotPromise = goalPortfolioStagedPromise?.then((staged) => staged.snapshot);
+    void goalPortfolioSnapshotPromise?.catch(() => undefined);
     // Display can degrade to null, but the obligation provider must receive the
     // original rejection: a fulfilled null means a measured absence of a goal.
     const goalPortfolioPromise = goalPortfolioReadPromise?.catch(() => null);
@@ -3658,9 +3663,10 @@ export default defineTool({
                 goalId: goalSubject,
                 // Reuse the already-started canonical portfolio read so orient's
                 // two GOAL core folds describe one snapshot rather than racing
-                // independent reads of the same mutable state.
+                // independent reads of the same mutable state. Take its UNCOUNTED
+                // stage: obligations never read queue.claimable (EI-25191349922959563).
                 deps: {
-                  goalPortfolio: async () => (goalPortfolioReadPromise ? await goalPortfolioReadPromise : null),
+                  goalPortfolio: async () => (goalPortfolioSnapshotPromise ? await goalPortfolioSnapshotPromise : null),
                 },
               });
               return projectAgentTurnStartObligationBrief(read.agenda);

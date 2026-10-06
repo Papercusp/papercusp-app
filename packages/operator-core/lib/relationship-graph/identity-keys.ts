@@ -210,7 +210,8 @@ function headerDisplayName(raw: string): string | null {
   return match && match[1]!.trim() ? match[1]!.trim() : null;
 }
 
-function participantOf(item: unknown): InteractionParticipant | null {
+/** One participant from a header string (`"Name" <addr>`), a number, or a `{ email, displayName }` object. */
+export function participantOf(item: unknown): InteractionParticipant | null {
   let email: string | null = null;
   let phone: string | null = null;
   let displayName: string | null = null;

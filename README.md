@@ -5,7 +5,7 @@ through shared plans, work items, locks and memory. Papercusp is source-availabl
 under the Elastic License 2.0 (see LICENSE and NOTICE): you may read, run,
 modify and self-host it, but not offer it to others as a hosted or managed service.
 
-- Exported from `Papercusp/papercup` at `6e5179874104e97720c7e781d80b247f53eae6e1`, with
+- Exported from `Papercusp/papercup` at `8cb8de85071d7c131e9c8dddb27742216cab5c39`, with
   37 submodule(s) flattened in at their pinned commits (MANIFEST.json).
 - It is the same public-safe source cut the Papercusp Server installer carries, without
   `node_modules` (run `npm ci` to install dependencies from `package-lock.json`), plus the

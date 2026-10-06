@@ -35,6 +35,7 @@ import {
   recordLearningSpend,
   registerLearningLoop,
   reserveLearningSpend,
+  cycleReservationRunRef,
   settleLearningSpend,
   type RecordLearningSpendInput,
   type RegisterLearningLoopInput,
@@ -156,6 +157,8 @@ export interface GovernedSpendAttemptInput<T> {
   requestedUsd: number;
   /** Forward the existing store contract for single-use manifest/resource admission. */
   exact?: ReserveLearningSpendInput['exact'];
+  /** Same-run per-cycle admission, kept distinct from exact lifetime grants. */
+  cycle?: ReserveLearningSpendInput['cycle'];
   /** Same floor as reserveLearningSpend; omission preserves its default. */
   floorUsd?: number;
   signalOrigin?: 'organic' | 'drill' | 'replay' | 'shadow';
@@ -218,6 +221,11 @@ function validDispatchReservation<T>(
     typeof resources.armId !== 'string' || !resources.armId.trim() ||
     !Number.isSafeInteger(resources.inputTokens) || resources.inputTokens < 0 ||
     !Number.isSafeInteger(resources.outputTokens) || resources.outputTokens <= 0)) return false;
+  if (input.cycle !== undefined) {
+    const ref = cycleReservationRunRef(input.cycle, reservation.id);
+    return input.exact === undefined && input.runRef == null && ref !== null &&
+      reservation.runRef === ref && headroomUsd! <= input.cycle.budgetUsd;
+  }
   if (!input.exact) return reservation.runRef === (input.runRef ?? null);
   const exact = input.exact;
   const expectedResources = exact.resources;
@@ -254,7 +262,7 @@ export async function runGovernedSpendAttempt<T>(
   // An async flag/pool preflight must not let the caller replace the manifest,
   // resource policy, dispatch callback or settlement identity after admission
   // begins. The store validates this snapshot against the registered policy.
-  input = { ...input, ...(input.exact ? { exact: { ...input.exact,
+  input = { ...input, ...(input.cycle !== undefined ? { cycle: { ...input.cycle } } : {}), ...(input.exact ? { exact: { ...input.exact,
     ...(input.exact.resources ? { resources: { ...input.exact.resources } } : {}),
     ...(input.exact.expectedResourceBudget ? { expectedResourceBudget: { ...input.exact.expectedResourceBudget,
       armIds: Array.isArray(input.exact.expectedResourceBudget.armIds) ? [...input.exact.expectedResourceBudget.armIds] : [],
@@ -270,6 +278,7 @@ export async function runGovernedSpendAttempt<T>(
     attemptKind: input.attemptKind,
     requestedUsd: input.requestedUsd,
     ...(input.exact === undefined ? {} : { exact: input.exact }),
+    ...(input.cycle === undefined ? {} : { cycle: input.cycle }),
     ...(input.floorUsd === undefined ? {} : { floorUsd: input.floorUsd }),
     ...(input.signalOrigin ? { signalOrigin: input.signalOrigin } : {}),
     runRef: input.runRef ?? null,

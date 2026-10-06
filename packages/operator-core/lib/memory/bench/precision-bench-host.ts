@@ -1,7 +1,18 @@
-import { configureMemory, type EmbedderMode, type MemoryHost } from '@papercusp/memory';
-import { readCredentials } from '../../credentials';
+import {
+  buildGemmaEmbedder,
+  buildHarrierEmbedder,
+  buildLocalEmbedder,
+  buildSidecarFirstEmbedder,
+  configureMemory,
+  EMBEDDER_DIM_SPECS,
+  type EmbedFn,
+  type EmbedderMode,
+  type MemoryCredentials,
+  type MemoryHost,
+  type ResolvedEmbedder,
+} from '@papercusp/memory';
 import { getHarnessAdminUrl } from '../../embedded-pg-discovery';
-import { buildEmbedderForMode, resolveEmbedderForMode } from '../worker-embedder';
+import { buildOpenAiEmbedderCore } from '../openai-embedder-core';
 
 export const PRECISION_BENCH_EMBEDDER_MODE_ENV = 'PAPERCUSP_PRECISION_BENCH_EMBEDDER_MODE';
 
@@ -13,6 +24,30 @@ function parsePrecisionMode(value: string): PrecisionEmbedderMode {
   throw new Error(`precision bench requires a resolved embedder mode; received ${JSON.stringify(value)}`);
 }
 
+function buildPrecisionBenchEmbedder(mode: PrecisionEmbedderMode): EmbedFn | Promise<EmbedFn> {
+  if (mode === 'openai') {
+    const key = process.env.OPENAI_API_KEY ?? '';
+    if (!key) throw new Error('openai_api_key not configured');
+    return buildOpenAiEmbedderCore(key);
+  }
+  const fallback = (): EmbedFn | Promise<EmbedFn> => {
+    if (mode === 'local') return buildLocalEmbedder();
+    if (mode === 'gemma') return buildGemmaEmbedder({ kind: 'document' });
+    return buildHarrierEmbedder({ kind: 'document' });
+  };
+  return buildSidecarFirstEmbedder({ model: mode, kind: 'document', fallback });
+}
+
+async function resolvePrecisionBenchEmbedder(mode: PrecisionEmbedderMode): Promise<ResolvedEmbedder> {
+  const profile = EMBEDDER_DIM_SPECS[mode];
+  return {
+    mode,
+    dims: profile.targetDims,
+    profile,
+    embed: await buildPrecisionBenchEmbedder(mode),
+  };
+}
+
 /** Build only the MemoryHost seams the isolated precision bench uses. */
 export function createPrecisionBenchMemoryHost(value: string): MemoryHost {
   const mode = parsePrecisionMode(value) as EmbedderMode;
@@ -22,15 +57,12 @@ export function createPrecisionBenchMemoryHost(value: string): MemoryHost {
     defaultDbName: 'papercusp',
     localStoreDir: null,
     backend: 'mem0',
-    getCredentials: async () => {
-      const credentials = await readCredentials();
-      return {
-        openai_api_key: credentials.openai_api_key,
-        anthropic_api_key: credentials.anthropic_api_key,
-      };
-    },
-    resolveEmbedder: () => resolveEmbedderForMode(mode),
-    buildEmbedderForMode,
+    getCredentials: async (): Promise<MemoryCredentials> => ({
+      openai_api_key: process.env.OPENAI_API_KEY,
+      anthropic_api_key: process.env.ANTHROPIC_API_KEY,
+    }),
+    resolveEmbedder: () => resolvePrecisionBenchEmbedder(mode),
+    buildEmbedderForMode: async (explicitMode) => buildPrecisionBenchEmbedder(parsePrecisionMode(explicitMode)),
   };
 }
 

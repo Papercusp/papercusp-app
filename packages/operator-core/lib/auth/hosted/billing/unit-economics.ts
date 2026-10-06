@@ -30,6 +30,7 @@ export interface PilotCostLine {
     readonly microsPerRate: number;
     readonly minimumBillableUnits?: number;
     readonly billingIncrementUnits?: number;
+    /** Measured labor applies only to support and platform overhead. */
     readonly kind: 'provider-billed' | 'measured-labor' | 'catalog' | 'estimate';
   }) | null;
 }
@@ -185,6 +186,9 @@ export function calculatePilotEconomics(sheet: PilotPriceSheet): PilotEconomics 
       const minimum = integer(line.rate.minimumBillableUnits ?? 0, `${line.id} minimum billable units`);
       const increment = integer(line.rate.billingIncrementUnits ?? 1, `${line.id} billing increment`, 1);
       if (!['provider-billed', 'measured-labor', 'catalog', 'estimate'].includes(line.rate.kind)) throw new Error('invalid rate kind');
+      if (line.rate.kind === 'measured-labor' && line.category !== 'support' && line.category !== 'platform-overhead') {
+        throw new Error('measured labor rate requires a labor cost category');
+      }
       checkProvenance(line.rate, `${line.id}:rate`);
       const billable = quantity === 0n ? 0n : ceil(quantity < minimum ? minimum : quantity, increment) * increment;
       safe(billable, `${line.id} billable quantity`);

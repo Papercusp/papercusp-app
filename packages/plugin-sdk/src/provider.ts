@@ -31,6 +31,11 @@ export interface ProviderOAuthDescriptor {
   authorizeUrl: string;
   tokenUrl: string;
   scopes: string[];
+  /**
+   * How the authorize URL joins `scopes`: a space (OAuth 2.0 default) or a comma (Linear
+   * documents `scope=read,write`).
+   */
+  scopeSeparator?: ' ' | ',';
   pkce?: boolean;
   /** Reference to a host-held client registration. Never a client secret. */
   clientRegistrationRef?: string;
@@ -48,6 +53,13 @@ export interface ProviderOAuthIdentity {
   url: string;
   idField: string;
   displayNameField?: string;
+  /**
+   * Request method, default GET. POST is for identity endpoints that only answer a request
+   * body, such as a GraphQL API (Linear: `POST /graphql` with a `viewer`/`organization` query).
+   */
+  method?: 'GET' | 'POST';
+  /** JSON request body, sent with `content-type: application/json`. Only with `method: 'POST'`. */
+  body?: string;
 }
 
 export interface ProviderDescriptor {
@@ -166,6 +178,12 @@ export interface ProviderInvokeRequest {
   source: string;
   capability: string;
   args: Record<string, unknown>;
+  /**
+   * The source's config, as `syncPage` receives it, when the host invokes on behalf of a data
+   * source (record write-back). A write may need it to map a canonical value onto the source's own
+   * vocabulary (Asana: which section is the `in-progress` column).
+   */
+  config?: Record<string, unknown>;
   /** Parameters of the descriptor's configured service credentials (D-018.1). */
   services?: ProviderServices;
 }
@@ -314,6 +332,9 @@ export function validateProviderDescriptor(descriptor: unknown): string[] {
     if (!Array.isArray(oauth.scopes) || !oauth.scopes.every(isNonEmptyString)) {
       issues.push('provider.oauth.scopes must be a list of scope strings');
     }
+    if (oauth.scopeSeparator !== undefined && oauth.scopeSeparator !== ' ' && oauth.scopeSeparator !== ',') {
+      issues.push('provider.oauth.scopeSeparator must be " " or ","');
+    }
     for (const key of Object.keys(oauth)) {
       if (/secret/i.test(key)) issues.push(`provider.oauth.${key} must not carry a secret; use clientRegistrationRef`);
     }
@@ -321,6 +342,20 @@ export function validateProviderDescriptor(descriptor: unknown): string[] {
       const identity = oauth.identity as Partial<ProviderOAuthIdentity>;
       if (!isHttpsUrl(identity.url)) issues.push('provider.oauth.identity.url must be an https URL');
       if (!isNonEmptyString(identity.idField)) issues.push('provider.oauth.identity.idField must name the account id field');
+      if (identity.method !== undefined && identity.method !== 'GET' && identity.method !== 'POST') {
+        issues.push('provider.oauth.identity.method must be GET or POST');
+      }
+      if (identity.body !== undefined) {
+        if (identity.method !== 'POST') issues.push('provider.oauth.identity.body needs method POST');
+        let parsed = false;
+        try {
+          JSON.parse(String(identity.body));
+          parsed = typeof identity.body === 'string';
+        } catch {
+          parsed = false;
+        }
+        if (!parsed) issues.push('provider.oauth.identity.body must be a JSON string');
+      }
     }
     for (const url of [oauth.authorizeUrl, oauth.tokenUrl, oauth.identity?.url]) {
       if (!isHttpsUrl(url)) continue;

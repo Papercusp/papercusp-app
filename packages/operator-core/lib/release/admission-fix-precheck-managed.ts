@@ -1,9 +1,11 @@
 /** Host independent, task-managed runner for the frozen repair admission pre-check. */
 import { dirname, join } from 'node:path';
+import { closeSync, mkdirSync, openSync, writeSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { getTask } from '../task-manager/store';
 import { managedSpawn, type ManagedSpawnResult } from '../task-manager/managed-spawn';
-import type { TaskRow } from '../task-manager/types';
+import { isValidTaskId, type TaskRow } from '../task-manager/types';
 import { resolveSidecarSpawnPlan, type SidecarSpawnPlan } from '../process-supervision/sidecar-spawn-shared';
 import {
   applyFrozenCandidateRepairQueueTransition,
@@ -59,8 +61,9 @@ export function buildAdmissionPrecheckSpawnPlan(options: {
 
 export async function startAdmissionPrecheckWorker(
   input: AdmissionPrecheckWorkerInput,
-  options: { spawnPlan?: SidecarSpawnPlan } = {},
+  options: { spawnPlan?: SidecarSpawnPlan; logDir?: string; spawn?: typeof managedSpawn } = {},
 ): Promise<ManagedSpawnResult> {
+  if (!isValidTaskId(input.taskId)) throw new Error('invalid admission pre-check task id');
   const plan = options.spawnPlan ?? buildAdmissionPrecheckSpawnPlan();
   const args = [...plan.args];
   const env = {
@@ -68,7 +71,14 @@ export async function startAdmissionPrecheckWorker(
     ...plan.env,
     [ADMISSION_PRECHECK_WORKER_INPUT_ENV]: JSON.stringify(input),
   };
-  return managedSpawn(
+  const logDir = options.logDir ?? join(homedir(), '.papercusp', 'checkpoint-logs');
+  mkdirSync(logDir, { recursive: true, mode: 0o700 });
+  const logPath = join(logDir, `admission-precheck-worker-${input.taskId}.log`);
+  const logFd = openSync(logPath, 'a', 0o600);
+  try {
+    // The scope client and worker inherit file descriptors, so startup failures
+    // survive host replacement without a host-owned pipe or output listener.
+    return await (options.spawn ?? managedSpawn)(
     plan.cmd,
     args,
     {
@@ -77,15 +87,22 @@ export async function startAdmissionPrecheckWorker(
       argv: [plan.cmd, ...args],
       cwd: input.integrationRoot,
       launchedBy: 'release:repair-queue:admission-precheck',
+      logPath,
       detail: { operationId: input.operationId, subsystem: 'frozen-repair-admission-precheck' },
       runtimeMaxSec: Math.max(1, Math.ceil((input.expiresAtMs - Date.now()) / 1000)),
     },
     {
       taskId: input.taskId,
       workspaceId: input.queueTarget.workspaceId,
-      spawnOptions: { cwd: input.integrationRoot, env, stdio: 'ignore' },
+      spawnOptions: { cwd: input.integrationRoot, env, stdio: ['ignore', logFd, logFd] },
     },
-  );
+    );
+  } catch (error) {
+    writeSync(logFd, `[release:repair-queue] worker launch failed: ${String(error)}\n`);
+    throw error;
+  } finally {
+    closeSync(logFd);
+  }
 }
 
 export async function persistAdmissionPrecheckProgress(

@@ -41,6 +41,7 @@ import { bindSuSessionToAdvSession, persistSuSessionDescriptor } from './su-sess
 import { SuOwnerTurnReceiptMatcher, type SuOwnerTurnReceiptRef } from './su-session-commands';
 import { findSessionTranscript } from './claude-sessions';
 import { gatewayServedAccountForOwner } from './compaction-usage';
+import { claudeAssistantUsage, claudeResultUsage, claudeTodoPlan } from './su-session-usage';
 import { createAgentTimelineParser } from './endpoint-route/routes/harness/streams';
 import type { TimelineLineParser } from './session-timeline-parsers';
 import {
@@ -265,11 +266,7 @@ export function claudeCapabilities(): SuSessionCapabilities {
         implementation: 'native',
         reason: 'Claude transcript records may include thinking blocks when the native runtime exposes them',
       },
-      usage: {
-        state: 'conditional',
-        implementation: 'native',
-        reason: 'Claude result records carry usage/cost metadata but the v1 SU-session event contract has no usage event',
-      },
+      usage: { state: 'supported', implementation: 'native' },
       compaction: {
         state: 'conditional',
         implementation: 'host',
@@ -281,8 +278,9 @@ export function claudeCapabilities(): SuSessionCapabilities {
         reason: 'PUI attached launches and resumptions use the native default permission policy; requests reach the owner as typed cards via canUseTool. Other managed engine callers must opt into toolApproval prompt.',
       },
       context: {
-        state: 'unsupported',
-        reason: 'the v1 SU-session contract carries no context event or descriptor field, so Claude context consumption stays inside the native runtime and never reaches the PUI',
+        state: 'conditional',
+        implementation: 'native',
+        reason: 'context used is reported from the first assistant message; the context window is known once a turn completes (result.modelUsage)',
       },
       modes: {
         state: 'conditional',
@@ -651,6 +649,10 @@ export class ClaudeSuSessionAdapter {
       } as SuSessionEventInput<'claude'>);
     }
 
+    // D-029/D-031: context, token and cost measurements ride the descriptor.
+    const usage = claudeAssistantUsage(record) ?? claudeResultUsage(record, this.host.descriptor().model);
+    if (usage) this.host.updateUsage(usage);
+
     const recordId = firstString(record.uuid, record.id, record.message_id);
     if (!preserveLifecycle && recordIndicatesCompaction(record)) {
       this.host.transition('compacting', 'Claude native transcript compacted');
@@ -679,6 +681,8 @@ export class ClaudeSuSessionAdapter {
           type: 'tool', phase: 'started', turnId, callId, name,
           input: asJsonValue(entry.toolInput),
         } as SuSessionEventInput<'claude'>);
+        const plan = claudeTodoPlan(name, entry.toolInput);
+        if (plan) this.host.updatePlan(plan);
         if (name === 'AskUserQuestion' && !this.transportHandlesCards) {
           const card = cardFromClaudeQuestion(callId, turnId, entry.toolInput);
           if (card) {

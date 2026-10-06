@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import type { PrViewerDetails } from '@papercusp/operator-core/lib/pr-host/pr-viewer';
 import { ReportPanel } from './PrRow';
 import { COLORS, RADIUS } from './theme';
+import { Select } from './Select';
 
 type Action = 'merge' | 'close' | 'send-green';
 
@@ -101,12 +102,18 @@ export function PrDetails({ harnessSlug, number, onChanged }: {
       </li>)}</ul>
     </section>
     <section aria-label="Changed files" style={{ minWidth: 0 }}>
-      <label><strong>Changed files ({details.files.length})</strong>{' '}
-        <select aria-label="File diff" value={file?.filename ?? ''} onChange={e => void setSelectedFile(e.target.value || null)} style={{ maxWidth: '100%' }}>
-          <option value="">All changes</option>
-          {details.files.map(f => <option key={f.filename} value={f.filename}>{f.filename} · {f.status} +{f.additions} −{f.deletions}</option>)}
-        </select>
-      </label>
+      <div><strong>Changed files ({details.files.length})</strong>{' '}
+        <Select
+          ariaLabel="File diff"
+          value={file ? `file:${file.filename}` : 'all'}
+          onChange={next => void setSelectedFile(next === 'all' ? null : next.slice('file:'.length))}
+          options={[
+            { value: 'all', label: 'All changes' },
+            ...details.files.map(f => ({ value: `file:${f.filename}`, label: `${f.filename} · ${f.status} +${f.additions} −${f.deletions}` })),
+          ]}
+          triggerStyle={{ maxWidth: '100%' }}
+        />
+      </div>
       {file?.previous_filename && <div>Renamed from {file.previous_filename}</div>}
       {details.diffTruncated && <div>The combined diff is truncated. Open on GitHub for the complete diff.</div>}
       <pre aria-label="PR diff" style={{ maxHeight: 360, overflow: 'auto', whiteSpace: 'pre', padding: 8,

@@ -411,7 +411,18 @@ function compilerReplayConfig(input: ReplayOracleInput, options: {
   options.onProgress?.({ phase: 'oracle-resolved', completed: 0, total: sourceFiles.length });
   for (const [index, source] of sourceFiles.entries()) {
     const visit = (node: ts.Node) => {
-      if (ts.isIdentifier(node) && canonical(checker.getSymbolAtLocation(node)) === hot) references.push(site(node));
+      if (ts.isIdentifier(node)) {
+        let symbol = canonical(checker.getSymbolAtLocation(node));
+        // In `const [{ hot }] = await Promise.all([import('./source')])`,
+        // the shorthand identifier binds a new LOCAL variable. The source
+        // property still refers to the export; resolve it from the binding
+        // pattern's type without treating later local uses as export sites.
+        const binding = node.parent;
+        if (ts.isBindingElement(binding) && binding.name === node &&
+          !binding.propertyName && !binding.dotDotDotToken && ts.isObjectBindingPattern(binding.parent))
+          symbol = canonical(checker.getTypeAtLocation(binding.parent).getProperty(node.text));
+        if (symbol === hot) references.push(site(node));
+      }
       ts.forEachChild(node, visit);
     };
     visit(source);

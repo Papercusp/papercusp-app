@@ -378,9 +378,11 @@ function injectBudgetChars(): number {
  * Two levers reach ~8.8 slots and they are NOT equivalent in cost:
  *   - PAPERCUSP_TURN_START_BUDGET_CHARS 4000 -> 8000: ~2x the context spend.
  *   - MAX_ENTRY_CHARS 900 -> 450 (this one): the SAME spend, more entries.
- * The asymmetry favors the clamp: a clamped line keeps scope + id + lede and says
- * "memory:search for the rest", so it stays RECOVERABLE; an entry dropped for budget is
- * invisible to the agent and unrecoverable. The owner was given all three options
+ * The asymmetry favors the clamp: a clamped line keeps scope + id + lede and asks the
+ * agent to have an authorized memory reader retrieve the full entry. It stays
+ * RECOVERABLE without promising that every recipient can call `memory:search`;
+ * an entry dropped for budget is invisible to the agent and unrecoverable. The
+ * owner was given all three options
  * (clamp / raise budget / wait for more data) against the D-089 measurement and picked
  * the clamp, declining the other two [owner 2026-08-09].
  *
@@ -1675,7 +1677,7 @@ async function buildBlockInner(
         // >900-char prefix are never mistaken for near-duplicates.
         const boundedText =
           annotatedText.length > MAX_ENTRY_CHARS
-            ? `${annotatedText.slice(0, MAX_ENTRY_CHARS)}… (truncated — memory:search for the rest)`
+            ? `${annotatedText.slice(0, MAX_ENTRY_CHARS)}… (truncated — ask an authorized memory reader for the full entry)`
             : annotatedText;
         return {
           line: `- ${fmtScope(hit, label)}${fmtId(hit)} ${boundedText}`,

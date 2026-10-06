@@ -13,6 +13,10 @@ documents:
   - "packages/operator-core/lib/auth/hosted/billing/entitlement-seam.ts"
   - "packages/operator-core/lib/agent-loop/model-selection.ts"
   - "packages/operator-core/lib/cupboard/shadow-metering.ts"
+  - "packages/operator-core/lib/auth/hosted/billing/openrouter-usage.ts"
+  - "packages/operator-core/lib/auth/hosted/billing/usage-store.ts"
+  - "packages/operator-core/lib/auth/hosted/billing/budget-store.ts"
+  - "packages/operator-core/lib/cupboard/reconciliation-runtime.ts"
 plans:
   - "papercusp-monetization-2026-09-04"
   - "byoc-cloud-workspaces-gcp-aws-azure-2026-08-22"
@@ -23,6 +27,20 @@ plans:
 # Monetization readiness and reuse — current-build assessment
 
 Measured 2026-10-03 under WI-10005829 for papercusp-monetization-2026-09-04 P-002. This is a gap/dependency assessment, not permission to charge or an assembled paid-service certification. Status reads were combined with the named source contracts; a shipped prerequisite is not evidence that the combined customer journey is ready.
+
+## Accounting source update — 2026-10-06
+
+This bounded update rechecks the existing hosted accounting sources under WI-10005829. The dependency/owner rows below retain their 2026-10-03 observation date; they are historical context until their own current artifact receipts are checked. This update does not re-certify cloud, portal, confidentiality, merchant configuration or assembled customer journeys.
+
+| Prepared source | Existing proof and current scope | Remaining authority and adoption |
+|---|---|---|
+| OpenRouter usage transport and original admission binding | WI-10005829 thread-post:1159436 records 58 unit tests plus 31 database tests on its six-file tuple. The original immutable budget admission joins one local generation; authenticated generation GETs have an owned deadline, parent cancellation and unread-body cleanup. | The collector returns `complete:false`. Known local generations and a key fingerprint do not authenticate a full billing-account census, invoice/finality or non-overlap with other liabilities. Provider-enforced maximum and real executable paid dispatch remain separate acceptance. |
+| Budget receipt and funding population | thread-post:1159245 records 73 database tests for the budget store, its integration test and migration 1388. The retained factory reads the local Stripe/funding population with the same SQL transaction. | Preserve the early write-capable budget fence before organization, account and source locks. The subsequent SHARE-only source phase cannot append receipts or invoke append-owning collectors. Full local rows are inputs to reconciliation, not bank cash, allowance policy or external provider completeness. |
+| Journal liabilities | thread-post:1159155 retains the separate 14-test journal population proof and migration 1385. | Local journal/rollup/accrual identity does not itself prove independently backed cash, provider account or invoice settlement. Do not add these counts to a claimed combined run. |
+| Authenticated Stripe collection and prepaid reconciliation | thread-post:1158876 retains separate 172-test Stripe transport and 126-test funding proofs. The current budget factory is covered by thread-post:1159245. | These are source/fixture proofs. Merchant live-mode authority, independent cash backing, exact pool coverage and installation into the production budget context still require their own receipts. |
+| Entitlement and independent backing seams | `entitlement-seam.ts` still initializes its default provider with `patch:null`; `reconciliation-runtime.ts` constructs its bank source as `not-configured`. | Null supplies no allowance and unavailable bank data supplies no zero balance. These observations apply to the named writers; they are not a repository-wide absence claim. Trusted policy and genuine independent cash evidence must be supplied before paid admission. |
+
+The observed OpenRouter and budget files retain the saved proof hashes. No suite was re-run for recovery. Source-test results establish the behaviors in their saved scopes; they do not certify full-suite promotion, deployment, real customer payment or paid-service readiness. The proposed offer and price sheet remain drafts, and D-010 keeps real charging off until its explicit gates pass.
 
 ## Component reuse and acceptance responsibility
 

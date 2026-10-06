@@ -627,6 +627,10 @@ export function narrowDecisionPayload<T extends { id: string }>(
 
 export default defineTool({
   name: 'plans:get',
+  // EI-21665387998856992: the optional ship-readiness resolver can outlive the
+  // transport's flat 55s nested-call deadline. Keep the tool's own abort budget
+  // at 120s so both direct calls and tools:invoke get the same bounded window.
+  timeoutSec: 120,
   description:
     "Fetch the full parsed structure of one plan by slug: frontmatter, ## Now (state + next), items with effectiveStatus, decisions. Resolves archived plans too. An exact slug can auto-resolve its owning harness within the caller's workspace ONLY from an unscoped (operator/superuser) session; a session already scoped to a concrete harness stays scoped to it and reports which harness actually owns the slug on a miss. Pass a concrete `harness` (for example, 'papercusp') to disambiguate, constrain, or escape the ambient scope. `harness: 'all'` is only valid in an unscoped (--all-workspaces) session.",
   guidance: {

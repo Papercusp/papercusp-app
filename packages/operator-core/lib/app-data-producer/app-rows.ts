@@ -188,10 +188,15 @@ export interface AppSyncBatch {
 /**
  * Assemble the batch body for one app.
  *
- * Both apps accept `{ <rows>, contacts, cursor?, sourceRef? }` under a STRICT
- * schema, so only keys the app declares may appear. Push sends one row and
- * reconcile sends many through this same function — that is what makes the
- * single-row push a genuine batch rather than a parallel format.
+ * Both apps accept `{ <rows>, cursor?, sourceRef? }` under a STRICT schema, so
+ * only keys the app declares may appear. Push sends one row and reconcile sends
+ * many through this same function — that is what makes the single-row push a
+ * genuine batch rather than a parallel format.
+ *
+ * No `contacts` key: people live in the platform relationship graph and apps read
+ * them through `people:*` (crm plan D-016/D-017, P-003). The producer stops
+ * sending the key BEFORE the apps drop it from their strict schemas, because both
+ * still default it to `[]`; the reverse order would make every batch fail parse.
  */
 export function buildAppSyncBatch(
   app: ProducerApp,
@@ -199,8 +204,8 @@ export function buildAppSyncBatch(
   options: { cursor?: string | null } = {},
 ): AppSyncBatch {
   const body: Record<string, unknown> = app === 'email'
-    ? { messages: rows, contacts: [] }
-    : { events: rows, calendars: [], contacts: [] };
+    ? { messages: rows }
+    : { events: rows, calendars: [] };
   body.sourceRef = APP_SYNC_SOURCE_REF;
   const cursor = options.cursor?.trim();
   if (cursor) body.cursor = cursor;

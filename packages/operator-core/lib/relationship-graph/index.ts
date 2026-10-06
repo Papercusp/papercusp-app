@@ -9,3 +9,4 @@ export * from './merge';
 export * from './resolver';
 export * from './graph-sink';
 export * from './participants';
+export * from './people';

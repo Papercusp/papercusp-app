@@ -1391,7 +1391,10 @@ export async function reconcilePlanAuthoredDependenciesNow(
     // Write even an EMPTY set — that is exactly how a removed plan edge clears. A cycle
     // refusal (syncFeatureBlockEdges throws) aborts BEFORE the marker write below, so a
     // refused sync never advances provenance.
-    await syncFeatureBlockEdges(harness, canonical.id, desired, { priorBlockerIds: prior });
+    // No marker (prior === null) means this sync owns NO edges yet, so it removes none: pass
+    // [] (add-only), never undefined, which would fall back to the full-replace contract and
+    // drop blocker edges outside `live` (other families / harnesses) that this plan never wrote.
+    await syncFeatureBlockEdges(harness, canonical.id, desired, { priorBlockerIds: prior ?? [] });
     await mergeWorkItemPayload(
       canonical.id,
       { [PLAN_AUTHORED_BLOCKERS_KEY]: { planSlug, itemId, blockerWorkItemIds: resolved } },

@@ -300,8 +300,12 @@ export function rosterEntryForSession(
 /**
  * Each agent owner's current claim, read once per owner. A failed read is a missing
  * label, never a failed roster: the grid must still show every desktop.
+ *
+ * Exported because the LOCAL roster (`/deploy/local-desktops`, D-015) labels its
+ * tiles the same way: one function, so a cloud tile and a local tile for the same
+ * agent can never disagree about which work-item it is on.
  */
-async function claimsForSessions(
+export async function claimsForSessions(
   sessions: readonly DesktopSessionRecord[],
   activeClaimFor: HostedDesktopBackendDeps['activeClaimFor'],
   warn: (message: string) => void,

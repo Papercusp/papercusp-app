@@ -20,7 +20,9 @@ import {
   lexicalHardEdges,
   readAdjudicatedPairKeys,
   readPinnedUnadjudicatedCensus,
+  readCompletedAdmissionCensus,
   runWorkItemAdmissionCensus,
+  type AdmissionCensusRef,
   type AdmissionCensusRunOptions,
   type AdmissionCensusRunResult,
 } from './work-items-admission-census';
@@ -2413,11 +2415,14 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
     return replayResult;
   }
 
-  let census = await step(`bulk:${rootRunId}:census:0`, () =>
+  const census0 = await step(`bulk:${rootRunId}:census:0`, () =>
     runCensus({ ...censusBase, sql, runId: `${rootRunId}-census-0` }),
   );
+  // The stage loop reads only the census id (its shard map), size and count, so
+  // a recovered pass can rehydrate a completed result census (WI-10006553).
+  let census: AdmissionCensusRef = census0;
   const initialCensus = census.censusAfter;
-  const scope = census.projection.recommendedBulkScope;
+  const scope = census0.projection.recommendedBulkScope;
   const stageLimit = scope === 'machine-emitter-targeted' ? 1 : maxStages;
   const stages: BulkDedupStageResult[] = [];
 
@@ -2501,8 +2506,17 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
       }
       if (savedStage.resultCensusRunId) {
         // A completed non-terminal stage can be resumed from its result census;
-        // the next loop iteration will read the pinned map afresh.
-        const resumed = await runCensus({ ...censusBase, sql, runId: savedStage.resultCensusRunId });
+        // the next loop iteration will read the pinned map afresh. WI-10006553:
+        // a COMPLETE result census is rehydrated, never re-run. Re-running it
+        // reset the row to 'running' and recomputed it (~16 min) on every
+        // recovery, and the digest cannot read a census that is not complete.
+        // Only an unfinished one runs again, and that run resumes its chunks (D-008).
+        const resumed =
+          (await readCompletedAdmissionCensus(
+            sql,
+            { workspaceId: opts.workspaceId, harnessSlug: opts.harnessSlug },
+            savedStage.resultCensusRunId,
+          )) ?? (await runCensus({ ...censusBase, sql, runId: savedStage.resultCensusRunId }));
         census = resumed;
         continue;
       }

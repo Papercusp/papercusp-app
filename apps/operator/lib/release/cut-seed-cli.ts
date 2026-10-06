@@ -392,6 +392,8 @@ export async function exportSeedUuidIdempotencyCensus(input: {
   let potId = input.potId;
   let coreKeys: string[] | undefined;
   let coreLengths: Record<string, unknown> = {};
+  let declaredHeads: Record<string, unknown> | undefined;
+  let declaredFoldNow: number | undefined;
   if (manifestPath || manifestSha256) {
     if (!manifestPath || !manifestSha256) throw new Error('UUID source manifest binding incomplete');
     const manifestBytes = await readFile(manifestPath);
@@ -399,7 +401,14 @@ export async function exportSeedUuidIdempotencyCensus(input: {
         || createHash('sha256').update(manifestBytes).digest('hex') !== manifestSha256) {
       throw new Error('UUID source manifest binding changed');
     }
-    const manifest = decodeManifest(manifestBytes.toString('utf8'));
+    const parsed = JSON.parse(manifestBytes.toString('utf8'));
+    const original = parsed?.schema === 'papercusp-original-signed-source-span-v1';
+    if (original && (parsed.sourceSelection !== 'enumerateOwnStoreCoreKeys'
+        || typeof parsed.potId !== 'string' || !parsed.potId
+        || !Array.isArray(parsed.stores) || parsed.stores.length !== 1)) {
+      throw new Error('UUID original source manifest selection invalid');
+    }
+    const manifest = original ? parsed as { potId: string; stores: SeedStoreEntry[] } : decodeManifest(manifestBytes.toString('utf8'));
     if (potId && potId !== manifest.potId) throw new Error('UUID source pot binding changed');
     potId = manifest.potId;
     const entries = manifest.stores.filter(entry => entry.kind === 'corestore');
@@ -414,6 +423,16 @@ export async function exportSeedUuidIdempotencyCensus(input: {
     }
     coreKeys = meta.coreKeys as string[];
     coreLengths = lengths;
+    if (original) {
+      const binding = entries[0]!.meta as { sourceHeads?: Record<string, unknown>; foldNow?: number };
+      if (coreKeys.length !== 1 || !binding.sourceHeads
+          || JSON.stringify(Object.keys(binding.sourceHeads).sort()) !== JSON.stringify([...coreKeys].sort())
+          || !Number.isSafeInteger(binding.foldNow) || binding.foldNow! < 0) {
+        throw new Error('UUID original source manifest head/time binding invalid');
+      }
+      declaredHeads = binding.sourceHeads;
+      declaredFoldNow = binding.foldNow;
+    }
   } else if (!input.captureOriginalSpan || !potId) {
     throw new Error('UUID source requires a bound manifest or original capture with an explicit pot');
   }
@@ -433,7 +452,7 @@ export async function exportSeedUuidIdempotencyCensus(input: {
       }
     }
     const sources = [];
-    const foldNow = Date.now();
+    const foldNow = declaredFoldNow ?? Date.now();
     let replicaDir: string | undefined;
     if (input.captureOriginalSpan) {
       if (coreKeys.length !== 1) throw new Error('UUID original span capture currently requires one manifest-bound core');
@@ -444,6 +463,9 @@ export async function exportSeedUuidIdempotencyCensus(input: {
         sourceKeyHex: key, sourceLength: coreLengths[key] as number,
         outputDir: input.outputDir, segment: `segment-${String(index + 1).padStart(6, '0')}.blob`,
         redactValues: input.redactValues, now: foldNow, executionBinding });
+      if (declaredHeads && JSON.stringify(declaredHeads[key]) !== JSON.stringify(exported.sourceInput.sourceHead)) {
+        throw new Error('UUID original source manifest signed head changed');
+      }
       if (replicaDir) {
         const capture = await captureSeedUuidOriginalSpan({ sourceStore: store, sourceKeyHex: key,
           sourceInput: exported.sourceInput, replicaDir });
@@ -471,7 +493,7 @@ export async function exportSeedUuidIdempotencyCensus(input: {
       manifestPath = join(input.outputDir, 'original-source-manifest.private.json');
       const bytes = JSON.stringify({ schema: 'papercusp-original-signed-source-span-v1', potId,
         sourceSelection: 'enumerateOwnStoreCoreKeys', stores: [{ kind: 'corestore', meta: {
-          coreKeys, coreLengths, sourceHeads: Object.fromEntries(sources.map(source =>
+          coreKeys, coreLengths, foldNow, sourceHeads: Object.fromEntries(sources.map(source =>
             [source.sourceKeyHex, source.sourceInput.sourceHead])) } }] });
       await writeFile(manifestPath, bytes, { mode: 0o600, flag: 'wx' });
       manifestSha256 = createHash('sha256').update(bytes).digest('hex');

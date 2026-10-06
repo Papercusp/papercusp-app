@@ -32,6 +32,28 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Sql } from 'postgres';
 import { getOrgPg } from '@papercusp/db-org';
+import { trackDetached } from '../detached-imports';
+
+/**
+ * The sync query the Desktops page's "This computer" grid reads
+ * (agent-multi-desktops-grid D-015). `desktop_sessions` carries no change-notify
+ * trigger, so the writes below that change what a tile SHOWS announce it here.
+ * The announcement is `pg_notify`, so a sibling operator's write reaches this
+ * process's viewers too. Activity-clock bumps (touch/renew) deliberately do not
+ * announce: the grid re-reads on its visible tick, and a heartbeat every few
+ * seconds per viewer would only churn the cache.
+ */
+export const LOCAL_DESKTOPS_QUERY = 'desktops.local';
+
+function announceRosterChange(): void {
+  // Lazy import avoids a cycle (sync-sse pulls broad operator infra). A failed
+  // announcement costs one stale tile until the next visible tick, never a write.
+  // The WHOLE chain is tracked, not just the import: tracking only the import lets
+  // a test's drain return while the pg_notify is still in flight (WI-10003882).
+  void trackDetached(
+    import('../sync-sse').then(({ notifySyncInvalidate }) => notifySyncInvalidate(LOCAL_DESKTOPS_QUERY)),
+  ).catch(() => {});
+}
 
 /**
  * Every desktop kind, as DATA so the set can be walked — the union below is derived
@@ -325,6 +347,7 @@ export async function registerDesktopSession(
       ${input.taskId ?? null}, ${input.idleAfterSec ?? null}
     )
     RETURNING *`;
+  announceRosterChange();
   return toRecord(rows[0]);
 }
 
@@ -353,6 +376,7 @@ export async function markDesktopReady(
      WHERE id = ${id}
        AND state NOT IN ('released', 'dead')
     RETURNING *`;
+  if (rows[0]) announceRosterChange();
   return rows[0] ? toRecord(rows[0]) : undefined;
 }
 
@@ -447,6 +471,7 @@ export async function markDesktopIdle(id: string, sql?: Sql): Promise<boolean> {
        SET state = 'idle'
      WHERE id = ${id} AND state = 'ready'
     RETURNING id`;
+  if (rows.length > 0) announceRosterChange();
   return rows.length > 0;
 }
 
@@ -465,6 +490,7 @@ export async function markDesktopFrozen(id: string, sql?: Sql): Promise<boolean>
        SET state = 'frozen', frozen_at = now()
      WHERE id = ${id} AND state IN ('ready', 'idle')
     RETURNING id`;
+  if (rows.length > 0) announceRosterChange();
   return rows.length > 0;
 }
 
@@ -482,6 +508,7 @@ export async function markDesktopThawed(id: string, sql?: Sql): Promise<boolean>
        SET state = 'ready', frozen_at = NULL, last_active_at = now()
      WHERE id = ${id} AND state = 'frozen'
     RETURNING id`;
+  if (rows.length > 0) announceRosterChange();
   return rows.length > 0;
 }
 
@@ -503,6 +530,7 @@ export async function closeDesktopSession(
        SET state = ${state}, released_at = now()
      WHERE id = ${id} AND state NOT IN ('released', 'dead')
     RETURNING id`;
+  if (rows.length > 0) announceRosterChange();
   return rows.length > 0;
 }
 
@@ -679,6 +707,7 @@ export async function setDesktopViewer(
        SET viewer_mode = ${viewer.mode}, viewer_actor = ${actor}, last_active_at = now()
      WHERE id = ${id} AND state NOT IN ('released', 'dead')
     RETURNING id`;
+  if (rows.length > 0) announceRosterChange();
   return rows.length > 0;
 }
 
@@ -740,5 +769,6 @@ export async function reconcileLocalDesktopSessions(
              OR ((${soleOwner}::boolean OR owner_pid = ${pid}) AND NOT (id = ANY(${live as string[]}::uuid[])))
            )
     RETURNING id`;
+  if (rows.length > 0) announceRosterChange();
   return { reaped: rows.length, reapedIds: rows.map((r) => r.id as string) };
 }

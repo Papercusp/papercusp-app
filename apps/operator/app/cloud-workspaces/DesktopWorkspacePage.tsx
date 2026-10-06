@@ -7,6 +7,8 @@ import { useSyncQuery } from "@papercusp/sync";
 import { Button } from "@/app/harness/Button";
 import { Select } from "@/app/harness/Select";
 import { HostedDesktopConnection } from "./HostedDesktopConnection";
+import { LocalDesktopWorkspace } from "./LocalDesktopWorkspace";
+import { LOCAL_DESKTOP_HOST } from "./local-desktop-protocol";
 import { readHostedWorkspaceConnector } from "./hosted-workspace-session-protocol";
 import type {
   CloudWorkspacesControlRow,
@@ -35,12 +37,19 @@ export default function DesktopWorkspacePage() {
       ),
     [control.data],
   );
+  // P-007: "This computer" sits beside the cloud workspaces. It is the default only
+  // when there is no cloud workspace to open, so an existing cloud default is kept.
+  const showLocal =
+    requestedHost === LOCAL_DESKTOP_HOST ||
+    (!requestedHost && !control.loading && !control.error && workspaces.length === 0);
   // Preserve explicit deep links; a missing subject must not silently select another machine.
-  const selected = requestedHost
-    ? workspaces.find((row) => row.id === requestedHost)
-    : (workspaces.find((row) => readHostedWorkspaceConnector(row.tunnel)) ??
-      workspaces.find((row) => row.observedState === "running") ??
-      workspaces[0]);
+  const selected = showLocal
+    ? undefined
+    : requestedHost
+      ? workspaces.find((row) => row.id === requestedHost)
+      : (workspaces.find((row) => readHostedWorkspaceConnector(row.tunnel)) ??
+        workspaces.find((row) => row.observedState === "running") ??
+        workspaces[0]);
 
   return (
     <section
@@ -52,20 +61,21 @@ export default function DesktopWorkspacePage() {
           <Monitor size={20} aria-hidden="true" /> Desktops
         </h1>
         <div className={styles.desktopDestinationActions}>
-          {workspaces.length > 0 && (
-            <Select
-              ariaLabel="Desktop workspace"
-              value={selected?.id ?? ""}
-              placeholder="Choose a workspace"
-              options={workspaces.map((row) => ({
+          <Select
+            ariaLabel="Desktop workspace"
+            value={showLocal ? LOCAL_DESKTOP_HOST : (selected?.id ?? "")}
+            placeholder="Choose a workspace"
+            options={[
+              { value: LOCAL_DESKTOP_HOST, label: "This computer" },
+              ...workspaces.map((row) => ({
                 value: row.id,
                 label: row.name,
-              }))}
-              onChange={(value) => {
-                void setDesktopHost(value);
-              }}
-            />
-          )}
+              })),
+            ]}
+            onChange={(value) => {
+              void setDesktopHost(value);
+            }}
+          />
           <Button
             variant="ghost"
             aria-label="Refresh desktop workspaces"
@@ -76,7 +86,9 @@ export default function DesktopWorkspacePage() {
           </Button>
         </div>
       </header>
-      {control.loading ? (
+      {showLocal ? (
+        <LocalDesktopWorkspace />
+      ) : control.loading ? (
         <div className={styles.desktopWorkspaceEmpty} role="status">
           <h2>Loading desktop workspaces…</h2>
         </div>

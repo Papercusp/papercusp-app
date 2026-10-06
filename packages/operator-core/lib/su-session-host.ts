@@ -14,6 +14,8 @@ import {
   isSuSessionCommandType,
   isSuApprovalsMode,
   type SuApprovalsMode,
+  type SuPlanItem,
+  type SuSessionUsage,
   type SuSessionBackend,
   type SuSessionCommand,
   type SuSessionCommandResultEvent,
@@ -348,6 +350,33 @@ export class SuSessionHost<B extends SuSessionBackend = SuSessionBackend> {
     return this.emit({
       type: 'session',
       descriptor: { ...this.descriptorValue, approvals },
+    } as SuSessionEventInput<B>);
+  }
+
+  /** D-029/D-031: merge fresh usage measurements into the descriptor. A field
+   * the engine did not report keeps its last value; nothing is guessed. Emits
+   * only when a value actually changed, so a repeated record costs nothing. */
+  updateUsage(usage: SuSessionUsage): SuSessionEvent<B> | null {
+    const measured = Object.fromEntries(
+      Object.entries(usage).filter(([, value]) => typeof value === 'number' && Number.isFinite(value) && value >= 0),
+    ) as SuSessionUsage;
+    const next: SuSessionUsage = { ...(this.descriptorValue.usage ?? {}), ...measured };
+    const previous = this.descriptorValue.usage ?? {};
+    const keys = new Set([...Object.keys(previous), ...Object.keys(next)]) as Set<keyof SuSessionUsage>;
+    if (![...keys].some((key) => previous[key] !== next[key])) return null;
+    return this.emit({
+      type: 'session',
+      descriptor: { ...this.descriptorValue, usage: next },
+    } as SuSessionEventInput<B>);
+  }
+
+  /** D-029/D-031: replace the agent's todo/plan list. Emits only on change. */
+  updatePlan(plan: readonly SuPlanItem[]): SuSessionEvent<B> | null {
+    const next: readonly SuPlanItem[] = plan.map((item) => ({ text: item.text, status: item.status }));
+    if (JSON.stringify(this.descriptorValue.plan ?? null) === JSON.stringify(next)) return null;
+    return this.emit({
+      type: 'session',
+      descriptor: { ...this.descriptorValue, plan: next },
     } as SuSessionEventInput<B>);
   }
 

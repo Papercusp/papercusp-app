@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { useSyncQuery } from '@papercusp/sync';
+import { RadioGroup } from './RadioGroup';
 import type {
   IntegrationModeQuestion,
 } from '@papercusp/operator-core/lib/harness/git-sync/integration-mode-question';
@@ -139,7 +140,7 @@ export default function IntegrationModeSection({ slug }: { slug: string }) {
         {state?.question.prompt ?? "Where should the agents' work go?"}
       </h2>
       {loadError && (
-        <p data-testid="integration-mode-load-error" style={{ margin: 0, color: 'var(--danger, #c0392b)', fontSize: 12 }}>
+        <p data-testid="integration-mode-load-error" style={{ margin: 0, color: 'var(--bad)', fontSize: 12 }}>
           Could not load this setting: {loadError}
         </p>
       )}
@@ -151,32 +152,31 @@ export default function IntegrationModeSection({ slug }: { slug: string }) {
           <legend style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>
             {state.question.prompt}
           </legend>
-          {state.question.options.map((opt) => (
-            <label
-              key={opt.value}
-              data-testid={`integration-mode-option-${opt.value}`}
-              style={{
+          <RadioGroup
+            label={state.question.prompt}
+            value={selected}
+            options={state.question.options.map(opt => ({ ...opt, disabled: !opt.available || saving }))}
+            onChange={next => {
+              setError(null);
+              setPending(next === current ? null : next);
+            }}
+            optionStyle={opt => ({
                 display: 'flex',
+                width: '100%',
+                textAlign: 'left',
                 alignItems: 'flex-start',
                 gap: 8,
                 padding: '6px 8px',
+                border: 'none',
+                background: 'transparent',
+                color: 'var(--fg)',
                 borderRadius: 6,
-                cursor: opt.available && !saving ? 'pointer' : 'not-allowed',
-              }}
-            >
-              <input
-                type="radio"
-                name={`integration-mode-${slug}`}
-                value={opt.value}
-                checked={selected === opt.value}
-                disabled={!opt.available || saving}
-                onChange={() => {
-                  setError(null);
-                  setPending(opt.value === current ? null : opt.value);
-                }}
-                style={{ marginTop: 3 }}
-              />
-              <span>
+                cursor: opt.disabled ? 'not-allowed' : 'pointer',
+            })}
+          >
+            {(opt, checked) => <>
+              <span aria-hidden="true">{checked ? '◉' : '○'}</span>
+              <span data-testid={`integration-mode-option-${opt.value}`}>
                 <span style={{ display: 'block', fontSize: 13, fontWeight: selected === opt.value ? 600 : 500 }}>
                   {opt.label}
                   {opt.value === current && (
@@ -187,8 +187,8 @@ export default function IntegrationModeSection({ slug }: { slug: string }) {
                   {opt.available ? opt.description : opt.unavailableReason}
                 </span>
               </span>
-            </label>
-          ))}
+            </>}
+          </RadioGroup>
           {current === 'review' && state.workingCopyUrl && !pending && (
             <p data-testid="integration-mode-working-copy" style={{ margin: '4px 8px 0', fontSize: 11.5, color: 'var(--fg-dim)' }}>
               Working copy: <a href={state.workingCopyUrl} target="_blank" rel="noreferrer">{state.workingCopyUrl}</a>
@@ -230,7 +230,7 @@ export default function IntegrationModeSection({ slug }: { slug: string }) {
             </div>
           )}
           {error && (
-            <p data-testid="integration-mode-error" role="alert" style={{ margin: '8px 0 0', color: 'var(--danger, #c0392b)', fontSize: 12 }}>
+            <p data-testid="integration-mode-error" role="alert" style={{ margin: '8px 0 0', color: 'var(--bad)', fontSize: 12 }}>
               {error}
             </p>
           )}

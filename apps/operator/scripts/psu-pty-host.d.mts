@@ -3208,6 +3208,8 @@ export function resolveAgentPtyTarget({ command, args, env, cwd }: {
  * @param {{nativeId?:string|null}|null} [o.adoptedCarryRespawn] host-code adoption of a carry;
  *   its kickoff must prove the late native id and re-anchor before it announces completion
  * @param {object} [o.signalSource]      process-like on/off signal source (tests)
+ * @param {((file:string, args:string[], options:object, realSpawn:(file:string, args:string[], options:object)=>any)=>any)|null} [o.spawnPty]
+ *   pty spawn override (tests: inject a resume failure); null = the real pty.spawn
  * @param {()=>object} [o.reapScopeResidue] exact-session-cgroup cleanup (tests)
  * @param {string} [o.normalizedLogPath] optional headless grep-safe log path; normally
  *   supplied through {@link HEADLESS_NORMALIZED_LOG_ENV} in `o.env`
@@ -3253,6 +3255,7 @@ export function hostThroughPty(o: {
         nativeId?: string | null;
     } | null | undefined;
     signalSource?: object | undefined;
+    spawnPty?: ((file: string, args: string[], options: object, realSpawn: (file: string, args: string[], options: object) => any) => any) | null | undefined;
     reapScopeResidue?: (() => object) | undefined;
     normalizedLogPath?: string | undefined;
     mintRecycleArgs?: ((args: string[], options: {

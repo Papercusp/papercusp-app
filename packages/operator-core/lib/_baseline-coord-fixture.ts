@@ -24,6 +24,11 @@
  * is for direct seed/cleanup of the shared coord tables.
  */
 import { inject } from 'vitest';
+// Type-only: brings in the `ProvidedContext { baselineSchemaDsn }` augmentation that
+// `inject('baselineSchemaDsn')` below depends on. Without it this file typechecked only
+// because unrelated test files happened to import the same module; the public source
+// cut omits those, and the key then resolves to `never` (WI-10006573).
+import type {} from '@papercusp/test-config';
 import postgres from 'postgres';
 import { assertPgReachable } from '@papercusp/test-config/pg';
 import {

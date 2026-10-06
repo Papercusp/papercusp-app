@@ -31,7 +31,9 @@ import {
   type IssueStoreKind,
   type ListIssueScopesFilter,
   type ListIssuesFilter,
+  issuesScopeWorkspace,
 } from '../../issues-engineer';
+import { ownNodeAuthoredRemoteIds } from '../../work-items-admission';
 import type { ImprovementCandidate, ImprovementState, WorkItemKind } from './policy';
 import { isSignalOrigin, originAllowed, ORGANIC_ONLY, type SignalOrigin } from './provenance';
 import { asStructuredObservation } from './observation-types';
@@ -117,7 +119,13 @@ function payloadOf(issue: EngineerIssue): ImprovementPayload {
 }
 
 /** Map an engineer_issue → the storage-agnostic ImprovementCandidate. */
-export function issueToCandidate(issue: EngineerIssue): ImprovementCandidate {
+/**
+ * `opts.ownNode` (WI-10006515): the row is origin='remote' but authored by one of THIS
+ * workspace's own keys ({@link ReadImprovementDeps.ownNodeRemoteIds}). `origin` records how a
+ * row ARRIVED, not who wrote it (WI-10003565), so it is ours and must not carry the remote label
+ * that routes it to the human tier. Callers that cannot classify omit it (the label stands).
+ */
+export function issueToCandidate(issue: EngineerIssue, opts: { ownNode?: boolean } = {}): ImprovementCandidate {
   const p = payloadOf(issue);
   const kind: WorkItemKind = p.improvementKind === 'feature' ? 'feature' : (issue.kind as WorkItemKind);
   const lane = p.lane === 'observation' ? ('observation' as const) : undefined;
@@ -163,7 +171,8 @@ export function issueToCandidate(issue: EngineerIssue): ImprovementCandidate {
     // field above) — surfaced only when 'remote' so the risk-tier policy can
     // exclude a remote-authored row from this node's auto-eligible lane (it can
     // never be terminal-completed here; see policy.ts's workItemOrigin gate).
-    ...(issue.origin === 'remote' ? { workItemOrigin: 'remote' as const } : {}),
+    // An own-node row stranded at 'remote' is not remote-authored (WI-10006515).
+    ...(issue.origin === 'remote' && opts.ownNode !== true ? { workItemOrigin: 'remote' as const } : {}),
     ...(observation ? { observation } : {}),
     ...(ideation ? { ideation } : {}),
     ...(dispatchHoldUntil ? { dispatchHoldUntil } : {}),
@@ -334,12 +343,41 @@ export interface ReadImprovementDeps {
    * and CLAUDE.md calls out as the #1 cause of silent cross-tree breakage.
    */
   readLoopOutputIds?: () => Promise<readonly string[]>;
+  /**
+   * WI-10006515: which of these origin='remote' ids were authored by THIS node. Optional for the
+   * same reason as readLoopOutputIds; absent ⇒ every remote row keeps its remote label.
+   */
+  ownNodeRemoteIds?: OwnNodeRemoteResolver;
+}
+
+/** Subset of `ids` (all origin='remote') authored by one of this workspace's own keys. */
+export type OwnNodeRemoteResolver = (ids: readonly string[]) => Promise<ReadonlySet<string>>;
+
+/** Same ambient workspace listIssues scopes by; fail-closed (empty) on any read failure. */
+const defaultOwnNodeRemoteIds: OwnNodeRemoteResolver = (ids) => ownNodeAuthoredRemoteIds(issuesScopeWorkspace(), ids);
+
+/**
+ * Classify the remote rows of one read in a single batch (exceptional path: no query when no
+ * row is remote). Any resolver failure keeps every remote label.
+ */
+async function ownNodeRemoteSet(
+  issues: readonly EngineerIssue[],
+  resolve: OwnNodeRemoteResolver | undefined,
+): Promise<ReadonlySet<string>> {
+  const remoteIds = issues.filter((issue) => issue.origin === 'remote').map((issue) => issue.id);
+  if (remoteIds.length === 0 || !resolve) return new Set();
+  try {
+    return await resolve(remoteIds);
+  } catch {
+    return new Set();
+  }
 }
 
 const defaultDeps: ReadImprovementDeps = {
   listIssues,
   listScopes: listIssueScopes,
   readLoopOutputIds: async () => (await (await import('./loop-output')).readLoopOutputIds()).ids,
+  ownNodeRemoteIds: defaultOwnNodeRemoteIds,
 };
 
 /**
@@ -383,11 +421,14 @@ export async function readImprovementItems(
 export interface ProjectImprovementDeps {
   projectIssues: typeof projectAllIssuesForBoundedRead;
   readLoopOutputIds?: () => Promise<readonly string[]>;
+  /** See {@link ReadImprovementDeps.ownNodeRemoteIds}. */
+  ownNodeRemoteIds?: OwnNodeRemoteResolver;
 }
 
 const defaultProjectImprovementDeps: ProjectImprovementDeps = {
   projectIssues: projectAllIssuesForBoundedRead,
   readLoopOutputIds: async () => (await (await import('./loop-output')).readLoopOutputIds()).ids,
+  ownNodeRemoteIds: defaultOwnNodeRemoteIds,
 };
 
 /**
@@ -456,10 +497,11 @@ export async function projectImprovementItemsForBoundedRead<T>(
       maxRows: projection.maxRows,
       project: async (issues) => {
         const allowedScopes = scopeSet ? new Set(scopeSet) : null;
-        const candidates = issues
+        const kept = issues
           .filter((issue) => originAllowed(issue.signalOrigin, origins))
-          .filter((issue) => !allowedScopes || allowedScopes.has(issue.scope))
-          .map(issueToCandidate);
+          .filter((issue) => !allowedScopes || allowedScopes.has(issue.scope));
+        const ownNode = await ownNodeRemoteSet(kept, deps.ownNodeRemoteIds);
+        const candidates = kept.map((issue) => issueToCandidate(issue, { ownNode: ownNode.has(issue.id) }));
         return projection.project(candidates);
       },
     },
@@ -782,10 +824,8 @@ async function readBySelector(
 
   // Keep a defensive post-filter for injectable/legacy listIssues deps that may
   // ignore the SQL scope predicate; production is bounded in SQL above.
-  if (scopeSet) {
-    const allowed = new Set(scopeSet);
-    return originGated.filter((issue) => allowed.has(issue.scope)).map(issueToCandidate);
-  }
-
-  return originGated.map(issueToCandidate);
+  const allowed = scopeSet ? new Set(scopeSet) : null;
+  const kept = allowed ? originGated.filter((issue) => allowed.has(issue.scope)) : originGated;
+  const ownNode = await ownNodeRemoteSet(kept, deps.ownNodeRemoteIds);
+  return kept.map((issue) => issueToCandidate(issue, { ownNode: ownNode.has(issue.id) }));
 }

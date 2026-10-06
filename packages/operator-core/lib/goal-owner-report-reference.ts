@@ -15,7 +15,10 @@ import {
 } from '@papercusp/chat-protocol';
 import { getReport, reportBodySha256, type ReportRecord, type ReportViewer } from './report-library';
 import { ownerWallActionSql, openOwnerWallPredicateSql } from './goal-owner-report-truth';
-import { GOAL_OWNER_REPORT_FIELD, parseGoalOwnerReport, stampGoalOwnerReport } from './goal-owner-report';
+import {
+  GOAL_OWNER_REPORT_FIELD, parseGoalOwnerReport, stampGoalOwnerReport,
+  type GoalOwnerReportStamp, type GoalOwnerReportTruthSummary, type GoalReportCitedRef,
+} from './goal-owner-report';
 import { resolveGoalHolders } from './goals/holder';
 
 type Snapshot = GoalOwnerReportSnapshotV1;
@@ -173,6 +176,27 @@ export function deriveGoalReportNotification(s: Snapshot): string {
   ].join('\n');
 }
 
+/**
+ * The truth a snapshot that PASSED validateGoalReportReferenceSnapshot already proves
+ * (WI-10006545). That validator refuses unless the cost is measured and current and the
+ * owner walls are exact, so both checks are settled here; corrections are not checked on
+ * this path and stay 'unread'. Cited ref states come from the receipt-verified movements,
+ * so the next inline report's corrections check has a baseline. The prose truth evaluator
+ * is NOT run on the derived notification: it renders cost in cents and only counts walls,
+ * so that evaluator would refuse a fully validated reference.
+ */
+export function goalReportReferenceTruth(s: Snapshot): { summary: GoalOwnerReportTruthSummary; citedRefStates: GoalReportCitedRef[] } {
+  return {
+    summary: { cost: 'cited-measured', ownerWalls: s.ownerWalls.length ? 'all-listed-with-action' : 'none-open', corrections: 'unread' },
+    citedRefStates: s.moved.map((m) => ({ ref: m.ref, state: m.state })),
+  };
+}
+
+/** The one stamp for a reference report, delivered (coord:send) and persisted alike. Only call it after validation. */
+export function stampGoalReportReference(goalId: string, s: Snapshot, body: string): GoalOwnerReportStamp {
+  return stampGoalOwnerReport(goalId, parseGoalOwnerReport(body), goalReportReferenceTruth(s));
+}
+
 export function goalReportDeliveryId(workspaceId: string, ref: GoalOwnerReportRefV1): string {
   return `goal-report-${goalReportSourceRevision([workspaceId, ref.goalId, ref.reportId, ref.bodySha256])}`;
 }
@@ -220,7 +244,7 @@ export async function persistGoalReportReference(sql: Sql, envelope: CoordEnvelo
       await hooks?.phase?.('before-stamp', tx);
       return { ...envelope, msg_id: msgId, body, summary: report.title,
         sections: [{ text: body }], report: { plans: [], goalReport: context.ref },
-        [GOAL_OWNER_REPORT_FIELD]: stampGoalOwnerReport(context.goalId, parseGoalOwnerReport(body)) };
+        [GOAL_OWNER_REPORT_FIELD]: stampGoalReportReference(context.goalId, snapshot, body) };
     },
     afterAppend: async (tx) => { await hooks?.phase?.('before-commit', tx); },
   });

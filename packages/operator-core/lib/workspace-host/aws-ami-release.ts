@@ -602,20 +602,10 @@ function validateCleanProof(
   if (!proof.attestation || typeof proof.attestation !== 'object' || proof.attestation.status !== 'healthy') {
     fail('clean-account launch proof did not carry a healthy bootstrap attestation');
   }
-  const input = fixture.bootstrapInput;
-  const validation = validateWorkspaceHostBootstrapAttestation(proof.attestation, {
-    contractVersion: input.contractVersion,
-    action: input.action,
-    hostId: input.hostId,
-    release: input.release,
-    migrationId: input.migrationId,
-    minimumNodeMajor: input.minimumNodeMajor,
-    service: input.service,
-    workspaceAuthorizedKeys: input.workspaceAuthorizedKeys,
-    ...(input.isolation ? { isolation: input.isolation } : {}),
-    ...(input.entrypoints ? { entrypoints: input.entrypoints } : {}),
-    ...(input.publicMetadata ? { publicMetadata: input.publicMetadata } : {}),
-  });
+  // Validate against the WHOLE input the fixture rendered, never a field-by-field copy: a copy
+  // here once omitted hostModel/bootc (added later, P-306), so every bootc canary was judged
+  // against the ubuntu-release-bundle default and refused after a healthy boot (WI-10006586).
+  const validation = validateWorkspaceHostBootstrapAttestation(proof.attestation, fixture.bootstrapInput);
   if (!validation.ok) fail(`clean-account bootstrap attestation failed validation: ${validation.errors.join('; ')}`);
 }
 

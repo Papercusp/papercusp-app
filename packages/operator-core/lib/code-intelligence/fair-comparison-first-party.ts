@@ -128,6 +128,14 @@ export interface LspQueryArmConfig {
   /** e.g. `typescript-language-server 6.0.0 / typescript 6.0.2`. */
   readonly version: string;
   readonly treeRoot: string;
+  /**
+   * Tree-relative file inside ONE tsconfig project, where the warm-up search
+   * loads a project. Without it the warm-up anchors at the tree root, which the
+   * adapter refuses on a tree with nested projects (the 2026-10-06 run: 113 of
+   * them). That refusal aborted index(), so the arm answered no case at all.
+   * Root-anchored refusals on individual cases stay a measured product property.
+   */
+  readonly warmupAnchor?: string;
   readonly loadAvg1?: () => number | null;
 }
 
@@ -144,8 +152,9 @@ export function createLspQueryArm(cfg: LspQueryArmConfig, door: LspDoor, now?: (
       // lsp:query keeps no index of its own: "indexing" is starting the server
       // and loading the project behind the tree root.
       const t0 = performance.now();
+      const anchor = cfg.warmupAnchor ? join(cfg.treeRoot, cfg.warmupAnchor) : cfg.treeRoot;
       const warm = symbolHits(
-        await door.workspaceSymbols({ name: WARMUP_SUBJECT, rootPath: cfg.treeRoot, anchor: cfg.treeRoot, limit: 1 }),
+        await door.workspaceSymbols({ name: WARMUP_SUBJECT, rootPath: cfg.treeRoot, anchor, limit: 1 }),
         WARMUP_SUBJECT,
       );
       return {

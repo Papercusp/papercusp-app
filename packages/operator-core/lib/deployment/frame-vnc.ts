@@ -48,6 +48,8 @@ import {
   touchDesktopSession,
 } from '../desktop/desktop-session-registry';
 import { desktopViewerHeartbeatMs } from '../desktop/desktop-lifecycle';
+import type { HostedDesktopEndpoint, HostedDesktopGrant } from '../desktop/hosted-desktop-channel';
+import type { HostedDesktopDialInput, HostedDesktopSocket } from '../workspace-host/hosted-session-host';
 
 export type VncMode = 'watch' | 'takeover';
 
@@ -84,6 +86,23 @@ export interface VncTicket {
   target: VncTarget;
   /** The registry row this session views — local sessions only. */
   desktopSessionId: string | null;
+  /**
+   * Which RFB server is on the far end (agent-multi-desktops-grid D-015). A
+   * KasmVNC desktop needs the viewer's KasmVNC RFB class (its PointerEvent is not
+   * stock); an x11vnc stream needs stock noVNC.
+   */
+  rfb: 'kasmvnc' | 'standard';
+}
+
+/**
+ * How the bridge reaches a registry desktop's own KasmVNC websocket (D-015): its
+ * loopback endpoint and the ONE credential the viewer's mode earns (watch → the
+ * view user, take over → the control user). Held only in this process's memory,
+ * like the lease it came from; never sent to the webview.
+ */
+export interface KasmDialPlan {
+  endpoint: HostedDesktopEndpoint;
+  grant: HostedDesktopGrant;
 }
 
 interface PendingSession extends VncSessionRequest {
@@ -98,6 +117,8 @@ interface PendingSession extends VncSessionRequest {
   spawnCmd: { cmd: string; args: string[] };
   /** Registry row to bind the viewer onto (local sessions only). */
   desktopSessionId: string | null;
+  /** Set when the bridge dials the desktop's KasmVNC instead of `spawnCmd` (D-015). */
+  kasm?: KasmDialPlan | null;
 }
 
 export interface ActiveVncSession {
@@ -167,6 +188,9 @@ export interface FrameVncDeps {
    * the behaviour that matters, rather than on the fact that a timer exists.
    */
   armHeartbeat?: (intervalMs: number, fn: () => void) => ManagedHandle;
+  /** D-015: the KasmVNC dial plan for a local desktop, or null to use x11vnc. */
+  resolveKasmDesktop?: (desktopSessionId: string, mode: VncMode) => Promise<KasmDialPlan | null>;
+  dialKasm?: (input: HostedDesktopDialInput) => Promise<HostedDesktopSocket>;
 }
 
 const pending = new Map<string, PendingSession>();
@@ -327,6 +351,7 @@ export async function createVncSession(req: VncSessionRequest): Promise<VncTicke
   const target: VncTarget = req.target ?? 'frame';
   let spawnCmd: { cmd: string; args: string[] };
   let desktopSessionId: string | null = null;
+  let kasm: KasmDialPlan | null = null;
   // The slug this session is RECORDED under. For a local desktop the registry
   // row is authoritative, not the caller's URL: admission is keyed on workspace
   // + display, so a caller could otherwise name any slug and file an audit entry
@@ -349,6 +374,9 @@ export async function createVncSession(req: VncSessionRequest): Promise<VncTicke
     desktopSessionId = record.id;
     slug = record.harnessSlug ?? req.slug;
     spawnCmd = localVncCommand(req.display, req.mode);
+    // D-015: a KasmVNC desktop this process leases is viewed over its own websocket.
+    const resolveKasm = depsOverride.resolveKasmDesktop ?? defaultResolveKasmDesktop;
+    kasm = await resolveKasm(record.id, req.mode).catch(() => null);
   } else {
     const loadFrame = depsOverride.loadFrame ?? loadDeployedFrame;
     const loaded = await loadFrame(req.slug, req.workspaceId);
@@ -358,7 +386,7 @@ export async function createVncSession(req: VncSessionRequest): Promise<VncTicke
   }
 
   const ticket = randomBytes(24).toString('hex');
-  pending.set(ticket, { ...req, slug, target, ticket, createdAt: now(), spawnCmd, desktopSessionId });
+  pending.set(ticket, { ...req, slug, target, ticket, createdAt: now(), spawnCmd, desktopSessionId, kasm });
   audit({
     // ONE audit namespace across both targets, on purpose: an operator asking
     // "who took over a desktop" writes one filter and finds every session. Two
@@ -382,6 +410,135 @@ export async function createVncSession(req: VncSessionRequest): Promise<VncTicke
     slug,
     target,
     desktopSessionId,
+    rfb: kasm ? 'kasmvnc' : 'standard',
+  };
+}
+
+/**
+ * The production dial plan (D-015): only for a desktop whose lease THIS process
+ * holds, because its endpoint and secrets exist only in the leasing process
+ * (`desktopRecordForLease`). Anything else returns null and keeps x11vnc.
+ */
+async function defaultResolveKasmDesktop(
+  desktopSessionId: string,
+  mode: VncMode,
+): Promise<KasmDialPlan | null> {
+  const [{ leasedDesktopBySessionId }, { desktopRecordForLease }, channel] = await Promise.all([
+    import('../agent-tools/computer/desktop-lease'),
+    import('../workspace-host/hosted-desktop-backend'),
+    import('../desktop/hosted-desktop-channel'),
+  ]);
+  const lease = leasedDesktopBySessionId(desktopSessionId);
+  if (!lease) return null;
+  const record = desktopRecordForLease(lease);
+  if (!record.endpoint) return null;
+  return {
+    endpoint: channel.assertLoopbackDesktopEndpoint(record.endpoint),
+    grant: channel.hostedDesktopGrant(mode === 'takeover' ? 'controller' : 'observer', record.credentials),
+  };
+}
+
+async function defaultDialKasm(input: HostedDesktopDialInput): Promise<HostedDesktopSocket> {
+  const { dialDesktopSocket } = await import('../workspace-host/hosted-desktop-backend');
+  return dialDesktopSocket(input);
+}
+
+/**
+ * The far end of one bridge: something that speaks RFB. The bridge below owns the
+ * session lifecycle (registry viewer binding, audit, heartbeat, idle and TTL
+ * teardown); an upstream only moves bytes and reports its own end.
+ */
+interface VncUpstream {
+  /** The spawned process, when there is one (tests and callers read it). */
+  readonly child: ChildProcess | null;
+  start(on: { data: (chunk: Buffer) => void; end: (why: string) => void }): void;
+  write(data: Buffer): void;
+  close(): void;
+}
+
+function childUpstream(session: PendingSession): VncUpstream {
+  const spawn = depsOverride.spawn ?? nodeSpawn;
+  const child = spawn(session.spawnCmd.cmd, session.spawnCmd.args, {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    detached: true, // own process group → tree-kill on teardown
+  });
+  return {
+    child,
+    start(on) {
+      child.stdout?.on('data', on.data);
+      child.stderr?.on('data', (chunk: Buffer) => {
+        const line = String(chunk).trim();
+        if (line) console.warn(`[frame-vnc] ${session.slug}:${session.display} ssh: ${line.slice(0, 300)}`);
+      });
+      child.on('close', () => on.end('remote-closed'));
+      child.on('error', () => on.end('spawn-error'));
+    },
+    write(data) {
+      child.stdin?.write(data);
+    },
+    close() {
+      // Kill the whole ssh process group; fall back to a single-PID kill when
+      // the group send fails OR the child never got a pid (early spawn failure).
+      let killed = false;
+      const pid = child.pid;
+      if (pid) {
+        try {
+          process.kill(-pid, 'SIGTERM');
+          killed = true;
+        } catch {
+          /* fall through to single-PID kill */
+        }
+      }
+      if (!killed) {
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          /* gone */
+        }
+      }
+    },
+  };
+}
+
+/** Bytes the viewer may send before the KasmVNC dial lands (RFB waits for the server first). */
+const KASM_PRE_DIAL_QUEUE_MAX = 64;
+
+function kasmUpstream(plan: KasmDialPlan, desktopSessionId: string): VncUpstream {
+  const dial = depsOverride.dialKasm ?? defaultDialKasm;
+  let socket: HostedDesktopSocket | null = null;
+  let closed = false;
+  const queued: Buffer[] = [];
+  return {
+    child: null,
+    start(on) {
+      dial({ desktopSessionId, endpoint: plan.endpoint, grant: plan.grant }).then(
+        (dialled) => {
+          if (closed) {
+            dialled.close();
+            return;
+          }
+          socket = dialled;
+          dialled.onData(on.data);
+          dialled.onClose(() => on.end('remote-closed'));
+          for (const chunk of queued.splice(0)) dialled.send(chunk);
+        },
+        (error: unknown) => {
+          console.warn(`[frame-vnc] kasmvnc dial for ${desktopSessionId} failed: ${String(error).slice(0, 200)}`);
+          on.end('kasmvnc-dial-failed');
+        },
+      );
+    },
+    write(data) {
+      if (socket) socket.send(data);
+      else if (!closed && queued.length < KASM_PRE_DIAL_QUEUE_MAX) queued.push(data);
+    },
+    close() {
+      closed = true;
+      queued.length = 0;
+      const live = socket;
+      socket = null;
+      live?.close();
+    },
   };
 }
 
@@ -424,12 +581,12 @@ export interface VncBridgeWs {
  * is symmetric and kills the WHOLE child tree (the ssh process group).
  * Exported for unit tests (driven with a fake spawn + fake WS).
  */
-export function bridgeVncSession(ws: VncBridgeWs, session: PendingSession): ChildProcess {
-  const spawn = depsOverride.spawn ?? nodeSpawn;
-  const child = spawn(session.spawnCmd.cmd, session.spawnCmd.args, {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    detached: true, // own process group → tree-kill on teardown
-  });
+export function bridgeVncSession(ws: VncBridgeWs, session: PendingSession): ChildProcess | null {
+  // D-015: a registry desktop this process leases is dialled over its own KasmVNC
+  // websocket; every other session keeps its RFB child process.
+  const upstream: VncUpstream = session.kasm
+    ? kasmUpstream(session.kasm, session.desktopSessionId ?? '')
+    : childUpstream(session);
   const key = session.ticket;
   active.set(key, {
     slug: session.slug,
@@ -488,25 +645,7 @@ export function bridgeVncSession(ws: VncBridgeWs, session: PendingSession): Chil
         why,
       },
     });
-    // Kill the whole ssh process group; fall back to a single-PID kill when
-    // the group send fails OR the child never got a pid (early spawn failure).
-    let killed = false;
-    const pid = child.pid;
-    if (pid) {
-      try {
-        process.kill(-pid, 'SIGTERM');
-        killed = true;
-      } catch {
-        /* fall through to single-PID kill */
-      }
-    }
-    if (!killed) {
-      try {
-        child.kill('SIGTERM');
-      } catch {
-        /* gone */
-      }
-    }
+    upstream.close();
     try {
       ws.close();
     } catch {
@@ -536,32 +675,29 @@ export function bridgeVncSession(ws: VncBridgeWs, session: PendingSession): Chil
 
   heartbeat = armHeartbeat(desktopViewerHeartbeatMs(), tick);
 
-  child.stdout?.on('data', (chunk: Buffer) => {
-    try {
-      ws.send(chunk);
-    } catch {
-      /* ws gone */
-    }
+  upstream.start({
+    data: (chunk: Buffer) => {
+      try {
+        ws.send(chunk);
+      } catch {
+        /* ws gone */
+      }
+    },
+    end: (why: string) => endSession(why),
   });
-  child.stderr?.on('data', (chunk: Buffer) => {
-    const line = String(chunk).trim();
-    if (line) console.warn(`[frame-vnc] ${session.slug}:${session.display} ssh: ${line.slice(0, 300)}`);
-  });
-  child.on('close', () => endSession('remote-closed'));
-  child.on('error', () => endSession('spawn-error'));
   ws.on('message', (data: Buffer) => {
     // The liveness signal for VNC_STREAM_IDLE_MS. Stamped before the write and
     // unconditionally: the byte ARRIVED from the viewer, which is what proves the
     // viewer is alive, whether or not the child is still there to receive it.
     lastViewerByteMs = now();
     try {
-      child.stdin?.write(data);
+      upstream.write(data);
     } catch {
-      /* child gone */
+      /* upstream gone */
     }
   });
   ws.on('close', () => endSession('viewer-left'));
-  return child;
+  return upstream.child;
 }
 
 // ── loopback WS server (the desktop-voice-ws model) ─────────────────────────

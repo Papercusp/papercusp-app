@@ -633,6 +633,43 @@ async function readUnadjudicatedCensus(
   return Number(rows[0]?.n ?? 0);
 }
 
+/** What a later bulk stage reads from a finished census: its id (the shard-map key), size and count. */
+export type AdmissionCensusRef = Pick<AdmissionCensusRunResult, 'runId' | 'censusAfter' | 'corpusSize'>;
+
+/**
+ * WI-10006553: rehydrate a COMPLETE census row instead of re-running it.
+ * `runWorkItemAdmissionCensus` never resumes a complete row (see
+ * `parseAdmissionCensusResume`); it upserts the row back to 'running' and
+ * recomputes the whole census. A recovered bulk pass used to do exactly that
+ * for every completed stage's result census: ~16 minutes per bg-host restart,
+ * and meanwhile the daily digest, which accepts only a complete source census,
+ * could not read it. Returns null for anything not provably complete, so the
+ * caller falls back to running the census (an unfinished row still resumes, D-008).
+ */
+export async function readCompletedAdmissionCensus(
+  sql: OrgSql,
+  scope: { workspaceId: string; harnessSlug: string },
+  runId: string,
+): Promise<AdmissionCensusRef | null> {
+  const rows = await sql<{ census_after: number | string | null; corpus_size: string | null }[]>`
+    SELECT census_after, detail->'snapshot'->>'corpusSize' AS corpus_size
+      FROM harness_shared.admission_runs
+     WHERE id = ${runId}
+       AND workspace_id = ${scope.workspaceId}
+       AND harness_slug = ${scope.harnessSlug}
+       AND run_kind = 'census'
+       AND detail->>'status' = 'complete'
+       AND finished_at IS NOT NULL
+     LIMIT 1`;
+  const row = rows[0];
+  if (!row || row.census_after == null || row.corpus_size == null) return null;
+  const censusAfter = Number(row.census_after);
+  const corpusSize = Number(row.corpus_size);
+  if (!Number.isInteger(censusAfter) || censusAfter < 0) return null;
+  if (!Number.isInteger(corpusSize) || corpusSize < 0) return null;
+  return { runId, censusAfter, corpusSize };
+}
+
 /**
  * WI-10006336: the unadjudicated census over ONE population — the members
  * pinned by `pinnedRunId` that are still members of `currentRunId` — so a

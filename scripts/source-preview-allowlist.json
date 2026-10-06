@@ -244,6 +244,27 @@
       "path": "packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.ts",
       "sha256": "62325c3ff51a6b19a9845707b6e64d5e08440fb49970bef0bcedd551ecd8e27e",
       "reason": "Drill fixture token literal 'p521-phase-i-disposable' passed to a local bare-repo fork-PR simulation; never a real credential (reviewed 2026-09-30, open-source-release P-009)."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "packages/operator-core/lib/workspace-host/image-scan-secret-allowances.ts",
+      "sha256": "f1be21ab79763f9aadc168b6186a8cdb3f985757b22a74b9f4ddf6fbc0fedfa0",
+      "reason": "Justification prose for a reviewed image-scan false positive. The line quotes the minified bundle match \"result30=key16\" (case\"key\":result30=key16 in a key/value iterator); no value is present. Reviewed 2026-10-06 by su-56b83 for the staging 6e517987 public export (open-source-release WI-10003960)."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "packages/operator-core/lib/workspace-host/image-scan-secret-allowances.ts",
+      "sha256": "db08915f2d5704ea8e64ec4d0efc675d9241c176c916da666c98a739e2f79bda",
+      "reason": "Justification prose for the vendored monaco-editor false positive. The line quotes minified glyph-cache source (this._glyphMap=new l.NKeyMap...), where the Key inside the class name NKeyMap trips the keyword-proximity check; the captured text is identifiers, with no value. Reviewed 2026-10-06 by su-56b83 for the staging 6e517987 public export (open-source-release WI-10003960)."
+    },
+    {
+      "detector": "gitleaks",
+      "rule": "generic-api-key",
+      "path": "papercusp-desktop/src-tauri/vendor/global-hotkey/src/hotkey.rs",
+      "sha256": "31f5be023b8fecc1f3b83dcfa7528b5c945b44fa82cb92d49869fef807f2ff93",
+      "reason": "Doc comment in the vendored third-party global-hotkey crate: `shift+alt+KeyQ` is legal (a hotkey string example). The Key in the key-code name trips the keyword-proximity check; it is not a credential. Reviewed 2026-10-06 by su-56b83 for the staging 6e517987 public export (open-source-release WI-10003960)."
     }
   ]
 }

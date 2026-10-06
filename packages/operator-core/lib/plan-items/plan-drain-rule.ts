@@ -37,13 +37,17 @@ import { registerReactionRule } from '../events';
 import { PLAN_DRAIN_TRANSITION_ACTION } from '../events/builtin-actions';
 import type { ToolInvocationEvent } from '../events/types';
 
-/** One fanned per-item `plans:add-item` or `plans:set-status` result. */
+/**
+ * One fanned per-item `plans:add-item` / `plans:set-status` result, or a
+ * `plans:set-plan-status` result (which reports `changed` + `newStatus`).
+ */
 interface PlanDrainWriteResult {
   ok?: boolean;
   slug?: string;
   itemId?: string;
   oldStatus?: string | null;
   newStatus?: string;
+  changed?: boolean;
   planDrainTransitionChanged?: boolean;
 }
 

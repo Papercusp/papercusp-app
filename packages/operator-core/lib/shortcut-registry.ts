@@ -107,13 +107,8 @@ export const SHORTCUTS: readonly ShortcutDef[] = [
     defaultCombo: 'mod+shift+i',
     category: 'global',
   },
-  {
-    id: 'editor.save',
-    description: 'Save the current editor (prompts, memory, etc.)',
-    defaultCombo: 'mod+s',
-    category: 'editor',
-    options: { enableOnFormTags: ['INPUT', 'TEXTAREA'] },
-  },
+  // editor.save belonged to the retired harness-dashboard prompt and memory
+  // editors. No current editor registers it, so it must not be offered for remap.
 
   // ── Voice / video (Discord-parity; universal-voice session bus) ───
   // Mute is a BUS control: it applies once at the session host and the

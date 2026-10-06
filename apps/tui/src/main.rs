@@ -5990,19 +5990,22 @@ fn default_operator_chat<'a>(
         if chat.role != "operator" || chat.feature_id.is_some() || chat.archived_at.is_some() {
             return None;
         }
-        if let Some(session) = inventory
+        let session = inventory
             .iter()
-            .find(|entry| entry.agent_chat_id == chat.id)
-        {
-            // pui-chat-first-ux P-010: never reattach a session that was
-            // started in ANOTHER directory — `pui` in project A must not
-            // pick up project B's running session. A session whose
-            // directory is unknown stays eligible (older operators).
-            if let (Some(launch), Some(session_cwd)) = (launch_cwd, session.cwd.as_deref()) {
-                if !crate::su_session::session_in_directory(Some(session_cwd), Some(launch)) {
-                    return None;
-                }
-            }
+            .find(|entry| entry.agent_chat_id == chat.id);
+        // pui-chat-first-ux P-010 / D-030: never land on a session started
+        // in ANOTHER directory — `pui` in project A must not pick up project
+        // B's session. A chat whose directory is unknown (no cwd recorded,
+        // or no inventory row because its snapshot probe failed, e.g. a
+        // session mid-teardown) belongs to no directory, so a PUI that knows
+        // its own directory never lands on it (WI-10006533).
+        if !crate::su_session::session_in_directory(
+            session.and_then(|session| session.cwd.as_deref()),
+            launch_cwd,
+        ) {
+            return None;
+        }
+        if let Some(session) = session {
             return match session.reconciliation {
                 crate::su_session::SuSessionReconciliation::Attached if !session.terminal => {
                     Some(2)
@@ -8495,11 +8498,52 @@ mod tests {
         assert_eq!(pick(Some("/work/b/")).as_deref(), Some("elsewhere"));
         assert_eq!(pick(Some("/work/c")), None);
         assert_eq!(pick(None).as_deref(), Some("elsewhere"));
+        // WI-10006533: a session whose directory is unknown belongs to no
+        // directory, the rule `session_in_directory` states. It used to stay
+        // eligible from anywhere ("older operators").
         let unknown = vec![row("here", Some("/work/a")), row("elsewhere", None)];
         assert_eq!(
             default_operator_chat(&chats, &unknown, Some("/work/c")).map(|chat| chat.id.as_str()),
-            Some("elsewhere")
+            None
         );
+        assert_eq!(
+            default_operator_chat(&chats, &unknown, Some("/work/a")).map(|chat| chat.id.as_str()),
+            Some("here")
+        );
+    }
+
+    /// WI-10006533: the inventory drops a chat whose snapshot request fails
+    /// (a session mid-teardown answers 404). Such a chat used to rank as live
+    /// from ANY directory, so a launch in project B landed on project A's
+    /// conversation and its first send was refused "already bound to a
+    /// different engine or project" (or, with the same engine, joined it).
+    #[test]
+    fn default_operator_chat_never_picks_a_chat_with_no_inventory_row_from_another_launch() {
+        let chats = vec![
+            startup_chat("here", Some("su-session"), "2026-09-07T01:00:00Z"),
+            startup_chat("probe-failed", Some("su-session"), "2026-09-07T02:00:00Z"),
+        ];
+        let here = crate::su_session::SuSessionInventoryEntry {
+            agent_chat_id: "here".into(),
+            adv_session_id: 1,
+            backend: crate::su_session::SuSessionBackend::Claude,
+            lifecycle: crate::su_session::SuSessionLifecycleState::Ready,
+            runtime_generation: 1,
+            native_session_id: "native-here".into(),
+            terminal: false,
+            reconciliation: crate::su_session::SuSessionReconciliation::Attached,
+            cwd: Some("/work/a".into()),
+        };
+        let pick = |inventory: &[crate::su_session::SuSessionInventoryEntry], launch: Option<&str>| {
+            default_operator_chat(&chats, inventory, launch).map(|chat| chat.id.clone())
+        };
+        // A fresh project: nothing there, so a new conversation.
+        assert_eq!(pick(&[here.clone()], Some("/work/b")), None);
+        assert_eq!(pick(&[], Some("/work/b")), None);
+        // The launch's own directory still wins over the newer unknown chat.
+        assert_eq!(pick(&[here.clone()], Some("/work/a")).as_deref(), Some("here"));
+        // A PUI with no known directory has nothing to scope by.
+        assert_eq!(pick(&[], None).as_deref(), Some("probe-failed"));
     }
 
     /// pui-chat-first-ux P-009 / D-008: quitting a PUI ends its engine, so the

@@ -155,6 +155,30 @@ export function isSuApprovalsMode(value: unknown): value is SuApprovalsMode {
   return typeof value === "string" && (SU_APPROVALS_MODES as readonly string[]).includes(value);
 }
 
+/**
+ * Token, context and cost measurements for a session (plan
+ * pui-chat-first-ux-2026-09-28 D-029 / D-031). Every field is optional: a field
+ * the engine cannot measure is omitted, never guessed. `contextTokens` is what
+ * the latest model call put in the context window; `costUsd` is the running
+ * session total, never a per-turn delta.
+ */
+export interface SuSessionUsage {
+  contextTokens?: number;
+  contextWindow?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+}
+
+export const SU_PLAN_ITEM_STATUSES = ["pending", "in_progress", "completed"] as const;
+export type SuPlanItemStatus = (typeof SU_PLAN_ITEM_STATUSES)[number];
+
+/** One row of the agent's own todo/plan list (Claude TodoWrite, Codex plan updates). */
+export interface SuPlanItem {
+  text: string;
+  status: SuPlanItemStatus;
+}
+
 export type SuSessionDescriptor<B extends SuSessionBackend = SuSessionBackend> =
   B extends SuSessionBackend
     ? {
@@ -169,6 +193,18 @@ export type SuSessionDescriptor<B extends SuSessionBackend = SuSessionBackend> =
          * engine that has no switchable mode (OMP always asks).
          */
         approvals?: SuApprovalsMode;
+        /**
+         * D-031: the latest usage measurements, merged field by field. Carried on
+         * the descriptor (published by a `session` event) rather than a new
+         * event type, so clients that predate it ignore it instead of failing to
+         * decode the stream. Omitted until the engine reports anything.
+         */
+        usage?: SuSessionUsage;
+        /**
+         * D-031: the agent's latest todo/plan list; each update replaces the
+         * whole list. Omitted by an engine that has no plan tool.
+         */
+        plan?: readonly SuPlanItem[];
         /** The account that actually served the latest completed native turn. */
         accountServed: string | null;
         accountRoute: string | null;

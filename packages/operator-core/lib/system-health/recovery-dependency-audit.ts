@@ -335,6 +335,13 @@ export const RECOVERY_MECHANISMS: readonly RecoveryMechanism[] = [
     recovers: [],
     note: 'Reads remote provider-pool burn and sheds agent concurrency before quota exhaustion; that failure domain is outside the listed operator substrate.',
   },
+  {
+    name: 'claude-update-canary',
+    file: 'packages/operator-core/lib/system-health/claude-update-canary.ts',
+    executor: 'operator-in-process-timer',
+    recovers: [],
+    note: 'Probes a changed Claude Code build and its saved model route, then escalates CLI regressions. The external CLI failure domain is outside the listed operator substrate; this timer does not claim to recover a stopped operator.',
+  },
 
   // ── DBOS / routines engine ───────────────────────────────────────────────────────
   {

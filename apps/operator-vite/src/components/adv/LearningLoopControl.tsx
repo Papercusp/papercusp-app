@@ -632,12 +632,19 @@ export default function LearningLoopControl() {
            "·$598.3" — a WRONG number, worse than no number. Now the strip
            WRAPS and is exactly one line tall: a figure that does not fit moves
            whole onto the hidden second line instead of being cut mid-value. */
+        /* INLINE line-breaking, not flex-wrap: a line always keeps its first
+           item even when it is too wide, and with one figure left (1024px)
+           Chrome's flex-wrap still sliced it ("·3 of 29 o") — even behind a
+           zero-width first flex item, measured. Here the figures are
+           inline-blocks after a zero-width space, which is a break
+           opportunity, so every figure can drop whole to the hidden line. */
         .pc-lloop__figs {
-          display: inline-flex; flex-wrap: wrap; align-items: center;
+          display: block; white-space: normal;
           min-width: 0; height: 18px; line-height: 18px;
           overflow: hidden; font-variant-numeric: tabular-nums;
         }
-        .pc-lloop__fig { flex: none; }
+        .pc-lloop__figs::before { content: "\\200B"; }
+        .pc-lloop__fig { display: inline-block; white-space: nowrap; }
         .pc-lloop__fig em { font-style: normal; color: var(--fg-mute); margin: 0 9px; }
         .pc-lloop__chip {
           display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;

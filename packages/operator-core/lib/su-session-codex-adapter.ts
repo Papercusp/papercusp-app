@@ -43,6 +43,7 @@ import {
   findCodexRolloutPath,
 } from './session-transcript-resolvers';
 import { createCodexTimelineParser, type TimelineLineParser } from './session-timeline-parsers';
+import { codexPlanCall, codexTokenUsage } from './su-session-usage';
 import { gatewayServedAccountForOwner } from './compaction-usage';
 import {
   SuSessionHost,
@@ -310,7 +311,7 @@ export function codexCapabilities(): SuSessionCapabilities {
       usage: {
         state: 'conditional',
         implementation: 'native',
-        reason: 'native token-count records are available but the v1 SU-session event contract has no usage event',
+        reason: 'rollout token_count records set descriptor.usage (latest-call tokens and context window); Codex reports no cost, so costUsd stays absent',
       },
       compaction: {
         state: 'conditional',
@@ -323,8 +324,9 @@ export function codexCapabilities(): SuSessionCapabilities {
         reason: 'PUI attached launches and resumptions use approvalPolicy on-request and a workspace-write sandbox; native requests become owner approval cards. Other managed engine callers must opt into toolApproval prompt.',
       },
       context: {
-        state: 'unsupported',
-        reason: 'the v1 SU-session contract carries no context event or descriptor field, so Codex context consumption stays inside the native runtime and never reaches the PUI',
+        state: 'conditional',
+        implementation: 'native',
+        reason: 'descriptor.usage.contextTokens and contextWindow come from rollout token_count records; absent until the first model call of the session',
       },
       modes: {
         state: 'conditional',
@@ -613,6 +615,15 @@ export class CodexSuSessionAdapter {
     }
     if (record.type === 'compacted') {
       if (!preserveLifecycle) this.host.transition('compacting', 'Codex native transcript compacted');
+    }
+    // D-029/D-031: usage and the agent's plan ride the session descriptor.
+    if (record.type === 'event_msg' && payloadType === 'token_count') {
+      const usage = codexTokenUsage(payload);
+      if (usage) this.host.updateUsage(usage);
+    }
+    if (record.type === 'response_item') {
+      const plan = codexPlanCall(payload);
+      if (plan) this.host.updatePlan(plan);
     }
 
     const error = nativeError(record);

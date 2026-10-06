@@ -490,7 +490,31 @@ async function sessionDirGcTick(): Promise<void> {
     },
     { name: 'session-dir-gc' },
   );
+  await chatBrainSessionGcTick();
   await dependencyGenerationRetentionTick();
+}
+
+// Same hourly janitor cadence: operator:converse brain-session dirs
+// (~/.papercusp/chat-brains) are dropped only when the SAME conversation takes
+// another turn, so an abandoned conversation's verbatim history stayed on disk
+// indefinitely (WI-10006551). The sweep removes only dirs past the session's
+// own 24h reuse window (plus a grace margin), which no later turn could resume.
+async function chatBrainSessionGcTick(): Promise<void> {
+  await DBOS.runStep(async () => {
+    try {
+      const { sweepExpiredChatBrainSessions } = await import('../agent-tools/operator/converse-session');
+      const r = sweepExpiredChatBrainSessions();
+      if (r.removed.length || r.errors.length) {
+        console.log(
+          `[chat-brain-session-gc] scanned ${r.scanned} dir(s) → removed ${r.removed.length}, kept ${r.kept}` +
+            (r.errors.length ? `, ${r.errors.length} error(s)` : ''),
+        );
+      }
+      for (const e of r.errors) console.warn(`[chat-brain-session-gc]   ! ${e.dir}: ${e.error}`);
+    } catch (error) {
+      console.warn(`[chat-brain-session-gc] tick failed: ${(error as Error).message}`);
+    }
+  }, { name: 'chat-brain-session-gc' });
 }
 const sessionDirGcWorkflow = idempotentRegisterWorkflow('sessionDirGc', () =>
   DBOS.registerWorkflow(sessionDirGcTick, {

@@ -288,6 +288,21 @@ function readMainThreadSyscallWait(): Record<string, string> {
 }
 
 /**
+ * What the main thread is doing when it did not answer an inspector request
+ * within its timeout. Unlike the STALLED report this does not require state
+ * D: an interruptible wait (state S) inside a synchronous syscall also blocks
+ * the inspector, and readMainThreadSyscallWait() itself drops a stale read.
+ */
+function describeUnansweredMainThread(): Record<string, string> {
+  const out: Record<string, string> = {};
+  const state = readMainThreadStat()?.state;
+  if (state) out.mainThreadState = state;
+  const wchan = readMainThreadWchan();
+  if (wchan) out.mainThreadWchan = wchan;
+  return Object.assign(out, readMainThreadSyscallWait());
+}
+
+/**
  * Name the main thread's live children, for the synchronous-subprocess case.
  *
  * When the loop is suspended inside `execSync`/`spawnSync` there IS a child,
@@ -558,11 +573,20 @@ async function captureStallProfile(
     if (mainThreadEventLoopResponse === 'pending') {
       mainThreadEventLoopResponse = String(err).includes('not answered within') ? 'not-answered' : 'error';
     }
+    // An inspector request the main thread never answered means it is inside
+    // native code (usually a synchronous syscall), so no profile can exist.
+    // Name the call and file instead; otherwise this stall stays unattributed
+    // (WI-10006344: 2 of 4 stalls after the start-timeout fix).
+    const blockedIn =
+      mainThreadInspectorResponse === 'not-answered' || mainThreadEventLoopResponse === 'not-answered'
+        ? describeUnansweredMainThread()
+        : {};
     emit('STALL profile capture failed — sentinel unaffected', {
       pid,
       stalenessAtStartMs,
       mainThreadActivity: cpuKind,
       ...stallProfileField(),
+      ...blockedIn,
       error: String(err).slice(0, 200),
     });
   } finally {

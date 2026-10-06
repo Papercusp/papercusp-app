@@ -56,7 +56,7 @@ import { createPersonalVaultExternalSinkForSource, VAULT_DATATYPES } from '../pe
 import { createDatatypeDestinationSinks } from '../data-sources/datatype-destination-sink';
 import { createRelationshipGraphSink } from '../relationship-graph/graph-sink';
 import { createInteractionParticipantSink, isInteractionDatatype } from '../relationship-graph/participants';
-import { isGraphEntityDatatype } from '../relationship-graph/resolver';
+import { graphDefaultHarness, isGraphEntityDatatype } from '../relationship-graph/resolver';
 import { createAppDeliverySinkIfConfigured, reportAppSinkGateError } from '../app-data-producer/live-sink';
 import { DATATYPE_FOR_APP } from '../app-data-producer/app-rows';
 
@@ -478,7 +478,14 @@ export async function connectorSinksFor(
   if (VAULT_DATATYPES.includes(datatype)) {
     if (source.ownerUserId) sinks.push(await createPersonalSink(sql, source.workspaceId, source.id));
   } else {
-    const datatypeSinks = await createDatatypeSinks(sql, { workspaceId: source.workspaceId, sourceId: source.id, datatype });
+    // A graph record from a personal source (no harness of its own) lands in the graph's home
+    // harness (D-019); every other datatype still fails closed without a source harness.
+    const datatypeSinks = await createDatatypeSinks(sql, {
+      workspaceId: source.workspaceId,
+      sourceId: source.id,
+      datatype,
+      ...(isGraphEntityDatatype(datatype) ? { defaultHarness: graphDefaultHarness() } : {}),
+    });
     sinks.push(...datatypeSinks);
     // A stored person/organization record re-resolves its identity cluster in the platform
     // relationship graph (crm-agent-sales-onboarding-apps-2026-10-06 P-002). Only when the

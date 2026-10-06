@@ -42,6 +42,7 @@ import {
 import { useSyncQuery } from '@papercusp/sync';
 import { useLexicon } from '../../lib/useLexicon';
 import { Checkbox } from './Checkbox';
+import { RadioGroup } from './RadioGroup';
 import { Select } from './Select';
 import { Tooltip } from './Tooltip';
 
@@ -1056,26 +1057,17 @@ export function EntryGithubUrlForm({ onBack, onCreated, hiveScope = null, initia
             </p>
           )}
           {integrationQuestion.blocked && <Hint>{integrationQuestion.blocked}</Hint>}
-          {integrationQuestion.options.map((opt) => (
-            <label
-              key={opt.value}
-              data-testid={`integration-mode-${opt.value}`}
-              style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: opt.available ? 'pointer' : 'not-allowed' }}
-            >
-              <input
-                type="radio"
-                name="integration-mode"
-                value={opt.value}
-                checked={effectiveIntegrationMode === opt.value}
-                disabled={!opt.available}
-                onChange={() => setIntegrationMode(opt.value)}
-                // A click on the already-selected default fires no change event, but it
-                // is still an explicit answer: record it so the server's workspace
-                // default cannot override what the owner picked (P-018).
-                onClick={() => setIntegrationMode(opt.value)}
-                style={{ marginTop: 3 }}
-              />
-              <span>
+          <RadioGroup
+            label={integrationQuestion.prompt}
+            value={effectiveIntegrationMode}
+            options={integrationQuestion.options.map(opt => ({ ...opt, disabled: !opt.available }))}
+            // Clicking the selected default is still an explicit answer (P-018).
+            onChange={setIntegrationMode}
+            optionStyle={opt => ({ display: 'flex', width: '100%', textAlign: 'left', alignItems: 'flex-start', gap: 8, padding: '6px 8px', border: 'none', background: 'transparent', color: 'var(--fg)', borderRadius: 6, cursor: opt.disabled ? 'not-allowed' : 'pointer' })}
+          >
+            {(opt, checked) => <>
+              <span aria-hidden="true">{checked ? '◉' : '○'}</span>
+              <span data-testid={`integration-mode-${opt.value}`}>
                 <span style={{ display: 'block', fontSize: 13, fontWeight: effectiveIntegrationMode === opt.value ? 600 : 500 }}>
                   {opt.label}
                   {opt.recommended && (
@@ -1091,8 +1083,8 @@ export function EntryGithubUrlForm({ onBack, onCreated, hiveScope = null, initia
                   {opt.available ? opt.description : opt.unavailableReason}
                 </span>
               </span>
-            </label>
-          ))}
+            </>}
+          </RadioGroup>
         </fieldset>
       )}
 

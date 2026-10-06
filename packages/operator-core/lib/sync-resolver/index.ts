@@ -1208,6 +1208,23 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
     },
   },
 
+  // desktops.local — the Desktops page's "This computer" grid
+  // (agent-multi-desktops-grid-2026-10-06 P-007, D-015): every local agent desktop,
+  // labelled with its owner and that owner's current work-item. The SAME read as
+  // GET /deploy/local-desktops. NOT trigger-backed: desktop_sessions has no
+  // change-notify trigger, so the registry's roster-visible writes announce this
+  // name themselves (desktop-session-registry LOCAL_DESKTOPS_QUERY), and the grid
+  // re-reads on its visible tick because a claim can change with no registry write.
+  'desktops.local': {
+    resolve: async () => {
+      const [{ activeWorkspaceId }, { readLocalDesktopRoster }] = await Promise.all([
+        import('../workspace-registry'),
+        import('../endpoint-route/routes/deploy/local-desktops'),
+      ]);
+      return readLocalDesktopRoster(activeWorkspaceId()) as Promise<unknown[]>;
+    },
+  },
+
   // storage.usage — live storage usage by category for Settings → Storage
   // (storage-settings-page-2026-06-15 P-003). Reuses the audit introspection
   // (pg table sizes + age distribution + on-disk du). No args.

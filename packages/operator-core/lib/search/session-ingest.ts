@@ -1273,6 +1273,9 @@ export interface PromptOriginStamp {
   session_id: string;
   prompt_hash: string;
   submitted_at: Date | string;
+  /** Validity is anchored to the TURN it authenticates, never to ingest time
+   *  (WI-10006568): a stamp vouches for a prompt typed before it expired. */
+  expires_at?: Date | string | null;
 }
 
 /** Upgrade only the exact v5 uncertainty state. An authenticated stamp can
@@ -1299,6 +1302,11 @@ export function correlatePromptOriginStamps(rows: TurnRow[], stamps: PromptOrigi
         stamp.session_id !== row.session_id ||
         stamp.prompt_hash !== row.prompt_hash
       ) continue;
+      // An expired stamp cannot vouch for a prompt typed after it expired. It
+      // is compared with the TURN's own time, not with now(): measuring it
+      // against ingest time lost every owner turn ingested more than one TTL
+      // late (WI-10006568, 58 rows measured).
+      if (stamp.expires_at != null && !(new Date(stamp.expires_at).getTime() > rowMs)) continue;
       const submittedMs = new Date(stamp.submitted_at).getTime();
       const delta = Math.abs(rowMs - submittedMs);
       if (Number.isFinite(delta) && delta <= PROMPT_ORIGIN_MATCH_WINDOW_MS && delta < bestDelta) {
@@ -1654,15 +1662,17 @@ export async function insertTurns(sql: Sql, rows: TurnRow[]): Promise<number> {
       const from = new Date(Math.min(...times) - PROMPT_ORIGIN_MATCH_WINDOW_MS);
       const to = new Date(Math.max(...times) + PROMPT_ORIGIN_MATCH_WINDOW_MS);
       const stamps = await sql<PromptOriginStamp[]>`
-        SELECT source_kind, session_id, prompt_hash, submitted_at
+        SELECT source_kind, session_id, prompt_hash, submitted_at, expires_at
           FROM harness_shared.session_prompt_origin_stamps
          WHERE workspace_id = ${activeWorkspaceId()}
            AND source_kind = ANY(${sql.array(sourceKinds)}::text[])
            AND session_id = ANY(${sql.array(sessionIds)}::text[])
            AND prompt_hash = ANY(${sql.array(promptHashes)}::text[])
            AND submitted_at BETWEEN ${from} AND ${to}
-           AND expires_at > now()
       `;
+      // Expiry is checked per row inside correlatePromptOriginStamps, against
+      // the turn's own timestamp. An `expires_at > now()` filter here made
+      // the verdict depend on ingest lag (WI-10006568).
       correlatePromptOriginStamps(rows, stamps);
     }
   }
@@ -2140,7 +2150,157 @@ export async function runTurnProvenanceBackfillOnce(): Promise<ProvenanceBackfil
     more = r.more;
     if (!r.more) break;
   }
-  return { scanned, updated, more };
+  // After the re-derivation above, so rows it just moved to the current
+  // catalogue version are eligible for their hook stamp in the same tick.
+  const recorrelated = await recorrelatePromptOriginStampsOnce(sql);
+  return {
+    scanned: scanned + recorrelated.scanned,
+    updated: updated + recorrelated.promoted,
+    more: more || recorrelated.more,
+  };
+}
+
+export interface PromptOriginRecorrelationResult {
+  /** Distinct unenrolled rows the prefilter paired with a stamp. */
+  scanned: number;
+  /** Rows the shared correlation rule upgraded to owner-typed. */
+  promoted: number;
+  more: boolean;
+}
+
+/**
+ * Re-apply the hook-stamp correlation to rows ALREADY stored as
+ * `unenrolled-origin` (WI-10006568).
+ *
+ * insertTurns correlates once, at insert, and writes ON CONFLICT DO NOTHING,
+ * so a row that missed its stamp was never revisited: ingest that ran before
+ * the hook's stamp landed, ingest that ran more than one stamp TTL late (the
+ * old `expires_at > now()` filter), and every row ingested before correlation
+ * shipped. Measured 2026-10-06: 1,508 owner turns in 648 sessions, including
+ * owner directive #1459, which then failed plans:audit's owner-provenance check.
+ *
+ * The SQL is a PREFILTER only. Its normalised-text hash keeps permanent
+ * non-matches out of the LIMIT window so they cannot starve real matches.
+ * correlatePromptOriginStamps, the same function insertTurns uses, decides
+ * every upgrade: same session, same hash, ±PROMPT_ORIGIN_MATCH_WINDOW_MS,
+ * turn-anchored expiry, one row per stamp. The hash is recomputed from the
+ * STORED text, so a row whose stored text differs from the raw prompt (for
+ * example a truncated body) stays unmatched. This pass can miss a row; it
+ * cannot attribute text the owner did not type.
+ */
+export async function recorrelatePromptOriginStampsOnce(
+  sql: Sql,
+  limit = PROVENANCE_BACKFILL_BATCH,
+): Promise<PromptOriginRecorrelationResult> {
+  const workspace = activeWorkspaceId();
+  const windowMs = PROMPT_ORIGIN_MATCH_WINDOW_MS;
+  const pairs = await sql<
+    Array<{
+      workspace_id: string;
+      source_kind: string;
+      session_id: string;
+      turn_idx: number;
+      ts: Date | string;
+      speaker: string;
+      text: string;
+      prompt_hash: string;
+      submitted_at: Date | string;
+      expires_at: Date | string;
+    }>
+  >`
+    SELECT turns.workspace_id, turns.source_kind, turns.session_id, turns.turn_idx,
+           turns.ts, turns.speaker, turns.text,
+           stamps.prompt_hash, stamps.submitted_at, stamps.expires_at
+      FROM harness_shared.session_prompt_origin_stamps AS stamps
+      JOIN harness_shared.session_turns AS turns
+        ON turns.workspace_id IN ('default', ${workspace})
+       AND turns.source_kind = stamps.source_kind
+       AND turns.session_id = stamps.session_id
+       AND turns.ts BETWEEN stamps.submitted_at - (${windowMs}::int * interval '1 millisecond')
+                        AND stamps.submitted_at + (${windowMs}::int * interval '1 millisecond')
+     WHERE stamps.workspace_id = ${workspace}
+       AND turns.speaker = 'user'
+       AND turns.turn_origin_verdict = ${UNENROLLED_ORIGIN_VERDICT}
+       AND turns.turn_origin_classifier_version = ${MACHINE_SURFACE_CATALOGUE_VERSION}
+       -- Mirrors promptOriginHash (CRLF -> LF, trim). Prefilter only; a drift
+       -- between the two makes rows MISS, which the integration test catches.
+       AND encode(sha256(convert_to(
+             regexp_replace(regexp_replace(turns.text, E'\\r\\n?', E'\\n', 'g'), '^\\s+|\\s+$', '', 'g'),
+             'UTF8')), 'hex') = stamps.prompt_hash
+       -- A stamp already spent on a hook-authenticated row stays spent.
+       AND NOT EXISTS (
+         SELECT 1
+           FROM harness_shared.session_turns AS spent
+          WHERE spent.workspace_id = turns.workspace_id
+            AND spent.source_kind = stamps.source_kind
+            AND spent.session_id = stamps.session_id
+            AND spent.turn_origin = ${HOOK_AUTHENTICATED_PROMPT_ORIGIN}
+            AND spent.ts BETWEEN stamps.submitted_at - (${windowMs}::int * interval '1 millisecond')
+                             AND stamps.submitted_at + (${windowMs}::int * interval '1 millisecond')
+            AND encode(sha256(convert_to(
+                  regexp_replace(regexp_replace(spent.text, E'\\r\\n?', E'\\n', 'g'), '^\\s+|\\s+$', '', 'g'),
+                  'UTF8')), 'hex') = stamps.prompt_hash
+       )
+     ORDER BY turns.ts, turns.session_id, turns.turn_idx
+     LIMIT ${limit}
+  `;
+  if (!pairs.length) return { scanned: 0, promoted: 0, more: false };
+
+  const rowsByKey = new Map<string, TurnRow>();
+  const stampsByKey = new Map<string, PromptOriginStamp>();
+  for (const p of pairs) {
+    const rowKey = [p.workspace_id, p.source_kind, p.session_id, p.turn_idx].join('\u0000');
+    if (!rowsByKey.has(rowKey)) {
+      rowsByKey.set(rowKey, {
+        workspace_id: p.workspace_id,
+        source_kind: p.source_kind,
+        session_id: p.session_id,
+        turn_idx: Number(p.turn_idx),
+        ts: new Date(p.ts).toISOString(),
+        owner: null,
+        harness_slug: null,
+        cwd: null,
+        speaker: p.speaker,
+        text: p.text,
+        turn_origin: null,
+        turn_origin_verdict: UNENROLLED_ORIGIN_VERDICT,
+        turn_origin_classifier_version: MACHINE_SURFACE_CATALOGUE_VERSION,
+        prompt_hash: promptOriginHash(p.text),
+      });
+    }
+    const stampKey = [p.source_kind, p.session_id, p.prompt_hash, new Date(p.submitted_at).getTime()].join('\u0000');
+    if (!stampsByKey.has(stampKey)) {
+      stampsByKey.set(stampKey, {
+        source_kind: p.source_kind,
+        session_id: p.session_id,
+        prompt_hash: p.prompt_hash,
+        submitted_at: p.submitted_at,
+        expires_at: p.expires_at,
+      });
+    }
+  }
+  const rows = [...rowsByKey.values()];
+  correlatePromptOriginStamps(rows, [...stampsByKey.values()]);
+  const promoted = rows.filter((row) => row.turn_origin === HOOK_AUTHENTICATED_PROMPT_ORIGIN);
+  if (promoted.length) {
+    await sql`
+      UPDATE harness_shared.session_turns AS turns
+         SET turn_origin = ${HOOK_AUTHENTICATED_PROMPT_ORIGIN},
+             turn_origin_verdict = 'owner-typed'
+        FROM UNNEST(
+               ${sql.array(promoted.map((row) => row.workspace_id))}::text[],
+               ${sql.array(promoted.map((row) => row.source_kind))}::text[],
+               ${sql.array(promoted.map((row) => row.session_id))}::text[],
+               ${sql.array(promoted.map((row) => row.turn_idx))}::int[]
+             ) AS hit(workspace_id, source_kind, session_id, turn_idx)
+       WHERE turns.workspace_id = hit.workspace_id
+         AND turns.source_kind = hit.source_kind
+         AND turns.session_id = hit.session_id
+         AND turns.turn_idx = hit.turn_idx
+         AND turns.turn_origin_verdict = ${UNENROLLED_ORIGIN_VERDICT}
+    `;
+  }
+  return { scanned: rows.length, promoted: promoted.length, more: pairs.length === limit };
 }
 
 interface IngestState {

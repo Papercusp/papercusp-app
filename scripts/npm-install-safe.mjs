@@ -893,6 +893,16 @@ export function installLockWaitReporter({ lock, describe, log, budgetMs }) {
   };
 }
 
+/**
+ * @param {{
+ *   repoRoot?: string,
+ *   commandArgs?: string[],
+ *   runCommand?: (command: string, args: string[], options: {
+ *     cwd: string, stdio: 'inherit', env: NodeJS.ProcessEnv,
+ *   }) => { status?: number | null, error?: Error },
+ *   env?: NodeJS.ProcessEnv,
+ * }} [options]
+ */
 export function runCommandUnderInstallMutex({
   repoRoot = DEFAULT_REPO_ROOT,
   commandArgs,

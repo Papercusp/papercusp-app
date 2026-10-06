@@ -1703,7 +1703,82 @@ async function resolveWorklistClosures(
   return closures;
 }
 
-export async function readGoalPortfolioBrief(args: {
+/**
+ * The claim-floor stage of a portfolio read. `assembleGoalPortfolioBrief` always
+ * returns the UNCOUNTED snapshot and records here what counting needs, so the
+ * count can run after the snapshot is already delivered (EI-25191349922959563).
+ */
+interface GoalPortfolioClaimStage {
+  /** False when the queue had no issue candidates (claimable is already a measured 0). */
+  countable: boolean;
+  claimCandidates: Array<{ id: string; harness: string }>;
+  /** Rebuilds the priority list with a measured claimable count. */
+  buildPriorities: ((claimable: number | null) => string[]) | null;
+}
+
+type ReadGoalPortfolioArgs = Parameters<typeof assembleGoalPortfolioBrief>[0];
+
+async function countGoalPortfolioClaimability(
+  brief: GoalPortfolioBrief,
+  stage: GoalPortfolioClaimStage,
+): Promise<GoalPortfolioBrief> {
+  if (!stage.countable) return brief;
+  const reasons = [...brief.degradedReasons];
+  let claimable: number | null = null;
+  let claimabilityScope: GoalPortfolioBrief['queue']['claimabilityScope'] = 'unknown';
+  try {
+    const { explainIssueClaimFloors } = await import('./work-items');
+    const byHarness = new Map<string, string[]>();
+    for (const { id, harness } of stage.claimCandidates) byHarness.set(harness, [...(byHarness.get(harness) ?? []), id]);
+    const admissible = await Promise.all(
+      [...byHarness].map(async ([harness, ids]) =>
+        (await explainIssueClaimFloors(harness, ids)).filter((floor) => floor.admissible).length),
+    );
+    claimable = admissible.reduce((sum, count) => sum + count, 0);
+    claimabilityScope = 'issue-family';
+  } catch (error) {
+    reasons.push(`goal-scoped claimability unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return {
+    ...brief,
+    queue: { ...brief.queue, claimable, claimabilityScope },
+    priorities: stage.buildPriorities ? stage.buildPriorities(claimable) : brief.priorities,
+    degradedReasons: [...new Set(reasons)],
+  };
+}
+
+/**
+ * One portfolio snapshot, delivered in two stages. `snapshot` is the brief WITHOUT
+ * the per-id claim-floor count (claimabilityScope 'not-requested'); `counted` is
+ * the same snapshot with `queue.claimable` measured over the same candidate rows.
+ * A caller that needs one consistent snapshot for both an obligation fold (which
+ * never reads queue.claimable and runs under AGENT_OBLIGATION_OPTIONAL_READ_TIMEOUT_MS)
+ * and a display fold must use this instead of sharing one counted read: the count
+ * alone took ~0.9s on goal 60d3a8 and timed the obligation fold out every wake
+ * (EI-25191349922959563).
+ */
+export function readGoalPortfolioBriefStaged(args: Omit<ReadGoalPortfolioArgs, 'claimability'>): {
+  snapshot: Promise<GoalPortfolioBrief | null>;
+  counted: Promise<GoalPortfolioBrief | null>;
+} {
+  const stage: GoalPortfolioClaimStage = { countable: false, claimCandidates: [], buildPriorities: null };
+  const assembled = assembleGoalPortfolioBrief(args, stage);
+  const snapshot = assembled;
+  const counted = assembled.then((brief) => (brief ? countGoalPortfolioClaimability(brief, stage) : null));
+  // Either stage may go unread; a rejection must never surface as unhandled.
+  void snapshot.catch(() => undefined);
+  void counted.catch(() => undefined);
+  return { snapshot, counted };
+}
+
+export async function readGoalPortfolioBrief(args: ReadGoalPortfolioArgs): Promise<GoalPortfolioBrief | null> {
+  const stage: GoalPortfolioClaimStage = { countable: false, claimCandidates: [], buildPriorities: null };
+  const brief = await assembleGoalPortfolioBrief(args, stage);
+  if (!brief || args.claimability === 'skip') return brief;
+  return countGoalPortfolioClaimability(brief, stage);
+}
+
+async function assembleGoalPortfolioBrief(args: {
   workspaceId: string;
   goalId: string;
   /** Only attest the elected holder when composing that holder's orient. */
@@ -1727,7 +1802,7 @@ export async function readGoalPortfolioBrief(args: {
     headcount: GoalHeadcount;
     degradedReasons?: string[];
   };
-}): Promise<GoalPortfolioBrief | null> {
+}, stage: GoalPortfolioClaimStage): Promise<GoalPortfolioBrief | null> {
   const degradedReasons = [...(args.launch?.degradedReasons ?? [])];
   let launch = args.launch;
   if (!launch) {
@@ -2077,33 +2152,19 @@ export async function readGoalPortfolioBrief(args: {
     const candidates = portfolioArray(queueRaw.issueCandidates)
       .map(portfolioObject)
       .filter((candidate): candidate is Record<string, unknown> => candidate !== null);
-    const skipClaimability = args.claimability === 'skip';
-    let claimable: number | null = candidates.length === 0 ? 0 : null;
-    let claimabilityScope: GoalPortfolioBrief['queue']['claimabilityScope'] =
-      candidates.length === 0 ? 'none' : skipClaimability ? 'not-requested' : 'unknown';
-    if (candidates.length > 0 && !skipClaimability) {
-      try {
-        const { explainIssueClaimFloors } = await import('./work-items');
-        let admissible = 0;
-        const byHarness = new Map<string, string[]>();
-        for (const candidate of candidates) {
-          const id = portfolioString(candidate.id);
-          const harness = portfolioString(candidate.harness);
-          if (!id || !harness) continue;
-          byHarness.set(harness, [...(byHarness.get(harness) ?? []), id]);
-        }
-        for (const [harness, ids] of byHarness) {
-          const floors = await explainIssueClaimFloors(harness, ids);
-          admissible += floors.filter((floor) => floor.admissible).length;
-        }
-        claimable = admissible;
-        claimabilityScope = 'issue-family';
-      } catch (error) {
-        degradedReasons.push(
-          `goal-scoped claimability unavailable: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
+    // The per-id claim-floor count is NOT run here: it is the slow stage
+    // (EI-25191349922959563) and runs afterwards in countGoalPortfolioClaimability
+    // over exactly these candidate rows, so a staged caller can deliver this
+    // snapshot first. Until counted, a non-empty queue reads 'not-requested'.
+    const claimable: number | null = candidates.length === 0 ? 0 : null;
+    const claimabilityScope: GoalPortfolioBrief['queue']['claimabilityScope'] =
+      candidates.length === 0 ? 'none' : 'not-requested';
+    stage.countable = candidates.length > 0;
+    stage.claimCandidates = candidates.flatMap((candidate) => {
+      const id = portfolioString(candidate.id);
+      const harness = portfolioString(candidate.harness);
+      return id && harness ? [{ id, harness }] : [];
+    });
 
     const assembledAt = args.now ?? new Date();
     // TWO PASSES (P-026 / D-012). The first compiles placement with no closure
@@ -2243,6 +2304,7 @@ export async function readGoalPortfolioBrief(args: {
           origin: portfolioString(item.origin) }];
       }),
     });
+    const buildPriorities = (claimableCount: number | null): string[] => {
     const priorities: string[] = [];
     if (attribution.status !== 'healthy') {
       priorities.push(`Repair attribution ladder: ${attribution.issues.map((issue) => `${issue.code}(${issue.ref})`).join(', ')}.`);
@@ -2258,14 +2320,17 @@ export async function readGoalPortfolioBrief(args: {
     const repairPlan =
       executablePlacement ?? worklist.find((plan) => plan.placement.reconciliation.action !== 'none');
     if (repairPlan) priorities.push(`Reconcile ${repairPlan.ref}: ${repairPlan.placement.reconciliation.reason}`);
-    if ((claimable ?? 0) > 0)
-      priorities.push(`Place ${claimable} goal-scoped claimable issue(s) without implementing them yourself.`);
+    if ((claimableCount ?? 0) > 0)
+      priorities.push(`Place ${claimableCount} goal-scoped claimable issue(s) without implementing them yourself.`);
     if (queue.blocked > 0)
       priorities.push(`Triage ${queue.blocked} blocked/cursed queue item(s) and remove stranded blockers.`);
     if (portfolioNumber(row.blender_pending) > 0)
       priorities.push(`Grade or route ${portfolioNumber(row.blender_pending)} pending Blender idea(s).`);
     if (priorities.length === 0)
       priorities.push('Refresh the worklist and queue, then continue supervision; do not self-implement.');
+    return priorities.slice(0, 6);
+    };
+    stage.buildPriorities = buildPriorities;
 
     return {
       schemaVersion: 1,
@@ -2331,7 +2396,7 @@ export async function readGoalPortfolioBrief(args: {
       },
       reporting: { cadence: reportCadence, draft: reportDraft, movementTruncated, killedTruncated },
       ...(args.attestOwnerId ? { holderAttestation } : {}),
-      priorities: priorities.slice(0, 6),
+      priorities: buildPriorities(claimable),
       degradedReasons: [...new Set(degradedReasons)],
     };
   } catch (error) {

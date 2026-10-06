@@ -25,7 +25,10 @@ export async function buildEmbedderForMode(
 }
 
 /** Resolve one already-selected production mode without re-running the parent process' cascade. */
-export async function resolveEmbedderForMode(mode: EmbedderMode): Promise<ResolvedEmbedder> {
+// `'disabled'` is the stored-preference value for "no embedding"; it is not an
+// EmbedderMode, but an untyped caller (the precision bench) can still pass it, so the
+// parameter admits it and the guard below refuses it at runtime.
+export async function resolveEmbedderForMode(mode: EmbedderMode | 'disabled'): Promise<ResolvedEmbedder> {
   if (mode === 'disabled') throw new Error('precision bench cannot run with memory embedding disabled');
   let embed: EmbedFn;
   if (mode === 'openai') {

@@ -30,6 +30,7 @@ import { getOrgPg } from '@papercusp/db-org';
 import { checkpointDeclaresTerminal } from './checkpoint-terminal-claim';
 import { detectBgJobCheckpointClaim } from './checkpoint-bg-job-claim';
 import { claimHoldExclusionSql } from './work-items';
+import { issueOwnAuthorWhereSql } from './work-items-admission';
 
 /**
  * The auto-appended tool-log section, stripped before the head is cut.
@@ -97,10 +98,17 @@ export interface StrandedCandidate {
    *
    * A `false` does NOT mean "skip it" — those strands still need draining, just by a
    * different move (verify, then hand the authoring peer the evidence).
+   *
+   * WI-10006562: an origin='remote' row authored by one of THIS node's own keys (a sync
+   * echo stranded the label) IS closable here — the write paths heal its origin
+   * (selfHealOwnNodeOriginIfStranded) — so it reads `true`, with `ownNodeAuthored` saying why.
    */
   closableLocally: boolean;
   /** Raw federation origin backing `closableLocally` (`'local' | 'remote' | null`). */
   origin: string | null;
+  /** True only for an origin='remote' row whose author key is one of this node's own keys:
+   *  the remote label is a stranded echo, not a peer's authorship. */
+  ownNodeAuthored: boolean;
 }
 
 export interface StrandedScanResult {
@@ -135,6 +143,8 @@ interface ScanRow {
   assignee: string | null;
   severity: string | null;
   origin: string | null;
+  /** origin='remote' AND authored by one of this node's own keys (computed in the scan SQL). */
+  own_node_authored?: boolean | null;
   note: string | null;
   updated_ts: string | number | null;
 }
@@ -176,7 +186,11 @@ export function classifyStrandedRows(
     // Only an explicit 'remote' blocks a local close — an unknown/null origin is treated
     // as closable so a missing column reads as "try it", never as a phantom wall that
     // hides drainable work. The refusal is authoritative and cheap when we are wrong.
-    const closableLocally = r.origin !== 'remote';
+    // An own-node row stranded at 'remote' is no wall either (WI-10006562): its write paths
+    // heal the label, so only a remote row authored by a PEER blocks a local close.
+    const remoteLabel = r.origin === 'remote';
+    const ownNodeAuthored = remoteLabel && r.own_node_authored === true;
+    const closableLocally = !remoteLabel || ownNodeAuthored;
     if (!closableLocally) matchedNotClosableLocally += 1;
     matches.push({
       id: r.issue_id,
@@ -191,6 +205,7 @@ export function classifyStrandedRows(
       citesBgJob,
       closableLocally,
       origin: r.origin,
+      ownNodeAuthored,
     });
   }
 
@@ -253,7 +268,14 @@ export async function scanStrandedCheckpoints(args: {
   const harnessScope = args.harness ? `harness:${args.harness}` : null;
   const rows = await sql<ScanRow[]>`
     SELECT ei.issue_id, ei.scope, ei.kind, ei.title, ei.assignee, ei.severity,
-           ei.origin, cn.note, cn.updated_ts
+           ei.origin, cn.note, cn.updated_ts,
+           -- WI-10006562: same own-key predicate the claim gate and write-path heal use
+           -- (work-items-admission.ts), so the label and the refusal cannot disagree.
+           (ei.origin = 'remote' AND EXISTS (
+             SELECT 1 FROM harness_shared.work_items wi
+              WHERE wi.workspace_id = ei.workspace_id AND wi.feature_id = ei.issue_id
+                AND ${issueOwnAuthorWhereSql(sql, args.workspaceId)}
+           )) AS own_node_authored
       FROM harness_shared.carry_notes cn
       JOIN harness_shared.engineer_issues ei
         ON ei.workspace_id = cn.workspace_id

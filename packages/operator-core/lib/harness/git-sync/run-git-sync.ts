@@ -4045,17 +4045,32 @@ export async function commitAttributedGroups(
     /** EI-24712906810240170: runs after each group's add and before its commit (see
      *  guardStagedIndexBeforeCommit). A failure aborts the phase with that error. */
     beforeCommit?: () => Promise<{ ok: true } | { ok: false; error: string }>;
+    /** WI-10006519: receives the stale-lock recovery diagnostics. */
+    log?: (m: string) => void;
   } = {},
 ): Promise<{ committedAny: boolean; committedCount: number; error?: string }> {
   const excludeSet = new Set(excludePaths);
   const dirty = (await dirtyFiles(runGit, repoPath)).filter((f) => !excludeSet.has(f));
   const groups = groupFilesForAttribution(dirty, attribution);
   const suffix = skipCiSuffix(message);
+  const log = opts.log ?? (() => {});
   let committedAny = false;
   let committedCount = 0;
   for (const g of groups) {
     if (g.agent === null || g.files.length === 0) continue; // catch-all handled by the caller's add -A
-    const add = await runGit(['add', '--', ...g.files], repoPath);
+    // WI-10006519: an index.lock orphaned by a killed git process failed this add on
+    // every tick (2026-10-06 07:09Z and 08:00Z). Route it through the same age- and
+    // holder-checked recovery the catch-all add and the commit already use; a FRESH or
+    // live-held lock is still left alone and surfaces as an error after bounded retries.
+    const addArgs = ['add', '--', ...g.files];
+    const add = await recoverIndexLockContention(
+      await runGit(addArgs, repoPath),
+      () => runGit(addArgs, repoPath),
+      runGit,
+      repoPath,
+      'attributed git add',
+      log,
+    );
     if (add.code !== 0) {
       return {
         committedAny,
@@ -4092,7 +4107,14 @@ export async function commitAttributedGroups(
     }
     if (g.sessionId) args.push('-m', `Papercusp-Session: ${g.sessionId}`);
     if (g.planSlug) args.push('-m', `Papercusp-Plan: ${g.planSlug}`);
-    const c = await runGit(args, repoPath);
+    const c = await recoverIndexLockContention(
+      await runGit(args, repoPath),
+      () => runGit(args, repoPath),
+      runGit,
+      repoPath,
+      'attributed git commit',
+      log,
+    );
     if (c.code === 0) {
       committedAny = true;
       committedCount += 1;
@@ -4863,7 +4885,7 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
         o.attribution,
         [...stagingExcludePaths, ...migrationCandidates, ...(o.forceCatchAllPaths ?? [])],
         message,
-        { diffSubjects: o.diffSubjects, beforeCommit: postStageGuard },
+        { diffSubjects: o.diffSubjects, beforeCommit: postStageGuard, log: o.log },
       );
       if (res.error) {
         // STRANDING GUARD (2026-06-30): a failed per-agent attributed commit — e.g. an

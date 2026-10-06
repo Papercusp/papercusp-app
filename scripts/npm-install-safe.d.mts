@@ -272,10 +272,28 @@ export function installLockWaitReporter({ lock, describe, log, budgetMs }: {
         waitedMs: number;
     }) => void;
 };
+/**
+ * @param {{
+ *   repoRoot?: string,
+ *   commandArgs?: string[],
+ *   runCommand?: (command: string, args: string[], options: {
+ *     cwd: string, stdio: 'inherit', env: NodeJS.ProcessEnv,
+ *   }) => { status?: number | null, error?: Error },
+ *   env?: NodeJS.ProcessEnv,
+ * }} [options]
+ */
 export function runCommandUnderInstallMutex({ repoRoot, commandArgs, runCommand, env, }?: {
-    repoRoot?: string | undefined;
-    runCommand?: typeof spawnSync | undefined;
-    env?: NodeJS.ProcessEnv | undefined;
+    repoRoot?: string;
+    commandArgs?: string[];
+    runCommand?: (command: string, args: string[], options: {
+        cwd: string;
+        stdio: "inherit";
+        env: NodeJS.ProcessEnv;
+    }) => {
+        status?: number | null;
+        error?: Error;
+    };
+    env?: NodeJS.ProcessEnv;
 }): Promise<number>;
 export function main(argv?: string[]): Promise<any>;
 export { installMutexIsHeld } from "./lib/install-lock-name.mjs";

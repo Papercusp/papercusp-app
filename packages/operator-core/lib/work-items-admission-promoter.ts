@@ -17,6 +17,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { getOrgPg } from '@papercusp/db-org';
 import { isLlmCallError } from '@papercusp/testing-shell/llm';
 import { z } from 'zod';
+import { boundedOrgTxn } from './pg-bounded-txn';
 import { isTransientNetworkError } from './loopback-fetch';
 import { activeExternalBlockers } from './external-blockers';
 import { isCompletionRef } from './harness/completion-ref-types';
@@ -38,7 +39,7 @@ import { selectCanonicalIssue, recordIssueOccurrence, type IssueOccurrenceCounts
 import { LEARNING_MODEL_SPEC } from './learning/model-policy';
 import { ALL_SUCCESSFUL_STATUSES, ALL_TERMINAL_STATUSES } from './work-item-blocking';
 import { isSufficientEvidence } from './work-item-completion-authority';
-import { DEFAULT_PROMOTER_TICK_MINUTES } from './work-items-admission';
+import { DEFAULT_PROMOTER_TICK_MINUTES, ownNodeAuthoredRemoteIds } from './work-items-admission';
 import {
   activeWorkItemDependencyRefsSql,
   readWorkItemDependenciesForRefs,
@@ -88,6 +89,8 @@ export const WORK_ITEM_ADMISSION_FAIL_OPEN = 'work-item-admission-fail-open';
 export const PROMOTER_ACTOR = `system:${WORK_ITEM_ADMISSION_PROMOTER}`;
 export const FAIL_OPEN_ACTOR = `system:${WORK_ITEM_ADMISSION_FAIL_OPEN}`;
 export const DEFAULT_PROMOTER_BATCH_SIZE = 20;
+/** Bound the deterministic quick-action update so one tick cannot monopolize its protected lane. */
+export const DEFAULT_FAIL_OPEN_BATCH_SIZE = 100;
 /** Process-local throttle for the work-scope `held` ledger line (one per harness). */
 const scopeHeldHarnessesNoted = new Set<string>();
 /**
@@ -175,6 +178,13 @@ export interface AdmissionMergeSnapshot {
   createdAtMs: number;
   updatedAtMs: number;
   origin: string | null;
+  /**
+   * WI-10006515: present (true) only for an origin='remote' row authored by one of THIS
+   * workspace's own keys. `origin` records how a row ARRIVED, not who wrote it (WI-10003565),
+   * so such a row is ours and must not be refused as remote-owned. Absent otherwise, so the
+   * fingerprint of every other snapshot is unchanged.
+   */
+  ownNode?: true;
   assignee: string | null;
   payload: unknown;
   completionRef: unknown;
@@ -1377,6 +1387,14 @@ export async function readAdmissionMergeSnapshots(
     incomingByTarget.set(row.target_id, entries);
   }
 
+  // WI-10006515: classify origin='remote' rows authored by this node (exceptional path only; a
+  // read, never a heal — this reader also serves read-only previews). Fail-closed: empty set.
+  const remoteIds = rows.filter((row) => row.origin === 'remote').map((row) => row.feature_id);
+  const ownNodeIds =
+    remoteIds.length > 0
+      ? await ownNodeAuthoredRemoteIds(input.workspaceId, remoteIds, { harnessSlug: input.harnessSlug })
+      : new Set<string>();
+
   const result = new Map<string, AdmissionMergeSnapshot>();
   for (const row of rows) {
     const endpointKeys = new Set(snapshotRefKeys(row));
@@ -1410,6 +1428,7 @@ export async function readAdmissionMergeSnapshots(
       createdAtMs: finiteMs(row.created_ts),
       updatedAtMs: finiteMs(row.updated_ts),
       origin: row.origin ?? null,
+      ...(ownNodeIds.has(row.feature_id) ? { ownNode: true as const } : {}),
       assignee: row.taken_by?.trim() || null,
       payload: row.payload ?? null,
       completionRef: row.completion_ref ?? null,
@@ -3340,7 +3359,8 @@ function endpointProtection(
   options: { requireImplementationReadiness?: boolean; reviewedEvidenceReady?: boolean } = {},
 ): Pick<AdmissionMergeGuardRefusal, 'reason' | 'detail'> | null {
   const payload = recordValue(snapshot.payload);
-  if (snapshot.origin === 'remote') {
+  // WI-10006515: an own-node row stranded at origin='remote' is ours to write (see ownNode).
+  if (snapshot.origin === 'remote' && snapshot.ownNode !== true) {
     return { reason: 'remote-owned', detail: `${role} ${snapshot.id} is remote-owned` };
   }
   if (role === 'promote' && snapshot.admission !== 'pending' && snapshot.admission !== 'unreviewed') {
@@ -5569,10 +5589,26 @@ export async function runWorkItemAdmissionFailOpen(opts: {
     const pendingEligibility = sql`admission = 'pending'
       AND (status IS NULL OR NOT harness_shared.work_item_status_is_terminal(status))
       AND created_ts < ${cutoffMs}`;
+    // Keep the pending predicate, workspace key, and (for harness scope) harness key on the
+    // candidate read so it can use wi_admission_pending_idx. Oldest-first plus a hard cap keeps
+    // this must-never-starve action quick when a workspace has a large pending backlog.
     // The workspace_id predicate is NEVER dropped: a workspace sweep widens across harnesses
-    // inside one tenant, never across tenants.
-    const rows = await sql<Array<{ feature_id: string; harness_slug: string }>>`
-      UPDATE harness_shared.work_items
+    // inside one tenant, never across tenants. The selected batch and update share one bounded
+    // transaction; SKIP LOCKED lets a concurrent clearer make progress without waiting here.
+    const rows = await boundedOrgTxn(
+      (tx) => tx<Array<{ feature_id: string; harness_slug: string }>>`
+      WITH pending_batch AS (
+        SELECT feature_id, harness_slug
+          FROM harness_shared.work_items
+         WHERE workspace_id = ${opts.workspaceId}
+           ${scope === 'workspace' ? sql`` : sql`AND harness_slug = ${opts.harnessSlug}`}
+           ${scopePredicate}
+           AND ${pendingEligibility}
+         ORDER BY created_ts ASC, feature_id ASC
+         LIMIT ${DEFAULT_FAIL_OPEN_BATCH_SIZE}
+         FOR UPDATE SKIP LOCKED
+      )
+      UPDATE harness_shared.work_items AS wi
          SET admission = 'unreviewed', admitted_at = now(), admitted_by = ${FAIL_OPEN_ACTOR},
              payload = COALESCE(payload, '{}'::jsonb) ||
                jsonb_build_object(
@@ -5603,11 +5639,13 @@ export async function runWorkItemAdmissionFailOpen(opts: {
                  )
                ),
              updated_ts = ${startedAt}
-       WHERE workspace_id = ${opts.workspaceId}
-         ${scope === 'workspace' ? sql`` : sql`AND harness_slug = ${opts.harnessSlug}`}
-         ${scopePredicate}
-         AND ${pendingEligibility}
-       RETURNING feature_id, harness_slug`;
+        FROM pending_batch
+       WHERE wi.workspace_id = ${opts.workspaceId}
+         AND wi.harness_slug = pending_batch.harness_slug
+         AND wi.feature_id = pending_batch.feature_id
+       RETURNING wi.feature_id, wi.harness_slug`,
+      opts.sql ? { client: opts.sql } : undefined,
+    );
     await (opts.onNewlyAdmitted ?? announceNewlyAdmittedWorkItems)(
       rows.map((row) => ({ id: row.feature_id, harness: row.harness_slug })),
     );

@@ -11,6 +11,8 @@
  *     [--vectors <candidate-vectors.json>]
  *     [--mdenseon-model <validated-local-directory>] [--isolated-sidecar]
  *     [--vectors-out <path.json>] [--warm-trials <N>]
+ *     [--robustness <input.json> --robustness-sha256 <sha> --arm-manifest <frozen.json> --arm-manifest-sha256 <sha>]
+ *     (P-007: one isolated real-weight arm; see sidecar-robustness.ts)
  *     Performance manifest cells use frozen requests and five randomized
  *     fresh-process blocks; retain cold/warm/batch/cache/resource raw samples.
  *     --transport-trace adds private socket/client lifecycle evidence to a
@@ -114,8 +116,9 @@ import { buildPplxBenchmarkEmbedder, loadCandidateVectors, qualifyIncumbentRefer
 import { prepareMeasurementCell, assertMeasuredEmbedResponse, assertMeasuredExecution, writeMeasurementCell,
   assertCandidateArm, failMeasurementCell, loadIndependentMeasurementInputs, loadRetainedRelevanceVectors,
   embedIncrementalRelevanceQueries, embedIncrementalRelevanceDocuments, type MeasurementArm, type PreparedMeasurement } from './measurement-manifest';
-import { ORT_SESSION_OPTIONS } from '../../../../../libs/generic/memory/src/local-embedder-worker';
+import { ORT_SESSION_OPTIONS, getOnnxBindingPin } from '../../../../../libs/generic/memory/src/local-embedder-worker';
 import { loadPerformanceInput, collectSidecarPerformance, runPerformanceBlocks, isolatedEvaluationBuilders, observeSidecarTransport } from './sidecar-performance';
+import { collectSidecarRobustness, loadRobustnessRun, summarizeRobustnessReport, type RobustnessModel } from './sidecar-robustness';
 
 const processStartedAtMs = Date.now() - process.uptime() * 1000;
 
@@ -588,6 +591,24 @@ async function main(): Promise<void> {
     }
     await assertCandidateArm(arm, arm.model as 'mdenseon' | 'gemma' | 'harrier', http ? 'local-http-client-worker' : 'worker', EMBED_SIDECAR_RUNTIME);
   }
+  // P-007 robustness: one real-weight arm through the isolated sidecar, bound to
+  // a frozen input and a frozen measurement arm (identity + weight bytes).
+  let robustness: Awaited<ReturnType<typeof loadRobustnessRun>> | undefined;
+  if (argValue('--robustness')) {
+    const leg = legNames[0] ?? '', model = leg.startsWith('sidecar:') ? leg.slice('sidecar:'.length) : '';
+    if (argValue('--manifest') || legNames.length !== 1 || !['mdenseon', 'gemma', 'harrier'].includes(model)
+      || !process.argv.includes('--isolated-sidecar') || argValue('--warm-trials') || process.argv.includes('--timing-only')
+      || argValue('--vectors') || argValue('--vectors-out') || argValue('--limit') || !argValue('--out')) {
+      throw new Error('--robustness requires --out and exactly one --legs sidecar:<mdenseon|gemma|harrier> on --isolated-sidecar, with no other measurement mode');
+    }
+    const out = path.resolve(argValue('--out')!);
+    if (fs.existsSync(out) || fs.existsSync(`${out}.samples.jsonl`)) throw new Error('robustness output already exists');
+    robustness = await loadRobustnessRun({ inputPath: path.resolve(argValue('--robustness')!), inputSha256: argValue('--robustness-sha256') ?? '',
+      armManifestPath: path.resolve(argValue('--arm-manifest') ?? ''), armManifestSha256: argValue('--arm-manifest-sha256') ?? '',
+      model: model as RobustnessModel, mdenseonModelDir: mdenseonModel, runtime: EMBED_SIDECAR_RUNTIME,
+      repoRoot: path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', '..', '..') });
+    if (getWorkerState().alive) throw new Error('robustness requires a fresh process with a cold worker');
+  }
   const retainedVectors: Record<string, { docVectors: number[][]; queryVectors: number[][] }> = {};
   const performanceInput = preparedMeasurement?.cell.bar === 'performance' ? loadPerformanceInput(preparedMeasurement) : undefined;
   if (performanceInput && (argValue('--warm-trials') || process.argv.includes('--timing-only') || argValue('--vectors-out'))) {
@@ -602,7 +623,8 @@ async function main(): Promise<void> {
     if (sidecarUrl) throw new Error('--isolated-sidecar cannot target an existing sidecar');
     if (!mdenseonModel) throw new Error('--isolated-sidecar requires --mdenseon-model');
     readMdenseOnExport(mdenseonModel);
-    isolatedSidecar = createEmbedSidecarServer({ port: 0, warmAtBoot: false, concurrency: performanceInput?.serverConcurrency ?? 1,
+    isolatedSidecar = createEmbedSidecarServer({ port: 0, warmAtBoot: false,
+      concurrency: performanceInput?.serverConcurrency ?? robustness?.input.serverConcurrency ?? 1,
       builders: isolatedEvaluationBuilders(async (kind) => buildMdenseOnEmbedder({ kind, model: mdenseonModel })),
       modelRevisions: { mdenseon: MDENSEON_REVISION },
       log: (line) => console.log(`[isolated-sidecar] ${line}`),
@@ -637,6 +659,23 @@ async function main(): Promise<void> {
       execution: embedExecutionTarget(), threads: ORT_SESSION_OPTIONS, workerState: getWorkerState() });
     await isolatedSidecar?.close(); await shutdownLocalEmbedder();
     console.log('wrote', outPath); process.exit(0);
+  }
+
+  if (robustness && sidecarUrl && isolatedSidecar) {
+    const { input, expected } = robustness, handle = isolatedSidecar;
+    const report = await collectSidecarRobustness(sidecarUrl, expected, input, {
+      crashWorker: shutdownLocalEmbedder, workerState: getWorkerState, activity: () => handle.activity(),
+      onPhase: (phase, edge) => console.log(`[robustness] ${expected.model} ${phase} ${edge} ${new Date().toISOString()}`),
+      onSample: (sample) => fs.promises.appendFile(`${outPath}.samples.jsonl`, `${JSON.stringify(sample)}\n`, { mode: 0o600 }),
+    });
+    // The verdict is re-derived from the raw samples here AND by any later reader.
+    const summary = summarizeRobustnessReport(input, expected, report);
+    fs.writeFileSync(outPath, JSON.stringify({ ...report, inputPin: robustness.inputPin, armPin: robustness.armPin,
+      execution: embedExecutionTarget(), threads: ORT_SESSION_OPTIONS, onnxBindingPin: getOnnxBindingPin(), summary }, null, 2),
+    { flag: 'wx', mode: 0o600 });
+    await handle.close(); await shutdownLocalEmbedder();
+    console.log('wrote', outPath, `verdict=${summary.verdict}`, summary.failures.join(' | '));
+    process.exit(summary.verdict === 'pass' ? 0 : 1);
   }
 
   // Which corpus/gold-set pair to score against. 'memory' (default) keeps the

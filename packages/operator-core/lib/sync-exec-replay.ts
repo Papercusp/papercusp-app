@@ -248,11 +248,72 @@ export function createGitReadMemo(
   return { exec: memoExec, stats: () => ({ hits, misses, entries: entries.size }) };
 }
 
+/**
+ * Per-subsystem override/kill-switch for routing these probes through the spawner sidecar.
+ * Shared with git-pipeline-position's realGit, whose reads run on the same hot path.
+ */
+export const SYNC_EXEC_SIDECAR_ENV = 'PAPERCUSP_GIT_PIPELINE_SPAWN_SIDECAR';
+
+/** Used only when a caller passes no timeout; the sidecar requires one. */
+const SIDECAR_DEFAULT_TIMEOUT_MS = 30_000;
+
+export interface SidecarFirstExecDeps {
+  enabled?: () => boolean;
+  viaSidecar?: (
+    cmd: string,
+    args: string[],
+    opts: { cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv },
+  ) => Promise<{ code: number; stdout: string; stderr: string }>;
+  local?: AsyncExec;
+  noteFallback?: (error: unknown) => void;
+}
+
+/**
+ * An {@link AsyncExec} that runs the command in the small spawner sidecar when this process
+ * is a spawn-offload host (bg-host), else locally. WI-10005145 / P-017: a captured bg-host
+ * stall profile (2026-10-06 08:40Z) spent ~365 ms of the stall inside child_process.spawn
+ * for realResolveGateCandidates' git reads. execFile is async, but fork cost scales with the
+ * multi-GB parent heap and is paid synchronously on the main thread.
+ *
+ * Fallback rules match the other sidecar callers: a transport rejection or a sidecar
+ * infrastructure fault runs the identical command locally (counted via noteSidecarFallback);
+ * a child that ran and exited keeps its exit code; a negative code (killed, timed out) maps
+ * to `status: null`, as execFileResult reports a killed child.
+ */
+export function createSidecarFirstExec(deps: SidecarFirstExecDeps = {}): AsyncExec {
+  return async (cmd, args, options) => {
+    const timeout = typeof options?.timeout === 'number' ? options.timeout : undefined;
+    const local = (): Promise<ExecResult> =>
+      deps.local ? deps.local(cmd, args, options) : execFileResult(cmd, args, { timeout });
+    const mod = deps.viaSidecar && deps.enabled && deps.noteFallback
+      ? null
+      : await import('./fleet/git-via-sidecar');
+    const enabled = deps.enabled ?? (() => mod!.gitSidecarEnabled(SYNC_EXEC_SIDECAR_ENV));
+    if (!enabled()) return local();
+    const viaSidecar = deps.viaSidecar ?? ((c, a, o) => mod!.runCommandViaSpawnerSidecar(c, a, o));
+    const noteFallback = deps.noteFallback ?? ((e: unknown) => mod!.noteSidecarFallback('sync-exec-replay', e));
+    let res: { code: number; stdout: string; stderr: string };
+    try {
+      res = await viaSidecar(cmd, [...args], {
+        cwd: process.cwd(),
+        timeoutMs: timeout ?? SIDECAR_DEFAULT_TIMEOUT_MS,
+        env: process.env,
+      });
+    } catch (error) {
+      noteFallback(error);
+      return local();
+    }
+    if (res.code === -1 && res.stderr.startsWith('spawner sidecar ')) {
+      noteFallback(new Error(res.stderr));
+      return local();
+    }
+    return { status: res.code >= 0 ? res.code : null, stdout: res.stdout, stderr: res.stderr };
+  };
+}
+
 /** One memo per process, pinned so a split module graph cannot halve its hit rate. */
 const sharedGitReadMemo = pinModuleState('@papercusp/operator-core.sync-exec-replay.git-read-memo', () =>
-  createGitReadMemo((cmd, args, options) =>
-    execFileResult(cmd, args, { timeout: typeof options?.timeout === 'number' ? options.timeout : undefined }),
-  ),
+  createGitReadMemo(createSidecarFirstExec()),
 );
 
 /**

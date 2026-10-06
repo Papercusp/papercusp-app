@@ -71,6 +71,8 @@ export default defineTool({
         slug,
         target,
         desktopSessionId: ticket.desktopSessionId,
+        // D-015: which RFB class the viewer must use for this stream.
+        rfb: ticket.rfb,
       });
     } catch (e) {
       return Response.json(

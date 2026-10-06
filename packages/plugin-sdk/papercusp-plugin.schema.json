@@ -126,6 +126,7 @@
             "authorizeUrl": { "type": "string" },
             "tokenUrl": { "type": "string" },
             "scopes": { "type": "array", "items": { "type": "string" } },
+            "scopeSeparator": { "type": "string", "enum": [" ", ","] },
             "pkce": { "type": "boolean" },
             "clientRegistrationRef": { "type": "string" },
             "credentialGroup": { "type": "string" },
@@ -136,7 +137,9 @@
               "properties": {
                 "url": { "type": "string" },
                 "idField": { "type": "string" },
-                "displayNameField": { "type": "string" }
+                "displayNameField": { "type": "string" },
+                "method": { "type": "string", "enum": ["GET", "POST"] },
+                "body": { "type": "string" }
               }
             }
           }

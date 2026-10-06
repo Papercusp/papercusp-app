@@ -56,7 +56,11 @@ export const RUNTIME_PROVIDED_NAMES = new Map([
   ['PopStateEvent', 'browser global (client module inlined into the host graph)'],
 ]);
 
-/** Known global value names: the running Node's globalThis plus RUNTIME_PROVIDED_NAMES plus `extra`. */
+/**
+ * Known global value names: the running Node's globalThis plus RUNTIME_PROVIDED_NAMES plus `extra`.
+ * @param {Iterable<string>} [extra]
+ * @returns {Set<string>}
+ */
 export function knownGlobalNames(extra = []) {
   const names = new Set(Object.getOwnPropertyNames(globalThis));
   for (const n of RUNTIME_PROVIDED_NAMES.keys()) names.add(n);
@@ -84,6 +88,9 @@ function walk(node, enter, typeDepth = 0) {
  * Free VALUE references in one source text: identifiers that resolve to no binding
  * in the file and are not known globals. `typeof X` probes and identifiers inside
  * type-only / ambient (`declare`) constructs are excluded — esbuild erases those.
+ * @param {string} code
+ * @param {{ jsx?: boolean, known?: Set<string> }} [options]
+ * @returns {Array<{ name: string, line: number, column: number }>}
  */
 export function findFreeValueReferences(code, { jsx = false, known = knownGlobalNames() } = {}) {
   const ast = parse(code, { jsx, loc: true, range: true, comment: false, errorOnUnknownASTType: false });
@@ -108,7 +115,12 @@ export function findFreeValueReferences(code, { jsx = false, known = knownGlobal
   return found;
 }
 
-/** Repo-owned source inputs of an esbuild metafile, as absolute paths. */
+/**
+ * Repo-owned source inputs of an esbuild metafile, as absolute paths.
+ * @param {{ inputs?: Record<string, unknown> }} metafile
+ * @param {string} baseDir
+ * @returns {string[]}
+ */
 export function repoOwnedInputs(metafile, baseDir) {
   const out = [];
   for (const key of Object.keys(metafile.inputs ?? {})) {
@@ -121,6 +133,11 @@ export function repoOwnedInputs(metafile, baseDir) {
   return out.sort();
 }
 
+/**
+ * @param {string[]} files
+ * @param {{ known?: Set<string>, readFile?: (file: string) => string }} [options]
+ * @returns {{ findings: Array<{ file: string, name: string, line: number, column: number }>, unparsed: Array<{ file: string, error: string }> }}
+ */
 export function checkInputs(files, { known, readFile = (f) => readFileSync(f, 'utf8') } = {}) {
   const findings = [];
   const unparsed = [];
@@ -169,6 +186,11 @@ function parseArgs(argv) {
   return opts;
 }
 
+/**
+ * @param {string[]} [argv]
+ * @param {{ log: (line: string) => void, error: (line: string) => void }} [io]
+ * @returns {number} 0 clean or skipped · 1 free references found · 2 misuse
+ */
 export function main(argv = process.argv.slice(2), io = { log: console.log, error: console.error }) {
   let opts;
   let metafile;

@@ -4301,6 +4301,32 @@ export function registerMcpHost(server: McpServer): void {
                 _meta?: Record<string, unknown>;
                 structuredContent?: unknown;
               };
+              // A retry may opt into structured output even when the original
+              // request did not. Recover only an unambiguous JSON object body;
+              // result-door envelopes describe retrieval state, not tool data.
+              if (requestedStructured && storedResult.structuredContent === undefined) {
+                const [onlyContent] = storedResult.content;
+                if (
+                  storedResult.content.length === 1 &&
+                  onlyContent?.type === 'text' &&
+                  typeof onlyContent.text === 'string'
+                ) {
+                  try {
+                    const decoded: unknown = JSON.parse(onlyContent.text);
+                    if (
+                      decoded !== null &&
+                      typeof decoded === 'object' &&
+                      !Array.isArray(decoded) &&
+                      (decoded as { schemaVersion?: unknown }).schemaVersion !== 'papercusp.output-envelope/v1'
+                    ) {
+                      storedResult.structuredContent = decoded;
+                      storedResult._meta = { ...(storedResult._meta ?? {}), structured: true };
+                    }
+                  } catch {
+                    // Compact or other non-JSON content cannot be rehydrated safely.
+                  }
+                }
+              }
               // P-006 / D-014: a replay is still model-facing output. Stored
               // outcomes were already per-result-doored before persistence,
               // but this request must consume the CURRENT aggregate cohort or

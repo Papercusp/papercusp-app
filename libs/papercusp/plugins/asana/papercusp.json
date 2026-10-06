@@ -1,0 +1,51 @@
+{
+  "kind": "plugin",
+  "name": "asana",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Asana as a ticket provider: tasks in the configured projects become ticket records, completion and section moves become ticket-status-change events, task comments become ticket-comment documents, and the host can comment on a task (ticket.comment) and move it to a workflow column (ticket.transition: complete/reopen, or a section mapped to that column). Synced by the host's connector driver: a full crawl per project, then that project's Events API sync token; the plugin only maps Asana's REST API.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "main": "./index.cjs",
+  "capabilities": [],
+  "tools": [],
+  "provider": {
+    "id": "asana",
+    "contractVersion": 1,
+    "displayName": "Asana",
+    "datatypes": ["ticket", "ticket-status-change", "ticket-comment"],
+    "capabilities": ["ticket.read", "ticket.comment", "ticket.transition"],
+    "oauth": {
+      "authorizeUrl": "https://app.asana.com/-/oauth_authorize",
+      "tokenUrl": "https://app.asana.com/-/oauth_token",
+      "scopes": [
+        "tasks:read", "tasks:write", "stories:read", "stories:write",
+        "projects:read", "users:read", "workspaces:read", "tags:read", "teams:read"
+      ],
+      "clientRegistrationRef": "asana",
+      "identity": {
+        "url": "https://app.asana.com/api/1.0/users/me?opt_fields=name",
+        "idField": "data.gid",
+        "displayNameField": "data.name"
+      }
+    },
+    "egressHosts": ["app.asana.com"],
+    "configSchema": {
+      "type": "object",
+      "required": ["projectGids"],
+      "properties": {
+        "workspaceGid": { "type": "string", "minLength": 1 },
+        "projectGids": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "sectionCategories": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["triage", "backlog", "todo", "in-progress", "in-review", "done", "canceled"]
+          }
+        },
+        "harnessSlug": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    }
+  }
+}

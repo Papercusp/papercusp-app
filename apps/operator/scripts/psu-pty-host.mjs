@@ -8380,6 +8380,8 @@ export function resolveAgentPtyTarget({ command, args, env, cwd }, deps = {}) {
  * @param {{nativeId?:string|null}|null} [o.adoptedCarryRespawn] host-code adoption of a carry;
  *   its kickoff must prove the late native id and re-anchor before it announces completion
  * @param {object} [o.signalSource]      process-like on/off signal source (tests)
+ * @param {((file:string, args:string[], options:object, realSpawn:(file:string, args:string[], options:object)=>any)=>any)|null} [o.spawnPty]
+ *   pty spawn override (tests: inject a resume failure); null = the real pty.spawn
  * @param {()=>object} [o.reapScopeResidue] exact-session-cgroup cleanup (tests)
  * @param {string} [o.normalizedLogPath] optional headless grep-safe log path; normally
  *   supplied through {@link HEADLESS_NORMALIZED_LOG_ENV} in `o.env`
@@ -8477,6 +8479,11 @@ export function hostThroughPty(o) {
     mcpReconnectMacro = runMcpReconnectMacro,
     signalSource = process,
     reapScopeResidue = reapDetachedPtyScopeResidue,
+    // psu-process-free-parking-2026-10-06 P-019: injectable pty spawn so a test
+    // can make ONE resume fail (fork EAGAIN/ENOMEM is the realistic cause on a
+    // box parking agents to free memory) and prove the delivery is held, not
+    // lost. Receives the real spawn as its 4th argument. null = pty.spawn.
+    spawnPty = null,
   } = o;
   if (kickoff && kickoffFile) throw new Error('plain kickoff and managed kickoff file are mutually exclusive');
   const managedKickoff = kickoffFile
@@ -8616,14 +8623,21 @@ export function hostThroughPty(o) {
     rows: sanePtyDim(stdout.rows, 24, 500),
   });
   const spawnChild = (spawnArgs = args) => {
-    liveChildArgs = spawnArgs;
     const target = resolveAgentPtyTarget({ command, args: spawnArgs, env, cwd });
-    return pty.spawn(target.command, target.args, {
+    const ptyOptions = {
       name: ptyName,
       ...childScreenDims(),
       cwd,
       env: target.env,
-    });
+    };
+    const realSpawn = (file, argv, options) => pty.spawn(file, argv, options);
+    const spawned = spawnPty
+      ? spawnPty(target.command, target.args, ptyOptions, realSpawn)
+      : realSpawn(target.command, target.args, ptyOptions);
+    // Only a child that actually started owns the live argv: a failed spawn
+    // must not rewrite what the next park/recycle mint reads.
+    liveChildArgs = spawnArgs;
+    return spawned;
   };
   let child;
   try {
@@ -10637,7 +10651,28 @@ export function hostThroughPty(o) {
   const heldOwnerInput = [];
   let heldOwnerInputBytes = 0;
   const HELD_OWNER_INPUT_CAP_BYTES = 4096;
+  // P-019: control deliveries that arrived while a resume FAILED. Running one
+  // would write into the pid-less stand-in and silently lose a turn the host
+  // already ACKed (WI-10005134), so each waits here for the next successful
+  // resume. A retry timer (backing off from PAPERCUSP_PSU_PARK_UNPARK_RETRY_MS)
+  // keeps trying while anything is held; the host ending releases them as
+  // undeliverable so the sender's dedup slot clears.
+  /** @type {Array<(outcome: { ok: boolean, reason: string }) => void>} */
+  const heldDeliveryWaiters = [];
+  const HELD_DELIVERY_CAP = 64;
+  const parkUnparkRetryMs = positiveNumber(env.PAPERCUSP_PSU_PARK_UNPARK_RETRY_MS, 5_000);
+  const PARK_UNPARK_RETRY_MAX_MS = 5 * 60_000;
+  /** @type {NodeJS.Timeout | null} */
+  let unparkRetryTimer = null;
+  let unparkRetryAttempt = 0;
   const parkInProgress = () => parked || parkPromise !== null || unparkPromise !== null;
+  const releaseHeldDeliveries = (outcome) => {
+    for (const release of heldDeliveryWaiters.splice(0)) release(outcome);
+  };
+  const cancelUnparkRetry = () => {
+    if (unparkRetryTimer) clearTimeout(unparkRetryTimer);
+    unparkRetryTimer = null;
+  };
   const makeParkedChild = () => {
     const listeners = [];
     let exitEvent = null;
@@ -10834,17 +10869,43 @@ export function hostThroughPty(o) {
         parkPromise = null;
       });
   };
+  /** P-019: while a failed resume leaves owner input or deliveries held, try
+   *  again on a backoff (base, 2x, 4x … capped at 5 min). Idempotent. */
+  const scheduleUnparkRetry = () => {
+    if (unparkRetryTimer || hostCleanedUp || shuttingDown || !parked) return;
+    if (!heldDeliveryWaiters.length && !heldOwnerInput.length) return;
+    const delayMs = Math.min(parkUnparkRetryMs * 2 ** unparkRetryAttempt, PARK_UNPARK_RETRY_MAX_MS);
+    unparkRetryAttempt++;
+    unparkRetryTimer = setTimeout(() => {
+      unparkRetryTimer = null;
+      void unparkChild('retry');
+    }, delayMs);
+    // The control socket keeps the host alive; the retry must not.
+    unparkRetryTimer.unref?.();
+  };
   /**
    * Bring a parked child back on the same conversation. Single-flight: every
    * trigger that arrives while a resume is in progress shares it. Resolves once
    * the resumed TUI shows its prompt (or the wait cap passes — the delivery
-   * gates downstream still guard the write).
+   * gates downstream still guard the write). On failure the child stays parked
+   * and a retry is scheduled while anything is held (P-019).
    * @param {string} trigger
    */
   const unparkChild = (trigger) => {
     if (unparkPromise) return unparkPromise;
     if (!parked && !parkPromise) return Promise.resolve({ unparked: false, reason: 'not-parked' });
-    unparkPromise = (async () => {
+    /** @type {Promise<{ unparked: boolean, reason: string }>} */
+    let attempt;
+    // The single-flight slot is cleared by IDENTITY, after the assignment below.
+    // A `finally` inside the async body is not enough: a resume that fails
+    // synchronously (a spawn that throws before any await) runs that finally
+    // BEFORE `unparkPromise = …` executes, leaving the failed promise in the
+    // slot for good, so every later retry/keystroke/delivery silently re-reads
+    // the stale failure (found by P-019's failing-first test).
+    const releaseSlot = () => {
+      if (unparkPromise === attempt) unparkPromise = null;
+    };
+    attempt = (async () => {
       const startedAt = Date.now();
       try {
         if (parkPromise) await parkPromise;
@@ -10853,6 +10914,7 @@ export function hostThroughPty(o) {
         const resume = parkResume;
         if (!resume) {
           appendHostEvent(ownerId, 'child-unpark-failed', { trigger, reason: 'no-resume-args' });
+          scheduleUnparkRetry();
           return { unparked: false, reason: 'no-resume-args' };
         }
         let resumed;
@@ -10862,10 +10924,14 @@ export function hostThroughPty(o) {
           appendHostEvent(ownerId, 'child-unpark-failed', {
             trigger,
             reason: 'spawn-failed',
+            attempt: unparkRetryAttempt,
             ...hostErrorEvidence(error),
           });
+          scheduleUnparkRetry();
           return { unparked: false, reason: 'spawn-failed' };
         }
+        cancelUnparkRetry();
+        unparkRetryAttempt = 0;
         child = resumed;
         stopStartupTrace = startCodexStartupProcessTrace({
           agent: env.PAPERCUSP_AGENT, ownerId, pid: child.pid,
@@ -10891,12 +10957,22 @@ export function hostThroughPty(o) {
           heldOwnerInputBytes = 0;
           for (const chunk of replay) forwardOwnerInput(chunk);
         }
+        // Deliveries held by an earlier failed resume run now, in arrival order
+        // (each re-enters the inject mutex). If the resumed child already died,
+        // the host is ending and cleanup releases them as undeliverable.
+        if (child === resumed) releaseHeldDeliveries({ ok: true, reason: 'resumed' });
         return { unparked: true, reason: 'resumed' };
-      } finally {
-        unparkPromise = null;
+      } catch (error) {
+        // Anything unexpected past the spawn (writeMeta, wiring) must not leave
+        // a rejected promise in callers that only branch on `unparked`.
+        appendHostEvent(ownerId, 'child-unpark-failed', { trigger, reason: 'error', ...hostErrorEvidence(error) });
+        scheduleUnparkRetry();
+        return { unparked: false, reason: 'error' };
       }
     })();
-    return unparkPromise;
+    unparkPromise = attempt;
+    attempt.then(releaseSlot, releaseSlot);
+    return attempt;
   };
   /** Owner bytes typed while parked: keep the real keystrokes for replay, drop
    *  the terminal's own replies (they answered the dead TUI), and resume. */
@@ -10918,11 +10994,38 @@ export function hostThroughPty(o) {
   };
   /** Every control-socket delivery resumes a parked child before its gates run
    *  (never refused: the host accepted it, WI-10005134), and counts as busy so
-   *  the policy cannot park the child out from under it. */
+   *  the policy cannot park the child out from under it. A FAILED resume holds
+   *  the delivery until a later resume succeeds (P-019): running it against the
+   *  pid-less stand-in would drop it without a trace. */
   const deliverAfterUnpark = async (mode, run) => {
     deliveriesInFlight++;
     try {
-      if (mode !== 'osc' && parkInProgress()) await unparkChild(`control:${mode}`);
+      if (mode !== 'osc' && parkInProgress()) {
+        const resume = await unparkChild(`control:${mode}`);
+        if (!resume.unparked && parked) {
+          if (resume.reason === 'host-ending' || hostCleanedUp || shuttingDown) {
+            return { ok: false, reason: 'host-ending' };
+          }
+          if (heldDeliveryWaiters.length >= HELD_DELIVERY_CAP) {
+            appendHostEvent(ownerId, 'parked-delivery-refused', {
+              mode,
+              reason: 'held-delivery-cap',
+              held: heldDeliveryWaiters.length,
+            });
+            return { ok: false, reason: 'unpark-failed' };
+          }
+          /** @type {Promise<{ ok: boolean, reason: string }>} */
+          const released = new Promise((res) => heldDeliveryWaiters.push(res));
+          appendHostEvent(ownerId, 'parked-delivery-held', {
+            mode,
+            reason: resume.reason,
+            held: heldDeliveryWaiters.length,
+          });
+          scheduleUnparkRetry();
+          const outcome = await released;
+          if (!outcome.ok) return outcome;
+        }
+      }
       return await run();
     } finally {
       deliveriesInFlight--;
@@ -12380,6 +12483,10 @@ export function hostThroughPty(o) {
       cleaned = true;
       hostCleanedUp = true;
       stopStartupTrace('host-cleanup');
+      // P-019: nothing held for a resume can run now; release it as
+      // undeliverable so each sender's dedup slot clears instead of hanging.
+      cancelUnparkRetry();
+      releaseHeldDeliveries({ ok: false, reason: 'host-ending' });
       const endedSignal = signal ?? teardownSignal;
       // A PTY leader can exit before its descendants. Reap the group while its
       // forkpty pgid is still unambiguous, then remove our signal listeners.
@@ -13111,10 +13218,14 @@ export function hostThroughPty(o) {
         if (parked) {
           heldOwnerInput.length = 0;
           heldOwnerInputBytes = 0;
+          cancelUnparkRetry();
+          unparkRetryAttempt = 0;
           appendHostEvent(ownerId, 'child-unparked', {
             ...clearParkedState('recycle', { nativeId: nativeId ?? null }),
             childPid: Number.isInteger(child.pid) ? child.pid : null,
           });
+          // P-019: deliveries held by a failed resume ride the fresh child.
+          releaseHeldDeliveries({ ok: true, reason: 'recycled' });
         }
         // Re-anchor the fresh native id → coord ownerId so a LATER untracked
         // resume still recovers this identity (else the 2026-07-02 orphaning bug

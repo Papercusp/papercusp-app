@@ -407,8 +407,16 @@ async function resolveDescriptorAccount(
   if (url.protocol !== 'https:' || !providerEgressAllows(holder.descriptor.egressHosts, url.hostname)) {
     throw new Error(`${errorPrefix}_identity_endpoint_not_allowed`);
   }
+  // POST + JSON body for identity endpoints that only answer a request body (a GraphQL API).
+  const post = identity.method === 'POST';
   const response = await fetch(url, {
-    headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' },
+    method: post ? 'POST' : 'GET',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      accept: 'application/json',
+      ...(post ? { 'content-type': 'application/json' } : {}),
+    },
+    ...(post && identity.body !== undefined ? { body: identity.body } : {}),
   });
   if (!response.ok) throw new Error(`${errorPrefix}_identity_${response.status}`);
   const body = (await response.json()) as unknown;
@@ -548,7 +556,7 @@ export function makeDescriptorOAuthProvider(
       url.searchParams.set('client_id', client.clientId);
       url.searchParams.set('redirect_uri', client.redirectUri);
       url.searchParams.set('response_type', 'code');
-      url.searchParams.set('scope', scopes.join(' '));
+      url.searchParams.set('scope', scopes.join(oauth.scopeSeparator ?? ' '));
       url.searchParams.set('state', stateToken);
       if (oauth.pkce) {
         const verifier = privateContext?.codeVerifier;

@@ -343,7 +343,8 @@ function pubsubService(services) {
 /** Idempotently create the shared topic and grant Gmail's push service account publish rights. */
 async function ensureTopic(host, source, topicName) {
   await call(host, source, 'topic_create', `${PUBSUB}/${topicName}`, { method: 'PUT', body: {}, allow: [409] });
-  const policy = await call(host, source, 'topic_get_iam', `${PUBSUB}/${topicName}:getIamPolicy`, { method: 'POST', body: {} });
+  // Pub/Sub's topics.getIamPolicy is a GET; a POST answers 404 (WI-41682, WI-10006554).
+  const policy = await call(host, source, 'topic_get_iam', `${PUBSUB}/${topicName}:getIamPolicy`, { method: 'GET' });
   const bindings = Array.isArray(policy.bindings) ? policy.bindings : [];
   const granted = bindings.some((binding) => binding && binding.role === PUBLISHER_ROLE
     && Array.isArray(binding.members) && binding.members.includes(GMAIL_PUSH_PUBLISHER));

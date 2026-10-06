@@ -231,6 +231,30 @@ export function declaredVersionRange(spec) {
   return separator > 'npm:'.length ? raw.slice(separator + 1) : null;
 }
 
+// Unqualified root overrides replace a direct workspace declaration too. Only
+// the override's own value (or ".") applies here; child rules are scoped to
+// that package's dependency tree and must not leak into unrelated workspaces.
+function effectiveDirectDeclaration(rootManifest, packageName, declared) {
+  const rule = rootManifest?.overrides?.[packageName];
+  const replacement = typeof rule === 'string' ? rule : rule?.['.'];
+  if (typeof replacement !== 'string') return declared;
+  if (!replacement.startsWith('$')) return replacement;
+  const reference = replacement.slice(1);
+  for (const field of LOCAL_VERSION_FIELDS) {
+    const spec = rootManifest?.[field]?.[reference];
+    if (typeof spec === 'string') return spec;
+  }
+  return replacement; // invalid references are outside the matcher's grammar
+}
+
+function rootManifestForOverrides(repoRoot, readJson) {
+  try {
+    return readJson(join(repoRoot, 'package.json'));
+  } catch {
+    return null; // manifest integrity is owned by the existing manifest guards
+  }
+}
+
 /**
  * Find readable workspace-local installs whose version violates the workspace's
  * direct declaration. Transitive local packages and peers are deliberately ignored:
@@ -245,6 +269,7 @@ export function findInvalidWorkspacePackageVersions({
   const readJson =
     deps.readJson ?? ((p) => JSON.parse(readFileSync(p, 'utf8')));
   const dirs = workspaceDirs ?? resolveWorkspaceDirs(repoRoot, deps);
+  const rootManifest = rootManifestForOverrides(repoRoot, readJson);
   const invalid = [];
 
   for (const workspace of dirs) {
@@ -257,7 +282,7 @@ export function findInvalidWorkspacePackageVersions({
     const declaredSpec = (packageName) => {
       for (const field of LOCAL_VERSION_FIELDS) {
         const spec = workspaceManifest?.[field]?.[packageName];
-        if (typeof spec === 'string') return spec;
+        if (typeof spec === 'string') return effectiveDirectDeclaration(rootManifest, packageName, spec);
       }
       return null;
     };
@@ -360,6 +385,7 @@ export function findUnsatisfiedDeclaredDepRanges({
   const readJson = deps.readJson ?? ((p) => JSON.parse(readFileSync(p, 'utf8')));
   const exists = deps.existsSync ?? fsExistsSync;
   const dirs = workspaceDirs ?? resolveWorkspaceDirs(repoRoot, deps);
+  const rootManifest = rootManifestForOverrides(repoRoot, readJson);
 
   const invalid = [];
   for (const rel of dirs) {
@@ -369,7 +395,8 @@ export function findUnsatisfiedDeclaredDepRanges({
     } catch {
       continue;
     }
-    for (const [dep, declared] of Object.entries(pkg.dependencies ?? {})) {
+    for (const [dep, spec] of Object.entries(pkg.dependencies ?? {})) {
+      const declared = effectiveDirectDeclaration(rootManifest, dep, spec);
       const range = declaredVersionRange(declared);
       if (range === null) continue;
       const dir = resolvedDepDir(repoRoot, join(repoRoot, rel), dep, exists);

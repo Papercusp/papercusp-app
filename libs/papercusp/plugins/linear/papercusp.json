@@ -1,0 +1,43 @@
+{
+  "kind": "plugin",
+  "name": "linear",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Linear as a ticket provider: issues in the configured teams become ticket records, workflow-state changes become ticket-status-change events, issue comments become ticket-comment documents, and the host can comment on an issue (ticket.comment) and move it to a workflow column (ticket.transition). Installs as a Linear app user (actor=app) so Papercusp is delegated issues instead of being assigned them. Synced by the host's connector driver; the plugin only maps Linear's GraphQL API.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "main": "./index.cjs",
+  "capabilities": [],
+  "tools": [],
+  "provider": {
+    "id": "linear",
+    "contractVersion": 1,
+    "displayName": "Linear",
+    "datatypes": ["ticket", "ticket-status-change", "ticket-comment"],
+    "capabilities": ["ticket.read", "ticket.comment", "ticket.transition"],
+    "oauth": {
+      "authorizeUrl": "https://linear.app/oauth/authorize?actor=app",
+      "tokenUrl": "https://api.linear.app/oauth/token",
+      "scopes": ["read", "write", "app:assignable", "app:mentionable"],
+      "scopeSeparator": ",",
+      "clientRegistrationRef": "linear",
+      "identity": {
+        "url": "https://api.linear.app/graphql",
+        "method": "POST",
+        "body": "{\"query\":\"query PapercuspIdentity { organization { id name urlKey } viewer { id name } }\"}",
+        "idField": "data.organization.id",
+        "displayNameField": "data.organization.name"
+      }
+    },
+    "egressHosts": ["api.linear.app", "linear.app"],
+    "configSchema": {
+      "type": "object",
+      "required": ["teamIds"],
+      "properties": {
+        "teamIds": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "harnessSlug": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    }
+  }
+}

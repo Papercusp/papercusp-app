@@ -37,6 +37,25 @@ export interface LearningLoopHealthEscalation {
   reason: string;
 }
 
+export interface LearningLoopHealthCandidateEvidence extends LearningLoopHealth {
+  /** Whether this exact classifier row was selected for the escalation pass. */
+  selectedForEscalation: boolean;
+}
+
+export interface LearningLoopHealthSweepReport {
+  schemaVersion: 'learning-loop-health-sweep/v1';
+  /** The concrete partition read by this invocation; null only if scope resolution failed. */
+  workspaceId: string | null;
+  observedAtMs: number;
+  processStartedAtMs: number;
+  runStatus: 'completed' | 'deferred' | 'error';
+  candidateCount: number;
+  /** Classifier outputs plus the routine-row evidence used to produce each output. */
+  candidates: LearningLoopHealthCandidateEvidence[];
+  escalations: LearningLoopHealthEscalation[];
+  error?: string;
+}
+
 /** PURE: which classified loops warrant an escalation. Mirrors
  *  `summarizeLearningLoopHealth`'s own `needsAttention` predicate exactly (kept
  *  as a separate exported selector, rather than only reading `needsAttention`
@@ -86,11 +105,15 @@ function describeLoop(r: LearningLoopHealth): string {
   }
 }
 
-export async function learningLoopHealthSweep(): Promise<LearningLoopHealthEscalation[]> {
-  const results: LearningLoopHealthEscalation[] = [];
+export async function learningLoopHealthSweepWithEvidence(): Promise<LearningLoopHealthSweepReport> {
+  const observedAtMs = Date.now();
+  const processStartedAtMs = observedAtMs - process.uptime() * 1_000;
+  let workspaceId: string | null = null;
+  const escalations: LearningLoopHealthEscalation[] = [];
+  let candidates: LearningLoopHealthCandidateEvidence[] = [];
   try {
     const { sql } = getOrgPg();
-    const workspaceId = activeWorkspaceId();
+    workspaceId = activeWorkspaceId();
     // A pristine packaged desktop has no project to own learning-loop rows yet. The
     // asynchronous first-boot hive bootstrap may still be materializing that project when
     // this periodic sweep fires; treating every expected singleton as absent would create
@@ -102,13 +125,23 @@ export async function learningLoopHealthSweep(): Promise<LearningLoopHealthEscal
         '[learning-loop-health-sweep] sweep deferred — fresh packaged install has no ' +
           'registered project yet; retry after first-boot hive provisioning',
       );
-      return results;
+      return {
+        schemaVersion: 'learning-loop-health-sweep/v1',
+        workspaceId,
+        observedAtMs,
+        processStartedAtMs,
+        runStatus: 'deferred',
+        candidateCount: 0,
+        candidates: [],
+        escalations,
+      };
     }
     // This sweep runs in the bg-host process; the pull-only health surfaces deliberately
     // omit process start so they continue to expose overdue routines without startup masking.
-    const processStartedAtMs = Date.now() - process.uptime() * 1_000;
     const rows = await readLearningLoopHealth(sql, workspaceId, { processStartedAtMs });
     const needing = selectLearningLoopsNeedingEscalation(rows);
+    const needingSet = new Set(needing);
+    candidates = rows.map((row) => ({ ...row, selectedForEscalation: needingSet.has(row) }));
     for (const loop of needing) {
       const status: LearningLoopStatus | 'collision' = loop.collision ? 'collision' : loop.status;
       try {
@@ -116,7 +149,12 @@ export async function learningLoopHealthSweep(): Promise<LearningLoopHealthEscal
         const installSlug = `learning-loop::${loop.blueprintId}`;
         const alreadyFired = (await recentWatchdogFires(workspaceId, installSlug, 24, source)) > 0;
         if (alreadyFired) {
-          results.push({ blueprintId: loop.blueprintId, outcome: 'debounced', status, reason: 'escalated within 24h' });
+          escalations.push({
+            blueprintId: loop.blueprintId,
+            outcome: 'debounced',
+            status,
+            reason: 'escalated within 24h',
+          });
           continue;
         }
         const reason = `learning loop '${loop.blueprintId}': ${describeLoop(loop)}`;
@@ -124,7 +162,12 @@ export async function learningLoopHealthSweep(): Promise<LearningLoopHealthEscal
         // one-time escalation side effect (mirrors autoloop-chronic-failure.ts's EI-6777 fix).
         const claimedFire = await claimWatchdogFire({ workspaceId, installSlug, source, windowHours: 24, reason, wakeAt: null });
         if (!claimedFire) {
-          results.push({ blueprintId: loop.blueprintId, outcome: 'debounced', status, reason: 'escalated within 24h (raced)' });
+          escalations.push({
+            blueprintId: loop.blueprintId,
+            outcome: 'debounced',
+            status,
+            reason: 'escalated within 24h (raced)',
+          });
           continue;
         }
         const { captureImprovement } = await import('../improvements/capture-core');
@@ -143,9 +186,9 @@ export async function learningLoopHealthSweep(): Promise<LearningLoopHealthEscal
           // the workspace platform Pot (capture-core.ts CaptureImprovementInput.scope doc).
           foundDuring: 'learning-loop-health sweep (routines tick)',
         });
-        results.push({ blueprintId: loop.blueprintId, outcome: 'escalated', status, reason });
+        escalations.push({ blueprintId: loop.blueprintId, outcome: 'escalated', status, reason });
       } catch (e) {
-        results.push({
+        escalations.push({
           blueprintId: loop.blueprintId,
           outcome: 'error',
           status,
@@ -154,7 +197,33 @@ export async function learningLoopHealthSweep(): Promise<LearningLoopHealthEscal
       }
     }
   } catch (e) {
-    console.warn(`[learning-loop-health-sweep] sweep failed: ${e instanceof Error ? e.message : e}`);
+    const error = e instanceof Error ? e.message : String(e);
+    console.warn(`[learning-loop-health-sweep] sweep failed: ${error}`);
+    return {
+      schemaVersion: 'learning-loop-health-sweep/v1',
+      workspaceId,
+      observedAtMs,
+      processStartedAtMs,
+      runStatus: 'error',
+      candidateCount: 0,
+      candidates: [],
+      escalations,
+      error,
+    };
   }
-  return results;
+  return {
+    schemaVersion: 'learning-loop-health-sweep/v1',
+    workspaceId,
+    observedAtMs,
+    processStartedAtMs,
+    runStatus: 'completed',
+    candidateCount: candidates.length,
+    candidates,
+    escalations,
+  };
+}
+
+/** Backward-compatible escalation-only view for direct callers. */
+export async function learningLoopHealthSweep(): Promise<LearningLoopHealthEscalation[]> {
+  return (await learningLoopHealthSweepWithEvidence()).escalations;
 }

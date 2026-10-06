@@ -24,7 +24,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { memoryHost } from '@papercusp/memory';
+import { memoryHost, type MemoryCredentials } from '@papercusp/memory';
 import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
 import { collectChildOutput } from '../../child-output';
@@ -43,6 +43,8 @@ import { fileRecallDropEi, resolveRecallDropEi } from './precision-alert-ei';
 import { tsxBin } from '../../harness-paths';
 import { PRECISION_BENCH_JEV_GATE_ENV, PRECISION_BENCH_RESULT_MARKER } from './precision-bench-core';
 import { PRECISION_BENCH_EMBEDDER_MODE_ENV } from './precision-bench-host';
+
+export { PRECISION_BENCH_EMBEDDER_MODE_ENV };
 
 export {
   assertCorpusSeeded,
@@ -172,21 +174,30 @@ export async function runBenchInWorker(opts: {
   jevGate?: boolean;
   /** Resolved in the parent, whose memory host carries the live embedder cascade. */
   embedderMode?: string;
+  /** Test seam for the parent's stored extraction and embedding credentials. */
+  resolveWorkerCredentials?: () => Promise<MemoryCredentials>;
 } = {}): Promise<MemoryPrecisionMetrics> {
   const spawnProcess = opts.spawnProcess ?? spawn;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS;
   let child: ChildProcess;
   try {
-    const embedderMode = opts.embedderMode ?? (await memoryHost().resolveEmbedder()).mode;
+    const host = memoryHost();
+    const [embedderMode, credentials] = await Promise.all([
+      opts.embedderMode === undefined ? host.resolveEmbedder().then(({ mode }) => mode) : Promise.resolve(opts.embedderMode),
+      opts.resolveWorkerCredentials ? opts.resolveWorkerCredentials() : host.getCredentials(),
+    ]);
     const worker = precisionBenchWorkerInvocation(PRECISION_BENCH_WORKER);
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      // Set explicitly either way, so an inherited value can never gate a floor-only run.
+      [PRECISION_BENCH_JEV_GATE_ENV]: opts.jevGate ? '1' : '0',
+      [PRECISION_BENCH_EMBEDDER_MODE_ENV]: String(embedderMode),
+    };
+    if (credentials.openai_api_key !== undefined) env.OPENAI_API_KEY = credentials.openai_api_key;
+    if (credentials.anthropic_api_key !== undefined) env.ANTHROPIC_API_KEY = credentials.anthropic_api_key;
     child = spawnProcess(worker.command, worker.args, {
       cwd: process.cwd(),
-      // Set explicitly either way, so an inherited value can never gate a floor-only run.
-      env: {
-        ...process.env,
-        [PRECISION_BENCH_JEV_GATE_ENV]: opts.jevGate ? '1' : '0',
-        [PRECISION_BENCH_EMBEDDER_MODE_ENV]: String(embedderMode),
-      },
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (error) {

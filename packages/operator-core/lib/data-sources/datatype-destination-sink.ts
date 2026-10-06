@@ -158,8 +158,13 @@ async function withRecordLinks(
   return out;
 }
 
-function harnessOf(source: DestinationSourceRow): string {
-  const harness = str(source.config?.harnessSlug);
+/**
+ * The harness a record/event row from this source is written under: the source's own
+ * `config.harnessSlug`, else the caller's `defaultHarness`. Without either it fails closed, so a
+ * datatype with no defined home is never written under a guessed harness.
+ */
+function harnessOf(source: DestinationSourceRow, defaultHarness?: string): string {
+  const harness = str(source.config?.harnessSlug) || str(defaultHarness);
   if (!harness) throw new Error(`data_source_harness_missing:${source.id}`);
   return harness;
 }
@@ -190,7 +195,17 @@ function requireGenericKind(def: Awaited<ReturnType<typeof getDatatype>>, dataty
  */
 export async function createDatatypeDestinationSinks(
   sql: Sql,
-  input: { workspaceId: string; sourceId: string; datatype: string },
+  input: {
+    workspaceId: string;
+    sourceId: string;
+    datatype: string;
+    /**
+     * Harness for record/event rows when the source names none (`config.harnessSlug`). A
+     * personal-scope source belongs to no harness; the caller that owns the datatype's home
+     * (the relationship graph for `person` / `organization`) supplies it.
+     */
+    defaultHarness?: string;
+  },
   deps: DatatypeDestinationDeps = {},
 ): Promise<ExternalTriggerSink[]> {
   const source = await loadSource(sql, input.workspaceId, input.sourceId);
@@ -206,7 +221,7 @@ export async function createDatatypeDestinationSinks(
 
   if (nature === 'record') {
     requireGenericKind(def, datatype, nature);
-    const harness = harnessOf(source);
+    const harness = harnessOf(source, input.defaultHarness);
     const admitRecord = deps.admitRecord ?? ((args) => evaluateAdmissionRules(args, { sql }));
     const refreshAdmitted = deps.refreshAdmitted ?? refreshAdmittedFromSource;
     const applyLifecycle = deps.applyLifecycle ?? ((input) => applySourceLifecycle(sql, input));
@@ -262,7 +277,7 @@ export async function createDatatypeDestinationSinks(
 
   if (nature === 'event') {
     requireGenericKind(def, datatype, nature);
-    const harness = harnessOf(source);
+    const harness = harnessOf(source, input.defaultHarness);
     return [{
       kind: 'data-source-event',
       ref,

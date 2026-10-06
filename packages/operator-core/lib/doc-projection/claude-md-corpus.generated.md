@@ -1781,7 +1781,7 @@ mirror with file primary". Helpers: `packages/operator-core/lib/operator-state-p
 
 - **Schema = migrations only; NO runtime DDL.** ⚠ **Pick the migration number via the atomic allocator — NEVER `ls sql/ | tail` by eye.** On this parallel fleet two agents racing an `ls`-then-write gap WILL pick the same NNN. Run `node scripts/next-migration.mjs --name <slug> --intent "..."` (or `npm run db:next-migration --`) FIRST — it reserves the number under an advisory lock (`harness_shared.migration_reservations`) and prints a `.DRAFT`-suffixed path.
 
-  **Write and iterate at that `.DRAFT` path, not the bare `.sql` name**: the runner only applies files matching `*.sql`, so a `.DRAFT` file is invisible to boot auto-apply / `db:migrate` / the green-checkpoint preflight while you edit it — including a deliberate temporary both-ways guard-test mutation, which otherwise races the operator's auto-apply and can execute half-finished SQL against the live DB. When it is finished and tested, ARM it with the printed `arm_command` (`mv <path>.DRAFT <path>`) at `libs/papercusp/libs/db/sql/<NNN>-…sql` (≥107), then run `node libs/papercusp/libs/db/scripts/pull-schema.mjs`. Never an `ensureXxx()` / inline `CREATE TABLE`. `000-baseline.sql` is frozen/generated.
+  **Write and iterate at that `.DRAFT` path, not the bare `.sql` name**: the runner only applies files matching `*.sql`, so a `.DRAFT` file is invisible to boot auto-apply / `db:migrate` / the green-checkpoint preflight while you edit it — including a deliberate temporary both-ways guard-test mutation, which otherwise races the operator's auto-apply and can execute half-finished SQL against the live DB. When it is finished and tested, ARM it with the printed `arm_command` (`next-migration.mjs --arm <draft>`: it lints like boot, then publishes `libs/papercusp/libs/db/sql/<NNN>-…sql`, ≥107) — never a hand `mv`, which skips the lint (WI-10006549). Then run `node libs/papercusp/libs/db/scripts/pull-schema.mjs`. Never an `ensureXxx()` / inline `CREATE TABLE`. `000-baseline.sql` is frozen/generated.
 - **Never hardcode `localhost:5432`** — resolve via `getHarnessAdminUrl()`. Embedded-pg is the ship target; the dev box runs native PG on `:5432`.
 - **Reading PG-canonical state? Query PG — don't dump-and-jq a projection.** Plans, work-items, issues, observations (`engineer_issues`), `tool_invocations`, scorecards and recipes live in Postgres; the `*:list` tools and `docs/plans/*.md` files are *projections*. `dev:pg_query` is for **genuinely ad-hoc / analytic** reads (a one-off group-by, join, or recency slice you won't repeat). A HOT read with a stable shape belongs behind a TOOL that wraps the canonical SQL so it can't drift — "what's claimable" is `work_items:claimable`, NOT a raw floor query.
 The duplicate-number race is EI-6843 — it cost a rename plus every in-code reference plus a re-verify when caught. The `.DRAFT` mechanism is EI-19366138707071397.
@@ -2051,13 +2051,15 @@ a `\du`), the bash form is the right answer — the gate will not fight you on t
   new handshakes under load). Pass your OWN `--client`, or writes land under an
   anonymous `mcp-call-*` (EI-8509):
   `node scripts/mcp-call.mjs <server:verb> --json-file <args.json> --client <your-su-id> --port 3170`
-- **DISCONNECTED** — tools worked, then every call says `ECONNREFUSED` or `MCP server
-  papercusp-su is not connected`: the operator you dial (often a `:3170` pin) is
-  restarting. Re-dial is INCONSISTENT, not never (EI-24755204180385597): once its
-  `/api/health` answers, retry the original failed Papercusp tool call. No human
-  `/mcp` needed (EI-24657708696146012). Still down? Flush checkpoints via
-  `mcp-call.mjs` as above, then respawn YOURSELF:
-  `node scripts/mcp-call.mjs session:request-compaction '{"reason":"papercusp-su MCP disconnected"}' --client <your-su-id> --port 3070`
+- **DISCONNECTED** — tools worked, then calls return `ECONNREFUSED` or `MCP server
+  papercusp-su is not connected`. Neither proves a restart.
+  `mcp-call`'s refusal means its process could not connect before sending the
+  request; another runtime may reach the endpoint. Probe in the same environment;
+  once its `/api/health` answers, retry the original failed Papercup tool call.
+  Re-dial is inconsistent (EI-24755204180385597); no human `/mcp`
+  (EI-24657708696146012). Omit `--port` unless pinning; defaults try configured,
+  canonical, and proxy ports. Flush checkpoints and request compaction via
+  `mcp-call.mjs`.
 - **IDENTITY** — tools are listed, but calls refuse `Identity capability (unresolved):
   stale-artifact`. ⛔ **`mcp-call.mjs` CANNOT open this one**: server-side preflight
   rejects every client and port (WI-10002028); even `coord:orient` may be refused.

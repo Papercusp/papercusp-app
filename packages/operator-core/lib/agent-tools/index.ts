@@ -118,6 +118,8 @@ import './recipes/sweep';
 import './datatypes/declare';
 import './datatypes/list';
 import './datatypes/get';
+import './people/search';
+import './people/get';
 // identities-v1 P-027 / D-010 — the shared leg and the global BROWSE were retired here:
 // `datatypes:publish` → cupboard:publish-datatype, `datatypes:catalog` →
 // cupboard:search { kind:'datatype' }. They were a second Cupboard, and a broken one:

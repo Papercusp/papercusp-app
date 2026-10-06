@@ -461,6 +461,17 @@ bundle_rc=0
     --metafile "$METAFILE" --base-dir "$OPERATOR_DIR"; then
     exit 1
   fi
+  # EI-25217214806027261: this bundler reads the LIVE shared tree, so a peer mid-edit can leave
+  # an identifier unbound in one input; esbuild compiles it into a bare global reference and the
+  # host throws `ReferenceError: X is not defined` at runtime (bg-host git-sync, 2026-10-06). Check
+  # every repo-owned input changed since the last-known-good $OUTFILE (still in place here — the
+  # atomic mv is below) for value references that reach global scope unbound. Findings keep LKG.
+  if ! "${COMMITTED_NODE[@]}" "$REPO_ROOT/scripts/check-bundle-free-refs.mjs" \
+    --metafile "$METAFILE" --base-dir "$OPERATOR_DIR" --since "$OUTFILE" \
+    "${HOST_BANNER_DEFINES[@]}" --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
+    "${BUNDLED_SOURCE_SHA_DEFINE[@]}"; then
+    exit 1
+  fi
   # WI-10005745: the restricted-hold gate reads these exact inputs after every step has published.
   cp -f "$METAFILE" "$BUNDLE_HOST_GATE_META_DIR/${OUTFILE##*/}.meta.json" || exit 1
   # WI-38221: widen-avoidance pass. Runs on $TMPFILE, BEFORE the atomic rename

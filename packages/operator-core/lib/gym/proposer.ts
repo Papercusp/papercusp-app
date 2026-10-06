@@ -11,6 +11,7 @@
 import { tryParseJson } from './parse-json';
 import { planVariantOverlay, type VariantOverlay } from './variant-overlay';
 import type { GymLlmCall } from './task-generator';
+import type { JudgeLlmCall } from './judge';
 
 export interface WorstTrace {
   taskId: string;
@@ -88,6 +89,37 @@ export function withGymLlmNetworkRetry<A extends unknown[], R>(
       }
     }
     throw lastErr;
+  };
+}
+
+type NativeGymLlmRequest = Parameters<JudgeLlmCall>[0] & {
+  priority?: string;
+  harnessSlug?: string;
+  requireOutputTokenLimit?: boolean;
+};
+
+/** The real cycle's transport binding. A frozen judge limit must be enforced
+ * by the selected provider route, including SDK retries. This does not issue
+ * a monetary grant; the proposer still needs its admitted resource policy. */
+export function bindNativeGymLlmCalls(
+  call: (opts: NativeGymLlmRequest) => ReturnType<JudgeLlmCall>,
+  harnessSlug: string,
+  deps: { log: (message: string) => void; sleep?: (ms: number) => Promise<void> },
+): { judge: JudgeLlmCall; proposer: GymLlmCall } {
+  const dispatch = withGymLlmNetworkRetry((opts: NativeGymLlmRequest) =>
+    call({ ...opts, priority: 'gym', harnessSlug }), deps);
+  const snapshot = (opts: NativeGymLlmRequest): NativeGymLlmRequest => ({
+    ...opts, messages: opts.messages.map(message => ({ ...message })),
+  });
+  return {
+    async judge(opts) {
+      const request = snapshot(opts);
+      if (!Number.isSafeInteger(request.maxTokens) || request.maxTokens! <= 0) {
+        throw Object.assign(new RangeError('Native Gym judge requires its frozen output token limit'), { costUsd: 0 });
+      }
+      return dispatch({ ...request, requireOutputTokenLimit: true });
+    },
+    proposer: opts => dispatch(snapshot(opts)),
   };
 }
 

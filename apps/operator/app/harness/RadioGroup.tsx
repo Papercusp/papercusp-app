@@ -18,7 +18,7 @@ import { useRef } from "react";
 
 export interface RadioGroupOption<T extends string> {
   value: T;
-  /** Disabled options stay focusable-skippable and unselectable. */
+  /** Disabled options are skipped by focus navigation and cannot be selected. */
   disabled?: boolean;
 }
 
@@ -29,6 +29,7 @@ export function RadioGroup<T extends string, O extends RadioGroupOption<T>>({
   onChange,
   className,
   optionClassName,
+  optionStyle,
   children,
 }: {
   /** The group's accessible name. */
@@ -38,20 +39,22 @@ export function RadioGroup<T extends string, O extends RadioGroupOption<T>>({
   onChange: (value: T) => void;
   className?: string;
   optionClassName?: string;
+  optionStyle?: (option: O, selected: boolean) => React.CSSProperties;
   children: (option: O, selected: boolean) => React.ReactNode;
 }) {
   const buttonsRef = useRef<Array<HTMLButtonElement | null>>([]);
 
   /*
    * The selected option is the single tab stop. When nothing is selected yet
-   * the FIRST option takes it, so the group is always reachable by keyboard.
+   * the first ENABLED option takes it. An entirely disabled group has none.
    */
-  const selectedIndex = options.findIndex((option) => option.value === value);
-  const tabStopIndex = selectedIndex >= 0 ? selectedIndex : 0;
+  const enabledIndexes = options.flatMap((option, index) => option.disabled ? [] : [index]);
+  const selectedIndex = options.findIndex((option) => option.value === value && !option.disabled);
+  const tabStopIndex = selectedIndex >= 0 ? selectedIndex : enabledIndexes[0];
 
   const move = (index: number) => {
     const next = options[index];
-    if (!next) return;
+    if (!next || next.disabled) return;
     onChange(next.value);
     buttonsRef.current[index]?.focus();
   };
@@ -60,15 +63,17 @@ export function RadioGroup<T extends string, O extends RadioGroupOption<T>>({
     event: React.KeyboardEvent<HTMLButtonElement>,
     index: number,
   ) => {
+    const enabledIndex = enabledIndexes.indexOf(index);
+    if (enabledIndex < 0) return;
     let nextIndex: number | null = null;
     if (event.key === "ArrowDown" || event.key === "ArrowRight") {
-      nextIndex = (index + 1) % options.length;
+      nextIndex = enabledIndexes[(enabledIndex + 1) % enabledIndexes.length];
     } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
-      nextIndex = (index - 1 + options.length) % options.length;
+      nextIndex = enabledIndexes[(enabledIndex - 1 + enabledIndexes.length) % enabledIndexes.length];
     } else if (event.key === "Home") {
-      nextIndex = 0;
+      nextIndex = enabledIndexes[0];
     } else if (event.key === "End") {
-      nextIndex = options.length - 1;
+      nextIndex = enabledIndexes[enabledIndexes.length - 1];
     }
     if (nextIndex === null) return;
 
@@ -87,13 +92,14 @@ export function RadioGroup<T extends string, O extends RadioGroupOption<T>>({
             key={option.value}
             aria-checked={selected}
             className={optionClassName}
+            style={optionStyle?.(option, selected)}
             data-selected={selected ? "true" : "false"}
             disabled={option.disabled}
             ref={(node) => {
               buttonsRef.current[index] = node;
             }}
             tabIndex={index === tabStopIndex ? 0 : -1}
-            onClick={() => onChange(option.value)}
+            onClick={() => { if (!option.disabled) onChange(option.value); }}
             onKeyDown={(event) => onKeyDown(event, index)}
           >
             {children(option, selected)}

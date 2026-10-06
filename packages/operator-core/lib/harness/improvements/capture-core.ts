@@ -2657,7 +2657,9 @@ export async function captureImprovement(
   // PRIOR resolved/closed items so a settled friction is recognised before it
   // re-enters the queue. Reads the stable signature (not raw title) via the shared
   // matcher. Recall, not a gate — surfaced even when we create.
-  const alreadyDecided = recallAlreadyDecided(input.title, candidates.map(issueToCandidate), {
+  // A lambda, not `.map(issueToCandidate)`: the mapper's second parameter is an options object,
+  // and Array.map would pass the element index there (WI-10006515).
+  const alreadyDecided = recallAlreadyDecided(input.title, candidates.map((issue) => issueToCandidate(issue)), {
     excludeId: undefined,
   });
 

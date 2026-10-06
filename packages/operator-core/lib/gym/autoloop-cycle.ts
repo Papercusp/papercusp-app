@@ -59,7 +59,7 @@ import { resolveGymAccountWorkspace } from './account-workspace';
 import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
 import { LEARNING_MODEL_SPEC } from '../learning/model-policy';
-import { withGymLlmNetworkRetry } from './proposer';
+import { bindNativeGymLlmCalls } from './proposer';
 
 // Anchored on the checkout, not on this module's directory: this module is inlined into the
 // esbuild host bundle, where import.meta.url is the bundle's URL, so both a `..` climb and a
@@ -451,16 +451,13 @@ export async function runOneAutoloopCycle(
     // spend; unknown/positive failed spend must reach reservation settlement
     // without being replaced by a later receipt. The gateway owns HTTP retries.
     const rawGymLlm = FAKE ? null : await import('../llm-testing/llm-client');
+    const nativeCalls = rawGymLlm ? bindNativeGymLlmCalls(rawGymLlm.llmCall, slug, { log }) : null;
     const judge: JudgeLlmCall = FAKE
       ? fakeJudge
-      : withGymLlmNetworkRetry((opts: Parameters<JudgeLlmCall>[0]) =>
-          rawGymLlm!.llmCall({ ...opts, priority: 'gym', harnessSlug: slug }),
-        { log });
+      : nativeCalls!.judge;
     const proposer: GymLlmCall = FAKE
       ? fakeProposer
-      : (withGymLlmNetworkRetry((opts: Parameters<GymLlmCall>[0]) =>
-          rawGymLlm!.llmCall({ ...(opts as object), priority: 'gym', harnessSlug: slug } as never),
-        { log }) as unknown as GymLlmCall);
+      : nativeCalls!.proposer;
 
     // 5. Ports + loop deps.
     const tokenPath = join(homedir(), '.papercusp', 'superuser-token');

@@ -482,12 +482,24 @@ export function buildUnreachableDiagnostic({ attempts, configuredPort, pinned })
   return `mcp-call: could not reach the operator MCP endpoint. Tried port(s): ${renderedAttempts}.\n` +
     (pinned ? `  Port ${configuredPort} was explicitly pinned with --port, so no fallback was attempted.\n` : '') +
     `  ${outcome}\n` +
+    `  These results describe this mcp-call process's attempts to the listed ports; a refusal does not identify why a connection was refused or whether another runtime can reach the operator.\n` +
+    `  Run endpoint probes from the same execution environment that ran mcp-call; loopback reachability can differ across environments.\n` +
     `  A healthy operator on a different port may still be serving. Find the live port:\n` +
     `    ss -ltn | grep -E ':(3070|3170|9071)'   # then: PAPERCUSP_HONO_PORT=<live port> re-run\n` +
-    `  The resilient MCP proxy usually listens on :9071 and can bridge an operator restart.\n` +
+    `  The local MCP proxy may listen on :9071; that is a separate route from the direct operator ports.\n` +
     `  Confirm the canonical operator is healthy with:\n` +
     `    curl -s -o /dev/null -w '%{http_code}\\n' http://127.0.0.1:3070/api/health\n` +
     `  See EI-20182275617587040 / agent-insights/mcp-client-drop-curl-recovery.`;
+}
+
+/**
+ * Explain a retry after ECONNREFUSED without attributing the refusal to an
+ * operator restart. The result is scoped to this helper's caller and endpoint.
+ */
+export function buildConnectionRetryDiagnostic({ port, attempt, delayMs, remainingMs }) {
+  return `mcp-call: connection to port ${port} was refused from this mcp-call process; ` +
+    `retry ${attempt} in ${delayMs}ms (${Math.ceil(remainingMs / 1000)}s left). ` +
+    'A refusal alone does not identify the cause or imply that other callers cannot reach the operator.';
 }
 
 /**
@@ -719,12 +731,9 @@ async function main() {
         // and must not be silently routed to another port while it restarts.
         retryWindowMs: pinned ? MCP_CALL_CONNECTION_RETRY_WINDOW_MS : 0,
         onRetry: ({ attempt, delayMs, remainingMs }) => {
-          // Keep a long restart quiet without hiding that recovery is active.
+          // Keep a long retry loop quiet without hiding that retries are active.
           if (attempt === 1 || attempt % 10 === 0) {
-            console.error(
-              `mcp-call: ${port} refused the connection; operator may be restarting — ` +
-                `retry ${attempt} in ${delayMs}ms (${Math.ceil(remainingMs / 1000)}s left)`,
-            );
+            console.error(buildConnectionRetryDiagnostic({ port, attempt, delayMs, remainingMs }));
           }
         },
       });

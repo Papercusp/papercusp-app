@@ -434,6 +434,23 @@ export async function sumOpenReservedUsd(
   }
 }
 
+/** One native run's frozen per-cycle policy. This scopes issuer arithmetic,
+ * not authentication or provider invoice enforcement. Persisted using the
+ * existing reservation run_ref; no new ledger or registration is needed. */
+export interface CycleSpendReservationScope {
+  runId: string;
+  budgetUsd: number;
+}
+
+const cycleUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Shared receipt identity check for the store and governed dispatch helper. */
+export function cycleReservationRunRef(cycle: CycleSpendReservationScope, reservationId: string): string | null {
+  if (!cycle || typeof cycle.runId !== 'string' || !cycleUuid.test(cycle.runId) ||
+    exactUsdMicros(cycle.budgetUsd) === null || typeof reservationId !== 'string' || !cycleUuid.test(reservationId)) return null;
+  return `cycle:${cycle.runId.toLowerCase()}/cap:${exactUsdMicros(cycle.budgetUsd)}/attempt:${reservationId.toLowerCase()}`;
+}
+
 export interface ReserveLearningSpendInput {
   workspaceId: string;
   loopId: string;
@@ -445,6 +462,10 @@ export interface ReserveLearningSpendInput {
   runRef?: string | null;
   note?: string | null;
   floorUsd?: number;
+  /** Bound all attempts in ONE per-cycle run under the registration lock.
+   * The registered cap must still match; other runs retain their own cap.
+   * Incompatible with exact lifetime/resource reservations or caller runRef. */
+  cycle?: CycleSpendReservationScope;
   /** Exact, single-use reservation for a controller's frozen manifest. The
    * registration must carry meta.reservationBinding with this SHA256, be
    * enabled/lifetime, and still have the expected dollar cap. No partial grant
@@ -464,9 +485,12 @@ type ExactReservationRefusal = 'invalid-exact-request' | 'transaction-required' 
   'stale-binding' | 'disabled' | 'pot-disabled' | 'unsupported-budget-kind' | 'insufficient-headroom' | 'already-reserved' |
   'resource-binding-required' | 'resource-accounting-incomplete' | 'resource-cap-exceeded';
 
+type CycleReservationRefusal = 'invalid-cycle-request' | 'cycle-binding-required' |
+  'stale-cycle-budget' | 'cycle-accounting-incomplete';
+
 export type ReserveLearningSpendResult =
   | { ok: true; reservation: LearningSpendReservation; clamped: boolean; headroomUsd: number | null }
-  | { ok: false; reason: ReservationRefusal | ExactReservationRefusal; requestedUsd: number; headroomUsd: number | null };
+  | { ok: false; reason: ReservationRefusal | ExactReservationRefusal | CycleReservationRefusal; requestedUsd: number; headroomUsd: number | null };
 
 /**
  * Open one attempt. Refuses (fail-closed) on a disabled or unbudgeted registration,
@@ -485,18 +509,26 @@ export async function reserveLearningSpend(
   sql: Sql,
   q: ReserveLearningSpendInput,
 ): Promise<ReserveLearningSpendResult> {
-  q = { ...q, ...(q.exact ? { exact: { ...q.exact,
+  q = { ...q, ...(q.cycle !== undefined ? { cycle: { ...q.cycle } } : {}), ...(q.exact ? { exact: { ...q.exact,
     ...(q.exact.resources ? { resources: { ...q.exact.resources } } : {}),
     ...(q.exact.expectedResourceBudget ? { expectedResourceBudget: { ...q.exact.expectedResourceBudget,
       armIds: Array.isArray(q.exact.expectedResourceBudget.armIds) ? [...q.exact.expectedResourceBudget.armIds] : [] } } : {}),
   } } : {}) };
   const exact = q.exact;
-  const refuse = (reason: ReservationRefusal | ExactReservationRefusal, headroomUsd: number | null = null): ReserveLearningSpendResult =>
+  const cycle = q.cycle;
+  const reservationId = exact?.reservationId ?? randomUUID();
+  const cycleRef = cycle === undefined ? null : cycleReservationRunRef(cycle, reservationId);
+  const refuse = (reason: ReservationRefusal | ExactReservationRefusal | CycleReservationRefusal, headroomUsd: number | null = null): ReserveLearningSpendResult =>
     ({ ok: false, reason, requestedUsd: q.requestedUsd, headroomUsd });
   // Work in integer microdollars on the exact path, not floating subtraction
   // that can round remaining headroom UP. Reject non-microdollar input.
   const micros = exactUsdMicros;
   const begin = (sql as unknown as { begin?: unknown }).begin;
+  if (cycle !== undefined && (!cycleRef || exact !== undefined || q.runRef != null || micros(q.requestedUsd) === null)) {
+    return refuse('invalid-cycle-request');
+  }
+  if (cycle === undefined && q.runRef?.startsWith('cycle:')) return refuse('cycle-binding-required');
+  if (cycle !== undefined && typeof begin !== 'function') return refuse('transaction-required');
   if (exact && (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(exact.reservationId) ||
     !/^[a-f0-9]{64}$/.test(exact.binding) || micros(exact.expectedBudgetUsd) === null ||
     micros(q.requestedUsd) === null || micros(q.floorUsd ?? LEARNING_GOVERNOR_BUDGET_FLOOR_USD) === null ||
@@ -532,6 +564,11 @@ export async function reserveLearningSpend(
       if (reg.meta?.reservationBinding !== exact.binding || reg.budgetUsd !== exact.expectedBudgetUsd) {
         return refuse('stale-binding');
       }
+    }
+    if (cycle !== undefined) {
+      if (!reg || reg.budgetUsd === null) return refuse('unbudgeted');
+      if (reg.budgetKind !== 'per-cycle') return refuse('unsupported-budget-kind');
+      if (reg.budgetUsd !== cycle.budgetUsd) return refuse('stale-cycle-budget');
     }
     const resourceBudget = reg?.meta?.reservationResourceBudget;
     if (resourceBudget != null || resources) {
@@ -575,6 +612,26 @@ export async function reserveLearningSpend(
       openReserved,
       q.floorUsd ?? LEARNING_GOVERNOR_BUDGET_FLOOR_USD,
     );
+    if (cycle !== undefined) {
+      const runPrefix = `cycle:${cycle.runId.toLowerCase()}/`;
+      const attemptPrefix = `${runPrefix}cap:${micros(cycle.budgetUsd)}/attempt:`;
+      // OPEN rows hold their full reservation, even when a caller knows only
+      // a usage subtotal. Every terminal disposition charges its actual use.
+      // Mirror accumulate:false therefore cannot reopen this run's capacity.
+      const history = (await tx`
+        SELECT COALESCE(SUM(CASE WHEN status = 'open' THEN reserved_usd ELSE used_usd END), 0) AS committed_usd,
+          COALESCE(BOOL_AND(reserved_usd >= 0 AND used_usd >= 0
+            AND reserved_usd * 1000000 = TRUNC(reserved_usd * 1000000)
+            AND used_usd * 1000000 = TRUNC(used_usd * 1000000)
+            AND status IN ('open', 'settled', 'failed', 'cancelled')
+            AND run_ref = ${attemptPrefix} || id::text), TRUE) AS complete
+        FROM harness_shared.learning_spend_reservations
+        WHERE workspace_id = ${q.workspaceId} AND loop_id = ${q.loopId}
+          AND run_ref LIKE ${runPrefix + '%'}`) as Row[];
+      const committed = micros(Number(history[0]?.committed_usd));
+      if (history[0]?.complete !== true || committed === null) return refuse('cycle-accounting-incomplete');
+      headroomUsd = Math.max(0, micros(cycle.budgetUsd)! - committed) / 1_000_000;
+    }
     if (exact && reg) {
       const cap = micros(reg.budgetUsd!), spent = micros(reg.spentUsd), open = micros(openReserved);
       const floor = micros(q.floorUsd ?? LEARNING_GOVERNOR_BUDGET_FLOOR_USD);
@@ -593,10 +650,10 @@ export async function reserveLearningSpend(
         (id, workspace_id, loop_id, pot_slug, attempt_kind, requested_usd, reserved_usd,
          status, signal_origin, run_ref, note
          ${resources ? tx`, arm_id, reserved_input_tokens, reserved_output_tokens` : tx``})
-      VALUES (${exact?.reservationId ?? randomUUID()}, ${q.workspaceId}, ${q.loopId}, ${q.potSlug === undefined ? (reg?.potSlug ?? null) : q.potSlug},
+      VALUES (${reservationId}, ${q.workspaceId}, ${q.loopId}, ${q.potSlug === undefined ? (reg?.potSlug ?? null) : q.potSlug},
         ${q.attemptKind ?? 'cycle'}, ${q.requestedUsd}, ${plan.reservedUsd},
         'open', ${q.signalOrigin ?? 'organic'},
-        ${exact ? `manifest:${exact.binding}/attempt:${exact.reservationId.toLowerCase()}` : q.runRef ?? null}, ${q.note ?? null}
+        ${exact ? `manifest:${exact.binding}/attempt:${exact.reservationId.toLowerCase()}` : cycleRef ?? q.runRef ?? null}, ${q.note ?? null}
         ${resources ? tx`, ${resources.armId}, ${resources.inputTokens}, ${resources.outputTokens}` : tx``})
       ON CONFLICT (id) DO NOTHING
       RETURNING *`) as Row[];
@@ -643,7 +700,7 @@ export type SettleLearningSpendResult =
       releasedUsd: number;
       overrunUsd: number;
     }
-  | { ok: false; reason: 'not-found' | 'already-settled' | 'exact-settlement-required'; reservation: LearningSpendReservation | null };
+  | { ok: false; reason: 'not-found' | 'already-settled' | 'exact-settlement-required' | 'cycle-settlement-required'; reservation: LearningSpendReservation | null };
 
 /**
  * Close one attempt — the ONLY way an attempt leaves 'open'. Idempotent by
@@ -681,6 +738,14 @@ export async function settleLearningSpend(
       current.runRef.slice(-current.id.length) === current.id;
     if (exact && (typeof begin !== 'function' || q.accumulate === false || exactUsdMicros(q.usedUsd) === null)) {
       return { ok: false, reason: 'exact-settlement-required', reservation: current };
+    }
+    if (current.runRef?.startsWith('cycle:')) {
+      const parts = current.runRef.split('/');
+      const scope = { runId: parts[0].slice(6), budgetUsd: Number(parts[1]?.slice(4)) / 1_000_000 };
+      if (typeof begin !== 'function' || exactUsdMicros(q.usedUsd) === null ||
+        current.runRef !== cycleReservationRunRef(scope, current.id)) {
+        return { ok: false, reason: 'cycle-settlement-required', reservation: current };
+      }
     }
     const settlement = settleReservation({
       reservedUsd: current.reservedUsd,

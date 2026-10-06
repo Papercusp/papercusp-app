@@ -69,6 +69,9 @@
   // An explicit list is also the honest surface: a glob would silently start
   // emitting declarations for every future script in the repo.
   "files": [
+    // EI-25217214806027261 — bundle-host's free-reference guard, imported directly by
+    // scripts/check-bundle-free-refs.test.ts (the list's first reason: no TS7016).
+    "scripts/check-bundle-free-refs.mjs",
     // EI-24834079439388393: ptool's SDK-install race regression imports the
     // maintained mutex and install boundary directly; keep their types generated.
     "scripts/lib/fs-mutex.mjs",

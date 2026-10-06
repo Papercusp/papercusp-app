@@ -40,6 +40,9 @@ const deps: ArmDeps = { loadAvg1: () => loadavg()[0] ?? null };
 export const FAIR_ARM_IDS = ['rg', 'lsp-query', 'no-third-party', 'gitnexus', 'codebase-memory', 'codegraph', 'trace-mcp', 'codegraphcontext'] as const;
 export type FairArmId = (typeof FAIR_ARM_IDS)[number];
 
+/** A file inside the operator-core tsconfig project: the lsp-query warm-up loads that one project. */
+export const LSP_WARMUP_ANCHOR = 'packages/operator-core/lib/code-intelligence/contracts.ts';
+
 const treeOf = (id: FairArmId): string => join(BENCH, 'trees', id);
 const homeOf = (id: FairArmId): string => join(BENCH, 'homes', id);
 
@@ -53,7 +56,15 @@ export async function buildArm(id: FairArmId): Promise<FairArm> {
     case 'lsp-query': {
       const { createLspAdapterDoor } = await import('./fair-comparison-lsp-door');
       const ts = loadVendoredTypescript(VENDOR_LSP);
-      return createLspQueryArm({ version: `typescript-language-server (vendored) / typescript ${ts.version}`, treeRoot, loadAvg1: deps.loadAvg1 }, createLspAdapterDoor());
+      return createLspQueryArm(
+        {
+          version: `typescript-language-server (vendored) / typescript ${ts.version}`,
+          treeRoot,
+          warmupAnchor: LSP_WARMUP_ANCHOR,
+          loadAvg1: deps.loadAvg1,
+        },
+        createLspAdapterDoor(),
+      );
     }
     case 'no-third-party':
       return createNoThirdPartyArm({ treeRoot, ts: loadVendoredTypescript(VENDOR_LSP), loadAvg1: deps.loadAvg1 });

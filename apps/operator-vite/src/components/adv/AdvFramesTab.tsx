@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { parseAsBoolean, parseAsString, useQueryState } from 'nuqs';
 import { Eye, Hand, MonitorPlay, MonitorOff, RefreshCw, X } from 'lucide-react';
 import { createResilientEventSource, type ResilientEventSource } from '@papercusp/sse';
+import { useSyncQuery } from '@papercusp/sync';
 import FrameVncView from './FrameVncView';
 import FrameScreenTrackView from './FrameScreenTrackView';
 import { Tooltip } from '@/app/harness/Tooltip';
@@ -50,32 +51,15 @@ export interface FrameStatusEvent {
 /** A thumb is stale once it's older than ~3 capture intervals. */
 export const STALE_AFTER_MS = 20_000;
 
-/** A local (this-host) desktop session, from GET /api/deploy/local-desktops. */
-export interface LocalDesktopRow {
-  id: string;
-  slug: string | null;
-  kind: string;
-  scope: string;
-  scopeRef: string;
-  display: number;
-  displayRaw: string;
-  state: string;
-  viewerMode: 'none' | 'watch' | 'takeover';
-  viewerActor: string | null;
-  captureGeometry?: { width: number; height: number };
-  displayGeometry?: { width: number; height: number; depth?: number };
-}
-
 const tileKey = (slug: string, display: number) => `${slug}:${display}`;
+
 /**
- * Selection keys for local desktops carry a `local:` prefix so one nuqs param
- * addresses both populations. A frame's `h1:99` and a local `h1:99` are
- * genuinely different desktops, so the key must distinguish them — the same
- * reason the audit subject does.
+ * Where this computer's agent desktops are shown (agent-multi-desktops-grid D-011):
+ * the Desktops page's "This computer" grid, with thumbnails, owners and pinning.
+ * This view shows deployed frames only and links there for local desktops, so
+ * there is exactly one place to watch them.
  */
-const LOCAL_KEY_PREFIX = 'local:';
-const localTileKey = (slug: string | null, display: number) =>
-  `${LOCAL_KEY_PREFIX}${slug ?? '-'}:${display}`;
+export const LOCAL_DESKTOPS_HREF = '/desktops?desktopHost=local';
 
 export default function AdvFramesTab() {
   const t = useLexicon();
@@ -108,35 +92,12 @@ export default function AdvFramesTab() {
     };
   }, []);
 
-  // ── local desktop roster (P-004) ───────────────────────────────────────
-  // The Xvfb displays THIS host leases to pots and frame slots, from the
-  // DesktopSession registry. Registry-backed, so a desktop leased by a sibling
-  // operator process shows up here too. These have no thumbnail stream (a frame's
-  // JPEG loop is a frame-side agent); they are watch/takeover targets, and the
-  // panel below mounts noVNC against them exactly as it does for a frame.
-  const [localDesktops, setLocalDesktops] = useState<LocalDesktopRow[]>([]);
-  useEffect(() => {
-    let cancel = false;
-    const pull = () => {
-      fetch('/api/deploy/local-desktops', { cache: 'no-store' })
-        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-        .then((d) => {
-          if (cancel) return;
-          setLocalDesktops(Array.isArray(d?.desktops) ? d.desktops : []);
-        })
-        .catch(() => {
-          // Non-fatal: the frames roster carries its own error surface, and a
-          // missing local roster must not blank the tab.
-          if (!cancel) setLocalDesktops([]);
-        });
-    };
-    pull();
-    const t = setInterval(pull, 10_000);
-    return () => {
-      cancel = true;
-      clearInterval(t);
-    };
-  }, []);
+  // ── this computer's agent desktops (D-011) ─────────────────────────────
+  // Counted from the same `desktops.local` sync query the Desktops page grid
+  // reads; the desktops themselves are watched there, not here. A failed read
+  // only hides the link — it must not blank the frames view.
+  const localRoster = useSyncQuery<{ id: string }>({ queryName: 'desktops.local' });
+  const localDesktopCount = localRoster.error ? 0 : (localRoster.data?.length ?? 0);
 
   // ── per-slug SSE streams → thumbs + statuses ───────────────────────────
   const [thumbs, setThumbs] = useState<Map<string, FrameThumbEvent>>(() => new Map());
@@ -207,16 +168,11 @@ export default function AdvFramesTab() {
   const [drive, setDrive] = useQueryState('drive', parseAsBoolean.withDefault(false));
   const selection = useMemo(() => {
     if (!selectedKey) return undefined;
-    // Strip the local marker BEFORE splitting: `local:h1:110` must parse as
-    // slug 'h1' on the local target, not as slug 'local:h1' on a frame — which
-    // is what a bare lastIndexOf(':') would produce.
-    const isLocal = selectedKey.startsWith(LOCAL_KEY_PREFIX);
-    const rest = isLocal ? selectedKey.slice(LOCAL_KEY_PREFIX.length) : selectedKey;
-    const i = rest.lastIndexOf(':');
+    const i = selectedKey.lastIndexOf(':');
     if (i <= 0) return undefined;
-    const display = Number(rest.slice(i + 1));
+    const display = Number(selectedKey.slice(i + 1));
     if (!Number.isInteger(display)) return undefined;
-    return { slug: rest.slice(0, i), display, target: isLocal ? ('local' as const) : ('frame' as const) };
+    return { slug: selectedKey.slice(0, i), display };
   }, [selectedKey]);
   const selected = useMemo(
     () => (selectedKey ? thumbs.get(selectedKey) : undefined),
@@ -250,64 +206,20 @@ export default function AdvFramesTab() {
         <span className="pc-frames__title">{t('fleet')} live view</span>
         <span className="pc-frames__sub">
           {/* "0 live displays" is kept deliberately: with frames deployed, zero
-              is the informative reading (they are up, nothing is on screen). The
-              local count is appended only when there are any, so a box with no
-              local desktops reads exactly as it did before P-004. */}
-          {rows.length === 0 && localDesktops.length === 0
+              is the informative reading (they are up, nothing is on screen). */}
+          {rows.length === 0
             ? 'no deployed frames'
-            : [
-                rows.length > 0 &&
-                  `${rows.length} frame${rows.length === 1 ? '' : 's'} · ${tiles.length} live display${tiles.length === 1 ? '' : 's'}`,
-                localDesktops.length > 0 &&
-                  `${localDesktops.length} local desktop${localDesktops.length === 1 ? '' : 's'}`,
-              ]
-                .filter(Boolean)
-                .join(' · ')}
+            : `${rows.length} frame${rows.length === 1 ? '' : 's'} · ${tiles.length} live display${tiles.length === 1 ? '' : 's'}`}
         </span>
         <div className="pc-frames__spacer" />
+        {/* D-011: this computer's agent desktops are watched on the Desktops page. */}
+        <a className="pc-frames__local-link" href={LOCAL_DESKTOPS_HREF}>
+          {localDesktopCount > 0
+            ? `${localDesktopCount} agent desktop${localDesktopCount === 1 ? '' : 's'} on this computer`
+            : 'Desktops on this computer'}{' '}
+          →
+        </a>
       </div>
-
-      {/* Local desktops render INDEPENDENTLY of the deployed-frame roster: on a
-          dev box there are usually no frames at all, and gating them behind
-          rows.length would hide every desktop this host is actually running. */}
-      {localDesktops.length > 0 && (
-        <div className="pc-frames__grid" aria-label="Local desktops">
-          {localDesktops.map((d) => {
-            const key = localTileKey(d.slug, d.display);
-            const watched = d.viewerMode !== 'none';
-            return (
-              <Tooltip
-                key={d.id}
-                label={`${d.slug ?? 'workspace'} ${d.displayRaw} — ${d.kind} · ${d.state}${
-                  d.viewerActor ? ` · ${d.viewerMode} by ${d.viewerActor}` : ''
-                }`}
-              >
-                <button
-                  type="button"
-                  className="pc-frames__tile pc-frames__tile--local"
-                  data-selected={selectedKey === key}
-                  aria-label={`${d.slug ?? 'workspace'} ${d.displayRaw} (local ${d.kind})`}
-                  onClick={() => void setSelectedKey(selectedKey === key ? null : key)}
-                >
-                  <span className="pc-frames__tile-placeholder" aria-hidden>
-                    <MonitorPlay size={20} />
-                  </span>
-                  <span className="pc-frames__tile-meta">
-                    <span className="pc-frames__tile-slug">{d.slug ?? 'workspace'}</span>
-                    <span className="pc-frames__tile-display">{d.displayRaw}</span>
-                    <span className="pc-frames__tile-role">{d.kind}</span>
-                    {watched && (
-                      <span className="pc-frames__chip-watch" data-drive={d.viewerMode === 'takeover'}>
-                        {d.viewerMode === 'takeover' ? <Hand size={10} aria-hidden /> : <Eye size={10} aria-hidden />}
-                      </span>
-                    )}
-                  </span>
-                </button>
-              </Tooltip>
-            );
-          })}
-        </div>
-      )}
 
       {rosterErr ? (
         <div className="pc-frames__state" data-error="true">
@@ -316,13 +228,11 @@ export default function AdvFramesTab() {
       ) : !rosterLoaded ? (
         <div className="pc-frames__state">Loading deployed frames…</div>
       ) : rows.length === 0 ? (
-        localDesktops.length === 0 ? (
-          <div className="pc-frames__state">
-            No deployed frames and no local desktops. Deploy a harness with{' '}
-            <code>deployment.desktop: true</code>, or lease a local desktop, and agents' screens
-            appear here.
-          </div>
-        ) : null
+        <div className="pc-frames__state">
+          No deployed frames. Deploy a harness with <code>deployment.desktop: true</code> and its
+          screens appear here. Agent desktops on this computer are on the{' '}
+          <a href={LOCAL_DESKTOPS_HREF}>Desktops page</a>.
+        </div>
       ) : (
         <>
           {/* per-frame status strip (no-desktop / connecting / errors) */}
@@ -465,18 +375,9 @@ export default function AdvFramesTab() {
             </button>
           </div>
           {live ? (
-            drive || trackFallback !== null || selection.target === 'local' ? (
-              // VNC: the input path (takeover), the watch fallback (P-013), and a
-              // LOCAL desktop — which is not a deployed frame and can never publish
-              // the holepunch screen track FrameScreenTrackView waits on, so trying
-              // it first only pays its FIRST_FRAME_TIMEOUT_MS (8s) for a guaranteed
-              // fallback. Route straight to VNC instead (EI-21881516933069798).
-              <FrameVncView
-                slug={selection.slug}
-                display={selection.display}
-                drive={drive}
-                target={selection.target}
-              />
+            drive || trackFallback !== null ? (
+              // VNC: the input path (takeover) and the watch fallback (P-013).
+              <FrameVncView slug={selection.slug} display={selection.display} drive={drive} />
             ) : (
               <FrameScreenTrackView
                 slug={selection.slug}
@@ -560,15 +461,8 @@ export default function AdvFramesTab() {
         .pc-frames__tile[data-selected='true'] { border-color: var(--accent, #38bdf8); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent, #38bdf8), transparent 60%); }
         .pc-frames__tile[data-stale='true'] { opacity: 0.55; }
         .pc-frames__tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
-        /* A local desktop has no thumbnail stream — a frame's JPEG loop is a
-           frame-side agent. The placeholder keeps the tile the same size as a
-           thumbnailed one so the grid does not reflow when frames appear. */
-        .pc-frames__tile--local .pc-frames__tile-placeholder {
-          display: flex; align-items: center; justify-content: center;
-          width: 100%; aspect-ratio: 4 / 3;
-          color: var(--fg-mute, #7f9bb4);
-          background: rgb(from var(--bg, #07101d) r g b / 0.5);
-        }
+        .pc-frames__local-link { font-size: 12px; color: var(--accent, #38bdf8); text-decoration: none; white-space: nowrap; }
+        .pc-frames__local-link:hover, .pc-frames__local-link:focus-visible { text-decoration: underline; }
         .pc-frames__tile-meta {
           position: absolute; left: 0; right: 0; bottom: 0;
           display: flex; align-items: center; gap: 6px;

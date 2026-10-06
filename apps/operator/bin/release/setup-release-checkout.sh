@@ -360,6 +360,22 @@ else
   log "target ref=$REF sha=$TARGET_SHA"
 fi
 
+# EI-25223821707990839: an explicit generation can expire while source checkout
+# and submodule replacement run. Take its process-owned selector lease before
+# those mutations, so a missing generation leaves the existing source untouched
+# and retention cannot remove a live selection during preparation. Source-only
+# and dependency-skip callers deliberately do not consume a generation.
+if [ "$SOURCE_ONLY" = "0" ] && [ "$NODE_MODULES_MODE" != "skip" ] \
+  && [ "$NODE_MODULES_COPY_MODE" = "copy" ] \
+  && [ "$NODE_MODULES_GENERATION_MODE" = "required" ] \
+  && [ -n "$NODE_MODULES_GENERATION_ID" ]; then
+  DEPENDENCY_GENERATION_ROOT="$(dependency_generation_resolve_root "$INTEGRATION_ROOT" "$DEPENDENCY_GENERATION_ROOT")"
+  dependency_generation_acquire_selector_lease \
+    "$DEPENDENCY_GENERATION_ROOT" "$NODE_MODULES_GENERATION_ID" "$$" \
+    "$NODE_MODULES_GENERATION_TOKEN"
+  log "leased explicit dependency generation before source preparation: $NODE_MODULES_GENERATION_ID"
+fi
+
 # 1. Worktree --------------------------------------------------------------
 if [ "$PREPARE_EXISTING" = "1" ]; then
   log "preserving existing checkout and submodules (prepare-existing)"
@@ -1209,7 +1225,9 @@ if need_node_modules; then
     if [ -n "$NODE_MODULES_GENERATION_ID" ]; then
       # Lease BEFORE the full validation walk. Otherwise a retention pass can
       # remove this exact identity between selection and materialization.
-      dependency_generation_acquire_selector_lease "$DEPENDENCY_GENERATION_ROOT" "$NODE_MODULES_GENERATION_ID"
+      if [ -z "${DEPENDENCY_GENERATION_SELECTOR_LEASE:-}" ]; then
+        dependency_generation_acquire_selector_lease "$DEPENDENCY_GENERATION_ROOT" "$NODE_MODULES_GENERATION_ID"
+      fi
       if [ -n "$NODE_MODULES_GENERATION_TOKEN" ]; then
         dependency_generation_select_prevalidated \
           "$DEPENDENCY_GENERATION_ROOT" "$NODE_MODULES_GENERATION_ID" \

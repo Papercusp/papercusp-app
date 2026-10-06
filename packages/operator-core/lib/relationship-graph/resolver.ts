@@ -27,6 +27,7 @@
  */
 import { createHash } from 'node:crypto';
 import type { Sql } from 'postgres';
+import { operatorHomeHarnessSlug } from '../harness/operator-home-harness';
 import {
   createWorkItem as defaultCreateWorkItem,
   mergeWorkItemPayload as defaultMergeWorkItemPayload,
@@ -67,6 +68,15 @@ const MAX_MERGE_HOPS = 10;
 
 export function isGraphEntityDatatype(datatype: string): datatype is GraphEntityDatatype {
   return (GRAPH_ENTITY_DATATYPES as readonly string[]).includes(datatype);
+}
+
+/**
+ * The harness a graph record is written under when its source names none (decision D-019). A
+ * personal-scope source (the built-in Google mail, calendar and contacts sources) belongs to no
+ * harness, but the graph is workspace-scoped, so its rows take the workspace's home harness.
+ */
+export function graphDefaultHarness(): string {
+  return operatorHomeHarnessSlug();
 }
 
 interface EntitySpec {

@@ -34,6 +34,15 @@ Each step's output feeds the next one. All commands run from the repo root.
      spot-reclaim drill (P-007, D-026).
    - `vm/install-server.sh`, `vm/time-restart.sh` and `vm/sample-footprint.py` measure the
      Papercusp Server itself (S7). `footprint-summary.ts <capture.jsonl>` summarizes a capture.
+   - `vm/sidecar-idle-soak.sh` runs the embed-sidecar idle-exit soak (P-532, D-052) on several
+     tenant Servers, with `vm/sidecar-idle-probe.sh` (census, ports, env-switcher operators),
+     `vm/embed-trace-fetch.cjs` and `vm/host-sampler.sh`.
+     `python3 vm/sidecar-idle-analyze.py <run.log>` turns its log into PASS / FAIL / NOT_OBSERVED
+     verdicts and the `--p532-saved-gib` figure for the cost model.
+   - `vm/p2p-join-soak.sh` is the p2p join soak (S6, P-525): a cold GCP joiner against the tower.
+     `python3 vm/backfill-split.py <fp.jsonl> <serve.log> [from_epoch]` splits its footprint
+     samples by whether an embed-backfill drain overlapped them.
+   - `vm/gce-resize.sh` times a GCE machine-type resize (D-053).
 4. **Build the capacity table** from the pulled-back ramp results:
    `npx tsx scripts/agent-capacity/capacity-table.ts <root> [--disk-gb 120] [--json]`
 5. **Cost model** (P-012). Cost per workspace of N agents for each lever combination, against the
@@ -66,10 +75,8 @@ re-read of the project shows no instance and no orphaned disk. Its header explai
 ## Not in the repo yet
 
 These runs produced plan decisions but their drivers still live only in the gitignored
-`.papercusp/scratch/`, so nobody else can re-run them. Moving them here, with tests, is tracked as a
-follow-up work item.
+`.papercusp/scratch/`, so nobody else can re-run them. Moving them here, with tests, is tracked as
+WI-10006497.
 
 - P-011 multi-tenant Server packing (D-045): `run-p011-ab.sh`, `run-p011-replicate.sh`, `p011/`.
-- P-532c and P-532f embed sidecar memory and stay-down runs (D-052): `p532c/`, `p532f/`.
-- GCE machine-type resize timing (D-053): `gce-resize/run.sh`.
-- p2p field tests S1 and S6 (P-522, P-525): `s1join/`, `s6soak/`.
+- p2p field test S1, the one-shot cold join (P-522): `s1join/`.

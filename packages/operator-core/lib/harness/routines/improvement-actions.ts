@@ -43,7 +43,7 @@ import { isShuttingDown } from '../../shutdown-state';
 import { readOwnerFullAutonomyGrant } from '../improvements/full-autonomy-grant';
 import { readRecentDispatches, recordDispatchFired, recordFireResult } from '../improvements/dispatch-ledger';
 import { laneInEnvOutage } from '../improvements/orphaned-dispatch';
-import { claimIssue, mergeIssuePayload } from '../../issues-engineer';
+import { claimIssue, healOwnNodeIssueOrigin, mergeIssuePayload } from '../../issues-engineer';
 import { routeExhaustedImprovementToLeaderTriage } from '../improvements/resolve-core';
 import { runWatchdogTick, watchdogOptionsFromPayload } from '../improvements/watchdog';
 import { runDecaySweep } from '../improvements/decay';
@@ -510,8 +510,16 @@ export function setImprovementMarkDispatched(fn: MarkDispatchedFn | null): void 
   _markDispatched = fn;
 }
 
-const defaultMarkDispatched: MarkDispatchedFn = async (candidate) => {
-  const claimed = await claimIssue(candidate.id, IMPROVEMENT_RUNNER_ASSIGNEE);
+/** Exported for its unit test (improvement-mark-dispatched.test.ts); the routine reaches it via markDispatched. */
+export const defaultMarkDispatched: MarkDispatchedFn = async (candidate) => {
+  let claimed = await claimIssue(candidate.id, IMPROVEMENT_RUNNER_ASSIGNEE);
+  // WI-10006515: an own-node row stranded at origin='remote' is auto-eligible (read-items no
+  // longer labels it remote), but the view's trigger still no-ops this claim until its origin is
+  // healed. Heal-and-retry once on the failed-claim path only; a true peer row is never healed
+  // (the identity check is the heal's WHERE clause), so its claim stays refused.
+  if (!claimed && (await healOwnNodeIssueOrigin(candidate.id))) {
+    claimed = await claimIssue(candidate.id, IMPROVEMENT_RUNNER_ASSIGNEE);
+  }
   if (!claimed) return false;
   await mergeIssuePayload(candidate.id, {
     implementAttempts: (candidate.attempts ?? 0) + 1,

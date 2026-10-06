@@ -915,7 +915,7 @@ export async function evaluateGoalOwnerReport(
       const report = await bridge.resolveGoalReportReference(sql, context.workspaceId, goalId, context.ref, context.viewer);
       await bridge.validateGoalReportReferenceSnapshot(report.goalOwnerReport!, bridge.makeGoalReportReferenceReads(sql, context.workspaceId, goalId), Date.now());
       const body = bridge.deriveGoalReportNotification(report.goalOwnerReport!);
-      return { kind: 'reference', body, summary: report.title, stamp: stampGoalOwnerReport(goalId, parseGoalOwnerReport(body)),
+      return { kind: 'reference', body, summary: report.title, stamp: bridge.stampGoalReportReference(goalId, report.goalOwnerReport!, body),
         persistEnvelope: (envelope) => bridge.persistGoalReportReference(sql, envelope, context) };
     } catch (error) {
       const failure = error as { code?: string; oracle?: string; message?: string };

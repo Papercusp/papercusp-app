@@ -15,7 +15,7 @@
     "test": "node ../../scripts/workspace-test.mjs --passWithNoTests",
     "typecheck": "node ../../scripts/lint-tsc-operator.mjs",
     "test:release-script-guards": "vitest run lib/release/tauri-signer-key-contract.test.ts lib/release/windows-rootfs-preflight.test.ts lib/release/android-versionname-preflight.test.ts lib/release/parallel-leg-supervisor.test.ts",
-    "test:phone-media": "vitest run scripts/__tests__/phone-app-hosted-config.test.ts --config vitest.config.ts && vitest run scripts/__tests__/phone-app-hosted-config.integration.test.ts --config vitest.integration.config.ts && OPERATOR_E2E_REUSE_SERVER=1 playwright test e2e/phone-media-probe.spec.ts --workers=1",
+    "test:phone-media": "vitest run scripts/__tests__/phone-app-hosted-config.test.ts scripts/__tests__/phone-app-edge-config.test.ts --config vitest.config.ts && vitest run scripts/__tests__/phone-app-hosted-config.integration.test.ts --config vitest.integration.config.ts && OPERATOR_E2E_REUSE_SERVER=1 playwright test e2e/phone-media-probe.spec.ts --workers=1",
     "setup-wake-runtime": "bash scripts/setup-wake-runtime.sh",
     "setup-vad-runtime": "bash scripts/setup-vad-runtime.sh",
     "setup-vditor-runtime": "bash scripts/setup-vditor-runtime.sh",
